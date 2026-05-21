@@ -13168,11 +13168,14 @@ If there is NO open position, use this Section 2 instead:
   const prevCandleTip=typeof candleTip==='function'?candleTip:null;
   if(prevCandleTip&&!window.__v32r1CandleTipWrapped){ window.__v32r1CandleTipWrapped=true; candleTip=function(c){
     const lines=[formatDateTime(c.time*1000),'O : '+ip(c.open),'H : '+ip(c.high),'L : '+ip(c.low),'C : '+ip(c.close),'V : '+fv(c.volume)];
+    const maTipState = window.__maisoTooltipToggleState || null;
+    const showMA4 = maTipState && typeof maTipState[4] === 'boolean' ? maTipState[4] : maEnabled(4);
+    const showMA5 = maTipState && typeof maTipState[5] === 'boolean' ? maTipState[5] : maEnabled(5);
     try{ if(tglEMA20&&tglEMA20.checked) lines.push((lblEMA20?lblEMA20.textContent:'EMA1')+' : '+fmtPrice(valAt(ema20,c.time))); }catch(_e){}
     try{ if(tglEMA50&&tglEMA50.checked) lines.push((lblEMA50?lblEMA50.textContent:'EMA2')+' : '+fmtPrice(valAt(ema50,c.time))); }catch(_e){}
     try{ if(tglEMA3&&tglEMA3.checked) lines.push((lblEMA3?lblEMA3.textContent:'EMA3')+' : '+fmtPrice(valAt(ema3,c.time))); }catch(_e){}
-    try{ if(maEnabled(4)) lines.push(maLabel(4)+' : '+fmtPrice(valAt(ema4,c.time))); }catch(_e){}
-    try{ if(maEnabled(5)) lines.push(maLabel(5)+' : '+fmtPrice(valAt(ema5,c.time))); }catch(_e){}
+    try{ if(showMA4) lines.push(maLabel(4)+' : '+fmtPrice(valAt(ema4,c.time))); }catch(_e){}
+    try{ if(showMA5) lines.push(maLabel(5)+' : '+fmtPrice(valAt(ema5,c.time))); }catch(_e){}
     ctx.save(); ctx.font='11px Arial'; const pad=7,lh=14; const tw=Math.max(...lines.map(s=>ctx.measureText(s).width))+pad*2, th=lines.length*lh+pad*2; const x=Math.max(8,canvas.clientWidth-RIGHT_AXIS-tw-12), y=8;
     ctx.fillStyle='rgba(255,255,255,.96)'; ctx.strokeStyle='#d9dce1'; ctx.fillRect(x,y,tw,th); ctx.strokeRect(x,y,tw,th); ctx.fillStyle='#1e2329'; ctx.textAlign='left'; ctx.textBaseline='top'; lines.forEach((s,i)=>ctx.fillText(s,x+pad,y+pad+i*lh)); ctx.restore();
   }; }
@@ -13356,11 +13359,14 @@ If there is NO open position, use this Section 2 instead:
   }; }
   if(typeof candleTip==='function'&&!window.__v32r2CandleTipWrapped){ window.__v32r2CandleTipWrapped=true; candleTip=function(c){
     const lines=[formatDateTime(c.time*1000),'O : '+ip(c.open),'H : '+ip(c.high),'L : '+ip(c.low),'C : '+ip(c.close),'V : '+fv(c.volume)];
+    const maTipState = window.__maisoTooltipToggleState || null;
+    const showMA4 = maTipState && typeof maTipState[4] === 'boolean' ? maTipState[4] : maEnabled(4);
+    const showMA5 = maTipState && typeof maTipState[5] === 'boolean' ? maTipState[5] : maEnabled(5);
     try{ if(tglEMA20&&tglEMA20.checked) lines.push((lblEMA20?lblEMA20.textContent:'EMA1')+' : '+fmt(valAt(ema20,c.time))); }catch(_e){}
     try{ if(tglEMA50&&tglEMA50.checked) lines.push((lblEMA50?lblEMA50.textContent:'EMA2')+' : '+fmt(valAt(ema50,c.time))); }catch(_e){}
     try{ if(tglEMA3&&tglEMA3.checked) lines.push((lblEMA3?lblEMA3.textContent:'EMA3')+' : '+fmt(valAt(ema3,c.time))); }catch(_e){}
-    try{ if(maEnabled(4)) lines.push(label(4)+' : '+fmt(valAt(ema4,c.time))); }catch(_e){}
-    try{ if(maEnabled(5)) lines.push(label(5)+' : '+fmt(valAt(ema5,c.time))); }catch(_e){}
+    try{ if(showMA4) lines.push(label(4)+' : '+fmt(valAt(ema4,c.time))); }catch(_e){}
+    try{ if(showMA5) lines.push(label(5)+' : '+fmt(valAt(ema5,c.time))); }catch(_e){}
     ctx.save(); ctx.font='11px Arial'; const pad=7,lh=14; const tw=Math.max(...lines.map(s=>ctx.measureText(s).width))+pad*2, th=lines.length*lh+pad*2; const x=Math.max(8,canvas.clientWidth-RIGHT_AXIS-tw-12), y=8;
     ctx.fillStyle='rgba(255,255,255,.96)'; ctx.strokeStyle='#d9dce1'; ctx.fillRect(x,y,tw,th); ctx.strokeRect(x,y,tw,th); ctx.fillStyle='#1e2329'; ctx.textAlign='left'; ctx.textBaseline='top'; lines.forEach((s,i)=>ctx.fillText(s,x+pad,y+pad+i*lh)); ctx.restore();
   }; }
@@ -13928,6 +13934,11 @@ If there is NO open position, use this Section 2 instead:
   function strokeFor(n){ return rgba(color(n),alpha(n)); }
   function vwapStroke(){ return rgba(vwapColor(),vwapAlpha()); }
   function enabled(n){ const el=$id(defaults[n].toggle); return !!(el && el.checked); }
+  function tooltipEnabled(n){
+    const state = window.__maisoTooltipToggleState;
+    if(state && typeof state[n] === "boolean") return state[n];
+    return enabled(n);
+  }
   function syncHiddenPeriodInputs(){
     [1,2,3].forEach(n=>{ const el=$id(defaults[n].periodEl); if(el) el.value = period(n); });
   }
@@ -14035,7 +14046,12 @@ If there is NO open position, use this Section 2 instead:
     const want4=!!(e4&&e4.checked), want5=!!(e5&&e5.checked);
     // Prevent older stacked MA wrappers from drawing MA4/MA5 with leaked styles.
     if(e4) e4.checked=false; if(e5) e5.checked=false;
-    try{ if(prevDraw) prevDraw.apply(this,arguments); } finally { if(e4) e4.checked=want4; if(e5) e5.checked=want5; }
+    window.__maisoTooltipToggleState = {4:want4,5:want5};
+    try{ if(prevDraw) prevDraw.apply(this,arguments); } finally {
+      delete window.__maisoTooltipToggleState;
+      if(e4) e4.checked=want4;
+      if(e5) e5.checked=want5;
+    }
     try{
       const r=range(); const vis=candles.slice(r.start,r.end); if(!vis || vis.length<2 || !(lastYMax>lastYMin)) return;
       const w=canvas.clientWidth,h=canvas.clientHeight,left=LEFT_PAD,right=RIGHT_AXIS,top=18,priceH=lastAreaH||Math.floor((h-48)*.78),chartW=w-left-right,total=Math.max(2,vis.length+(r.futureBars||0)),slot=chartW/total;
