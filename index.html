@@ -14,23 +14,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-<!-- =========================================================
-V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE — MODULE MAP
-Purpose: cleanup/consolidation only. No new strategy, scoring, trade, GPT, Binance order, or IndexedDB schema behavior.
 
-Future edit boundaries:
-1. CORE_MARKET_DATA: Binance candles/position/account reads and websocket/live price hooks. Do not mix UI modules here.
-2. CORE_CHART_RENDER: canvas rendering, axes, candles, volume, crosshair, pan/zoom, sessions/day separators.
-3. CORE_TRADE_LEDGER: trade reconstruction, parent-chain integrity, P/EX/EX-total P/L, report-period ownership by final EX time.
-4. INDICATORS_MA_VWAP: one active isolated control/draw system for MA1–MA5 + VWAP. Settings panel may be shared; state/draw/storage must remain independent per chart element.
-5. MA_STACK_STRIP: removable values-line module only. It reads configured MA periods; it must not own or mutate chart MA settings except timeframe switch/refresh.
-6. ASSESS_MODULE: packet generation/copy UI only; no GPT API call inside this branch.
-7. SETTINGS_UI: tabs/layout/controls only; should bind to module APIs, not duplicate module state.
-8. PARKED_MODULES: ORDERS_MODULE and SSSC are future isolated modules; do not splice them into core blocks.
-
-Patch hygiene rule:
-- Do not append another full MA/VWAP patch layer. Replace the canonical module or make a clearly bounded small patch with a unique START/END marker.
-========================================================= -->
 
 <div class="topbar">
 <button class="settings-button" id="apiKeysBtn" title="Settings">⚙</button>
@@ -186,8 +170,6 @@ Patch hygiene rule:
 
   <script src="api.js" defer></script>
   <script src="main.js" defer></script>
-</body> of locked V12.
-========================================================= -->
 
 <div class="v13-modal-backdrop hidden" id="v13GptModal">
 <div class="v13-modal">
@@ -292,8 +274,8 @@ Rate fresh entries only."></textarea>
 
 <!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_END -->
 
-</body>.
-========================================================= -->
+</body>
+
 
 <div class="modal-backdrop hidden" id="customDateModal">
 <div class="modal">
