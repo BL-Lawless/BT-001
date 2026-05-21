@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>BTC Futures Realtime Chart V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1</title>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+
+<!-- V13_UI_V2_CLEAN_BASE
+Cleanup-only build from V13_UI_V2_PATCH_20.
+Exact duplicate inline script/style blocks removed; final behavior patches preserved in last-load order.
+Rollback baseline: V13_UI_V2_PATCH_20.
+-->
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<!-- =========================================================
+V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE — MODULE MAP
+Purpose: cleanup/consolidation only. No new strategy, scoring, trade, GPT, Binance order, or IndexedDB schema behavior.
+
+Future edit boundaries:
+1. CORE_MARKET_DATA: Binance candles/position/account reads and websocket/live price hooks. Do not mix UI modules here.
+2. CORE_CHART_RENDER: canvas rendering, axes, candles, volume, crosshair, pan/zoom, sessions/day separators.
+3. CORE_TRADE_LEDGER: trade reconstruction, parent-chain integrity, P/EX/EX-total P/L, report-period ownership by final EX time.
+4. INDICATORS_MA_VWAP: one active isolated control/draw system for MA1–MA5 + VWAP. Settings panel may be shared; state/draw/storage must remain independent per chart element.
+5. MA_STACK_STRIP: removable values-line module only. It reads configured MA periods; it must not own or mutate chart MA settings except timeframe switch/refresh.
+6. ASSESS_MODULE: packet generation/copy UI only; no GPT API call inside this branch.
+7. SETTINGS_UI: tabs/layout/controls only; should bind to module APIs, not duplicate module state.
+8. PARKED_MODULES: ORDERS_MODULE and SSSC are future isolated modules; do not splice them into core blocks.
+
+Patch hygiene rule:
+- Do not append another full MA/VWAP patch layer. Replace the canonical module or make a clearly bounded small patch with a unique START/END marker.
+========================================================= -->
+
+<div class="topbar">
+<button class="settings-button" id="apiKeysBtn" title="Settings">⚙</button>
+<select id="market">
+<option value="btcusdt">BTCUSDT</option>
+<option selected="" value="btcusdc">BTCUSDC</option>
+</select>
+<label>TF
+    <select id="interval">
+<option value="1m">1m</option>
+<option value="3m">3m</option>
+<option value="5m">5m</option>
+<option selected="" value="15m">15m</option>
+<option value="30m">30m</option>
+<option value="1h">1h</option>
+<option value="4h">4h</option>
+<option value="1d">1d</option>
+</select>
+</label>
+<span class="indicator-toggles">
+<label class="toggle"><input id="tglEMA20" type="checkbox"/><span id="lblEMA20">EMA20</span></label>
+<label class="toggle"><input id="tglEMA50" type="checkbox"/><span id="lblEMA50">EMA50</span></label>
+<label class="toggle"><input id="tglEMA3" type="checkbox"/><span id="lblEMA3">EMA100</span></label>
+<label class="toggle"><input id="tglVWAP" type="checkbox"/>VWAP</label>
+</span>
+<button id="reload">Reload</button>
+<button id="resetView">Reset</button>
+<div class="toggles">
+<label class="report-control">Period
+      <select id="reportWeeks">
+<option selected="" value="1w">1W</option>
+<option value="2w">2W</option>
+<option value="3w">3W</option>
+<option value="1mth">1M</option>
+<option value="custom">Custom</option>
+</select>
+</label>
+<span class="custom-range hidden" id="customRange">
+<span>From</span><input autocomplete="off" id="customFrom" placeholder="dd/mm/yy" type="text"/>
+<span>To</span><input autocomplete="off" id="customTo" placeholder="dd/mm/yy" type="text"/>
+</span>
+<button id="loadTrades">Load Trades</button>
+<span class="trade-count" id="tradeCount">Trades: 0</span>
+<label class="toggle"><input id="tglPositions" type="checkbox"/>Positions</label>
+<label class="toggle"><input id="tglResults" type="checkbox"/>Results</label>
+<label class="toggle"><input id="tglDollarValues" type="checkbox"/>$ Values</label>
+<label class="toggle"><input id="tglLots" type="checkbox"/>Lots</label>
+<div class="conn-wrap" id="connWrap" title="Disconnected">
+<div class="led" id="connLed">X</div>
+</div>
+</div>
+</div>
+<div class="metrics">
+<div class="metric"><div class="k">Symbol</div><div class="v" id="mSymbol">-</div></div>
+<div class="metric metric-wide"><div class="k">Date / time</div><div class="v" id="mTime">-</div></div>
+<div class="metric"><div class="k">Day Open</div><div class="v" id="mOpen">-</div></div>
+<div class="metric"><div class="k">Day High</div><div class="v" id="mHigh">-</div></div>
+<div class="metric"><div class="k">Day Low</div><div class="v" id="mLow">-</div></div>
+<div class="metric"><div class="k">Current</div><div class="v" id="mClose">-</div></div>
+<div class="metric"><div class="k">Day Volume</div><div class="v" id="mVolume">-</div></div>
+<div class="metric"><div class="k">Day Change</div><div class="v" id="mChange">-</div></div>
+<div class="metric"><div class="k">VWAP</div><div class="v" id="mVWAP">-</div></div>
+<div class="metric metric-account metric-account-start"><div class="k">Account Balance</div><div class="v" id="mBalance">-</div></div>
+<div class="metric metric-account"><div class="k">Floating P/L</div><div class="v" id="mFloatPL">-</div></div>
+</div>
+<canvas id="chart"></canvas>
+<div class="modal-backdrop hidden" id="apiModal">
+<div class="modal">
+<h3>Binance API Keys</h3>
+<div class="modal-row">
+<label for="apiKey">API Key</label>
+<input autocomplete="off" id="apiKey" type="password"/>
+</div>
+<div class="modal-row">
+<label for="apiSecret">Secret</label>
+<input autocomplete="off" id="apiSecret" type="password"/>
+</div>
+<label class="toggle">
+<input checked="" id="rememberKeys" type="checkbox"/>
+      Remember keys locally in this browser
+    </label>
+<div class="modal-note">
+      Keys are stored only in this browser’s local storage when Remember is checked.
+    </div>
+<div class="modal-actions">
+<button class="secondary" id="closeApiKeys">Close</button>
+<button id="saveApiKeys">Save</button>
+</div>
+</div>
+</div>
+<div class="modal-backdrop hidden" id="settingsModal">
+<div class="modal">
+<h3>Settings</h3>
+<div class="settings-grid">
+<div class="settings-card">
+<div class="settings-card-title">Binance API</div>
+<div class="settings-card-desc">API key and secret used for trades, positions, and open-position display.</div>
+<button class="secondary" id="openBinanceSettings">Open Binance API</button>
+</div>
+<div class="settings-card">
+<div class="settings-card-title">GPT API</div>
+<div class="settings-card-desc">GPT key and model used by Strategy Lab analysis.</div>
+<button class="secondary" id="openGptFromSettings">Open GPT API</button>
+</div>
+<div class="settings-card">
+<div class="settings-card-title">EMAs</div>
+<div class="settings-card-desc">Chart indicator periods only.</div>
+<div class="ema-settings">
+<label>EMA 1<input id="emaPeriod1" max="999" min="1" step="1" type="number"/></label>
+<label>EMA 2<input id="emaPeriod2" max="999" min="1" step="1" type="number"/></label>
+<label>EMA 3<input id="emaPeriod3" max="999" min="1" step="1" type="number"/></label>
+</div>
+</div>
+</div>
+<div class="modal-actions">
+<button class="secondary" id="closeSettings">Close</button>
+</div>
+</div>
+</div>
+
+<!-- =========================================================
+     V13_01 — STRATEGY LAB FOUNDATION ADD-ON
+     Paste this block just before the final 
+
+<div id="customDateModal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3>Custom report dates</h3>
+    <div class="modal-row"><label for="customFromModal">From</label><input id="customFromModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
+    <div class="modal-row"><label for="customToModal">To</label><input id="customToModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
+    <div class="modal-note">Enter dates as dd/mm/yy.</div>
+    <div class="modal-actions"><button id="customDateCancel" class="secondary">Cancel</button><button id="customDateApply">Apply</button></div>
+  </div>
+</div>
+<div id="inspectModal" class="modal-backdrop hidden">
+  <div class="modal" style="width:min(320px,calc(100vw - 28px))">
+    <h3>Inspect</h3>
+    <div class="modal-actions" style="justify-content:center">
+      <button id="inspectIsolate">Isolate</button>
+      <button id="inspectCancel" class="secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- PATCH_34_CLEANUP: removed duplicated early R5 MA/VWAP isolation block; canonical block kept near final patch area. -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_START -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_END -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R3_REBUILD_START -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R3_REBUILD_END -->
+
+  <script src="api.js" defer></script>
+  <script src="main.js" defer></script>
+</body> of locked V12.
+========================================================= -->
+
+<div class="v13-modal-backdrop hidden" id="v13GptModal">
+<div class="v13-modal">
+<h3>GPT API Key</h3>
+<div class="v13-modal-row">
+<label for="v13GptKey">API Key</label>
+<input autocomplete="off" id="v13GptKey" type="password"/>
+</div>
+<div class="v13-modal-row">
+<label for="v13GptModel">Model</label>
+<input autocomplete="off" id="v13GptModel" type="text" value="gpt-4o-mini"/>
+</div>
+<label class="toggle">
+<input checked="" id="v13RememberGpt" type="checkbox"/>
+      Remember GPT key locally in this browser
+    </label>
+<div class="modal-note">
+      Used only by this local browser file. The key is stored in localStorage when Remember is checked.
+    </div>
+<div class="v13-modal-actions">
+<button class="secondary" id="v13CloseGpt">Close</button>
+<button id="v13SaveGpt">Save</button>
+</div>
+</div>
+</div>
+<div class="v13-panel hidden" id="v13LabPanel">
+<div class="v13-head">
+<div class="v13-head-title">Strategy Lab — V13_UI_V2</div>
+<div class="v13-head-actions">
+<button class="secondary" id="v13SaveStrategy">Save Strategy</button>
+<button class="secondary" id="v13CloseLab">Close</button>
+</div>
+</div>
+<div class="v13-body">
+<div class="v13-grid">
+<div class="v13-field">
+<label for="v13StrategyName">Strategy name</label>
+<input id="v13StrategyName" placeholder="Example: Trend Pullback V1" type="text"/>
+</div>
+<div class="v13-field">
+<label>Current app context</label>
+<div class="v13-output" id="v13ContextBox" style="min-height:36px"></div>
+</div>
+</div>
+<div class="v13-field">
+<label for="v13StrategyText">Strategy / data instructions</label>
+<textarea id="v13StrategyText" placeholder="Write freely. Example:
+Use 1D with 300 candles for direction.
+Use 4H with 500 candles for trend.
+Use 1H EMA34 and VWAP for setup.
+Use 15m with 800 candles for entry timing.
+Avoid longs near weekly resistance.
+Rate fresh entries only."></textarea>
+</div>
+<div class="v13-actions">
+<button id="v13CheckReq">Check Strategy Data Requirements</button>
+<button id="v13AnalyzeCurrent">Analyze Current Market</button>
+<button class="secondary" id="v13ClearResult">Clear Result</button>
+</div>
+<div class="v13-grid">
+<div class="v13-field">
+<label>Data requirements / data used preview</label>
+<div class="v13-output" id="v13ReqPreview">No check run yet.</div>
+</div>
+<div class="v13-field">
+<label>GPT result</label>
+<div class="v13-output" id="v13GptResult">No analysis run yet.</div>
+</div>
+</div>
+<div class="v13-small">
+      V13_UI_V2_PATCH_02 uses handov1 multi-timeframe data and IndexedDB candle cache. Position management can be added later.
+    </div>
+</div>
+</div>
+
+<!-- =========================================================
+     V13_02 — STRATEGY LAB DRAGGABLE WINDOW ADD-ON
+     Paste this after V13_01, before final 
+
+<div id="customDateModal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3>Custom report dates</h3>
+    <div class="modal-row"><label for="customFromModal">From</label><input id="customFromModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
+    <div class="modal-row"><label for="customToModal">To</label><input id="customToModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
+    <div class="modal-note">Enter dates as dd/mm/yy.</div>
+    <div class="modal-actions"><button id="customDateCancel" class="secondary">Cancel</button><button id="customDateApply">Apply</button></div>
+  </div>
+</div>
+<div id="inspectModal" class="modal-backdrop hidden">
+  <div class="modal" style="width:min(320px,calc(100vw - 28px))">
+    <h3>Inspect</h3>
+    <div class="modal-actions" style="justify-content:center">
+      <button id="inspectIsolate">Isolate</button>
+      <button id="inspectCancel" class="secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- PATCH_34_CLEANUP: removed duplicated early R5 MA/VWAP isolation block; canonical block kept near final patch area. -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_START -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_END -->
+
+</body>.
+========================================================= -->
+
+<div class="modal-backdrop hidden" id="customDateModal">
+<div class="modal">
+<h3>Custom report dates</h3>
+<div class="modal-row"><label for="customFromModal">From</label><input autocomplete="off" id="customFromModal" placeholder="dd/mm/yy" type="text"/></div>
+<div class="modal-row"><label for="customToModal">To</label><input autocomplete="off" id="customToModal" placeholder="dd/mm/yy" type="text"/></div>
+<div class="modal-note">Enter dates as dd/mm/yy.</div>
+<div class="modal-actions"><button class="secondary" id="customDateCancel">Cancel</button><button id="customDateApply">Apply</button></div>
+</div>
+</div>
+<div class="modal-backdrop hidden" id="inspectModal">
+<div class="modal" style="width:min(320px,calc(100vw - 28px))">
+<h3>Inspect</h3>
+<div class="modal-actions" style="justify-content:center">
+<button id="inspectIsolate">Isolate</button>
+<button class="secondary" id="inspectCancel">Cancel</button>
+</div>
+</div>
+</div>
+
+<!-- ASSESS_MODULE_CSS_START -->
+
+<!-- ASSESS_MODULE_CSS_END -->
+
+<!-- ASSESS_MODULE_JS_START -->
+
+<!-- ASSESS_MODULE_JS_END -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R1_START -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R1_END -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R2_START -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R2_END -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_START -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_END -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_MASTACK_FIX_R4_NOTES
+R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now consumed once per indicator draw so VWAP width cannot leak into MA4/MA5 draw calls. MA4/MA5 remain drawn with their own configured widths. No MA_STACK_STRIP logic, strategy, order, GPT, scoring, or IndexedDB changes.
+-->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_MASTACK_FIX_R5_MA_VWAP_ISOLATION_START -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_MASTACK_FIX_R5_MA_VWAP_ISOLATION_END -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_PL_ISOLATE_AND_OVERLAY_FIX_START -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_PL_ISOLATE_AND_OVERLAY_FIX_END -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_START -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_END -->
+
+<!-- R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_START -->
+
+<div id="ssscDash" class="hidden" aria-label="SSSC MA Diagnostic Dashboard">
+  <div class="sssc-ui-head" id="ssscDashHead">
+    <div class="sssc-ui-titleline"><span class="sssc-ui-title">SSSC MA Diagnostic Dashboard</span><span class="sssc-ui-subtitle">Stack · Slope · Spread · Crossover | WebSocket-first live module</span></div>
+    <div class="sssc-ui-actions"><button id="ssscDashRefresh" type="button">Refresh</button><button id="ssscDashClose" type="button">Close</button></div>
+  </div>
+  <div class="sssc-ui-body">
+    <div class="sssc-ui-top" id="ssscDashTop"></div>
+    <div class="sssc-ui-table-head"><div>TF</div><div>State / Phase</div><div></div><div>MOMENTUM</div><div>SCORE</div><div>Magnitude</div></div>
+    <div class="sssc-ui-rows" id="ssscDashRows"></div>
+    <div class="sssc-ui-event"><h4><span>Event Strip</span><button id="ssscEventToggle" type="button">Expand</button></h4><div id="ssscDashEvents" class="sssc-collapse-body hidden"></div></div>
+    <div class="sssc-ui-detail hidden" id="ssscDashDetail"><h4><span id="ssscDashDetailTitle">TF Detail</span><button id="ssscDetailToggle" type="button">Collapse</button></h4><div class="sssc-ui-detail-grid" id="ssscDashDetailGrid"></div></div>
+    <div class="sssc-ui-footer" id="ssscDashFooter">Waiting for data.</div>
+  </div>
+</div>
+
+<!-- R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3_END -->
+
+</body>
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_NOTES
+R1 changes:
+- Indicator eye / view-hide-all-overlays now hides MA4 and MA5 manual draw output and excludes them from auto-Y while hidden.
+- Simplified closed-trade total P/L box is larger and remains in its existing placement.
+- EX marker total P/L box uses parent-chain total P/L, solid fill, edge placement: profit near chart top, loss near chart bottom, with vertical collision stacking.
+- Isolate mode is now triggered by closed-trade P/L boxes only; position/trade marker clicks no longer trigger isolate.
+
+Base cleanup retained:
+- Deduplicated repeated early R5 MA/VWAP isolation blocks; one canonical isolation block remains.
+- Added module map / edit boundaries for future patch work.
+- Kept runtime behavior unchanged aside from removing duplicated early isolation executions.
+- Preserved current MA/VWAP isolation layer, MA_STACK_STRIP, Assess, report-period and parent-chain logic from the baseline.
+-->
+</html>
