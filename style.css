@@ -1188,6 +1188,41 @@ button:hover{filter:brightness(1.04)}
 #patch8IndicatorCard .maiso-grid input[type="color"]{width:96px !important;min-width:96px !important;height:28px !important}
 #patch8IndicatorCard .maiso-grid input[type="range"]{width:100% !important;max-width:128px !important;margin:0 !important}
 
+.price-levels-card{
+  grid-column:1 / -1;
+}
+.price-levels-card textarea{
+  width:100%;
+  min-height:180px;
+  resize:vertical;
+  margin:0;
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:8px;
+  font:12px/1.45 Arial,Helvetica,sans-serif;
+  color:var(--text);
+  background:#fff;
+}
+.price-levels-style-row{
+  display:grid;
+  grid-template-columns:96px 96px minmax(120px,1fr) 38px minmax(120px,1fr);
+  gap:10px;
+  align-items:center;
+  margin-top:10px;
+  font-size:12px;
+}
+.price-levels-style-row input[type="color"]{
+  width:96px;
+  min-width:96px;
+  height:28px;
+  padding:1px;
+  margin:0;
+}
+.price-levels-style-row input[type="range"]{
+  width:100%;
+  margin:0;
+}
+
 /* =========================================================
    R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD
    Scope: isolated SSSC dashboard module only.

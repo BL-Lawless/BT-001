@@ -14206,6 +14206,212 @@ If there is NO open position, use this Section 2 instead:
 
 (() => {
   "use strict";
+  const MODULE = "V13_MANUAL_PRICE_LEVELS";
+  const STORE = "btc_futures_chart_v13_price_levels_";
+  const KEY_TEXT = STORE + "text";
+  const KEY_COLOR = STORE + "color";
+  const KEY_ALPHA = STORE + "alpha";
+  const KEY_WIDTH = STORE + "width";
+  const DEFAULT_COLOR = "#111827";
+  const $id = id => document.getElementById(id);
+  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+  const num = (v,d) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  };
+  const get = (key,def) => {
+    try{
+      const v = localStorage.getItem(key);
+      return v == null ? def : v;
+    }catch(_e){
+      return def;
+    }
+  };
+  const set = (key,value) => {
+    try{ localStorage.setItem(key,String(value)); }catch(_e){}
+  };
+  function levelsText(){ return get(KEY_TEXT,""); }
+  function color(){ return get(KEY_COLOR,DEFAULT_COLOR); }
+  function alpha(){ return clamp(num(get(KEY_ALPHA,"85"),85),0,100); }
+  function width(){ return clamp(num(get(KEY_WIDTH,"1.5"),1.5),0.5,10); }
+  function rgba(hex,alphaPct){
+    let h = String(hex || DEFAULT_COLOR).replace("#","");
+    if(h.length === 3) h = h.split("").map(ch => ch + ch).join("");
+    h = (h + "000000").slice(0,6);
+    const a = clamp(num(alphaPct,85),0,100) / 100;
+    return `rgba(${parseInt(h.slice(0,2),16)||0},${parseInt(h.slice(2,4),16)||0},${parseInt(h.slice(4,6),16)||0},${a})`;
+  }
+  function escapeHtml(value){
+    return String(value || "").replace(/[&<>"']/g, ch => ({
+      "&":"&amp;",
+      "<":"&lt;",
+      ">":"&gt;",
+      '"':"&quot;",
+      "'":"&#39;"
+    }[ch]));
+  }
+  function parseLevels(text=levelsText()){
+    const seen = new Set();
+    const out = [];
+    const matches = String(text || "").match(/[-+]?\d[\d,]*(?:\.\d+)?/g) || [];
+    for(const raw of matches){
+      const value = Number(raw.replace(/,/g,""));
+      if(!Number.isFinite(value) || value <= 0) continue;
+      const key = String(value);
+      if(seen.has(key)) continue;
+      seen.add(key);
+      out.push(value);
+    }
+    return out.sort((a,b) => b - a);
+  }
+  function setPriceLevelsTabActive(){
+    const root = document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid");
+    if(!root) return;
+    root.querySelectorAll(".v24-settings-tab").forEach(btn => btn.classList.toggle("active",btn.dataset.tab === "price-levels"));
+    root.querySelectorAll(".v24-settings-panel").forEach(panel => panel.classList.toggle("active",panel.dataset.tab === "price-levels"));
+    try{ localStorage.setItem("btc_futures_chart_v13_24_settings_tab","price-levels"); }catch(_e){}
+  }
+  function bindControl(id,key,normalizer){
+    const el = $id(id);
+    if(!el || el.__priceLevelsBound) return;
+    el.__priceLevelsBound = true;
+    const sync = () => {
+      const value = normalizer ? normalizer(el.value) : el.value;
+      if(normalizer) el.value = value;
+      set(key,value);
+      if(id === "priceLevelsAlpha"){
+        const out = $id("priceLevelsAlphaVal");
+        if(out) out.textContent = String(value);
+      }
+      if(id === "priceLevelsText"){
+        return;
+      }
+      try{ draw(); }catch(_e){}
+    };
+    el.addEventListener("input",sync,false);
+    el.addEventListener("change",sync,false);
+  }
+  function installSettings(){
+    const grid = document.querySelector("#settingsModal .settings-grid");
+    if(!grid) return;
+    const tabs = grid.querySelector(":scope > .v24-settings-tabs");
+    const panelsRoot = grid.querySelector(":scope > .v24-settings-panels");
+    if(!tabs || !panelsRoot) return;
+
+    if(!$id("priceLevelsSettingsTab")){
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "priceLevelsSettingsTab";
+      btn.className = "v24-settings-tab";
+      btn.dataset.tab = "price-levels";
+      btn.textContent = "Key levels";
+      tabs.appendChild(btn);
+      btn.addEventListener("click",setPriceLevelsTabActive,false);
+    }else{
+      $id("priceLevelsSettingsTab").textContent = "Key levels";
+    }
+
+    if(!$id("priceLevelsSettingsPanel")){
+      const panel = document.createElement("div");
+      panel.id = "priceLevelsSettingsPanel";
+      panel.className = "v24-settings-panel";
+      panel.dataset.tab = "price-levels";
+      const inner = document.createElement("div");
+      inner.className = "v24-settings-panel-grid";
+      inner.innerHTML = `
+        <div class="settings-card price-levels-card">
+          <div class="settings-card-title">Key levels</div>
+          <div class="settings-card-desc">One price per line, or paste any plain text containing prices.</div>
+          <textarea id="priceLevelsText" spellcheck="false" placeholder="77000&#10;78500&#10;80125.5">${escapeHtml(levelsText())}</textarea>
+          <div class="price-levels-style-row">
+            <span>Levels</span>
+            <input id="priceLevelsColor" type="color" value="${escapeHtml(color())}">
+            <input id="priceLevelsAlpha" type="range" min="0" max="100" step="1" value="${alpha()}">
+            <span id="priceLevelsAlphaVal">${alpha()}</span>
+            <input id="priceLevelsWidth" type="range" min="0.5" max="10" step="0.5" value="${width()}">
+          </div>
+        </div>`;
+      panel.appendChild(inner);
+      panelsRoot.appendChild(panel);
+    }
+    const title = document.querySelector("#priceLevelsSettingsPanel .settings-card-title");
+    if(title) title.textContent = "Key levels";
+
+    bindControl("priceLevelsText",KEY_TEXT);
+    bindControl("priceLevelsColor",KEY_COLOR);
+    bindControl("priceLevelsAlpha",KEY_ALPHA,v => clamp(Math.round(num(v,85)),0,100));
+    bindControl("priceLevelsWidth",KEY_WIDTH,v => clamp(num(v,1.5),0.5,10));
+    try{
+      if(localStorage.getItem("btc_futures_chart_v13_24_settings_tab") === "price-levels") setPriceLevelsTabActive();
+    }catch(_e){}
+  }
+  function drawPriceLevels(){
+    if(!ctx || !canvas || !Array.isArray(candles) || candles.length < 2) return;
+    const levels = parseLevels();
+    if(!levels.length || !(lastYMax > lastYMin)) return;
+    const w = canvas.clientWidth;
+    const left = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
+    const right = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
+    const top = 18;
+    const priceH = lastAreaH || Math.floor((canvas.clientHeight - top - 30) * .78);
+    const chartW = w - left - right;
+    const mapY = price => top + ((lastYMax - price) / (lastYMax - lastYMin)) * priceH;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left,top,chartW,priceH);
+    ctx.clip();
+    ctx.strokeStyle = rgba(color(),alpha());
+    ctx.lineWidth = width();
+    ctx.setLineDash([]);
+    ctx.font = "bold 11px Arial";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for(const level of levels){
+      const y = mapY(level);
+      if(y < top || y > top + priceH) continue;
+      const yy = typeof px === "function" ? px(y) : y;
+      ctx.beginPath();
+      ctx.moveTo(typeof px === "function" ? px(left) : left,yy);
+      ctx.lineTo(typeof px === "function" ? px(left + chartW) : left + chartW,yy);
+      ctx.stroke();
+      ctx.fillStyle = rgba(color(),Math.min(100,alpha() + 10));
+      ctx.fillText(Math.round(level).toLocaleString("en-US"),left + chartW - 6,y - 7);
+    }
+    ctx.restore();
+  }
+  if(typeof autoYRange === "function" && !window.__priceLevelsAutoYWrapped){
+    const prevAutoYRange = autoYRange;
+    window.__priceLevelsAutoYWrapped = true;
+    autoYRange = window.autoYRange = function(vis){
+      return prevAutoYRange.apply(this,arguments);
+    };
+  }
+  if(typeof draw === "function" && !window.__priceLevelsDrawWrapped){
+    const prevDraw = draw;
+    window.__priceLevelsDrawWrapped = true;
+    draw = window.draw = function(){
+      const result = prevDraw.apply(this,arguments);
+      try{ drawPriceLevels(); }catch(e){ console.error(MODULE + " draw failed",e); }
+      return result;
+    };
+  }
+  if(typeof openSettings === "function" && !window.__priceLevelsOpenSettingsWrapped){
+    const prevOpen = openSettings;
+    window.__priceLevelsOpenSettingsWrapped = true;
+    openSettings = window.openSettings = function(){
+      const result = prevOpen.apply(this,arguments);
+      setTimeout(installSettings,0);
+      setTimeout(installSettings,150);
+      return result;
+    };
+  }
+  installSettings();
+  setTimeout(installSettings,300);
+  window.PRICE_LEVELS_OVERLAY = {version:MODULE,parseLevels,installSettings};
+})();
+
+(() => {
+  "use strict";
   const MODULE = "V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_PL_ISOLATE_AND_OVERLAY_FIX";
   function plHit(){
     try{
