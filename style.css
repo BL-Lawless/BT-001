@@ -1146,7 +1146,7 @@ button:hover{filter:brightness(1.04)}
   min-width:32px;
   height:20px;
   border:1px solid rgba(31,41,55,.16);
-  border-radius:7px;
+  border-radius:0;
   padding:0 4px;
   font-size:10px;
   font-weight:800;

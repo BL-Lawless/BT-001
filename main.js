@@ -13617,6 +13617,7 @@ If there is NO open position, use this Section 2 instead:
   const MA_STACK_STRIP = (() => {
     const TFs = [
       {key:"1m", interval:"1m"}, {key:"3m", interval:"3m"}, {key:"5m", interval:"5m"}, {key:"15m", interval:"15m"},
+      {key:"30m", interval:"30m"},
       {key:"1H", interval:"1h"}, {key:"4H", interval:"4h"}, {key:"1D", interval:"1d"}
     ];
     let timer = null, pending = false;
@@ -14069,6 +14070,138 @@ If there is NO open position, use this Section 2 instead:
   function install(){ ensureToggles(); syncHiddenPeriodInputs(); rebuildSeries(); rebuildSettings(); updateLabels(); try{ draw(); }catch(_e){} }
   window.MA_VWAP_ISOLATION_R5 = {version:MODULE,install,period,color,alpha,width,vwapColor,vwapAlpha,vwapWidth};
   install(); setTimeout(install,100); setTimeout(install,700); window.addEventListener("load",()=>setTimeout(install,0),{once:true});
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_BOLD";
+  const STYLE = "btc_futures_chart_v13_05_";
+  const EXTRA = "btc_futures_chart_v13_32r1_";
+  const DEFAULT_COLORS = {
+    1:"#ff7900",
+    2:"#0000ff",
+    3:"#d600a9",
+    4:"#0b7a00",
+    5:"#008c7a"
+  };
+  const toggles = {
+    1:"tglEMA20",
+    2:"tglEMA50",
+    3:"tglEMA3",
+    4:"tglEMA4",
+    5:"tglEMA5"
+  };
+  const labels = {
+    1:"lblEMA20",
+    2:"lblEMA50",
+    3:"lblEMA3",
+    4:"lblEMA4",
+    5:"lblEMA5"
+  };
+  const seriesNames = {
+    1:"ema20",
+    2:"ema50",
+    3:"ema3",
+    4:"ema4",
+    5:"ema5"
+  };
+  const colorKey = n => n <= 3 ? STYLE + "ema" + n + "_color" : EXTRA + "ma" + n + "Color";
+  const $id = id => document.getElementById(id);
+  const stored = (key,def) => {
+    try{
+      const v = localStorage.getItem(key);
+      return v == null ? def : v;
+    }catch(_e){
+      return def;
+    }
+  };
+  const maColor = n => stored(colorKey(n),DEFAULT_COLORS[n]);
+  const isOn = n => {
+    if(window.__maisoTooltipToggleState && typeof window.__maisoTooltipToggleState[n] === "boolean"){
+      return window.__maisoTooltipToggleState[n];
+    }
+    const el = $id(toggles[n]);
+    return !!(el && el.checked);
+  };
+  const label = n => {
+    const el = $id(labels[n]);
+    return el && el.textContent ? el.textContent : "EMA" + n;
+  };
+  const series = n => {
+    try{
+      return window[seriesNames[n]];
+    }catch(_e){
+      return null;
+    }
+  };
+  const valueAt = (arr,t) => {
+    if(typeof valAt === "function") return valAt(arr,t);
+    if(!Array.isArray(arr)) return null;
+    for(let i=arr.length-1;i>=0;i--){
+      if(Number(arr[i].time) <= Number(t)) return arr[i].value;
+    }
+    return null;
+  };
+  const fmtPrice = v => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(n).toLocaleString("en-US") : "-";
+  };
+  const textOf = line => String(line && line.text != null ? line.text : line || "");
+  const fontOf = line => (line && line.bold ? "bold " : "") + "11px Arial";
+
+  if(typeof candleTip !== "function") return;
+
+  candleTip = window.candleTip = function(c){
+    const lines = [
+      {text:formatDateTime(c.time * 1000)},
+      {text:"O : " + ip(c.open)},
+      {text:"H : " + ip(c.high)},
+      {text:"L : " + ip(c.low)},
+      {text:"C : " + ip(c.close)},
+      {text:"V : " + fv(c.volume)}
+    ];
+
+    [1,2,3,4,5].forEach(n => {
+      try{
+        if(isOn(n)){
+          lines.push({
+            text:label(n) + " : " + fmtPrice(valueAt(series(n),c.time)),
+            color:maColor(n),
+            bold:true
+          });
+        }
+      }catch(_e){}
+    });
+
+    ctx.save();
+    const pad = 7;
+    const lh = 14;
+    let tw = 0;
+    for(const line of lines){
+      ctx.font = fontOf(line);
+      tw = Math.max(tw,ctx.measureText(textOf(line)).width);
+    }
+    tw += pad * 2;
+    const th = lines.length * lh + pad * 2;
+    const x = Math.max(8,canvas.clientWidth - RIGHT_AXIS - tw - 12);
+    const y = 8;
+
+    ctx.fillStyle = "rgba(255,255,255,.96)";
+    ctx.strokeStyle = "#d9dce1";
+    ctx.fillRect(x,y,tw,th);
+    ctx.strokeRect(x,y,tw,th);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+
+    lines.forEach((line,i) => {
+      ctx.font = fontOf(line);
+      ctx.fillStyle = line.color || "#1e2329";
+      ctx.fillText(textOf(line),x+pad,y+pad+i*lh);
+    });
+    ctx.restore();
+  };
+
+  window.V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_BOLD = {version:MODULE};
 })();
 
 (() => {
