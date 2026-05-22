@@ -14503,6 +14503,232 @@ If there is NO open position, use this Section 2 instead:
 
 (() => {
   "use strict";
+  const MODULE = "V13_REALTIME_RENDER_COALESCER";
+  const FALLBACK_REST_MS = 5000;
+  let renderPending = false;
+  let indicatorPending = true;
+  let lastIndicatorMs = 0;
+  let incrementalDirty = false;
+
+  function mergeCandle(existing,incoming){
+    if(!existing) return {...incoming};
+    const merged = {...existing,...incoming};
+    const eHigh = Number(existing.high), iHigh = Number(incoming.high), iClose = Number(incoming.close);
+    const eLow = Number(existing.low), iLow = Number(incoming.low), iCloseLow = Number(incoming.close);
+    merged.open = Number.isFinite(Number(existing.open)) ? existing.open : incoming.open;
+    merged.high = Math.max(
+      Number.isFinite(eHigh) ? eHigh : -Infinity,
+      Number.isFinite(iHigh) ? iHigh : -Infinity,
+      Number.isFinite(iClose) ? iClose : -Infinity
+    );
+    merged.low = Math.min(
+      Number.isFinite(eLow) ? eLow : Infinity,
+      Number.isFinite(iLow) ? iLow : Infinity,
+      Number.isFinite(iCloseLow) ? iCloseLow : Infinity
+    );
+    if(!Number.isFinite(merged.high)) merged.high = incoming.high;
+    if(!Number.isFinite(merged.low)) merged.low = incoming.low;
+    merged.close = incoming.close;
+    const eVol = Number(existing.volume), iVol = Number(incoming.volume);
+    if(Number.isFinite(eVol) && Number.isFinite(iVol)) merged.volume = Math.max(eVol,iVol);
+    return merged;
+  }
+
+  function periodFor(n){
+    try{
+      if(window.MA_VWAP_ISOLATION_R5 && typeof window.MA_VWAP_ISOLATION_R5.period === "function"){
+        return window.MA_VWAP_ISOLATION_R5.period(n);
+      }
+    }catch(_e){}
+    if(n === 1) return emaPeriod(emaPeriod1El,20);
+    if(n === 2) return emaPeriod(emaPeriod2El,50);
+    if(n === 3) return emaPeriod(emaPeriod3El,100);
+    const key = "btc_futures_chart_v13_32r1_ma" + n + "Period";
+    const fallback = n === 4 ? 100 : 200;
+    const stored = Number(localStorage.getItem(key));
+    return Number.isFinite(stored) && stored > 0 ? Math.round(stored) : fallback;
+  }
+
+  function updateEmaSeries(series,p){
+    if(!Array.isArray(candles) || !candles.length || candles.length < p) return [];
+    if(!Array.isArray(series)) series = [];
+    const expected = candles.length - p + 1;
+    if(expected <= 0) return [];
+    const lastCandle = candles[candles.length-1];
+
+    if(series.length < expected - 1 || series.length > expected){
+      return EMA(candles,p);
+    }
+
+    let value;
+    if(expected === 1){
+      let sum = 0;
+      for(let i=candles.length-p;i<candles.length;i++) sum += Number(candles[i].close) || 0;
+      value = sum / p;
+    }else{
+      const prev = series[expected - 2];
+      if(!prev || !Number.isFinite(Number(prev.value))) return EMA(candles,p);
+      const a = 2 / (p + 1);
+      value = Number(lastCandle.close) * a + Number(prev.value) * (1 - a);
+    }
+
+    const point = {time:lastCandle.time,value};
+    if(series.length === expected) series[expected - 1] = point;
+    else series.push(point);
+    return series;
+  }
+
+  function updateVwapTail(){
+    if(!Array.isArray(candles) || !candles.length) return [];
+    if(!Array.isArray(vwap)) vwap = [];
+    const latest = candles[candles.length-1];
+    let start = candles.length - 1;
+    while(start > 0 && sameDay(candles[start-1].time,latest.time)) start--;
+    let pv = 0;
+    let vol = 0;
+    const points = [];
+    for(let i=start;i<candles.length;i++){
+      const c = candles[i];
+      const cv = Number(c.volume) || 0;
+      const typ = (Number(c.high) + Number(c.low) + Number(c.close)) / 3;
+      pv += typ * cv;
+      vol += cv;
+      if(vol > 0) points.push({time:c.time,value:pv/vol});
+    }
+    const dayStartTime = candles[start].time;
+    vwap = vwap.filter(p => Number(p.time) < dayStartTime).concat(points);
+    window.vwap = vwap;
+    return vwap;
+  }
+
+  function updateIndicatorsIncremental(){
+    try{
+      ema20 = updateEmaSeries(ema20,periodFor(1)); window.ema20 = ema20;
+      ema50 = updateEmaSeries(ema50,periodFor(2)); window.ema50 = ema50;
+      ema3 = updateEmaSeries(ema3,periodFor(3)); window.ema3 = ema3;
+      window.ema4 = updateEmaSeries(window.ema4 || [],periodFor(4));
+      window.ema5 = updateEmaSeries(window.ema5 || [],periodFor(5));
+      updateVwapTail();
+    }catch(e){
+      console.error(MODULE + " incremental indicators failed",e);
+      indicators();
+    }
+  }
+
+  function scheduleRender(forceIndicators=false){
+    indicatorPending = indicatorPending || forceIndicators;
+    incrementalDirty = incrementalDirty || !forceIndicators;
+    if(renderPending) return;
+    renderPending = true;
+    requestAnimationFrame(() => {
+      renderPending = false;
+      const now = Date.now();
+      if(indicatorPending){
+        try{ indicators(); }catch(e){ console.error(MODULE + " indicators failed",e); }
+        indicatorPending = false;
+        incrementalDirty = false;
+        lastIndicatorMs = now;
+      }else if(incrementalDirty){
+        updateIndicatorsIncremental();
+        incrementalDirty = false;
+        lastIndicatorMs = now;
+      }
+      try{
+        if(candles.length) metrics(candles[candles.length-1]);
+        clampView();
+        draw();
+      }catch(e){
+        console.error(MODULE + " draw failed",e);
+      }
+    });
+  }
+
+  upsert = window.upsert = function(c){
+    if(!c || !Number.isFinite(Number(c.time))) return;
+    const keep = rightOffset;
+    const follow = rightOffset <= 0;
+    const last = candles[candles.length-1];
+    let added = false;
+
+    if(last && last.time === c.time){
+      candles[candles.length-1] = mergeCandle(last,c);
+    }else if(!last || c.time > last.time){
+      candles.push({...c});
+      added = true;
+    }else{
+      const i = candles.findIndex(x => x.time === c.time);
+      if(i >= 0) candles[i] = mergeCandle(candles[i],c);
+      else{
+        candles.push({...c});
+        candles.sort((a,b) => a.time - b.time);
+        added = true;
+      }
+    }
+
+    if(added && !follow) rightOffset += 1;
+    if(follow) rightOffset = keep;
+    scheduleRender(added || !!c.final);
+  };
+
+  liveTrade = window.liveTrade = function(p,q,ms){
+    p = +p;
+    q = +q;
+    ms = +ms;
+    if(!Number.isFinite(p) || p <= 0) return;
+    if(!Number.isFinite(q) || q < 0) q = 0;
+    if(!Number.isFinite(ms) || ms <= 0) ms = Date.now();
+
+    const sec = Math.floor(ms / 1000);
+    const bucket = Math.floor(sec / ivSec()) * ivSec();
+    const last = candles[candles.length-1];
+    if(!last) return;
+
+    if(bucket === last.time){
+      upsert({
+        time:last.time,
+        open:last.open,
+        high:Math.max(Number(last.high),p),
+        low:Math.min(Number(last.low),p),
+        close:p,
+        volume:Number(last.volume) + q
+      });
+    }else if(bucket > last.time){
+      upsert({
+        time:bucket,
+        open:last.close,
+        high:Math.max(Number(last.close),p),
+        low:Math.min(Number(last.close),p),
+        close:p,
+        volume:q
+      });
+    }
+  };
+
+  pollOnce = window.pollOnce = async function(){
+    const rows = await klines(Date.now(),10);
+    for(const row of rows) upsert(row);
+    lastRest = Date.now();
+    markLiveUpdate();
+    refreshConn();
+  };
+
+  startPoll = window.startPoll = function(){
+    stopPoll();
+    pollTimer = setInterval(() => {
+      const wsFresh = lastWs && Date.now() - lastWs <= 5000;
+      if(wsFresh) return;
+      pollOnce().catch(e => {
+        console.error(e);
+        refreshConn();
+      });
+    },FALLBACK_REST_MS);
+  };
+
+  window.REALTIME_RENDER_COALESCER = {version:MODULE};
+})();
+
+(() => {
+  "use strict";
   const MODULE = "V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_PL_ISOLATE_AND_OVERLAY_FIX";
   function plHit(){
     try{
