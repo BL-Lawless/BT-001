@@ -219,6 +219,10 @@ button:hover{filter:brightness(1.04)}
   flex-basis:168px;
 }
 
+.metric-date-time{
+  display:none !important;
+}
+
 .metric.metric-account{
   flex-basis:118px;
 }

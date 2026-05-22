@@ -1237,6 +1237,11 @@ function connectWs(){
       const msg = JSON.parse(e.data);
       const d = msg.data || msg;
 
+      if(d && d.E){
+        window.__countdownExchangeMs = Number(d.E);
+        window.__countdownLocalMs = Date.now();
+      }
+
       lastWs = Date.now();
       markLiveUpdate();
 
@@ -14408,6 +14413,92 @@ If there is NO open position, use this Section 2 instead:
   installSettings();
   setTimeout(installSettings,300);
   window.PRICE_LEVELS_OVERLAY = {version:MODULE,parseLevels,installSettings};
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "V13_CANDLE_CLOSE_COUNTDOWN";
+  let timer = null;
+
+  function exchangeNow(){
+    const ex = Number(window.__countdownExchangeMs);
+    const local = Number(window.__countdownLocalMs);
+    if(Number.isFinite(ex) && Number.isFinite(local)){
+      return ex + (Date.now() - local);
+    }
+    return Date.now();
+  }
+
+  function isFeedLive(){
+    const age = lastWs ? Date.now() - lastWs : Infinity;
+    const limit = typeof STALE_MS === "number" ? Math.max(STALE_MS,5000) : 5000;
+    return !!(lastWs && age <= limit);
+  }
+
+  function formatLeft(ms,tfSec){
+    if(!Number.isFinite(ms) || ms < 0) ms = 0;
+    const total = Math.ceil(ms / 1000);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = value => String(value).padStart(2,"0");
+    if(tfSec >= 3600) return pad(h) + ":" + pad(m) + ":" + pad(s);
+    return pad(m) + ":" + pad(s);
+  }
+
+  function countdownText(){
+    if(!Array.isArray(candles) || !candles.length || typeof ivSec !== "function") return "--:--";
+    const latest = candles[candles.length - 1];
+    const tfSec = Number(ivSec());
+    const openMs = Number(latest && latest.time) * 1000;
+    if(!Number.isFinite(tfSec) || tfSec <= 0 || !Number.isFinite(openMs)) return "--:--";
+    const closeMs = openMs + tfSec * 1000;
+    return formatLeft(closeMs - exchangeNow(),tfSec);
+  }
+
+  function drawCountdown(){
+    if(!ctx || !canvas || !Array.isArray(candles) || !candles.length || !(lastYMax > lastYMin)) return;
+    const latest = candles[candles.length - 1];
+    const price = Number(latest && latest.close);
+    if(!Number.isFinite(price)) return;
+    const right = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
+    const left = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
+    const top = 18;
+    const priceH = lastAreaH || Math.floor((canvas.clientHeight - top - 30) * .78);
+    const chartRight = canvas.clientWidth - right;
+    const y = top + ((lastYMax - price) / (lastYMax - lastYMin)) * priceH;
+    const text = countdownText();
+    ctx.save();
+    ctx.font = "12px Arial";
+    const tw = ctx.measureText(text).width;
+    const x = Math.max(left + 4, chartRight - tw - 8);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "#4b5563";
+    ctx.fillText(text,x,y + 8);
+    ctx.restore();
+  }
+
+  if(typeof draw === "function" && !window.__candleCountdownDrawWrapped){
+    const prevDraw = draw;
+    window.__candleCountdownDrawWrapped = true;
+    draw = window.draw = function(){
+      const result = prevDraw.apply(this,arguments);
+      try{ drawCountdown(); }catch(e){ console.error(MODULE + " draw failed",e); }
+      return result;
+    };
+  }
+
+  function start(){
+    if(timer) return;
+    timer = setInterval(() => {
+      try{ if(typeof draw === "function") draw(); }catch(_e){}
+    },1000);
+  }
+
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",start,{once:true});
+  else start();
+  window.CANDLE_CLOSE_COUNTDOWN = {version:MODULE,countdownText};
 })();
 
 (() => {
