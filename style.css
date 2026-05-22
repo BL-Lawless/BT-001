@@ -5,8 +5,8 @@
   --orange:#f59e0b;--midgray:#8a8f98;--darkgray:#4b5563;
 
   --candle-up-body:#ffffff;
-  --candle-down-body:#969696;
-  --candle-stroke:#4f4f4f;
+  --candle-down-body:#e11010;
+  --candle-stroke:#969696;
   --candle-up-border:var(--candle-stroke);
   --candle-up-wick:var(--candle-stroke);
   --candle-down-border:var(--candle-stroke);
