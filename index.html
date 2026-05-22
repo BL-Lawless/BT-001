@@ -55,8 +55,8 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 </select>
 </label>
 <span class="custom-range hidden" id="customRange">
-<span>From</span><input autocomplete="off" id="customFrom" placeholder="dd/mm/yy" type="text"/>
-<span>To</span><input autocomplete="off" id="customTo" placeholder="dd/mm/yy" type="text"/>
+<span>From</span><input autocomplete="off" id="customFrom" placeholder="dd/mm/yy" type="date"/>
+<span>To</span><input autocomplete="off" id="customTo" placeholder="dd/mm/yy" type="date"/>
 </span>
 <button id="loadTrades">Load Trades</button>
 <span class="trade-count" id="tradeCount">Trades: 0</span>
@@ -137,38 +137,6 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 </div>
 </div>
 
-<!-- =========================================================
-     V13_01 — STRATEGY LAB FOUNDATION ADD-ON
-     Paste this block just before the final 
-
-<div id="customDateModal" class="modal-backdrop hidden">
-  <div class="modal">
-    <h3>Custom report dates</h3>
-    <div class="modal-row"><label for="customFromModal">From</label><input id="customFromModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
-    <div class="modal-row"><label for="customToModal">To</label><input id="customToModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
-    <div class="modal-note">Enter dates as dd/mm/yy.</div>
-    <div class="modal-actions"><button id="customDateCancel" class="secondary">Cancel</button><button id="customDateApply">Apply</button></div>
-  </div>
-</div>
-<div id="inspectModal" class="modal-backdrop hidden">
-  <div class="modal" style="width:min(320px,calc(100vw - 28px))">
-    <h3>Inspect</h3>
-    <div class="modal-actions" style="justify-content:center">
-      <button id="inspectIsolate">Isolate</button>
-      <button id="inspectCancel" class="secondary">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- PATCH_34_CLEANUP: removed duplicated early R5 MA/VWAP isolation block; canonical block kept near final patch area. -->
-
-<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_START -->
-
-<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_END -->
-
-<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R3_REBUILD_START -->
-
-<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R3_REBUILD_END -->
 
   <script src="api.js" defer></script>
   <script src="main.js" defer></script>
@@ -247,43 +215,12 @@ Rate fresh entries only."></textarea>
 </div>
 </div>
 
-<!-- =========================================================
-     V13_02 — STRATEGY LAB DRAGGABLE WINDOW ADD-ON
-     Paste this after V13_01, before final 
-
-<div id="customDateModal" class="modal-backdrop hidden">
-  <div class="modal">
-    <h3>Custom report dates</h3>
-    <div class="modal-row"><label for="customFromModal">From</label><input id="customFromModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
-    <div class="modal-row"><label for="customToModal">To</label><input id="customToModal" type="text" placeholder="dd/mm/yy" autocomplete="off"></div>
-    <div class="modal-note">Enter dates as dd/mm/yy.</div>
-    <div class="modal-actions"><button id="customDateCancel" class="secondary">Cancel</button><button id="customDateApply">Apply</button></div>
-  </div>
-</div>
-<div id="inspectModal" class="modal-backdrop hidden">
-  <div class="modal" style="width:min(320px,calc(100vw - 28px))">
-    <h3>Inspect</h3>
-    <div class="modal-actions" style="justify-content:center">
-      <button id="inspectIsolate">Isolate</button>
-      <button id="inspectCancel" class="secondary">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- PATCH_34_CLEANUP: removed duplicated early R5 MA/VWAP isolation block; canonical block kept near final patch area. -->
-
-<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_START -->
-
-<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_END -->
-
-</body>
-
 
 <div class="modal-backdrop hidden" id="customDateModal">
 <div class="modal">
 <h3>Custom report dates</h3>
-<div class="modal-row"><label for="customFromModal">From</label><input autocomplete="off" id="customFromModal" placeholder="dd/mm/yy" type="text"/></div>
-<div class="modal-row"><label for="customToModal">To</label><input autocomplete="off" id="customToModal" placeholder="dd/mm/yy" type="text"/></div>
+<div class="modal-row"><label for="customFromModal">From</label><input autocomplete="off" id="customFromModal" placeholder="dd/mm/yy" type="date"/></div>
+<div class="modal-row"><label for="customToModal">To</label><input autocomplete="off" id="customToModal" placeholder="dd/mm/yy" type="date"/></div>
 <div class="modal-note">Enter dates as dd/mm/yy.</div>
 <div class="modal-actions"><button class="secondary" id="customDateCancel">Cancel</button><button id="customDateApply">Apply</button></div>
 </div>
@@ -369,3 +306,5 @@ Base cleanup retained:
 - Preserved current MA/VWAP isolation layer, MA_STACK_STRIP, Assess, report-period and parent-chain logic from the baseline.
 -->
 </html>
+
+
