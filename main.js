@@ -92,7 +92,7 @@ const MARKETS = {
   }
 };
 
-const DEF_VISIBLE = 190;
+const DEF_VISIBLE = 283;
 const MIN_VISIBLE = 30;
 const INIT_LIMIT = 1500;
 const OLDER_LIMIT = 1500;
@@ -677,15 +677,36 @@ function startLiveClock(){
   updateLiveTime();
 }
 
+function connVisual(status){
+  switch(String(status || "")){
+    case "WS LIVE":
+      return {text:"W", bg:"#0ecb81", glow:"rgba(14,203,129,.45)"};
+    case "RECONNECTING":
+    case "WS STALE":
+    case "REST FALLBACK":
+      return {
+        text:String(status) === "REST FALLBACK" ? "R" : "W",
+        bg:"#0ecb81",
+        glow:"rgba(14,203,129,.45)"
+      };
+    default:
+      return {text:"X", bg:"#f6465d", glow:"rgba(246,70,93,.42)"};
+  }
+}
+
 function setConn(ok,src=""){
   const isWs = ok && String(src).toLowerCase().includes("websocket");
   const isRest = ok && String(src).toLowerCase().includes("rest");
+  const visual = isWs
+    ? connVisual("WS LIVE")
+    : isRest
+      ? connVisual("REST FALLBACK")
+      : connVisual("OFFLINE / ERROR");
 
-  connLed.textContent = isWs ? "W" : isRest ? "R" : "X";
-  connLed.style.background = ok ? css("--green") : css("--red");
-  connLed.style.boxShadow = ok
-    ? "0 0 5px rgba(14,203,129,.75)"
-    : "0 0 5px rgba(246,70,93,.75)";
+  connLed.textContent = visual.text;
+  connLed.style.background = visual.bg;
+  connLed.style.boxShadow =
+    "inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 1px rgba(75,85,99,.18), 0 0 8px " + visual.glow;
 
   connWrap.title = ok ? "Connected via " + src : "Disconnected";
 }
@@ -1068,7 +1089,7 @@ async function fetchInitial(targetCount){
     emaPeriod(emaPeriod1El,20),
     emaPeriod(emaPeriod2El,50),
     emaPeriod(emaPeriod3El,100),
-    260
+    600
   );
   const desired = Math.max(1, Math.round(warmup));
   let rows = [];
@@ -15314,17 +15335,11 @@ If there is NO open position, use this Section 2 instead:
 
   function paintStatus(status,detail=""){
     syncDiag({status});
-    const colors = {
-      "WS LIVE":"#0ecb81",
-      "WS STALE":"#f59e0b",
-      "RECONNECTING":"#1e88e5",
-      "REST FALLBACK":"#f59e0b",
-      "OFFLINE / ERROR":"#f6465d"
-    };
-    const bg = colors[status] || "#f6465d";
+    const visual = connVisual(status);
     if(connWrap){
-      connWrap.style.width = "94px";
-      connWrap.style.borderRadius = "5px";
+      connWrap.style.width = "22px";
+      connWrap.style.height = "22px";
+      connWrap.style.borderRadius = "999px";
       connWrap.title =
         status +
         (detail ? " - " + detail : "") +
@@ -15335,15 +15350,16 @@ If there is NO open position, use this Section 2 instead:
         (diag.lastError ? " | last error: " + diag.lastError : "");
     }
     if(connLed){
-      connLed.textContent = status;
-      connLed.style.width = "86px";
-      connLed.style.height = "18px";
-      connLed.style.borderRadius = "4px";
-      connLed.style.fontSize = "9px";
+      connLed.textContent = visual.text;
+      connLed.style.width = "11px";
+      connLed.style.height = "11px";
+      connLed.style.borderRadius = "999px";
+      connLed.style.fontSize = "8px";
       connLed.style.color = "#111";
-      connLed.style.background = bg;
-      connLed.style.boxShadow = "0 0 5px " + bg;
-      connLed.style.whiteSpace = "nowrap";
+      connLed.style.background = visual.bg;
+      connLed.style.boxShadow =
+        "inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 1px rgba(75,85,99,.18), 0 0 8px " + visual.glow;
+      connLed.style.whiteSpace = "normal";
     }
   }
 
