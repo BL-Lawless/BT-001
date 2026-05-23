@@ -162,6 +162,7 @@ let loading = false;
 let loadingOlder = false;
 let noMoreOlder = false;
 let olderFetchArmed = false;
+let olderFetchTargetVisible = 0;
 let tradeLoading = false;
 
 let visibleCount = DEF_VISIBLE;
@@ -1060,20 +1061,39 @@ async function klines(endMs,limit){
   return d.map(parseRest);
 }
 
-async function fetchInitial(){
+async function fetchInitial(targetCount){
   const warmup = Math.max(
+    Number(targetCount) || 0,
     visibleCount || DEF_VISIBLE,
     emaPeriod(emaPeriod1El,20),
     emaPeriod(emaPeriod2El,50),
     emaPeriod(emaPeriod3El,100),
     260
   );
-  const rows = await klines(Date.now(), Math.min(INIT_LIMIT,warmup));
+  const desired = Math.max(1, Math.round(warmup));
+  let rows = [];
+  let endMs = Date.now();
+
+  while(rows.length < desired){
+    const remaining = desired - rows.length;
+    const batch = await klines(endMs, Math.min(KLINE_LIMIT, remaining || KLINE_LIMIT));
+    if(!batch.length) break;
+
+    const oldestTime = batch[0] && batch[0].time ? batch[0].time * 1000 : null;
+    rows = rows.length ? batch.concat(rows) : batch;
+
+    if(batch.length < Math.min(KLINE_LIMIT, remaining || KLINE_LIMIT) || !oldestTime) break;
+    endMs = oldestTime - 1;
+  }
+
   if(!rows.length) throw new Error("No Binance candles returned");
-  return rows;
+  return rows.slice(-desired);
 }
 
 async function olderIfNeeded(r){
+  const zoomRequestedVisible = Number.isFinite(olderFetchTargetVisible) ? olderFetchTargetVisible : 0;
+  const needsZoomBackfill = zoomRequestedVisible > candles.length;
+  const nearLeftEdge = !!(r && r.start <= 2);
   if(
     loading ||
     loadingOlder ||
@@ -1081,7 +1101,7 @@ async function olderIfNeeded(r){
     !olderFetchArmed ||
     !candles.length ||
     !r ||
-    r.start > 2
+    (!nearLeftEdge && !needsZoomBackfill)
   ) return;
 
   loadingOlder = true;
@@ -1089,21 +1109,36 @@ async function olderIfNeeded(r){
 
   try{
     const oldLength = candles.length;
-    const expandAfterFetch = visibleCount >= oldLength - 2;
+    const requestedVisible = Math.max(
+      visibleCount,
+      zoomRequestedVisible
+    );
+    const neededVisible = Math.max(0, requestedVisible - oldLength);
+    const loadLimit = clamp(
+      Math.max(OLDER_THRESHOLD, neededVisible + 24, Math.ceil(visibleCount * 0.6)),
+      1,
+      OLDER_LIMIT
+    );
+    const expandAfterFetch = zoomRequestedVisible > oldLength;
     const before = candles[0].time * 1000 - 1;
-    const old = await klines(before, OLDER_LIMIT);
+    const old = await klines(before, loadLimit);
     const f = old.filter(c => c.time < candles[0].time);
 
     if(!f.length){
       noMoreOlder = true;
+      olderFetchTargetVisible = 0;
       return;
     }
 
     candles = f.concat(candles);
     if(expandAfterFetch){
-      visibleCount = Math.min(candles.length, visibleCount + f.length);
+      visibleCount = Math.min(
+        candles.length,
+        Math.max(visibleCount, requestedVisible || visibleCount)
+      );
     }
-    if(old.length < OLDER_LIMIT) noMoreOlder = true;
+    if(old.length < loadLimit) noMoreOlder = true;
+    olderFetchTargetVisible = Math.max(0, requestedVisible - candles.length);
     indicators();
     clampView();
     draw();
@@ -1382,6 +1417,7 @@ async function loadChart(opt={}){
   noMoreOlder = false;
   loadingOlder = false;
   olderFetchArmed = false;
+  olderFetchTargetVisible = 0;
   rightOffset = 0;
   visibleCount = DEF_VISIBLE;
 
@@ -3226,6 +3262,7 @@ function draw(){
 
 function pan(delta){
   olderFetchArmed = true;
+  olderFetchTargetVisible = 0;
   rightOffset += delta;
   clampView();
   draw();
@@ -3251,14 +3288,20 @@ function zoomAt(mx,dy){
   const global = oldStart + anchor;
   const ratio = idxView / oldTotal;
   const factor = dy < 0 ? .82 : 1.22;
-
-  let nc = Math.round(visibleCount * factor);
+  const rawVisible = Math.round(visibleCount * factor);
+  let nc = rawVisible;
 
   nc = candles.length < MIN_VISIBLE
     ? candles.length
-    : clamp(nc,MIN_VISIBLE,candles.length);
+    : clamp(nc,MIN_VISIBLE,Math.max(MIN_VISIBLE,candles.length));
 
   const newEnd = Math.round(global + (1-ratio)*nc);
+
+  if(dy > 0 && rawVisible > candles.length){
+    olderFetchTargetVisible = Math.max(olderFetchTargetVisible || 0, rawVisible);
+  }else if(rawVisible <= candles.length){
+    olderFetchTargetVisible = 0;
+  }
 
   visibleCount = nc;
   rightOffset = candles.length - newEnd;
@@ -3359,6 +3402,7 @@ canvas.addEventListener("mousemove",e => {
 
       rightOffset = dragRight + Math.round(dx/slot);
       olderFetchArmed = true;
+      olderFetchTargetVisible = 0;
 
       if(dragManualY && validRange(dragMin,dragMax)){
         const pp = (dragMax-dragMin) / Math.max(1,dragH);
@@ -10497,6 +10541,7 @@ startTradeAuto();
     noMoreOlder = false;
     loadingOlder = false;
     olderFetchArmed = false;
+    olderFetchTargetVisible = 0;
     if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
     connectWs();
     try{
@@ -12579,11 +12624,17 @@ startTradeAuto();
       const ratio = idxView / oldTotal;
       const mag = clamp26(Math.abs(Number(dy) || 0) / 100, 0.12, 3.0);
       const factor = Math.exp((dy < 0 ? -1 : 1) * 0.20 * mag);
-      let nc = Math.round(visibleCount * factor);
+      const rawVisible = Math.round(visibleCount * factor);
+      let nc = rawVisible;
       const minVis = typeof MIN_VISIBLE !== "undefined" ? MIN_VISIBLE : 40;
-      nc = candles.length < minVis ? candles.length : clamp26(nc,minVis,candles.length);
+      nc = candles.length < minVis ? candles.length : clamp26(nc,minVis,Math.max(minVis,candles.length));
       const newEnd = Math.round(global + (1-ratio)*nc);
       olderFetchArmed = true;
+      if(dy > 0 && rawVisible > candles.length){
+        olderFetchTargetVisible = Math.max(olderFetchTargetVisible || 0, rawVisible);
+      }else if(rawVisible <= candles.length){
+        olderFetchTargetVisible = 0;
+      }
       visibleCount = nc;
       rightOffset = candles.length - newEnd;
       if(typeof clampView === "function") clampView();
@@ -13270,15 +13321,16 @@ If there is NO open position, use this Section 2 instead:
     if(loading) return;
     const keepVisible=visibleCount;
     const keepRight=rightOffset;
+    const keepLoaded=Math.max(Array.isArray(candles) ? candles.length : 0, keepVisible || 0);
     const keepManual=manualY, keepMin=yMin, keepMax=yMax;
     const tradesOff=!(tglResults&&tglResults.checked);
     const targetRight=tradesOff ? Math.min(0,Number(keepRight)||0) : keepRight;
     loading=true;
     try{
       stopPoll(); stopWatch(); stopDailyTimer(); if(ws){ws.close(); ws=null;} if(priceWs){priceWs.close(); priceWs=null;}
-      setConn(false); lastWs=0; lastRest=0; lastMarkPrice=null; dailyState=null; noMoreOlder=false; loadingOlder=false; olderFetchArmed=false;
+      setConn(false); lastWs=0; lastRest=0; lastMarkPrice=null; dailyState=null; noMoreOlder=false; loadingOlder=false; olderFetchArmed=false; olderFetchTargetVisible=0;
       connectWs();
-      const nextCandles=await fetchInitial();
+      const nextCandles=await fetchInitial(keepLoaded);
       candles=nextCandles; visibleCount=keepVisible||visibleCount; rightOffset=targetRight;
       if(keepManual&&validRange(keepMin,keepMax)){ manualY=true; yMin=keepMin; yMax=keepMax; } else { manualY=false; yMin=null; yMax=null; }
       indicators(); clampView();
