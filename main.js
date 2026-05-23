@@ -74,7 +74,7 @@ const MARKETS = {
     userTrades:"https://fapi.binance.com/fapi/v1/userTrades",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
-    ws:"wss://fstream.binance.com/stream"
+    ws:"wss://fstream.binance.com/market/stream"
   },
   btcusdc:{
     symbol:"BTCUSDC",
@@ -83,7 +83,7 @@ const MARKETS = {
     userTrades:"https://fapi.binance.com/fapi/v1/userTrades",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
-    ws:"wss://fstream.binance.com/stream"
+    ws:"wss://fstream.binance.com/market/stream"
   }
 };
 
@@ -140,6 +140,7 @@ let dailyState = null;
 let accountBalanceState = null;
 
 let ws = null;
+let priceWs = null;
 let pollTimer = null;
 let watchdogTimer = null;
 let tradeAutoTimer = null;
@@ -684,10 +685,12 @@ function setConn(ok,src=""){
 
 function refreshConn(){
   const n = Date.now();
+  const open = (ws && ws.readyState === WebSocket.OPEN) ||
+    (priceWs && priceWs.readyState === WebSocket.OPEN);
   const w = lastWs && n - lastWs <= STALE_MS;
   const r = lastRest && n - lastRest <= STALE_MS;
 
-  if(w) setConn(true,"WebSocket");
+  if(open || w) setConn(true,"WebSocket");
   else if(r) setConn(true,"REST");
   else setConn(false);
 }
@@ -1052,12 +1055,20 @@ async function klines(endMs,limit){
 }
 
 async function fetchInitial(){
-  const rows = await klines(Date.now(), INIT_LIMIT);
+  const warmup = Math.max(
+    visibleCount || DEF_VISIBLE,
+    emaPeriod(emaPeriod1El,20),
+    emaPeriod(emaPeriod2El,50),
+    emaPeriod(emaPeriod3El,100),
+    260
+  );
+  const rows = await klines(Date.now(), Math.min(INIT_LIMIT,warmup));
   if(!rows.length) throw new Error("No Binance candles returned");
   return rows;
 }
 
 async function olderIfNeeded(r){
+  return;
   if(
     loading ||
     loadingOlder ||
@@ -1178,24 +1189,24 @@ function liveTrade(p,q,ms){
   }
 }
 
+function applyLivePrice(p,ms){
+  p = Number(p);
+  ms = Number(ms);
+  if(!Number.isFinite(p) || p <= 0) return;
+  if(!Number.isFinite(ms) || ms <= 0) ms = Date.now();
+
+  lastMarkPrice = p;
+  if(mClose) mClose.textContent = ip(p);
+  updatePositionStrip({close:p});
+  if(candles.length) liveTrade(p,0,ms);
+}
+
 async function pollOnce(){
-  const rows = await klines(Date.now(),10);
-  rows.forEach(upsert);
-  lastRest = Date.now();
-  markLiveUpdate();
   refreshConn();
 }
 
 function startPoll(){
   stopPoll();
-
-  pollTimer = setInterval(
-    () => pollOnce().catch(e => {
-      console.error(e);
-      refreshConn();
-    }),
-    REST_MS
-  );
 }
 
 function stopPoll(){
@@ -1209,30 +1220,48 @@ function connectWs(){
   const c = cfg();
 
   if(ws){
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
     ws.close();
     ws = null;
   }
+  if(priceWs){
+    priceWs.onopen = null;
+    priceWs.onmessage = null;
+    priceWs.onerror = null;
+    priceWs.onclose = null;
+    priceWs.close();
+    priceWs = null;
+  }
 
   const base = c.symbol.toLowerCase();
-  const streams = [
-    base + "@kline_" + iv(),
-    base + "@aggTrade",
-    base + "@markPrice@1s"
-  ].join("/");
-
-  const url = c.ws + "?streams=" + streams;
+  const stream = base + "@kline_" + iv();
+  const url = String(c.ws || "wss://fstream.binance.com/market/stream")
+    .replace(/\/stream\/?$/,"/ws/") + stream;
+  const priceUrl = String(c.ws || "wss://fstream.binance.com/market/stream")
+    .replace(/\/stream\/?$/,"/ws/") + base + "@ticker";
 
   try{
     ws = API.createWebSocket(url);
+    priceWs = API.createWebSocket(priceUrl);
   }catch(e){
     console.error("WS create failed",e);
     refreshConn();
     return;
   }
+  const socket = ws;
+  const priceSocket = priceWs;
 
-  ws.onopen = refreshConn;
+  ws.onopen = () => {
+    if(ws !== socket) return;
+    lastWs = Date.now();
+    setConn(true,"WebSocket");
+  };
 
   ws.onmessage = e => {
+    if(ws !== socket) return;
     try{
       const msg = JSON.parse(e.data);
       const d = msg.data || msg;
@@ -1246,8 +1275,6 @@ function connectWs(){
       markLiveUpdate();
 
       if(d.k) upsert(parseWsKline(d.k));
-      else if(d.e === "aggTrade") liveTrade(d.p,d.q,d.T || d.E);
-      else if(d.e === "markPriceUpdate") lastMarkPrice = +d.p;
 
       refreshConn();
     }catch(err){
@@ -1255,8 +1282,34 @@ function connectWs(){
     }
   };
 
-  ws.onerror = refreshConn;
-  ws.onclose = refreshConn;
+  ws.onerror = () => { if(ws === socket) setConn(false); };
+  ws.onclose = () => { if(ws === socket) setConn(false); };
+
+  priceWs.onopen = () => {
+    if(priceWs !== priceSocket) return;
+    lastWs = Date.now();
+    setConn(true,"WebSocket");
+  };
+  priceWs.onmessage = e => {
+    if(priceWs !== priceSocket) return;
+    try{
+      const msg = JSON.parse(e.data);
+      const d = msg.data || msg;
+      if(d && d.E){
+        window.__countdownExchangeMs = Number(d.E);
+        window.__countdownLocalMs = Date.now();
+      }
+      lastWs = Date.now();
+      markLiveUpdate();
+      const livePrice = d && (d.c != null ? d.c : d.p);
+      if(livePrice != null) applyLivePrice(livePrice,d.E);
+      refreshConn();
+    }catch(err){
+      console.error("Price WS parse error",err);
+    }
+  };
+  priceWs.onerror = () => { if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false); };
+  priceWs.onclose = () => { if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false); };
 }
 
 function startWatch(){
@@ -1266,7 +1319,9 @@ function startWatch(){
     const age = lastWs ? Date.now() - lastWs : Infinity;
     refreshConn();
 
-    if(age > WS_RECONNECT_MS && !loading){
+    const anyOpen = (ws && ws.readyState === WebSocket.OPEN) ||
+      (priceWs && priceWs.readyState === WebSocket.OPEN);
+    if(!anyOpen && age > WS_RECONNECT_MS && !loading){
       connectWs();
     }
   },1000);
@@ -1291,6 +1346,10 @@ async function loadChart(opt={}){
   if(ws){
     ws.close();
     ws = null;
+  }
+  if(priceWs){
+    priceWs.close();
+    priceWs = null;
   }
 
   setConn(false);
@@ -1318,6 +1377,7 @@ async function loadChart(opt={}){
   }
 
   draw();
+  connectWs();
 
   try{
     candles = await fetchInitial();
@@ -1333,11 +1393,6 @@ async function loadChart(opt={}){
     if(candles.length) metrics(candles[candles.length-1]);
 
     draw();
-    connectWs();
-
-    await pollOnce();
-
-    startPoll();
     startDailyTimer();
     startWatch();
   }catch(e){
@@ -4011,6 +4066,7 @@ startTradeAuto();
     stopWatch();
     stopDailyTimer();
     if(ws){ ws.close(); ws = null; }
+    if(priceWs){ priceWs.close(); priceWs = null; }
     setConn(false);
     lastWs = 0;
     lastRest = 0;
@@ -4019,6 +4075,7 @@ startTradeAuto();
     noMoreOlder = false;
     loadingOlder = false;
     if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
+    connectWs();
     try{
       const nextCandles = await fetchInitial();
       candles = nextCandles;
@@ -4031,7 +4088,6 @@ startTradeAuto();
       else resetView();
       if(candles.length) metrics(candles[candles.length-1]);
       draw();
-      connectWs();
       await pollOnce();
       startPoll();
       startDailyTimer();
@@ -10413,6 +10469,7 @@ startTradeAuto();
     stopWatch();
     stopDailyTimer();
     if(ws){ ws.close(); ws = null; }
+    if(priceWs){ priceWs.close(); priceWs = null; }
     setConn(false);
     lastWs = 0;
     lastRest = 0;
@@ -10421,6 +10478,7 @@ startTradeAuto();
     noMoreOlder = false;
     loadingOlder = false;
     if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
+    connectWs();
     try{
       const nextCandles = await fetchInitial();
       candles = nextCandles;
@@ -10433,7 +10491,6 @@ startTradeAuto();
       else resetView();
       if(candles.length) metrics(candles[candles.length-1]);
       draw();
-      connectWs();
       await pollOnce();
       startPoll();
       startDailyTimer();
@@ -13197,15 +13254,16 @@ If there is NO open position, use this Section 2 instead:
     const targetRight=tradesOff ? Math.min(0,Number(keepRight)||0) : keepRight;
     loading=true;
     try{
-      stopPoll(); stopWatch(); stopDailyTimer(); if(ws){ws.close(); ws=null;}
+      stopPoll(); stopWatch(); stopDailyTimer(); if(ws){ws.close(); ws=null;} if(priceWs){priceWs.close(); priceWs=null;}
       setConn(false); lastWs=0; lastRest=0; lastMarkPrice=null; dailyState=null; noMoreOlder=false; loadingOlder=false;
+      connectWs();
       const nextCandles=await fetchInitial();
       candles=nextCandles; visibleCount=keepVisible||visibleCount; rightOffset=targetRight;
       if(keepManual&&validRange(keepMin,keepMax)){ manualY=true; yMin=keepMin; yMax=keepMax; } else { manualY=false; yMin=null; yMax=null; }
       indicators(); clampView();
       await fetchDaily().catch(e=>console.error('Daily fetch failed',e));
       markLiveUpdate(); if(candles.length) metrics(candles[candles.length-1]);
-      draw(); connectWs(); await pollOnce(); startPoll(); startDailyTimer(); startWatch();
+      draw(); await pollOnce(); startPoll(); startDailyTimer(); startWatch();
     }catch(e){ console.error(e); setConn(false); }
     finally{ loading=false; }
   }
@@ -14705,26 +14763,140 @@ If there is NO open position, use this Section 2 instead:
   };
 
   pollOnce = window.pollOnce = async function(){
-    const rows = await klines(Date.now(),10);
-    for(const row of rows) upsert(row);
-    lastRest = Date.now();
-    markLiveUpdate();
     refreshConn();
   };
 
   startPoll = window.startPoll = function(){
     stopPoll();
-    pollTimer = setInterval(() => {
-      const wsFresh = lastWs && Date.now() - lastWs <= 5000;
-      if(wsFresh) return;
-      pollOnce().catch(e => {
-        console.error(e);
-        refreshConn();
-      });
-    },FALLBACK_REST_MS);
   };
 
   window.REALTIME_RENDER_COALESCER = {version:MODULE};
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "V13_WS_TICK_INPUT_COALESCER";
+  let flushPending = false;
+  let pendingKline = null;
+
+  function scheduleFlush(){
+    if(flushPending) return;
+    flushPending = true;
+    requestAnimationFrame(() => {
+      flushPending = false;
+      try{
+        if(pendingKline){
+          const k = pendingKline;
+          pendingKline = null;
+          upsert(k);
+        }
+        refreshConn();
+      }catch(e){
+        console.error(MODULE + " flush failed",e);
+      }
+    });
+  }
+
+  connectWs = window.connectWs = function(){
+    const c = cfg();
+    if(ws){
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      ws.close();
+      ws = null;
+    }
+    if(priceWs){
+      priceWs.onopen = null;
+      priceWs.onmessage = null;
+      priceWs.onerror = null;
+      priceWs.onclose = null;
+      priceWs.close();
+      priceWs = null;
+    }
+
+    const base = c.symbol.toLowerCase();
+    const stream = base + "@kline_" + iv();
+    const url = String(c.ws || "wss://fstream.binance.com/market/stream")
+      .replace(/\/stream\/?$/,"/ws/") + stream;
+    const priceUrl = String(c.ws || "wss://fstream.binance.com/market/stream")
+      .replace(/\/stream\/?$/,"/ws/") + base + "@ticker";
+
+    try{
+      ws = API.createWebSocket(url);
+      priceWs = API.createWebSocket(priceUrl);
+    }catch(e){
+      console.error("WS create failed",e);
+      refreshConn();
+      return;
+    }
+    const socket = ws;
+    const priceSocket = priceWs;
+
+  ws.onopen = () => {
+    if(ws !== socket) return;
+    lastWs = Date.now();
+    setConn(true,"WebSocket");
+  };
+    ws.onmessage = e => {
+      if(ws !== socket) return;
+      try{
+        const msg = JSON.parse(e.data);
+        const d = msg.data || msg;
+        if(d && d.E){
+          window.__countdownExchangeMs = Number(d.E);
+          window.__countdownLocalMs = Date.now();
+        }
+
+        lastWs = Date.now();
+        markLiveUpdate();
+
+        if(d.k){
+          pendingKline = parseWsKline(d.k);
+          if(d.k.x) pendingKline.final = true;
+          scheduleFlush();
+        }
+      }catch(err){
+        console.error("WS parse error",err);
+      }
+    };
+
+  ws.onerror = () => { if(ws === socket) setConn(false); };
+  ws.onclose = () => { if(ws === socket) setConn(false); };
+
+    priceWs.onopen = () => {
+      if(priceWs !== priceSocket) return;
+      lastWs = Date.now();
+      setConn(true,"WebSocket");
+    };
+    priceWs.onmessage = e => {
+      if(priceWs !== priceSocket) return;
+      try{
+        const msg = JSON.parse(e.data);
+        const d = msg.data || msg;
+        if(d && d.E){
+          window.__countdownExchangeMs = Number(d.E);
+          window.__countdownLocalMs = Date.now();
+        }
+        lastWs = Date.now();
+        markLiveUpdate();
+        const livePrice = d && (d.c != null ? d.c : d.p);
+        if(livePrice != null) applyLivePrice(livePrice,d.E);
+        refreshConn();
+      }catch(err){
+        console.error("Price WS parse error",err);
+      }
+    };
+    priceWs.onerror = () => {
+      if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false);
+    };
+    priceWs.onclose = () => {
+      if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false);
+    };
+  };
+
+  window.WS_TICK_INPUT_COALESCER = {version:MODULE};
 })();
 
 (() => {
@@ -14925,7 +15097,7 @@ If there is NO open position, use this Section 2 instead:
 
   function sym(){ try{return cfg().symbol}catch(_e){return (document.getElementById('market')?.value||'BTCUSDC').toUpperCase()} }
   function restUrl(){ try{return cfg().rest}catch(_e){return 'https://fapi.binance.com/fapi/v1/klines'} }
-  function wsUrl(){ try{return cfg().ws}catch(_e){return 'wss://fstream.binance.com/stream'} }
+  function wsUrl(){ try{return cfg().ws}catch(_e){return 'wss://fstream.binance.com/market/stream'} }
   function fmt(v,d=0){ const n=num(v); return n==null?'-':n.toFixed(d); }
   function avg(list,key){ const xs=list.map(x=>x&&x[key]).filter(x=>Number.isFinite(x)); return xs.length?xs.reduce((a,b)=>a+b,0)/xs.length:0; }
   function clsSigned(v,blue=false){ if(v>20)return blue?'sssc-ui-blue':'sssc-ui-green'; if(v<-20)return 'sssc-ui-red'; return 'sssc-ui-gray'; }
@@ -14983,6 +15155,7 @@ If there is NO open position, use this Section 2 instead:
   function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); }
   function savePanel(){ const p=$('ssscDash'); if(!p)return; const r=p.getBoundingClientRect(); localStorage.setItem(STORE+'panel',JSON.stringify({left:r.left,top:r.top,width:r.width,height:r.height})); }
   function restorePanel(){ const p=$('ssscDash'); if(!p)return; try{ const v=JSON.parse(localStorage.getItem(STORE+'panel')||'null'); if(v){p.style.left=Math.max(6,Math.min(window.innerWidth-100,v.left))+'px';p.style.top=Math.max(6,Math.min(window.innerHeight-80,v.top))+'px';p.style.bottom='auto';p.style.width=Math.max(840,v.width)+'px';p.style.height=Math.max(500,v.height)+'px';} }catch(_e){} }
+  function installSsscSettingsPlaceholder(){}
 
   function installResizeGuard(){ installResizeHandles(); }
   function installResizeHandles(){ const p=$('ssscDash'); if(!p||p.__ssscResizeHandles)return; p.__ssscResizeHandles=true; ['n','s','e','w','ne','nw','se','sw'].forEach(dir=>{ const h=document.createElement('div'); h.className='sssc-resize-handle sssc-resize-'+dir; h.dataset.dir=dir; p.appendChild(h); h.addEventListener('pointerdown',e=>{ e.preventDefault(); e.stopPropagation(); const r=p.getBoundingClientRect(); const start={x:e.clientX,y:e.clientY,left:r.left,top:r.top,w:r.width,h:r.height,dir}; p.classList.add('sssc-resizing'); try{h.setPointerCapture(e.pointerId)}catch(_e){} const move=ev=>{ const dx=ev.clientX-start.x, dy=ev.clientY-start.y; let left=start.left, top=start.top, w=start.w, hgt=start.h; const minW=760,minH=440; if(start.dir.includes('e')) w=start.w+dx; if(start.dir.includes('s')) hgt=start.h+dy; if(start.dir.includes('w')){ w=start.w-dx; left=start.left+dx; } if(start.dir.includes('n')){ hgt=start.h-dy; top=start.top+dy; } if(w<minW){ if(start.dir.includes('w')) left-=minW-w; w=minW; } if(hgt<minH){ if(start.dir.includes('n')) top-=minH-hgt; hgt=minH; } left=clamp(left,6,window.innerWidth-80); top=clamp(top,6,window.innerHeight-60); w=Math.min(w,window.innerWidth-left-6); hgt=Math.min(hgt,window.innerHeight-top-6); p.style.left=left+'px'; p.style.top=top+'px'; p.style.bottom='auto'; p.style.width=w+'px'; p.style.height=hgt+'px'; }; const up=ev=>{ document.removeEventListener('pointermove',move,true); document.removeEventListener('pointerup',up,true); document.removeEventListener('pointercancel',up,true); p.classList.remove('sssc-resizing'); try{h.releasePointerCapture(ev.pointerId)}catch(_e){} savePanel(); }; document.addEventListener('pointermove',move,true); document.addEventListener('pointerup',up,true); document.addEventListener('pointercancel',up,true); },true); }); }
@@ -14992,4 +15165,398 @@ If there is NO open position, use this Section 2 instead:
   if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(installSsscSettingsPlaceholder,0); return r; }; }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
   window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={version:MODULE,show,hide,refresh:()=>restSeed(true),diagnose};
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "V13_FINAL_BINANCE_REALTIME_MANAGER";
+  const WS_STALE_MS = 5000;
+  const WS_RECONNECT_MS_FINAL = 15000;
+  const REST_FALLBACK_MS = 5000;
+  const REST_LIMIT = 5;
+
+  let generation = 0;
+  let reconnectTimer = null;
+  let watchdog = null;
+  let fallbackTimer = null;
+  let restInFlight = false;
+  let flushPending = false;
+  let pendingTrade = null;
+  let desiredLive = true;
+  let lastTradeTickTime = 0;
+
+  const diag = {
+    module:MODULE,
+    status:"OFFLINE / ERROR",
+    symbol:null,
+    interval:null,
+    streams:[],
+    socketStatus:"closed",
+    lastWsTickTime:0,
+    lastRestSyncTime:0,
+    reconnectCount:0,
+    staleDurationMs:null,
+    lastError:null
+  };
+
+  window.BINANCE_REALTIME_DIAG = diag;
+  window.binanceRealtimeDiagnostics = () => ({...diag});
+
+  function now(){ return Date.now(); }
+  function wsBase(){
+    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream");
+    return raw
+      .replace(/\/(?:public|market|private)\/stream\/?$/,"/market/stream")
+      .replace(/\/stream\/?$/,"/market/stream")
+      .replace(/\/(?:public|market|private)\/ws\/?$/,"/market/stream")
+      .replace(/\/ws\/?$/,"/market/stream");
+  }
+  function currentStreams(){
+    const base = cfg().symbol.toLowerCase();
+    return [base + "@kline_" + iv(), base + "@aggTrade", base + "@markPrice@1s"];
+  }
+  function socketOpen(){
+    return !!(ws && ws.readyState === WebSocket.OPEN);
+  }
+  function socketState(){
+    if(!ws) return "closed";
+    return ["connecting","open","closing","closed"][ws.readyState] || String(ws.readyState);
+  }
+  function syncDiag(extra={}){
+    diag.symbol = cfg().symbol;
+    diag.interval = iv();
+    diag.socketStatus = socketState();
+    diag.staleDurationMs = diag.lastWsTickTime ? now() - diag.lastWsTickTime : null;
+    Object.assign(diag,extra);
+  }
+
+  function paintStatus(status,detail=""){
+    syncDiag({status});
+    const colors = {
+      "WS LIVE":"#0ecb81",
+      "WS STALE":"#f59e0b",
+      "RECONNECTING":"#1e88e5",
+      "REST FALLBACK":"#f59e0b",
+      "OFFLINE / ERROR":"#f6465d"
+    };
+    const bg = colors[status] || "#f6465d";
+    if(connWrap){
+      connWrap.style.width = "94px";
+      connWrap.style.borderRadius = "5px";
+      connWrap.title =
+        status +
+        (detail ? " - " + detail : "") +
+        " | streams: " + (diag.streams || []).join(", ") +
+        " | last WS: " + (diag.lastWsTickTime ? Math.round((now()-diag.lastWsTickTime)/1000) + "s ago" : "never") +
+        " | reconnects: " + diag.reconnectCount +
+        (diag.lastError ? " | last error: " + diag.lastError : "");
+    }
+    if(connLed){
+      connLed.textContent = status;
+      connLed.style.width = "86px";
+      connLed.style.height = "18px";
+      connLed.style.borderRadius = "4px";
+      connLed.style.fontSize = "9px";
+      connLed.style.color = "#111";
+      connLed.style.background = bg;
+      connLed.style.boxShadow = "0 0 5px " + bg;
+      connLed.style.whiteSpace = "nowrap";
+    }
+  }
+
+  setConn = window.setConn = function(ok,src=""){
+    if(ok && String(src).toLowerCase().includes("rest")) paintStatus("REST FALLBACK",src);
+    else if(ok) paintStatus("WS LIVE",src || "WebSocket");
+    else paintStatus("OFFLINE / ERROR",src || "Disconnected");
+  };
+
+  refreshConn = window.refreshConn = function(){
+    const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+    syncDiag();
+    if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
+    else if(socketOpen()) paintStatus("WS STALE");
+    else if(restInFlight) paintStatus("REST FALLBACK");
+    else paintStatus("OFFLINE / ERROR");
+  };
+
+  function closeSocket(s){
+    if(!s) return;
+    try{
+      s.onopen = null;
+      s.onmessage = null;
+      s.onerror = null;
+      s.onclose = null;
+      if(s.readyState === WebSocket.OPEN || s.readyState === WebSocket.CONNECTING) s.close();
+    }catch(_e){}
+  }
+
+  function closeRealtimeSocket(){
+    closeSocket(ws);
+    closeSocket(priceWs);
+    ws = null;
+    priceWs = null;
+  }
+
+  function scheduleReconnect(reason,delay=1500){
+    if(!desiredLive || loading) return;
+    if(reconnectTimer) return;
+    diag.lastError = reason || null;
+    diag.reconnectCount += 1;
+    paintStatus("RECONNECTING",reason || "socket reconnect");
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectWs();
+    },delay);
+  }
+
+  function markWsTick(source){
+    lastWs = now();
+    diag.lastWsTickTime = lastWs;
+    diag.lastError = null;
+    syncDiag({lastMessageSource:source});
+    markLiveUpdate();
+    paintStatus("WS LIVE",source);
+  }
+
+  function queueTradeTick(d){
+    const price = Number(d && d.p);
+    const qty = Number(d && d.q);
+    const ms = Number((d && (d.T || d.E)) || now());
+    if(!Number.isFinite(price) || price <= 0) return;
+
+    lastMarkPrice = price;
+    if(mClose) mClose.textContent = ip(price);
+    updatePositionStrip({close:price});
+
+    const sec = Math.floor(ms / 1000);
+    const bucket = Math.floor(sec / ivSec()) * ivSec();
+    if(!pendingTrade || pendingTrade.bucket !== bucket){
+      flushTradeTick();
+      pendingTrade = {bucket,high:price,low:price,close:price,volume:Number.isFinite(qty) && qty > 0 ? qty : 0,ms};
+    }else{
+      pendingTrade.high = Math.max(pendingTrade.high,price);
+      pendingTrade.low = Math.min(pendingTrade.low,price);
+      pendingTrade.close = price;
+      if(Number.isFinite(qty) && qty > 0) pendingTrade.volume += qty;
+      pendingTrade.ms = ms;
+    }
+
+    if(!flushPending){
+      flushPending = true;
+      requestAnimationFrame(() => {
+        flushPending = false;
+        flushTradeTick();
+      });
+    }
+  }
+
+  function queueMarkPriceTick(d){
+    const price = Number(d && d.p);
+    const ms = Number((d && d.E) || now());
+    if(!Number.isFinite(price) || price <= 0) return;
+    lastMarkPrice = price;
+    if(mClose) mClose.textContent = ip(price);
+    updatePositionStrip({close:price});
+    updateTabTitle();
+
+    if(now() - lastTradeTickTime > 1500){
+      queueTradeTick({p:price,q:0,T:ms,E:ms});
+    }
+  }
+
+  function flushTradeTick(){
+    if(!pendingTrade) return;
+    const t = pendingTrade;
+    pendingTrade = null;
+    const last = candles[candles.length-1];
+    if(!last) return;
+
+    if(t.bucket === last.time){
+      upsert({
+        time:last.time,
+        open:last.open,
+        high:Math.max(Number(last.high),t.high),
+        low:Math.min(Number(last.low),t.low),
+        close:t.close,
+        volume:(Number(last.volume) || 0) + t.volume
+      });
+    }else if(t.bucket > last.time){
+      upsert({
+        time:t.bucket,
+        open:last.close,
+        high:Math.max(Number(last.close),t.high),
+        low:Math.min(Number(last.close),t.low),
+        close:t.close,
+        volume:t.volume
+      });
+    }
+  }
+
+  async function restSyncLatest(reason="fallback"){
+    if(restInFlight) return;
+    const requestStarted = now();
+    const requestSymbol = cfg().symbol;
+    const requestInterval = iv();
+    restInFlight = true;
+    paintStatus("REST FALLBACK",reason);
+    try{
+      const rows = await klines(Date.now(),REST_LIMIT);
+      if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return;
+      const currentLastTime = candles.length ? candles[candles.length-1].time : 0;
+      for(const row of rows){
+        if(diag.lastWsTickTime > requestStarted && row.time >= currentLastTime) continue;
+        upsert(row);
+      }
+      lastRest = now();
+      diag.lastRestSyncTime = lastRest;
+      refreshConn();
+    }catch(e){
+      diag.lastError = e && e.message ? e.message : String(e);
+      if(!socketOpen()) paintStatus("OFFLINE / ERROR",diag.lastError);
+      console.warn(MODULE + " REST fallback failed",e);
+    }finally{
+      restInFlight = false;
+    }
+  }
+
+  connectWs = window.connectWs = function(){
+    desiredLive = true;
+    generation += 1;
+    const token = generation;
+    if(reconnectTimer){
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    closeRealtimeSocket();
+
+    const streams = currentStreams();
+    diag.streams = streams.slice();
+    syncDiag({status:"RECONNECTING"});
+    paintStatus("RECONNECTING","opening Binance stream");
+
+    try{
+      ws = API.createWebSocket(wsBase() + "?streams=" + streams.join("/"));
+    }catch(e){
+      diag.lastError = e && e.message ? e.message : String(e);
+      scheduleReconnect(diag.lastError,2500);
+      return;
+    }
+
+    const socket = ws;
+    socket.onopen = () => {
+      if(token !== generation || ws !== socket) return;
+      syncDiag({socketStatus:"open"});
+      paintStatus("RECONNECTING","waiting for Binance tick");
+    };
+
+    socket.onmessage = e => {
+      if(token !== generation || ws !== socket) return;
+      let d;
+      try{
+        const msg = JSON.parse(e.data);
+        d = msg && msg.data ? msg.data : msg;
+      }catch(err){
+        diag.lastError = "WS parse error";
+        console.error(MODULE + " WS parse error",err);
+        return;
+      }
+
+      if(d && Object.prototype.hasOwnProperty.call(d,"result")) return;
+      if(d && d.s && d.s !== cfg().symbol) return;
+      if(d && d.E){
+        window.__countdownExchangeMs = Number(d.E);
+        window.__countdownLocalMs = now();
+      }
+
+      if(d && d.e === "kline" && d.k){
+        markWsTick("kline");
+        const row = parseWsKline(d.k);
+        if(d.k.x) row.final = true;
+        upsert(row);
+      }else if(d && d.e === "aggTrade"){
+        lastTradeTickTime = now();
+        markWsTick("aggTrade");
+        queueTradeTick(d);
+      }else if(d && d.e === "markPriceUpdate"){
+        markWsTick("markPrice");
+        queueMarkPriceTick(d);
+      }
+    };
+
+    socket.onerror = () => {
+      if(token !== generation || ws !== socket) return;
+      diag.lastError = "WebSocket error";
+      scheduleReconnect("WebSocket error",2500);
+    };
+
+    socket.onclose = ev => {
+      if(token !== generation || ws !== socket) return;
+      const reason = "closed " + (ev && ev.code ? ev.code : "");
+      diag.lastError = reason;
+      scheduleReconnect(reason,2000);
+    };
+  };
+
+  pollOnce = window.pollOnce = async function(){
+    const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+    if(socketOpen() && age <= WS_STALE_MS) return;
+    await restSyncLatest("manual/fallback sync");
+  };
+
+  startPoll = window.startPoll = function(){
+    stopPoll();
+    fallbackTimer = setInterval(() => {
+      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+      if(!socketOpen() || age > WS_STALE_MS) restSyncLatest("stale WebSocket");
+    },REST_FALLBACK_MS);
+    pollTimer = fallbackTimer;
+  };
+
+  stopPoll = window.stopPoll = function(){
+    if(fallbackTimer) clearInterval(fallbackTimer);
+    if(pollTimer && pollTimer !== fallbackTimer) clearInterval(pollTimer);
+    fallbackTimer = null;
+    pollTimer = null;
+  };
+
+  startWatch = window.startWatch = function(){
+    stopWatch();
+    watchdog = setInterval(() => {
+      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+      syncDiag();
+      if(socketOpen() && age <= WS_STALE_MS){
+        paintStatus("WS LIVE");
+      }else if(socketOpen() && age <= WS_RECONNECT_MS_FINAL){
+        paintStatus("WS STALE");
+      }else if(!loading){
+        restSyncLatest("watchdog stale");
+        scheduleReconnect("stale WebSocket",1000);
+      }
+    },1000);
+    watchdogTimer = watchdog;
+  };
+
+  stopWatch = window.stopWatch = function(){
+    if(watchdog) clearInterval(watchdog);
+    if(watchdogTimer && watchdogTimer !== watchdog) clearInterval(watchdogTimer);
+    watchdog = null;
+    watchdogTimer = null;
+  };
+
+  function handleVisibilityReturn(){
+    if(document.hidden) return;
+    restSyncLatest("visibility/focus return");
+    if(!socketOpen()) connectWs();
+  }
+
+  ["visibilitychange","focus","pageshow"].forEach(ev => {
+    window.addEventListener(ev,handleVisibilityReturn,true);
+  });
+
+  startPoll();
+  startWatch();
+  setTimeout(() => {
+    connectWs();
+    restSyncLatest("manager install");
+  },250);
 })();
