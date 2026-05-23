@@ -1,3 +1,8 @@
+const API = window.API;
+if (!API) {
+  throw new Error("apis.js must load before main.js");
+}
+
 /* =========================================================
    SECTION 1 — DOM SHORTCUTS
 ========================================================= */
@@ -156,6 +161,7 @@ let lastLiveUpdateMs = 0;
 let loading = false;
 let loadingOlder = false;
 let noMoreOlder = false;
+let olderFetchArmed = false;
 let tradeLoading = false;
 
 let visibleCount = DEF_VISIBLE;
@@ -1068,18 +1074,22 @@ async function fetchInitial(){
 }
 
 async function olderIfNeeded(r){
-  return;
   if(
     loading ||
     loadingOlder ||
     noMoreOlder ||
+    !olderFetchArmed ||
     !candles.length ||
-    r.start > OLDER_THRESHOLD
+    !r ||
+    r.start > 2
   ) return;
 
   loadingOlder = true;
+  olderFetchArmed = false;
 
   try{
+    const oldLength = candles.length;
+    const expandAfterFetch = visibleCount >= oldLength - 2;
     const before = candles[0].time * 1000 - 1;
     const old = await klines(before, OLDER_LIMIT);
     const f = old.filter(c => c.time < candles[0].time);
@@ -1090,6 +1100,10 @@ async function olderIfNeeded(r){
     }
 
     candles = f.concat(candles);
+    if(expandAfterFetch){
+      visibleCount = Math.min(candles.length, visibleCount + f.length);
+    }
+    if(old.length < OLDER_LIMIT) noMoreOlder = true;
     indicators();
     clampView();
     draw();
@@ -1367,6 +1381,7 @@ async function loadChart(opt={}){
 
   noMoreOlder = false;
   loadingOlder = false;
+  olderFetchArmed = false;
   rightOffset = 0;
   visibleCount = DEF_VISIBLE;
 
@@ -3210,6 +3225,7 @@ function draw(){
 ========================================================= */
 
 function pan(delta){
+  olderFetchArmed = true;
   rightOffset += delta;
   clampView();
   draw();
@@ -3217,6 +3233,7 @@ function pan(delta){
 
 function zoomAt(mx,dy){
   if(candles.length < 2) return;
+  olderFetchArmed = true;
 
   const left = LEFT_PAD;
   const chartW = canvas.clientWidth - left - RIGHT_AXIS;
@@ -3341,6 +3358,7 @@ canvas.addEventListener("mousemove",e => {
       const dy = e.clientY - dragY;
 
       rightOffset = dragRight + Math.round(dx/slot);
+      olderFetchArmed = true;
 
       if(dragManualY && validRange(dragMin,dragMax)){
         const pp = (dragMax-dragMin) / Math.max(1,dragH);
@@ -4072,9 +4090,10 @@ startTradeAuto();
     lastRest = 0;
     lastMarkPrice = null;
     dailyState = null;
-    noMoreOlder = false;
-    loadingOlder = false;
-    if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
+      noMoreOlder = false;
+      loadingOlder = false;
+      olderFetchArmed = false;
+      if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
     connectWs();
     try{
       const nextCandles = await fetchInitial();
@@ -10477,6 +10496,7 @@ startTradeAuto();
     dailyState = null;
     noMoreOlder = false;
     loadingOlder = false;
+    olderFetchArmed = false;
     if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
     connectWs();
     try{
@@ -12563,6 +12583,7 @@ startTradeAuto();
       const minVis = typeof MIN_VISIBLE !== "undefined" ? MIN_VISIBLE : 40;
       nc = candles.length < minVis ? candles.length : clamp26(nc,minVis,candles.length);
       const newEnd = Math.round(global + (1-ratio)*nc);
+      olderFetchArmed = true;
       visibleCount = nc;
       rightOffset = candles.length - newEnd;
       if(typeof clampView === "function") clampView();
@@ -13255,7 +13276,7 @@ If there is NO open position, use this Section 2 instead:
     loading=true;
     try{
       stopPoll(); stopWatch(); stopDailyTimer(); if(ws){ws.close(); ws=null;} if(priceWs){priceWs.close(); priceWs=null;}
-      setConn(false); lastWs=0; lastRest=0; lastMarkPrice=null; dailyState=null; noMoreOlder=false; loadingOlder=false;
+      setConn(false); lastWs=0; lastRest=0; lastMarkPrice=null; dailyState=null; noMoreOlder=false; loadingOlder=false; olderFetchArmed=false;
       connectWs();
       const nextCandles=await fetchInitial();
       candles=nextCandles; visibleCount=keepVisible||visibleCount; rightOffset=targetRight;
@@ -15174,6 +15195,7 @@ If there is NO open position, use this Section 2 instead:
   const WS_RECONNECT_MS_FINAL = 15000;
   const REST_FALLBACK_MS = 5000;
   const REST_LIMIT = 5;
+  const FIRST_TICK_GRACE_MS = 12000;
 
   let generation = 0;
   let reconnectTimer = null;
@@ -15184,6 +15206,7 @@ If there is NO open position, use this Section 2 instead:
   let pendingTrade = null;
   let desiredLive = true;
   let lastTradeTickTime = 0;
+  let connectStartedAt = 0;
 
   const diag = {
     module:MODULE,
@@ -15192,6 +15215,7 @@ If there is NO open position, use this Section 2 instead:
     interval:null,
     streams:[],
     socketStatus:"closed",
+    activeUrl:"",
     lastWsTickTime:0,
     lastRestSyncTime:0,
     reconnectCount:0,
@@ -15222,6 +15246,12 @@ If there is NO open position, use this Section 2 instead:
     if(!ws) return "closed";
     return ["connecting","open","closing","closed"][ws.readyState] || String(ws.readyState);
   }
+  function waitingForFirstTick(){
+    if(diag.lastWsTickTime) return false;
+    if(!connectStartedAt) return false;
+    if(!(ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN))) return false;
+    return now() - connectStartedAt <= FIRST_TICK_GRACE_MS;
+  }
   function syncDiag(extra={}){
     diag.symbol = cfg().symbol;
     diag.interval = iv();
@@ -15246,6 +15276,7 @@ If there is NO open position, use this Section 2 instead:
       connWrap.title =
         status +
         (detail ? " - " + detail : "") +
+        (diag.activeUrl ? " | url: " + diag.activeUrl : "") +
         " | streams: " + (diag.streams || []).join(", ") +
         " | last WS: " + (diag.lastWsTickTime ? Math.round((now()-diag.lastWsTickTime)/1000) + "s ago" : "never") +
         " | reconnects: " + diag.reconnectCount +
@@ -15273,7 +15304,8 @@ If there is NO open position, use this Section 2 instead:
   refreshConn = window.refreshConn = function(){
     const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     syncDiag();
-    if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
+    if(waitingForFirstTick()) paintStatus("RECONNECTING","waiting for first Binance tick");
+    else if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
     else if(socketOpen()) paintStatus("WS STALE");
     else if(restInFlight) paintStatus("REST FALLBACK");
     else paintStatus("OFFLINE / ERROR");
@@ -15310,6 +15342,10 @@ If there is NO open position, use this Section 2 instead:
   }
 
   function markWsTick(source){
+    if(reconnectTimer){
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     lastWs = now();
     diag.lastWsTickTime = lastWs;
     diag.lastError = null;
@@ -15398,7 +15434,9 @@ If there is NO open position, use this Section 2 instead:
     const requestSymbol = cfg().symbol;
     const requestInterval = iv();
     restInFlight = true;
-    paintStatus("REST FALLBACK",reason);
+    if(!waitingForFirstTick()){
+      paintStatus("REST FALLBACK",reason);
+    }
     try{
       const rows = await klines(Date.now(),REST_LIMIT);
       if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return;
@@ -15430,12 +15468,16 @@ If there is NO open position, use this Section 2 instead:
     closeRealtimeSocket();
 
     const streams = currentStreams();
+    const url = wsBase() + "?streams=" + streams.join("/");
+    connectStartedAt = now();
     diag.streams = streams.slice();
+    diag.activeUrl = url;
+    diag.lastWsTickTime = 0;
     syncDiag({status:"RECONNECTING"});
     paintStatus("RECONNECTING","opening Binance stream");
 
     try{
-      ws = API.createWebSocket(wsBase() + "?streams=" + streams.join("/"));
+      ws = API.createWebSocket(url);
     }catch(e){
       diag.lastError = e && e.message ? e.message : String(e);
       scheduleReconnect(diag.lastError,2500);
@@ -15498,6 +15540,7 @@ If there is NO open position, use this Section 2 instead:
   };
 
   pollOnce = window.pollOnce = async function(){
+    if(waitingForFirstTick()) return;
     const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     if(socketOpen() && age <= WS_STALE_MS) return;
     await restSyncLatest("manual/fallback sync");
@@ -15506,6 +15549,7 @@ If there is NO open position, use this Section 2 instead:
   startPoll = window.startPoll = function(){
     stopPoll();
     fallbackTimer = setInterval(() => {
+      if(waitingForFirstTick()) return;
       const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
       if(!socketOpen() || age > WS_STALE_MS) restSyncLatest("stale WebSocket");
     },REST_FALLBACK_MS);
@@ -15524,7 +15568,9 @@ If there is NO open position, use this Section 2 instead:
     watchdog = setInterval(() => {
       const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
       syncDiag();
-      if(socketOpen() && age <= WS_STALE_MS){
+      if(waitingForFirstTick()){
+        paintStatus("RECONNECTING","waiting for first Binance tick");
+      }else if(socketOpen() && age <= WS_STALE_MS){
         paintStatus("WS LIVE");
       }else if(socketOpen() && age <= WS_RECONNECT_MS_FINAL){
         paintStatus("WS STALE");
