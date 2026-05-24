@@ -145,7 +145,6 @@ let dailyState = null;
 let accountBalanceState = null;
 
 let ws = null;
-let priceWs = null;
 let pollTimer = null;
 let watchdogTimer = null;
 let tradeAutoTimer = null;
@@ -712,9 +711,12 @@ function setConn(ok,src=""){
 }
 
 function refreshConn(){
+  if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.refreshConnectionStatus === "function"){
+    window.PUBLIC_MARKET_DATA_HUB.refreshConnectionStatus();
+    return;
+  }
   const n = Date.now();
-  const open = (ws && ws.readyState === WebSocket.OPEN) ||
-    (priceWs && priceWs.readyState === WebSocket.OPEN);
+  const open = ws && ws.readyState === WebSocket.OPEN;
   const w = lastWs && n - lastWs <= STALE_MS;
   const r = lastRest && n - lastRest <= STALE_MS;
 
@@ -1060,12 +1062,12 @@ function scaleY(delta){
    SECTION 10 — DATA DOWNLOAD / REALTIME
 ========================================================= */
 
-async function klines(endMs,limit){
+async function klinesForInterval(interval,endMs,limit,symbolOverride){
   const c = cfg();
   const url =
     c.rest +
-    "?symbol=" + encodeURIComponent(c.symbol) +
-    "&interval=" + encodeURIComponent(iv()) +
+    "?symbol=" + encodeURIComponent(symbolOverride || c.symbol) +
+    "&interval=" + encodeURIComponent(interval) +
     "&limit=" + Math.min(KLINE_LIMIT,limit) +
     "&endTime=" + Math.floor(endMs);
 
@@ -1080,6 +1082,10 @@ async function klines(endMs,limit){
   if(!Array.isArray(d)) throw new Error("Invalid Binance klines response");
 
   return d.map(parseRest);
+}
+
+async function klines(endMs,limit){
+  return klinesForInterval(iv(),endMs,limit);
 }
 
 async function fetchInitial(targetCount){
@@ -1161,6 +1167,9 @@ async function olderIfNeeded(r){
     if(old.length < loadLimit) noMoreOlder = true;
     olderFetchTargetVisible = Math.max(0, requestedVisible - candles.length);
     indicators();
+    if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.syncChartBufferFromCandles === "function"){
+      window.PUBLIC_MARKET_DATA_HUB.syncChartBufferFromCandles();
+    }
     clampView();
     draw();
   }catch(e){
@@ -1219,6 +1228,9 @@ function upsert(c){
   indicators();
   if(candles.length) metrics(candles[candles.length-1]);
 
+  if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.syncChartBufferFromCandles === "function"){
+    window.PUBLIC_MARKET_DATA_HUB.syncChartBufferFromCandles();
+  }
   clampView();
   draw();
 }
@@ -1272,140 +1284,565 @@ function applyLivePrice(p,ms){
 }
 
 async function pollOnce(){
-  refreshConn();
+  return marketDataHub.pollOnce();
 }
 
+const SHARED_SSSC_TFS = [
+  {label:"1D", interval:"1d", keep:420},
+  {label:"4H", interval:"4h", keep:420},
+  {label:"1H", interval:"1h", keep:420},
+  {label:"15M", interval:"15m", keep:420},
+  {label:"5M", interval:"5m", keep:420},
+  {label:"3M", interval:"3m", keep:420},
+  {label:"1M", interval:"1m", keep:420}
+];
+
+const marketDataHub = (() => {
+  const MODULE = "BINANCE_PUBLIC_MARKET_DATA_HUB";
+  const WS_STALE_MS = 12000;
+  const WS_RECONNECT_MS = 25000;
+  const REST_FALLBACK_MS = 10000;
+  const REST_LATEST_LIMIT = 5;
+  const FIRST_TICK_GRACE_MS = 12000;
+  const diag = {
+    module:MODULE,
+    status:"OFFLINE / ERROR",
+    symbol:null,
+    interval:null,
+    streams:[],
+    socketStatus:"closed",
+    activeUrl:"",
+    lastWsTickTime:0,
+    lastRestSyncTime:0,
+    reconnectCount:0,
+    staleDurationMs:null,
+    lastError:null,
+    latestPrice:null,
+    latestMarkPrice:null,
+    latestAggTradeTickTime:0,
+    restFallbackTimestamp:0
+  };
+  const state = {
+    generation:0,
+    reconnectTimer:null,
+    restInFlight:false,
+    connectStartedAt:0,
+    desiredLive:true,
+    pendingTrade:null,
+    flushPending:false,
+    ssscVisible:false,
+    lastMessageSource:"",
+    klineBuffers:{}
+  };
+
+  function now(){ return Date.now(); }
+  function wsBase(){
+    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream").replace(/\/+$/,"");
+    if(/\/market\/stream$/i.test(raw)) return raw;
+    if(/\/market\/ws$/i.test(raw)) return raw.replace(/\/market\/ws$/i,"/market/stream");
+    if(/\/(?:public|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|private)\/stream$/i,"/market/stream");
+    if(/\/(?:public|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|private)\/ws$/i,"/market/stream");
+    if(/\/stream$/i.test(raw)) return raw.replace(/\/stream$/i,"/market/stream");
+    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/market/stream");
+    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/market/stream");
+    return raw + "/market/stream";
+  }
+  function socketState(){
+    if(!ws) return "closed";
+    return ["connecting","open","closing","closed"][ws.readyState] || String(ws.readyState);
+  }
+  function socketOpen(){
+    return !!(ws && ws.readyState === WebSocket.OPEN);
+  }
+  function waitingForFirstTick(){
+    if(diag.lastWsTickTime) return false;
+    if(!state.connectStartedAt) return false;
+    if(!(ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN))) return false;
+    return now() - state.connectStartedAt <= FIRST_TICK_GRACE_MS;
+  }
+  function syncDiag(extra={}){
+    diag.symbol = cfg().symbol;
+    diag.interval = iv();
+    diag.socketStatus = socketState();
+    diag.staleDurationMs = diag.lastWsTickTime ? now() - diag.lastWsTickTime : null;
+    Object.assign(diag,extra);
+  }
+  function paintStatus(status,detail=""){
+    syncDiag({status});
+    const visual = connVisual(status);
+    if(connWrap){
+      connWrap.style.width = "22px";
+      connWrap.style.height = "22px";
+      connWrap.style.borderRadius = "999px";
+      connWrap.title =
+        status +
+        (detail ? " - " + detail : "") +
+        (diag.activeUrl ? " | url: " + diag.activeUrl : "") +
+        " | streams: " + (diag.streams || []).join(", ") +
+        " | last WS: " + (diag.lastWsTickTime ? Math.round((now()-diag.lastWsTickTime)/1000) + "s ago" : "never") +
+        " | reconnects: " + diag.reconnectCount +
+        (diag.lastError ? " | last error: " + diag.lastError : "");
+    }
+    if(connLed){
+      connLed.textContent = visual.text;
+      connLed.style.width = "11px";
+      connLed.style.height = "11px";
+      connLed.style.borderRadius = "999px";
+      connLed.style.fontSize = "8px";
+      connLed.style.color = "#111";
+      connLed.style.background = visual.bg;
+      connLed.style.boxShadow =
+        "inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 1px rgba(75,85,99,.18), 0 0 8px " + visual.glow;
+      connLed.style.whiteSpace = "normal";
+    }
+  }
+  function updateConn(ok,src=""){
+    if(ok && String(src).toLowerCase().includes("rest")) paintStatus("REST FALLBACK",src);
+    else if(ok) paintStatus("WS LIVE",src || "WebSocket");
+    else paintStatus("OFFLINE / ERROR",src || "Disconnected");
+  }
+  function refreshConnectionStatus(){
+    const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+    syncDiag();
+    if(waitingForFirstTick()) paintStatus("RECONNECTING","waiting for first Binance tick");
+    else if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
+    else if(socketOpen()) paintStatus("WS STALE");
+    else if(state.restInFlight) paintStatus("REST FALLBACK");
+    else paintStatus("OFFLINE / ERROR");
+  }
+  function closeSocket(connection){
+    if(!connection) return;
+    try{
+      if(typeof connection.disconnect === "function") connection.disconnect();
+      else if(typeof connection.close === "function") connection.close();
+    }catch(_e){}
+  }
+  function closeRealtimeSocket(){
+    closeSocket(ws);
+    ws = null;
+  }
+  function intervalKeep(tf){
+    if(tf === iv()) return Math.max(Array.isArray(candles) ? candles.length : 0, visibleCount || 0, 420);
+    const hit = SHARED_SSSC_TFS.find(x => x.interval === tf);
+    return hit ? hit.keep : 420;
+  }
+  function requiredKlineTimeframes(){
+    const required = new Set([iv()]);
+    if(state.ssscVisible){
+      SHARED_SSSC_TFS.forEach(tf => required.add(tf.interval));
+    }
+    return required;
+  }
+  function currentStreams(){
+    const base = cfg().symbol.toLowerCase();
+    const streams = [];
+    requiredKlineTimeframes().forEach(tf => streams.push(base + "@kline_" + tf));
+    streams.push(base + "@aggTrade");
+    streams.push(base + "@markPrice@1s");
+    return streams;
+  }
+  function mergeBufferRow(existing,incoming){
+    if(!existing) return {...incoming};
+    const exHigh = Number(existing.high), exLow = Number(existing.low);
+    const inHigh = Number(incoming.high), inLow = Number(incoming.low), inClose = Number(incoming.close);
+    const merged = {...existing,...incoming};
+    merged.open = Number.isFinite(Number(existing.open)) ? existing.open : incoming.open;
+    merged.high = Math.max(
+      Number.isFinite(exHigh) ? exHigh : -Infinity,
+      Number.isFinite(inHigh) ? inHigh : -Infinity,
+      Number.isFinite(inClose) ? inClose : -Infinity
+    );
+    merged.low = Math.min(
+      Number.isFinite(exLow) ? exLow : Infinity,
+      Number.isFinite(inLow) ? inLow : Infinity,
+      Number.isFinite(inClose) ? inClose : Infinity
+    );
+    if(!Number.isFinite(merged.high)) merged.high = incoming.high;
+    if(!Number.isFinite(merged.low)) merged.low = incoming.low;
+    merged.close = incoming.close;
+    const exVol = Number(existing.volume), inVol = Number(incoming.volume);
+    if(Number.isFinite(exVol) && Number.isFinite(inVol)) merged.volume = Math.max(exVol,inVol);
+    return merged;
+  }
+  function upsertBuffer(tf,row,limitOverride){
+    if(!tf || !row || !Number.isFinite(Number(row.time))) return;
+    const limit = Math.max(10, limitOverride || intervalKeep(tf));
+    const arr = state.klineBuffers[tf] || (state.klineBuffers[tf] = []);
+    const idx = arr.findIndex(x => x.time === row.time);
+    if(idx >= 0) arr[idx] = mergeBufferRow(arr[idx],row);
+    else if(!arr.length || row.time > arr[arr.length-1].time) arr.push({...row});
+    else{
+      arr.push({...row});
+      arr.sort((a,b) => a.time - b.time);
+    }
+    while(arr.length > limit) arr.shift();
+  }
+  function syncChartBufferFromCandles(){
+    const tf = iv();
+    state.klineBuffers[tf] = (candles || []).slice(-intervalKeep(tf)).map(c => ({
+      time:Number(c.time),
+      open:Number(c.open),
+      high:Number(c.high),
+      low:Number(c.low),
+      close:Number(c.close),
+      volume:Number(c.volume)
+    }));
+  }
+  function getBuffer(tf){
+    if(tf === iv()){
+      syncChartBufferFromCandles();
+    }
+    return state.klineBuffers[tf] || [];
+  }
+  async function seedBuffer(tf,count,force=false){
+    if(!force){
+      const existing = getBuffer(tf);
+      if(existing.length >= count) return existing;
+    }
+    const rows = await klinesForInterval(tf,Date.now(),Math.min(KLINE_LIMIT,count),cfg().symbol);
+    state.klineBuffers[tf] = rows.slice(-Math.max(count,intervalKeep(tf)));
+    return state.klineBuffers[tf];
+  }
+  async function seedSsscBuffers(force=false){
+    for(const tf of SHARED_SSSC_TFS){
+      await seedBuffer(tf.interval,tf.keep,force);
+    }
+  }
+  function markWsTick(source){
+    if(state.reconnectTimer){
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+    lastWs = now();
+    diag.lastWsTickTime = lastWs;
+    diag.lastError = null;
+    state.lastMessageSource = source;
+    syncDiag({lastMessageSource:source});
+    markLiveUpdate();
+    paintStatus("WS LIVE",source);
+  }
+  function flushTradeTick(){
+    if(!state.pendingTrade) return;
+    const tick = state.pendingTrade;
+    state.pendingTrade = null;
+    const last = candles[candles.length-1];
+    if(!last) return;
+    if(tick.bucket === last.time){
+      upsert({
+        time:last.time,
+        open:last.open,
+        high:Math.max(Number(last.high),tick.high),
+        low:Math.min(Number(last.low),tick.low),
+        close:tick.close,
+        volume:(Number(last.volume) || 0) + tick.volume
+      });
+    }else if(tick.bucket > last.time){
+      upsert({
+        time:tick.bucket,
+        open:last.close,
+        high:Math.max(Number(last.close),tick.high),
+        low:Math.min(Number(last.close),tick.low),
+        close:tick.close,
+        volume:tick.volume
+      });
+    }
+    syncChartBufferFromCandles();
+  }
+  function queueTradeTick(d){
+    const price = Number(d && d.p);
+    const qty = Number(d && d.q);
+    const ms = Number((d && (d.T || d.E)) || now());
+    if(!Number.isFinite(price) || price <= 0) return;
+    diag.latestPrice = price;
+    diag.latestAggTradeTickTime = ms;
+    lastMarkPrice = price;
+    if(mClose) mClose.textContent = ip(price);
+    updatePositionStrip({close:price});
+    const sec = Math.floor(ms / 1000);
+    const bucket = Math.floor(sec / ivSec()) * ivSec();
+    if(!state.pendingTrade || state.pendingTrade.bucket !== bucket){
+      flushTradeTick();
+      state.pendingTrade = {bucket,high:price,low:price,close:price,volume:Number.isFinite(qty) && qty > 0 ? qty : 0,ms};
+    }else{
+      state.pendingTrade.high = Math.max(state.pendingTrade.high,price);
+      state.pendingTrade.low = Math.min(state.pendingTrade.low,price);
+      state.pendingTrade.close = price;
+      if(Number.isFinite(qty) && qty > 0) state.pendingTrade.volume += qty;
+      state.pendingTrade.ms = ms;
+    }
+    if(!state.flushPending){
+      state.flushPending = true;
+      requestAnimationFrame(() => {
+        state.flushPending = false;
+        flushTradeTick();
+      });
+    }
+  }
+  function queueMarkPriceTick(d){
+    const price = Number(d && d.p);
+    const ms = Number((d && d.E) || now());
+    if(!Number.isFinite(price) || price <= 0) return;
+    diag.latestMarkPrice = price;
+    lastMarkPrice = price;
+    if(mClose) mClose.textContent = ip(price);
+    updatePositionStrip({close:price});
+    updateTabTitle();
+    if(now() - diag.latestAggTradeTickTime > 1500){
+      queueTradeTick({p:price,q:0,T:ms,E:ms});
+    }
+  }
+  function handleKline(d){
+    const row = parseWsKline(d.k);
+    if(d.k.x) row.final = true;
+    upsertBuffer(d.k.i,row,intervalKeep(d.k.i));
+    if(d.k.i === iv()){
+      upsert(row);
+      syncChartBufferFromCandles();
+    }
+  }
+  function scheduleReconnect(reason,delay=1500){
+    if(!state.desiredLive || loading) return;
+    if(state.reconnectTimer) return;
+    diag.lastError = reason || null;
+    diag.reconnectCount += 1;
+    paintStatus("RECONNECTING",reason || "socket reconnect");
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = null;
+      connect();
+    },delay);
+  }
+  async function restSyncLatest(reason="fallback"){
+    if(state.restInFlight) return;
+    const requestStarted = now();
+    const requestSymbol = cfg().symbol;
+    const requestInterval = iv();
+    state.restInFlight = true;
+    diag.restFallbackTimestamp = requestStarted;
+    if(!waitingForFirstTick()) paintStatus("REST FALLBACK",reason);
+    try{
+      const rows = await klines(Date.now(),REST_LATEST_LIMIT);
+      if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return;
+      const currentLastTime = candles.length ? candles[candles.length-1].time : 0;
+      for(const row of rows){
+        if(diag.lastWsTickTime > requestStarted && row.time >= currentLastTime) continue;
+        upsert(row);
+      }
+      syncChartBufferFromCandles();
+      lastRest = now();
+      diag.lastRestSyncTime = lastRest;
+      refreshConnectionStatus();
+    }catch(e){
+      diag.lastError = e && e.message ? e.message : String(e);
+      if(!socketOpen()) paintStatus("OFFLINE / ERROR",diag.lastError);
+      console.warn(MODULE + " REST fallback failed",e);
+    }finally{
+      state.restInFlight = false;
+    }
+  }
+  function connect(){
+    state.desiredLive = true;
+    state.generation += 1;
+    const token = state.generation;
+    if(state.reconnectTimer){
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+    closeRealtimeSocket();
+    const streams = currentStreams();
+    const url = wsBase() + "?streams=" + streams.join("/");
+    state.connectStartedAt = now();
+    diag.streams = streams.slice();
+    diag.activeUrl = url;
+    diag.lastWsTickTime = 0;
+    syncDiag({status:"RECONNECTING"});
+    paintStatus("RECONNECTING","opening Binance stream");
+    try{
+      ws = API.connectWebSocket(url,{
+        reconnect:false,
+        onOpen:() => {
+          if(token !== state.generation || ws == null) return;
+          syncDiag({socketStatus:"open"});
+          paintStatus("RECONNECTING","waiting for Binance tick");
+        },
+        onMessage:event => {
+          if(token !== state.generation || !ws) return;
+          let d;
+          try{
+            const msg = JSON.parse(event.data);
+            d = msg && msg.data ? msg.data : msg;
+          }catch(err){
+            diag.lastError = "WS parse error";
+            console.error(MODULE + " WS parse error",err);
+            return;
+          }
+          if(d && Object.prototype.hasOwnProperty.call(d,"result")) return;
+          if(d && d.s && d.s !== cfg().symbol) return;
+          if(d && d.E){
+            window.__countdownExchangeMs = Number(d.E);
+            window.__countdownLocalMs = now();
+          }
+          if(d && d.e === "kline" && d.k){
+            markWsTick("kline");
+            handleKline(d);
+          }else if(d && d.e === "aggTrade"){
+            markWsTick("aggTrade");
+            queueTradeTick(d);
+          }else if(d && d.e === "markPriceUpdate"){
+            markWsTick("markPrice");
+            queueMarkPriceTick(d);
+          }
+        },
+        onError:() => {
+          if(token !== state.generation || !ws) return;
+          diag.lastError = "WebSocket error";
+          scheduleReconnect("WebSocket error",2500);
+        },
+        onClose:event => {
+          if(token !== state.generation) return;
+          const reason = "closed " + (event && event.code ? event.code : "");
+          diag.lastError = reason;
+          scheduleReconnect(reason,2000);
+        }
+      });
+    }catch(e){
+      diag.lastError = e && e.message ? e.message : String(e);
+      scheduleReconnect(diag.lastError,2500);
+    }
+  }
+  function stop(){
+    state.desiredLive = false;
+    if(state.reconnectTimer){
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+    closeRealtimeSocket();
+  }
+  function rebuildRequirements(forceReconnect=false){
+    syncChartBufferFromCandles();
+    const nextStreams = currentStreams();
+    const changed = diag.streams.join("|") !== nextStreams.join("|");
+    if(forceReconnect || changed){
+      connect();
+    }
+  }
+  function startPollLoop(){
+    stopPollLoop();
+    pollTimer = setInterval(() => {
+      if(waitingForFirstTick()) return;
+      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+      if(!socketOpen() || age > WS_STALE_MS) restSyncLatest("stale WebSocket");
+    },REST_FALLBACK_MS);
+  }
+  function stopPollLoop(){
+    if(pollTimer){
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+  function startWatchLoop(){
+    stopWatchLoop();
+    watchdogTimer = setInterval(() => {
+      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+      syncDiag();
+      if(waitingForFirstTick()) paintStatus("RECONNECTING","waiting for first Binance tick");
+      else if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
+      else if(socketOpen() && age <= WS_RECONNECT_MS) paintStatus("WS STALE");
+      else if(!loading){
+        restSyncLatest("watchdog stale");
+        scheduleReconnect("stale WebSocket",1000);
+      }
+    },1000);
+  }
+  function stopWatchLoop(){
+    if(watchdogTimer){
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
+  }
+  function setSsscVisible(visible){
+    state.ssscVisible = !!visible;
+    if(!state.ssscVisible){
+      SHARED_SSSC_TFS.forEach(tf => { delete state.klineBuffers[tf.interval]; });
+    }
+    rebuildRequirements(true);
+  }
+  function handleVisibilityReturn(){
+    if(document.hidden) return;
+    restSyncLatest("visibility/focus return");
+    if(state.ssscVisible) seedSsscBuffers(false).catch(e => console.warn(MODULE + " SSSC resync failed",e));
+    if(!socketOpen()) connect();
+  }
+
+  ["visibilitychange","focus","pageshow"].forEach(ev => {
+    window.addEventListener(ev,handleVisibilityReturn,true);
+  });
+
+  window.BINANCE_REALTIME_DIAG = diag;
+  window.binanceRealtimeDiagnostics = () => ({...diag});
+
+  return {
+    diag,
+    state,
+    connect,
+    stop,
+    pollOnce: async () => {
+      if(waitingForFirstTick()) return;
+      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+      if(socketOpen() && age <= WS_STALE_MS) return;
+      await restSyncLatest("manual/fallback sync");
+    },
+    startPollLoop,
+    stopPollLoop,
+    startWatchLoop,
+    stopWatchLoop,
+    refreshConnectionStatus,
+    restSyncLatest,
+    rebuildRequirements,
+    setSsscVisible,
+    seedBuffer,
+    seedSsscBuffers,
+    getBuffer,
+    syncChartBufferFromCandles,
+    isSsscVisible: () => state.ssscVisible
+  };
+})();
+
+window.PUBLIC_MARKET_DATA_HUB = marketDataHub;
+refreshConn = window.refreshConn = function(){ marketDataHub.refreshConnectionStatus(); };
+
 function startPoll(){
-  stopPoll();
+  marketDataHub.startPollLoop();
 }
 
 function stopPoll(){
-  if(pollTimer){
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
+  marketDataHub.stopPollLoop();
 }
 
 function connectWs(){
-  const c = cfg();
-
-  if(ws){
-    ws.onopen = null;
-    ws.onmessage = null;
-    ws.onerror = null;
-    ws.onclose = null;
-    ws.close();
-    ws = null;
-  }
-  if(priceWs){
-    priceWs.onopen = null;
-    priceWs.onmessage = null;
-    priceWs.onerror = null;
-    priceWs.onclose = null;
-    priceWs.close();
-    priceWs = null;
-  }
-
-  const base = c.symbol.toLowerCase();
-  const stream = base + "@kline_" + iv();
-  const url = String(c.ws || "wss://fstream.binance.com/market/stream")
-    .replace(/\/stream\/?$/,"/ws/") + stream;
-  const priceUrl = String(c.ws || "wss://fstream.binance.com/market/stream")
-    .replace(/\/stream\/?$/,"/ws/") + base + "@ticker";
-
-  try{
-    ws = API.createWebSocket(url);
-    priceWs = API.createWebSocket(priceUrl);
-  }catch(e){
-    console.error("WS create failed",e);
-    refreshConn();
-    return;
-  }
-  const socket = ws;
-  const priceSocket = priceWs;
-
-  ws.onopen = () => {
-    if(ws !== socket) return;
-    lastWs = Date.now();
-    setConn(true,"WebSocket");
-  };
-
-  ws.onmessage = e => {
-    if(ws !== socket) return;
-    try{
-      const msg = JSON.parse(e.data);
-      const d = msg.data || msg;
-
-      if(d && d.E){
-        window.__countdownExchangeMs = Number(d.E);
-        window.__countdownLocalMs = Date.now();
-      }
-
-      lastWs = Date.now();
-      markLiveUpdate();
-
-      if(d.k) upsert(parseWsKline(d.k));
-
-      refreshConn();
-    }catch(err){
-      console.error("WS parse error",err);
-    }
-  };
-
-  ws.onerror = () => { if(ws === socket) setConn(false); };
-  ws.onclose = () => { if(ws === socket) setConn(false); };
-
-  priceWs.onopen = () => {
-    if(priceWs !== priceSocket) return;
-    lastWs = Date.now();
-    setConn(true,"WebSocket");
-  };
-  priceWs.onmessage = e => {
-    if(priceWs !== priceSocket) return;
-    try{
-      const msg = JSON.parse(e.data);
-      const d = msg.data || msg;
-      if(d && d.E){
-        window.__countdownExchangeMs = Number(d.E);
-        window.__countdownLocalMs = Date.now();
-      }
-      lastWs = Date.now();
-      markLiveUpdate();
-      const livePrice = d && (d.c != null ? d.c : d.p);
-      if(livePrice != null) applyLivePrice(livePrice,d.E);
-      refreshConn();
-    }catch(err){
-      console.error("Price WS parse error",err);
-    }
-  };
-  priceWs.onerror = () => { if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false); };
-  priceWs.onclose = () => { if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false); };
+  marketDataHub.rebuildRequirements(true);
 }
 
 function startWatch(){
-  stopWatch();
-
-  watchdogTimer = setInterval(() => {
-    const age = lastWs ? Date.now() - lastWs : Infinity;
-    refreshConn();
-
-    const anyOpen = (ws && ws.readyState === WebSocket.OPEN) ||
-      (priceWs && priceWs.readyState === WebSocket.OPEN);
-    if(!anyOpen && age > WS_RECONNECT_MS && !loading){
-      connectWs();
-    }
-  },1000);
+  marketDataHub.startWatchLoop();
 }
 
 function stopWatch(){
-  if(watchdogTimer){
-    clearInterval(watchdogTimer);
-    watchdogTimer = null;
-  }
+  marketDataHub.stopWatchLoop();
 }
 
 async function loadChart(opt={}){
   if(loading) return;
+  const preserveView = !!opt.preserveView;
+  const keepVisible = preserveView ? visibleCount : DEF_VISIBLE;
+  const keepRight = preserveView ? rightOffset : 0;
+  const keepLoaded = preserveView
+    ? Math.max(Array.isArray(candles) ? candles.length : 0, keepVisible || 0)
+    : 0;
+  const keepManual = preserveView && manualY;
+  const keepMin = keepManual ? yMin : null;
+  const keepMax = keepManual ? yMax : null;
+  const tradesOff = !(tglResults && tglResults.checked);
+  const targetRight = preserveView && tradesOff ? Math.min(0, Number(keepRight) || 0) : keepRight;
 
   loading = true;
 
@@ -1413,46 +1850,46 @@ async function loadChart(opt={}){
   stopWatch();
   stopDailyTimer();
 
-  if(ws){
-    ws.close();
-    ws = null;
-  }
-  if(priceWs){
-    priceWs.close();
-    priceWs = null;
-  }
+  marketDataHub.stop();
 
   setConn(false);
 
-  lastWs = 0;
-  lastRest = 0;
-  lastMarkPrice = null;
-  dailyState = null;
-
-  candles = [];
-  ema20 = [];
-  ema50 = [];
-  ema3 = [];
-  vwap = [];
-
-  noMoreOlder = false;
-  loadingOlder = false;
-  olderFetchArmed = false;
-  olderFetchTargetVisible = 0;
-  rightOffset = 0;
-  visibleCount = DEF_VISIBLE;
-
-  if(!opt.focus){
-    manualY = false;
-    yMin = null;
-    yMax = null;
-  }
-
-  draw();
-  connectWs();
-
   try{
-    candles = await fetchInitial();
+    const nextCandles = await fetchInitial(keepLoaded || undefined);
+    lastWs = 0;
+    lastRest = 0;
+    lastMarkPrice = null;
+    dailyState = null;
+    candles = nextCandles;
+    ema20 = [];
+    ema50 = [];
+    ema3 = [];
+    vwap = [];
+    noMoreOlder = false;
+    loadingOlder = false;
+    olderFetchArmed = false;
+    olderFetchTargetVisible = 0;
+    rightOffset = 0;
+    visibleCount = DEF_VISIBLE;
+    if(!opt.focus){
+      manualY = false;
+      yMin = null;
+      yMax = null;
+    }
+    marketDataHub.syncChartBufferFromCandles();
+    if(preserveView){
+      visibleCount = keepVisible || visibleCount;
+      rightOffset = targetRight;
+      if(keepManual && validRange(keepMin,keepMax)){
+        manualY = true;
+        yMin = keepMin;
+        yMax = keepMax;
+      }else{
+        manualY = false;
+        yMin = null;
+        yMax = null;
+      }
+    }
     indicators();
 
     await fetchDaily().catch(e => console.error("Daily fetch failed",e));
@@ -1460,11 +1897,15 @@ async function loadChart(opt={}){
     markLiveUpdate();
 
     if(opt.focus) applyFocus(opt.focus);
-    else resetView();
+    else if(!preserveView) resetView();
+    else clampView();
 
     if(candles.length) metrics(candles[candles.length-1]);
 
     draw();
+    marketDataHub.rebuildRequirements(true);
+    await pollOnce();
+    startPoll();
     startDailyTimer();
     startWatch();
   }catch(e){
@@ -3460,7 +3901,25 @@ canvas.addEventListener("dblclick",e => {
    SECTION 18 — UI EVENTS
 ========================================================= */
 
-reloadEl.addEventListener("click",() => loadChart());
+function handleReloadClick(){
+  loadChart();
+}
+
+function handleMarketChange(){
+  clearTrades();
+  loadChart();
+
+  setTimeout(() => {
+    if(hasKeys()) loadTrades({silent:true});
+    else updateApiStatus();
+  },2000);
+}
+
+function handleIntervalChange(){
+  loadChart({preserveView:true});
+}
+
+reloadEl.addEventListener("click",handleReloadClick);
 
 resetViewEl.addEventListener("click",resetView);
 
@@ -3501,20 +3960,9 @@ window.addEventListener("keydown",e => {
   }
 });
 
-marketEl.addEventListener("change",() => {
-  clearTrades();
-  loadChart();
+marketEl.addEventListener("change",handleMarketChange);
 
-  setTimeout(() => {
-    if(hasKeys()) loadTrades({silent:true});
-    else updateApiStatus();
-  },2000);
-});
-
-intervalEl.addEventListener("change",() => {
-  const f = captureFocus();
-  loadChart({focus:f});
-});
+intervalEl.addEventListener("change",handleIntervalChange);
 
 function updateReportControls(){
   if(customRangeEl){
@@ -4139,52 +4587,6 @@ startTradeAuto();
     el.__p15NoShift = true;
     el.addEventListener('change',restoreViewAfterToggle15,false);
   });
-
-  // Timeframe/market reload: swap to new candles only when ready; no temporary over-scaled empty render.
-  const prevLoadChart15 = loadChart;
-  loadChart = async function(opt={}){
-    if(loading) return;
-    loading = true;
-    stopPoll();
-    stopWatch();
-    stopDailyTimer();
-    if(ws){ ws.close(); ws = null; }
-    if(priceWs){ priceWs.close(); priceWs = null; }
-    setConn(false);
-    lastWs = 0;
-    lastRest = 0;
-    lastMarkPrice = null;
-    dailyState = null;
-      noMoreOlder = false;
-      loadingOlder = false;
-      olderFetchArmed = false;
-      if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
-    connectWs();
-    try{
-      const nextCandles = await fetchInitial();
-      candles = nextCandles;
-      rightOffset = 0;
-      visibleCount = DEF_VISIBLE;
-      indicators();
-      await fetchDaily().catch(e => console.error('Daily fetch failed',e));
-      markLiveUpdate();
-      if(opt.focus) applyFocus(opt.focus);
-      else resetView();
-      if(candles.length) metrics(candles[candles.length-1]);
-      draw();
-      await pollOnce();
-      startPoll();
-      startDailyTimer();
-      startWatch();
-    }catch(e){
-      console.error(e);
-      setConn(false);
-      // Fallback to prior behavior if the direct replacement fails before data swap.
-      try{ await prevLoadChart15(opt); }catch(_){}
-    }finally{
-      loading = false;
-    }
-  };
 
   try{ draw(); }catch(e){ console.error('PATCH_15 draw failed',e); }
 })();
@@ -10544,53 +10946,6 @@ startTradeAuto();
     el.addEventListener('change',restoreViewAfterToggle15,false);
   });
 
-  // Timeframe/market reload: swap to new candles only when ready; no temporary over-scaled empty render.
-  const prevLoadChart15 = loadChart;
-  loadChart = async function(opt={}){
-    if(loading) return;
-    loading = true;
-    stopPoll();
-    stopWatch();
-    stopDailyTimer();
-    if(ws){ ws.close(); ws = null; }
-    if(priceWs){ priceWs.close(); priceWs = null; }
-    setConn(false);
-    lastWs = 0;
-    lastRest = 0;
-    lastMarkPrice = null;
-    dailyState = null;
-    noMoreOlder = false;
-    loadingOlder = false;
-    olderFetchArmed = false;
-    olderFetchTargetVisible = 0;
-    if(!opt.focus){ manualY = false; yMin = null; yMax = null; }
-    connectWs();
-    try{
-      const nextCandles = await fetchInitial();
-      candles = nextCandles;
-      rightOffset = 0;
-      visibleCount = DEF_VISIBLE;
-      indicators();
-      await fetchDaily().catch(e => console.error('Daily fetch failed',e));
-      markLiveUpdate();
-      if(opt.focus) applyFocus(opt.focus);
-      else resetView();
-      if(candles.length) metrics(candles[candles.length-1]);
-      draw();
-      await pollOnce();
-      startPoll();
-      startDailyTimer();
-      startWatch();
-    }catch(e){
-      console.error(e);
-      setConn(false);
-      // Fallback to prior behavior if the direct replacement fails before data swap.
-      try{ await prevLoadChart15(opt); }catch(_){}
-    }finally{
-      loading = false;
-    }
-  };
-
   try{ draw(); }catch(e){ console.error('PATCH_15 draw failed',e); }
 })();
 
@@ -13338,35 +13693,6 @@ If there is NO open position, use this Section 2 instead:
     ctx.fillStyle='rgba(255,255,255,.96)'; ctx.strokeStyle='#d9dce1'; ctx.fillRect(x,y,tw,th); ctx.strokeRect(x,y,tw,th); ctx.fillStyle='#1e2329'; ctx.textAlign='left'; ctx.textBaseline='top'; lines.forEach((s,i)=>ctx.fillText(s,x+pad,y+pad+i*lh)); ctx.restore();
   }; }
 
-  async function loadChartStableFromInterval(){
-    if(loading) return;
-    const keepVisible=visibleCount;
-    const keepRight=rightOffset;
-    const keepLoaded=Math.max(Array.isArray(candles) ? candles.length : 0, keepVisible || 0);
-    const keepManual=manualY, keepMin=yMin, keepMax=yMax;
-    const tradesOff=!(tglResults&&tglResults.checked);
-    const targetRight=tradesOff ? Math.min(0,Number(keepRight)||0) : keepRight;
-    loading=true;
-    try{
-      stopPoll(); stopWatch(); stopDailyTimer(); if(ws){ws.close(); ws=null;} if(priceWs){priceWs.close(); priceWs=null;}
-      setConn(false); lastWs=0; lastRest=0; lastMarkPrice=null; dailyState=null; noMoreOlder=false; loadingOlder=false; olderFetchArmed=false; olderFetchTargetVisible=0;
-      connectWs();
-      const nextCandles=await fetchInitial(keepLoaded);
-      candles=nextCandles; visibleCount=keepVisible||visibleCount; rightOffset=targetRight;
-      if(keepManual&&validRange(keepMin,keepMax)){ manualY=true; yMin=keepMin; yMax=keepMax; } else { manualY=false; yMin=null; yMax=null; }
-      indicators(); clampView();
-      await fetchDaily().catch(e=>console.error('Daily fetch failed',e));
-      markLiveUpdate(); if(candles.length) metrics(candles[candles.length-1]);
-      draw(); await pollOnce(); startPoll(); startDailyTimer(); startWatch();
-    }catch(e){ console.error(e); setConn(false); }
-    finally{ loading=false; }
-  }
-  function installTFHandler(){
-    if(!intervalEl||intervalEl.__v32r1TFBound) return;
-    intervalEl.__v32r1TFBound=true;
-    intervalEl.addEventListener('change',e=>{ e.stopImmediatePropagation(); e.preventDefault(); loadChartStableFromInterval(); },true);
-  }
-
   function installStrictIsolateClickGuard(){
     if(!canvas||canvas.__v32r1IsoGuard) return;
     canvas.__v32r1IsoGuard=true;
@@ -13396,7 +13722,7 @@ If there is NO open position, use this Section 2 instead:
   }
   function setSsscTabActive(){ const root=document.querySelector('#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid'); if(!root) return; root.querySelectorAll('.v24-settings-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab==='sssc')); root.querySelectorAll('.v24-settings-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab==='sssc')); try{localStorage.setItem('btc_futures_chart_v13_24_settings_tab','sssc');}catch(_e){} }
   function install(){
-    installReportOptions(); installDatePickers(); installReportHandlers(); installMAToggles(); installMASettings(); calcExtraMAs(); installTFHandler(); installStrictIsolateClickGuard();
+    installReportOptions(); installDatePickers(); installReportHandlers(); installMAToggles(); installMASettings(); calcExtraMAs(); installStrictIsolateClickGuard();
     try{ if(typeof updateReportControls==='function') updateReportControls(); }catch(_e){}
     try{ draw(); }catch(_e){}
   }
@@ -14856,141 +15182,7 @@ If there is NO open position, use this Section 2 instead:
     }
   };
 
-  pollOnce = window.pollOnce = async function(){
-    refreshConn();
-  };
-
-  startPoll = window.startPoll = function(){
-    stopPoll();
-  };
-
   window.REALTIME_RENDER_COALESCER = {version:MODULE};
-})();
-
-(() => {
-  "use strict";
-  const MODULE = "V13_WS_TICK_INPUT_COALESCER";
-  let flushPending = false;
-  let pendingKline = null;
-
-  function scheduleFlush(){
-    if(flushPending) return;
-    flushPending = true;
-    requestAnimationFrame(() => {
-      flushPending = false;
-      try{
-        if(pendingKline){
-          const k = pendingKline;
-          pendingKline = null;
-          upsert(k);
-        }
-        refreshConn();
-      }catch(e){
-        console.error(MODULE + " flush failed",e);
-      }
-    });
-  }
-
-  connectWs = window.connectWs = function(){
-    const c = cfg();
-    if(ws){
-      ws.onopen = null;
-      ws.onmessage = null;
-      ws.onerror = null;
-      ws.onclose = null;
-      ws.close();
-      ws = null;
-    }
-    if(priceWs){
-      priceWs.onopen = null;
-      priceWs.onmessage = null;
-      priceWs.onerror = null;
-      priceWs.onclose = null;
-      priceWs.close();
-      priceWs = null;
-    }
-
-    const base = c.symbol.toLowerCase();
-    const stream = base + "@kline_" + iv();
-    const url = String(c.ws || "wss://fstream.binance.com/market/stream")
-      .replace(/\/stream\/?$/,"/ws/") + stream;
-    const priceUrl = String(c.ws || "wss://fstream.binance.com/market/stream")
-      .replace(/\/stream\/?$/,"/ws/") + base + "@ticker";
-
-    try{
-      ws = API.createWebSocket(url);
-      priceWs = API.createWebSocket(priceUrl);
-    }catch(e){
-      console.error("WS create failed",e);
-      refreshConn();
-      return;
-    }
-    const socket = ws;
-    const priceSocket = priceWs;
-
-  ws.onopen = () => {
-    if(ws !== socket) return;
-    lastWs = Date.now();
-    setConn(true,"WebSocket");
-  };
-    ws.onmessage = e => {
-      if(ws !== socket) return;
-      try{
-        const msg = JSON.parse(e.data);
-        const d = msg.data || msg;
-        if(d && d.E){
-          window.__countdownExchangeMs = Number(d.E);
-          window.__countdownLocalMs = Date.now();
-        }
-
-        lastWs = Date.now();
-        markLiveUpdate();
-
-        if(d.k){
-          pendingKline = parseWsKline(d.k);
-          if(d.k.x) pendingKline.final = true;
-          scheduleFlush();
-        }
-      }catch(err){
-        console.error("WS parse error",err);
-      }
-    };
-
-  ws.onerror = () => { if(ws === socket) setConn(false); };
-  ws.onclose = () => { if(ws === socket) setConn(false); };
-
-    priceWs.onopen = () => {
-      if(priceWs !== priceSocket) return;
-      lastWs = Date.now();
-      setConn(true,"WebSocket");
-    };
-    priceWs.onmessage = e => {
-      if(priceWs !== priceSocket) return;
-      try{
-        const msg = JSON.parse(e.data);
-        const d = msg.data || msg;
-        if(d && d.E){
-          window.__countdownExchangeMs = Number(d.E);
-          window.__countdownLocalMs = Date.now();
-        }
-        lastWs = Date.now();
-        markLiveUpdate();
-        const livePrice = d && (d.c != null ? d.c : d.p);
-        if(livePrice != null) applyLivePrice(livePrice,d.E);
-        refreshConn();
-      }catch(err){
-        console.error("Price WS parse error",err);
-      }
-    };
-    priceWs.onerror = () => {
-      if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false);
-    };
-    priceWs.onclose = () => {
-      if(priceWs === priceSocket && (!ws || ws.readyState !== WebSocket.OPEN)) setConn(false);
-    };
-  };
-
-  window.WS_TICK_INPUT_COALESCER = {version:MODULE};
 })();
 
 (() => {
@@ -15186,12 +15378,12 @@ If there is NO open position, use this Section 2 instead:
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   let visible=false, renderTimer=null, calcTimer=null, resyncTimer=null, staleTimer=null, drag=null;
-  let data={}, buffers={}, ssscWs=null, lastFullFetch=0, lastWs=0, lastRender=0, currentSymbol='', currentRest='';
+  let data={}, lastFullFetch=0, lastRender=0, currentSymbol='', currentRest='';
   let previousMomentumByTf={}, lastRenderedMomentumByTf={}, previousScoreByTf={}, previousTopValues={};
+  function hub(){ return window.PUBLIC_MARKET_DATA_HUB || null; }
 
   function sym(){ try{return cfg().symbol}catch(_e){return (document.getElementById('market')?.value||'BTCUSDC').toUpperCase()} }
   function restUrl(){ try{return cfg().rest}catch(_e){return 'https://fapi.binance.com/fapi/v1/klines'} }
-  function wsUrl(){ try{return cfg().ws}catch(_e){return 'wss://fstream.binance.com/market/stream'} }
   function fmt(v,d=0){ const n=num(v); return n==null?'-':n.toFixed(d); }
   function avg(list,key){ const xs=list.map(x=>x&&x[key]).filter(x=>Number.isFinite(x)); return xs.length?xs.reduce((a,b)=>a+b,0)/xs.length:0; }
   function clsSigned(v,blue=false){ if(v>20)return blue?'sssc-ui-blue':'sssc-ui-green'; if(v<-20)return 'sssc-ui-red'; return 'sssc-ui-gray'; }
@@ -15203,13 +15395,10 @@ If there is NO open position, use this Section 2 instead:
   function phaseClass(text){ const s=String(text||'').toLowerCase(); if(s.includes('compression')||s.includes('chop'))return 'sssc-phase-compression'; if(s.includes('trend')||s.includes('markup')||s.includes('markdown'))return 'sssc-phase-trend'; if(s.includes('transition')||s.includes('retest')||s.includes('pullback'))return 'sssc-phase-transition'; if(s.includes('fading')||s.includes('exhaust'))return 'sssc-phase-fading'; return 'sssc-phase-neutral'; }
   function actionComment(act){ const a=String(act||'').toUpperCase(); if(a.includes('EXIT'))return 'Exit condition triggered by SSSC state'; if(a.includes('TRIM'))return 'Reduce exposure; SSSC risk is rising'; if(a.includes('ADD')||a.includes('SNOWBALL'))return 'Add only if execution confirms'; if(a.includes('FRESH'))return 'Fresh entry is technically valid'; if(a.includes('HOLD'))return 'Hold; no invalidation from SSSC'; return 'Wait; no clean trigger yet'; }
   function parseKline(k){return {time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5],baseVolume:+k[5],quoteVolume:+k[7]}}
-  function parseWsK(k){return {time:Math.floor(k.t/1000),open:+k.o,high:+k.h,low:+k.l,close:+k.c,volume:+k.v,baseVolume:+k.v,quoteVolume:+k.q}}
   function ema(rows,p){ const out=[]; if(!rows||rows.length<p)return out; const a=2/(p+1); let cur=rows.slice(0,p).reduce((s,c)=>s+c.close,0)/p; out.push({time:rows[p-1].time,value:cur}); for(let i=p;i<rows.length;i++){cur=rows[i].close*a+cur*(1-a);out.push({time:rows[i].time,value:cur})} return out; }
   function vwapCalc(rows){ let q=0,b=0; for(const c of rows){ const bv=num(c.baseVolume??c.volume); const qv=num(c.quoteVolume); if(qv!=null&&bv!=null&&bv>0){q+=qv;b+=bv;} } return b>0?q/b:null; }
   function last(arr){return arr&&arr.length?arr[arr.length-1].value:null}
   function prev(arr,n=8){return arr&&arr.length>n?arr[arr.length-1-n].value:null}
-  function upsertBuffer(tf,row,limit=360){ if(!row||!row.time)return; const arr=buffers[tf]||(buffers[tf]=[]); const ix=arr.findIndex(x=>x.time===row.time); if(ix>=0){ const ex=arr[ix]; arr[ix]={...ex,...row,high:Math.max(num(ex.high)||row.high,row.high),low:Math.min(num(ex.low)||row.low,row.low),close:row.close,volume:Math.max(num(ex.volume)||0,num(row.volume)||0),baseVolume:Math.max(num(ex.baseVolume)||0,num(row.baseVolume)||0),quoteVolume:num(row.quoteVolume)??num(ex.quoteVolume)}; } else { arr.push(row); arr.sort((a,b)=>a.time-b.time); while(arr.length>limit)arr.shift(); } }
-  async function fetchTf(tf,count){ if(tf===iv() && Array.isArray(candles) && candles.length>=Math.min(80,count) && candles[0] && candles[0].close!=null){ return candles.slice(-count).map(c=>({time:c.time,open:+c.open,high:+c.high,low:+c.low,close:+c.close,volume:+c.volume,baseVolume:+c.volume,quoteVolume:null,fromChart:true})); } const url=restUrl()+'?symbol='+encodeURIComponent(sym())+'&interval='+encodeURIComponent(tf)+'&limit='+Math.min(1000,count)+'&endTime='+Date.now(); const r=await API.fetch(url,{cache:'no-store',headers:{'Cache-Control':'no-cache','Pragma':'no-cache'}}); if(!r.ok)throw new Error(tf+' HTTP '+r.status); const rows=await r.json(); if(!Array.isArray(rows))throw new Error(tf+' invalid data'); return rows.map(parseKline); }
   function stackDirection(vals){ let bull=0,bear=0; for(let i=0;i<vals.length-1;i++){ if(vals[i]>vals[i+1])bull++; else if(vals[i]<vals[i+1])bear++; } return (bull-bear)/4*100; }
   function stackClean(vals,price){ const spreads=[]; for(let i=0;i<vals.length-1;i++)spreads.push(Math.abs(vals[i]-vals[i+1])/(price||vals[i])*10000); return clamp(spreads.reduce((a,b)=>a+b,0)/Math.max(1,spreads.length)*7,0,100); }
   function slopeScore(series,price){ const a=last(series), b=prev(series,8); if(a==null||b==null||!price)return 0; return clamp(((a-b)/price)*10000*7,-100,100); }
@@ -15237,14 +15426,13 @@ If there is NO open position, use this Section 2 instead:
   function updatePreviousMomentum(items){ for(const it of items){ if(!it||!it.available||!Number.isFinite(it.magnitude)) continue; const cur=Number(it.magnitude); if(Number.isFinite(lastRenderedMomentumByTf[it.tf]) && Math.round(lastRenderedMomentumByTf[it.tf])!==Math.round(cur)){ previousMomentumByTf[it.tf]=lastRenderedMomentumByTf[it.tf]; } else if(!Number.isFinite(previousMomentumByTf[it.tf])){ previousMomentumByTf[it.tf]=null; } lastRenderedMomentumByTf[it.tf]=cur; } }
   function magClass(v){ return v>20?'sssc-ui-blue':v<-20?'sssc-ui-red':'sssc-ui-gray'; }
   function rowHtml(d){ if(!d||!d.available)return `<div class="sssc-ui-row"><div class="sssc-ui-tf">${d?d.tf:'-'}</div><div class="sssc-ui-dir">Unavailable</div><div>-</div><div>-</div><div class="sssc-ui-score">-</div><div class="sssc-ui-power-state">${d?.reason||'-'}</div></div>`; const strCls=strengthClass(d.direction); const scCls=scoreClass(d.direction); const phCls=phaseClass(d.phase); const scoreVal=Math.abs(Math.round(d.direction)); const blink=scoreBlinkClass(d.tf,scoreVal); return `<div class="sssc-ui-row" data-tf="${d.tf}"><div class="sssc-ui-tf">${d.tf}</div><div><div class="sssc-ui-dir"><span class="sssc-dir-state">${dirLabel(d.direction)}</span> | <span class="sssc-dir-value ${strCls}">${scoreVal}</span></div><div class="sssc-ui-phase ${phCls}">${d.phase}</div></div><div class="sssc-ribbon">${ribbonSegments(d.direction)}</div><div class="sssc-gauge-wrap">${powerGauge(d.magnitude,d.tf)}</div><div class="sssc-ui-score ${scCls}${blink}">${scoreVal}</div><div><div class="sssc-ui-power-state ${magClass(d.magnitude)}">${d.magState}</div></div></div>`; }
-  function render(force=false){ if(!force && Date.now()-lastRender<500)return; lastRender=Date.now(); const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'}); updatePreviousMomentum(items); const avail=items.filter(x=>x.available); const dir=avg(avail,'direction'); const pow=avg(avail,'magnitude'); const align=avail.length/items.length; const clarity=clamp(Math.abs(dir)*0.42+(100-Math.abs(pow))*0.12+align*42,0,100); const risk=clamp(100-clarity+(avail.slice(-2).some(x=>x.available&&Math.sign(x.direction)!==Math.sign(dir))?14:0),0,100); const act=action(dir,pow,clarity,risk); const dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED'; const dirCls=strengthClass(dir); const powCls=pow>20?'blue':pow<-20?'red':'gray'; const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`, momVal=signed(pow), clarityVal=Math.round(clarity)+'%', riskVal=Math.round(risk)+'%'; $('ssscDashTop').innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('MOMENTUM',`<span class="${blinkClass('kpi_mom',momVal)}">${momVal}</span>`,pow>20?'Expansion improving':pow<-20?'Momentum fading':'Neutral',powCls)+kpi('CLARITY',`<span class="${blinkClass('kpi_clarity',clarityVal)}">${clarityVal}</span>`,clarity>62?'Clean enough to read':'Signal needs caution',clarity>62?'green':'gray')+kpi('EXECUTION RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('ACTION',act,actionComment(act),'', 'action'); $('ssscDashRows').innerHTML=items.map(rowHtml).join(''); $('ssscDashEvents').innerHTML=eventRows(items); bindRows(); const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable')); const wsAge=lastWs?Math.round((Date.now()-lastWs)/1000)+'s':'never'; $('ssscDashFooter').innerHTML=`Module: ${MODULE} | WS age: ${wsAge} | REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500–1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`; }
+  function render(force=false){ if(!force && Date.now()-lastRender<500)return; lastRender=Date.now(); const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'}); updatePreviousMomentum(items); const avail=items.filter(x=>x.available); const dir=avg(avail,'direction'); const pow=avg(avail,'magnitude'); const align=avail.length/items.length; const clarity=clamp(Math.abs(dir)*0.42+(100-Math.abs(pow))*0.12+align*42,0,100); const risk=clamp(100-clarity+(avail.slice(-2).some(x=>x.available&&Math.sign(x.direction)!==Math.sign(dir))?14:0),0,100); const act=action(dir,pow,clarity,risk); const dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED'; const dirCls=strengthClass(dir); const powCls=pow>20?'blue':pow<-20?'red':'gray'; const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`, momVal=signed(pow), clarityVal=Math.round(clarity)+'%', riskVal=Math.round(risk)+'%'; $('ssscDashTop').innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('MOMENTUM',`<span class="${blinkClass('kpi_mom',momVal)}">${momVal}</span>`,pow>20?'Expansion improving':pow<-20?'Momentum fading':'Neutral',powCls)+kpi('CLARITY',`<span class="${blinkClass('kpi_clarity',clarityVal)}">${clarityVal}</span>`,clarity>62?'Clean enough to read':'Signal needs caution',clarity>62?'green':'gray')+kpi('EXECUTION RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('ACTION',act,actionComment(act),'', 'action'); $('ssscDashRows').innerHTML=items.map(rowHtml).join(''); $('ssscDashEvents').innerHTML=eventRows(items); bindRows(); const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable')); const h=hub(); const wsTick=h&&h.diag?h.diag.lastWsTickTime:0; const wsAge=wsTick?Math.round((Date.now()-wsTick)/1000)+'s':'never'; $('ssscDashFooter').innerHTML=`Module: ${MODULE} | WS age: ${wsAge} | REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500–1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`; }
   function detail(tf){ const d=data[tf]; const box=$('ssscDashDetail'), title=$('ssscDashDetailTitle'), grid=$('ssscDashDetailGrid'); if(!d)return; box.classList.remove('hidden'); title.textContent='TF Detail — '+tf; const dt=$('ssscDetailToggle'); if(dt)dt.textContent='Collapse'; if(!d.available){grid.innerHTML=`<div class="sssc-ui-detail-box">Unavailable\n${d.reason||''}</div>`;return} const emaLines=PERIODS.map((p,i)=>`EMA${p}: ${fmt(d.emaVals[i],2)}`).join('\n'); const spreadLines=PAIRS.map(([a,b])=>`EMA${a}/${b}: ${fmt((d.emaVals[PERIODS.indexOf(a)]-d.emaVals[PERIODS.indexOf(b)])/d.price*10000,1)} bps`).join('\n'); const crossLines=`9/21: ${d.crosses.c921.label}\n21/55: ${d.crosses.c2155.label}\n55/100: ${d.crosses.c55100.label}\n100/200: ${d.crosses.c100200.label}`; const eventLines=Object.entries(d.events).map(([k,v])=>`${k}: ${v}`).join('\n'); grid.innerHTML=`<div class="sssc-ui-detail-box"><b>Values</b>\nPrice: ${fmt(d.price,2)}\nVWAP: ${d.vwap==null?'Unavailable':fmt(d.vwap,2)}\n${emaLines}</div><div class="sssc-ui-detail-box"><b>SSSC</b>\nDirection: ${signed(d.direction)}\nMomentum: ${signed(d.magnitude)}\nStack: ${fmt(d.stackDir,0)}\nSlope dir: ${fmt(d.slopeDir,0)}\nSpread dir: ${fmt(d.sprDir,0)}\nSlope momentum: ${fmt(d.slopePow,0)}\nSpread momentum: ${fmt(d.sprPow,0)}</div><div class="sssc-ui-detail-box"><b>Spreads / Crosses</b>\n${spreadLines}\n\n${crossLines}</div><div class="sssc-ui-detail-box"><b>Events</b>\n${eventLines}</div><div class="sssc-ui-detail-box"><b>Phase</b>\nState: ${d.state}\nPhase: ${d.phase}\nMomentum: ${d.magState}\nRows: ${d.rows}</div><div class="sssc-ui-detail-box"><b>Implication</b>\n${d.direction>35?'Bullish side favored.':d.direction<-35?'Bearish side favored.':'Mixed / wait for acceptance.'}\n${d.magnitude>25?'Current directional force strengthening.':d.magnitude<-25?'Current direction fading.':'Momentum stable / low signal.'}\n3M/1M warnings do not override 15M/1H/4H unless confirming failure/rejection/acceptance.</div>`; }
   function bindRows(){ document.querySelectorAll('#ssscDash [data-tf]').forEach(el=>{ if(el.__ssscBound)return; el.__ssscBound=true; el.addEventListener('click',()=>detail(el.dataset.tf)); }); }
-  function calculate(){ for(const [label,tf,count] of TFS){ const rows=(buffers[tf]||[]).slice(-count); if(rows.length) data[label]=diagnose(label,tf,rows); else if(!data[label]) data[label]={tf:label,interval:tf,available:false,reason:'No buffer'}; } render(); }
-  async function restSeed(full=true){ const s=sym(); currentSymbol=s; currentRest=restUrl(); for(const [label,tf,count] of TFS){ try{ const rows=await fetchTf(tf,count); buffers[tf]=rows.slice(-Math.max(count,360)); data[label]=diagnose(label,tf,buffers[tf]); render(true); await sleep(35); }catch(e){ data[label]={tf:label,interval:tf,available:false,reason:e.message||'Unavailable'}; render(true); } } lastFullFetch=Date.now(); calculate(); }
-  function connectWs(){ try{ if(ssscWs){ssscWs.close();ssscWs=null;} }catch(_e){} const lower=sym().toLowerCase(); const streams=TFS.map(x=>lower+'@kline_'+x[1]).join('/'); const url=wsUrl()+'?streams='+streams; try{ ssscWs=API.createWebSocket(url); }catch(e){ console.warn('SSSC WS create failed',e); return; } ssscWs.onmessage=e=>{ try{ const msg=JSON.parse(e.data); const d=msg.data||msg; if(!d.k)return; lastWs=Date.now(); const tf=d.k.i; upsertBuffer(tf,parseWsK(d.k),420); }catch(err){ console.warn('SSSC WS parse failed',err); } }; ssscWs.onclose=()=>{ if(visible) setTimeout(()=>visible&&connectWs(),3000); }; ssscWs.onerror=()=>{}; }
-  function startLive(){ stopLive(false); visible=true; restSeed(true).then(connectWs); calcTimer=setInterval(()=>visible&&calculate(),500); renderTimer=setInterval(()=>visible&&render(),1000); resyncTimer=setInterval(()=>visible&&restSeed(false),90000); staleTimer=setInterval(()=>{ if(!visible)return; if(currentSymbol!==sym()||currentRest!==restUrl()){ buffers={}; data={}; restSeed(true).then(connectWs); return; } if(lastWs && Date.now()-lastWs>8000){ connectWs(); } if(lastWs && Date.now()-lastWs>15000){ restSeed(false); } },5000); }
-  function stopLive(closeWs=true){ if(calcTimer)clearInterval(calcTimer); if(renderTimer)clearInterval(renderTimer); if(resyncTimer)clearInterval(resyncTimer); if(staleTimer)clearInterval(staleTimer); calcTimer=renderTimer=resyncTimer=staleTimer=null; if(closeWs&&ssscWs){try{ssscWs.close()}catch(_e){} ssscWs=null;} }
+  function calculate(){ const h=hub(); for(const [label,tf,count] of TFS){ const rows=(h?h.getBuffer(tf):[]).slice(-count); if(rows.length) data[label]=diagnose(label,tf,rows); else if(!data[label]) data[label]={tf:label,interval:tf,available:false,reason:'No buffer'}; } render(); }
+  async function restSeed(full=true){ const h=hub(); if(!h) return; currentSymbol=sym(); currentRest=restUrl(); for(const [label,tf,count] of TFS){ try{ await h.seedBuffer(tf,count,full); const rows=h.getBuffer(tf).slice(-Math.max(count,360)); data[label]=diagnose(label,tf,rows); render(true); await sleep(35); }catch(e){ data[label]={tf:label,interval:tf,available:false,reason:e.message||'Unavailable'}; render(true); } } lastFullFetch=Date.now(); calculate(); }
+  function startLive(){ stopLive(false); visible=true; currentSymbol=sym(); currentRest=restUrl(); const h=hub(); if(h){ h.setSsscVisible(true); restSeed(true).catch(e=>console.warn(MODULE+' seed failed',e)); } calcTimer=setInterval(()=>visible&&calculate(),500); renderTimer=setInterval(()=>visible&&render(),1000); resyncTimer=setInterval(()=>visible&&restSeed(false),90000); staleTimer=setInterval(()=>{ if(!visible)return; if(currentSymbol!==sym()||currentRest!==restUrl()){ currentSymbol=sym(); currentRest=restUrl(); data={}; const liveHub=hub(); if(liveHub) liveHub.setSsscVisible(true); restSeed(true).catch(e=>console.warn(MODULE+' reseed failed',e)); return; } },5000); }
+  function stopLive(closeWs=true){ if(calcTimer)clearInterval(calcTimer); if(renderTimer)clearInterval(renderTimer); if(resyncTimer)clearInterval(resyncTimer); if(staleTimer)clearInterval(staleTimer); calcTimer=renderTimer=resyncTimer=staleTimer=null; if(closeWs){ const h=hub(); if(h) h.setSsscVisible(false); } }
   function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); startLive(); render(true); }
   function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); }
   function savePanel(){ const p=$('ssscDash'); if(!p)return; const r=p.getBoundingClientRect(); localStorage.setItem(STORE+'panel',JSON.stringify({left:r.left,top:r.top,width:r.width,height:r.height})); }
@@ -15259,418 +15447,4 @@ If there is NO open position, use this Section 2 instead:
   if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(installSsscSettingsPlaceholder,0); return r; }; }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
   window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={version:MODULE,show,hide,refresh:()=>restSeed(true),diagnose};
-})();
-
-(() => {
-  "use strict";
-  const MODULE = "V13_FINAL_BINANCE_REALTIME_MANAGER";
-  const WS_STALE_MS = 5000;
-  const WS_RECONNECT_MS_FINAL = 15000;
-  const REST_FALLBACK_MS = 5000;
-  const REST_LIMIT = 5;
-  const FIRST_TICK_GRACE_MS = 12000;
-
-  let generation = 0;
-  let reconnectTimer = null;
-  let watchdog = null;
-  let fallbackTimer = null;
-  let restInFlight = false;
-  let flushPending = false;
-  let pendingTrade = null;
-  let desiredLive = true;
-  let lastTradeTickTime = 0;
-  let connectStartedAt = 0;
-
-  const diag = {
-    module:MODULE,
-    status:"OFFLINE / ERROR",
-    symbol:null,
-    interval:null,
-    streams:[],
-    socketStatus:"closed",
-    activeUrl:"",
-    lastWsTickTime:0,
-    lastRestSyncTime:0,
-    reconnectCount:0,
-    staleDurationMs:null,
-    lastError:null
-  };
-
-  window.BINANCE_REALTIME_DIAG = diag;
-  window.binanceRealtimeDiagnostics = () => ({...diag});
-
-  function now(){ return Date.now(); }
-  function wsBase(){
-    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream");
-    return raw
-      .replace(/\/(?:public|market|private)\/stream\/?$/,"/market/stream")
-      .replace(/\/stream\/?$/,"/market/stream")
-      .replace(/\/(?:public|market|private)\/ws\/?$/,"/market/stream")
-      .replace(/\/ws\/?$/,"/market/stream");
-  }
-  function currentStreams(){
-    const base = cfg().symbol.toLowerCase();
-    return [base + "@kline_" + iv(), base + "@aggTrade", base + "@markPrice@1s"];
-  }
-  function socketOpen(){
-    return !!(ws && ws.readyState === WebSocket.OPEN);
-  }
-  function socketState(){
-    if(!ws) return "closed";
-    return ["connecting","open","closing","closed"][ws.readyState] || String(ws.readyState);
-  }
-  function waitingForFirstTick(){
-    if(diag.lastWsTickTime) return false;
-    if(!connectStartedAt) return false;
-    if(!(ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN))) return false;
-    return now() - connectStartedAt <= FIRST_TICK_GRACE_MS;
-  }
-  function syncDiag(extra={}){
-    diag.symbol = cfg().symbol;
-    diag.interval = iv();
-    diag.socketStatus = socketState();
-    diag.staleDurationMs = diag.lastWsTickTime ? now() - diag.lastWsTickTime : null;
-    Object.assign(diag,extra);
-  }
-
-  function paintStatus(status,detail=""){
-    syncDiag({status});
-    const visual = connVisual(status);
-    if(connWrap){
-      connWrap.style.width = "22px";
-      connWrap.style.height = "22px";
-      connWrap.style.borderRadius = "999px";
-      connWrap.title =
-        status +
-        (detail ? " - " + detail : "") +
-        (diag.activeUrl ? " | url: " + diag.activeUrl : "") +
-        " | streams: " + (diag.streams || []).join(", ") +
-        " | last WS: " + (diag.lastWsTickTime ? Math.round((now()-diag.lastWsTickTime)/1000) + "s ago" : "never") +
-        " | reconnects: " + diag.reconnectCount +
-        (diag.lastError ? " | last error: " + diag.lastError : "");
-    }
-    if(connLed){
-      connLed.textContent = visual.text;
-      connLed.style.width = "11px";
-      connLed.style.height = "11px";
-      connLed.style.borderRadius = "999px";
-      connLed.style.fontSize = "8px";
-      connLed.style.color = "#111";
-      connLed.style.background = visual.bg;
-      connLed.style.boxShadow =
-        "inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 1px rgba(75,85,99,.18), 0 0 8px " + visual.glow;
-      connLed.style.whiteSpace = "normal";
-    }
-  }
-
-  setConn = window.setConn = function(ok,src=""){
-    if(ok && String(src).toLowerCase().includes("rest")) paintStatus("REST FALLBACK",src);
-    else if(ok) paintStatus("WS LIVE",src || "WebSocket");
-    else paintStatus("OFFLINE / ERROR",src || "Disconnected");
-  };
-
-  refreshConn = window.refreshConn = function(){
-    const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-    syncDiag();
-    if(waitingForFirstTick()) paintStatus("RECONNECTING","waiting for first Binance tick");
-    else if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
-    else if(socketOpen()) paintStatus("WS STALE");
-    else if(restInFlight) paintStatus("REST FALLBACK");
-    else paintStatus("OFFLINE / ERROR");
-  };
-
-  function closeSocket(s){
-    if(!s) return;
-    try{
-      s.onopen = null;
-      s.onmessage = null;
-      s.onerror = null;
-      s.onclose = null;
-      if(s.readyState === WebSocket.OPEN || s.readyState === WebSocket.CONNECTING) s.close();
-    }catch(_e){}
-  }
-
-  function closeRealtimeSocket(){
-    closeSocket(ws);
-    closeSocket(priceWs);
-    ws = null;
-    priceWs = null;
-  }
-
-  function scheduleReconnect(reason,delay=1500){
-    if(!desiredLive || loading) return;
-    if(reconnectTimer) return;
-    diag.lastError = reason || null;
-    diag.reconnectCount += 1;
-    paintStatus("RECONNECTING",reason || "socket reconnect");
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      connectWs();
-    },delay);
-  }
-
-  function markWsTick(source){
-    if(reconnectTimer){
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    lastWs = now();
-    diag.lastWsTickTime = lastWs;
-    diag.lastError = null;
-    syncDiag({lastMessageSource:source});
-    markLiveUpdate();
-    paintStatus("WS LIVE",source);
-  }
-
-  function queueTradeTick(d){
-    const price = Number(d && d.p);
-    const qty = Number(d && d.q);
-    const ms = Number((d && (d.T || d.E)) || now());
-    if(!Number.isFinite(price) || price <= 0) return;
-
-    lastMarkPrice = price;
-    if(mClose) mClose.textContent = ip(price);
-    updatePositionStrip({close:price});
-
-    const sec = Math.floor(ms / 1000);
-    const bucket = Math.floor(sec / ivSec()) * ivSec();
-    if(!pendingTrade || pendingTrade.bucket !== bucket){
-      flushTradeTick();
-      pendingTrade = {bucket,high:price,low:price,close:price,volume:Number.isFinite(qty) && qty > 0 ? qty : 0,ms};
-    }else{
-      pendingTrade.high = Math.max(pendingTrade.high,price);
-      pendingTrade.low = Math.min(pendingTrade.low,price);
-      pendingTrade.close = price;
-      if(Number.isFinite(qty) && qty > 0) pendingTrade.volume += qty;
-      pendingTrade.ms = ms;
-    }
-
-    if(!flushPending){
-      flushPending = true;
-      requestAnimationFrame(() => {
-        flushPending = false;
-        flushTradeTick();
-      });
-    }
-  }
-
-  function queueMarkPriceTick(d){
-    const price = Number(d && d.p);
-    const ms = Number((d && d.E) || now());
-    if(!Number.isFinite(price) || price <= 0) return;
-    lastMarkPrice = price;
-    if(mClose) mClose.textContent = ip(price);
-    updatePositionStrip({close:price});
-    updateTabTitle();
-
-    if(now() - lastTradeTickTime > 1500){
-      queueTradeTick({p:price,q:0,T:ms,E:ms});
-    }
-  }
-
-  function flushTradeTick(){
-    if(!pendingTrade) return;
-    const t = pendingTrade;
-    pendingTrade = null;
-    const last = candles[candles.length-1];
-    if(!last) return;
-
-    if(t.bucket === last.time){
-      upsert({
-        time:last.time,
-        open:last.open,
-        high:Math.max(Number(last.high),t.high),
-        low:Math.min(Number(last.low),t.low),
-        close:t.close,
-        volume:(Number(last.volume) || 0) + t.volume
-      });
-    }else if(t.bucket > last.time){
-      upsert({
-        time:t.bucket,
-        open:last.close,
-        high:Math.max(Number(last.close),t.high),
-        low:Math.min(Number(last.close),t.low),
-        close:t.close,
-        volume:t.volume
-      });
-    }
-  }
-
-  async function restSyncLatest(reason="fallback"){
-    if(restInFlight) return;
-    const requestStarted = now();
-    const requestSymbol = cfg().symbol;
-    const requestInterval = iv();
-    restInFlight = true;
-    if(!waitingForFirstTick()){
-      paintStatus("REST FALLBACK",reason);
-    }
-    try{
-      const rows = await klines(Date.now(),REST_LIMIT);
-      if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return;
-      const currentLastTime = candles.length ? candles[candles.length-1].time : 0;
-      for(const row of rows){
-        if(diag.lastWsTickTime > requestStarted && row.time >= currentLastTime) continue;
-        upsert(row);
-      }
-      lastRest = now();
-      diag.lastRestSyncTime = lastRest;
-      refreshConn();
-    }catch(e){
-      diag.lastError = e && e.message ? e.message : String(e);
-      if(!socketOpen()) paintStatus("OFFLINE / ERROR",diag.lastError);
-      console.warn(MODULE + " REST fallback failed",e);
-    }finally{
-      restInFlight = false;
-    }
-  }
-
-  connectWs = window.connectWs = function(){
-    desiredLive = true;
-    generation += 1;
-    const token = generation;
-    if(reconnectTimer){
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    closeRealtimeSocket();
-
-    const streams = currentStreams();
-    const url = wsBase() + "?streams=" + streams.join("/");
-    connectStartedAt = now();
-    diag.streams = streams.slice();
-    diag.activeUrl = url;
-    diag.lastWsTickTime = 0;
-    syncDiag({status:"RECONNECTING"});
-    paintStatus("RECONNECTING","opening Binance stream");
-
-    try{
-      ws = API.createWebSocket(url);
-    }catch(e){
-      diag.lastError = e && e.message ? e.message : String(e);
-      scheduleReconnect(diag.lastError,2500);
-      return;
-    }
-
-    const socket = ws;
-    socket.onopen = () => {
-      if(token !== generation || ws !== socket) return;
-      syncDiag({socketStatus:"open"});
-      paintStatus("RECONNECTING","waiting for Binance tick");
-    };
-
-    socket.onmessage = e => {
-      if(token !== generation || ws !== socket) return;
-      let d;
-      try{
-        const msg = JSON.parse(e.data);
-        d = msg && msg.data ? msg.data : msg;
-      }catch(err){
-        diag.lastError = "WS parse error";
-        console.error(MODULE + " WS parse error",err);
-        return;
-      }
-
-      if(d && Object.prototype.hasOwnProperty.call(d,"result")) return;
-      if(d && d.s && d.s !== cfg().symbol) return;
-      if(d && d.E){
-        window.__countdownExchangeMs = Number(d.E);
-        window.__countdownLocalMs = now();
-      }
-
-      if(d && d.e === "kline" && d.k){
-        markWsTick("kline");
-        const row = parseWsKline(d.k);
-        if(d.k.x) row.final = true;
-        upsert(row);
-      }else if(d && d.e === "aggTrade"){
-        lastTradeTickTime = now();
-        markWsTick("aggTrade");
-        queueTradeTick(d);
-      }else if(d && d.e === "markPriceUpdate"){
-        markWsTick("markPrice");
-        queueMarkPriceTick(d);
-      }
-    };
-
-    socket.onerror = () => {
-      if(token !== generation || ws !== socket) return;
-      diag.lastError = "WebSocket error";
-      scheduleReconnect("WebSocket error",2500);
-    };
-
-    socket.onclose = ev => {
-      if(token !== generation || ws !== socket) return;
-      const reason = "closed " + (ev && ev.code ? ev.code : "");
-      diag.lastError = reason;
-      scheduleReconnect(reason,2000);
-    };
-  };
-
-  pollOnce = window.pollOnce = async function(){
-    if(waitingForFirstTick()) return;
-    const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-    if(socketOpen() && age <= WS_STALE_MS) return;
-    await restSyncLatest("manual/fallback sync");
-  };
-
-  startPoll = window.startPoll = function(){
-    stopPoll();
-    fallbackTimer = setInterval(() => {
-      if(waitingForFirstTick()) return;
-      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-      if(!socketOpen() || age > WS_STALE_MS) restSyncLatest("stale WebSocket");
-    },REST_FALLBACK_MS);
-    pollTimer = fallbackTimer;
-  };
-
-  stopPoll = window.stopPoll = function(){
-    if(fallbackTimer) clearInterval(fallbackTimer);
-    if(pollTimer && pollTimer !== fallbackTimer) clearInterval(pollTimer);
-    fallbackTimer = null;
-    pollTimer = null;
-  };
-
-  startWatch = window.startWatch = function(){
-    stopWatch();
-    watchdog = setInterval(() => {
-      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-      syncDiag();
-      if(waitingForFirstTick()){
-        paintStatus("RECONNECTING","waiting for first Binance tick");
-      }else if(socketOpen() && age <= WS_STALE_MS){
-        paintStatus("WS LIVE");
-      }else if(socketOpen() && age <= WS_RECONNECT_MS_FINAL){
-        paintStatus("WS STALE");
-      }else if(!loading){
-        restSyncLatest("watchdog stale");
-        scheduleReconnect("stale WebSocket",1000);
-      }
-    },1000);
-    watchdogTimer = watchdog;
-  };
-
-  stopWatch = window.stopWatch = function(){
-    if(watchdog) clearInterval(watchdog);
-    if(watchdogTimer && watchdogTimer !== watchdog) clearInterval(watchdogTimer);
-    watchdog = null;
-    watchdogTimer = null;
-  };
-
-  function handleVisibilityReturn(){
-    if(document.hidden) return;
-    restSyncLatest("visibility/focus return");
-    if(!socketOpen()) connectWs();
-  }
-
-  ["visibilitychange","focus","pageshow"].forEach(ev => {
-    window.addEventListener(ev,handleVisibilityReturn,true);
-  });
-
-  startPoll();
-  startWatch();
-  setTimeout(() => {
-    connectWs();
-    restSyncLatest("manager install");
-  },250);
 })();
