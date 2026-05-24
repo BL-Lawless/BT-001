@@ -145,8 +145,6 @@ let dailyState = null;
 let accountBalanceState = null;
 
 let ws = null;
-let pollTimer = null;
-let watchdogTimer = null;
 let tradeAutoTimer = null;
 let liveTimeTimer = null;
 let dailyTimer = null;
@@ -694,6 +692,10 @@ function connVisual(status){
 }
 
 function setConn(ok,src=""){
+  if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.setLegacyConnectionState === "function"){
+    window.PUBLIC_MARKET_DATA_HUB.setLegacyConnectionState(ok,src);
+    return;
+  }
   const isWs = ok && String(src).toLowerCase().includes("websocket");
   const isRest = ok && String(src).toLowerCase().includes("rest");
   const visual = isWs
@@ -715,14 +717,7 @@ function refreshConn(){
     window.PUBLIC_MARKET_DATA_HUB.refreshConnectionStatus();
     return;
   }
-  const n = Date.now();
-  const open = ws && ws.readyState === WebSocket.OPEN;
-  const w = lastWs && n - lastWs <= STALE_MS;
-  const r = lastRest && n - lastRest <= STALE_MS;
-
-  if(open || w) setConn(true,"WebSocket");
-  else if(r) setConn(true,"REST");
-  else setConn(false);
+  setConn(false);
 }
 
 
@@ -733,22 +728,32 @@ function refreshConn(){
 function parseRest(k){
   return {
     time:Math.floor(k[0]/1000),
+    openTime:+k[0],
+    closeTime:+k[6],
     open:+k[1],
     high:+k[2],
     low:+k[3],
     close:+k[4],
-    volume:+k[5]
+    volume:+k[5],
+    baseVolume:+k[5],
+    quoteVolume:+k[7],
+    final:false
   };
 }
 
 function parseWsKline(k){
   return {
     time:Math.floor(k.t/1000),
+    openTime:+k.t,
+    closeTime:+k.T,
     open:+k.o,
     high:+k.h,
     low:+k.l,
     close:+k.c,
-    volume:+k.v
+    volume:+k.v,
+    baseVolume:+k.v,
+    quoteVolume:+k.q,
+    final:!!k.x
   };
 }
 
@@ -1296,21 +1301,26 @@ async function pollOnce(){
   return marketDataHub.pollOnce();
 }
 
+const SSSC_MIN_CLOSED_CANDLES = 600;
+const SSSC_TARGET_CLOSED_CANDLES = 1000;
+const SSSC_CLOSED_RETENTION_CAP = 1200;
 const SHARED_SSSC_TFS = [
-  {label:"1D", interval:"1d", keep:420},
-  {label:"4H", interval:"4h", keep:420},
-  {label:"1H", interval:"1h", keep:420},
-  {label:"15M", interval:"15m", keep:420},
-  {label:"5M", interval:"5m", keep:420},
-  {label:"3M", interval:"3m", keep:420},
-  {label:"1M", interval:"1m", keep:420}
+  {label:"1D", interval:"1d", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP},
+  {label:"4H", interval:"4h", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP},
+  {label:"1H", interval:"1h", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP},
+  {label:"15M", interval:"15m", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP},
+  {label:"5M", interval:"5m", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP},
+  {label:"3M", interval:"3m", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP},
+  {label:"1M", interval:"1m", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP}
 ];
 
 const marketDataHub = (() => {
   const MODULE = "BINANCE_PUBLIC_MARKET_DATA_HUB";
+  const ACTIVE_FEED_STALE_MS = 8000;
   const WS_STALE_MS = 12000;
   const WS_RECONNECT_MS = 25000;
   const REST_FALLBACK_MS = 10000;
+  const REST_STATUS_HOLD_MS = 12000;
   const REST_LATEST_LIMIT = 5;
   const FIRST_TICK_GRACE_MS = 12000;
   const diag = {
@@ -1323,17 +1333,25 @@ const marketDataHub = (() => {
     activeUrl:"",
     lastWsTickTime:0,
     lastRestSyncTime:0,
+    lastMarkPriceTickTime:0,
     reconnectCount:0,
     staleDurationMs:null,
     lastError:null,
     latestPrice:null,
     latestMarkPrice:null,
     latestAggTradeTickTime:0,
-    restFallbackTimestamp:0
+    restFallbackTimestamp:0,
+    lastKlineTickByTf:{},
+    lastChartActivityByTf:{},
+    lastChartActivitySourceByTf:{},
+    lastActiveChartTf:null,
+    lastActiveChartCandles:[],
+    lastChartValidationWarnMs:0
   };
   const state = {
     generation:0,
     reconnectTimer:null,
+    statusTimer:null,
     restInFlight:false,
     connectStartedAt:0,
     desiredLive:true,
@@ -1341,6 +1359,7 @@ const marketDataHub = (() => {
     flushPending:false,
     ssscVisible:false,
     lastMessageSource:"",
+    visibilityRecoveryTimer:null,
     closedKlinesByTf:{},
     formingKlineByTf:{}
   };
@@ -1375,7 +1394,50 @@ const marketDataHub = (() => {
     diag.interval = iv();
     diag.socketStatus = socketState();
     diag.staleDurationMs = diag.lastWsTickTime ? now() - diag.lastWsTickTime : null;
+    diag.lastActiveChartTf = iv();
     Object.assign(diag,extra);
+  }
+  function restFallbackRecent(){
+    const ts = Math.max(Number(diag.lastRestSyncTime) || 0, Number(diag.restFallbackTimestamp) || 0);
+    return !!(ts && now() - ts <= REST_STATUS_HOLD_MS);
+  }
+  function activeChartFreshTimestamp(tf=iv()){
+    return Math.max(
+      Number(diag.lastChartActivityByTf[tf]) || 0,
+      Number(diag.lastKlineTickByTf[tf]) || 0
+    );
+  }
+  function activeChartAge(tf=iv()){
+    const ts = activeChartFreshTimestamp(tf);
+    return ts ? now() - ts : Infinity;
+  }
+  function activeChartSource(tf=iv()){
+    return diag.lastChartActivitySourceByTf[tf] || "";
+  }
+  function markChartActivity(tf,stamp=now(),source="ws"){
+    if(!tf || !Number.isFinite(Number(stamp))) return;
+    diag.lastChartActivityByTf[tf] = Number(stamp);
+    diag.lastChartActivitySourceByTf[tf] = source;
+    diag.lastActiveChartTf = iv();
+  }
+  function rehydrateActiveChartFromHub(tf=iv(),stamp=now(),source="ws"){
+    if(tf !== iv()) return;
+    candles = getChartBuffer(tf);
+    diag.lastActiveChartCandles = candles.slice(-5).map(row => ({
+      time:row.time,
+      openTime:row.openTime ?? row.time * 1000,
+      open:row.open,
+      high:row.high,
+      low:row.low,
+      close:row.close,
+      final:!!row.final
+    }));
+    indicators();
+    if(candles.length) metrics(candles[candles.length-1]);
+    clampView();
+    draw();
+    markChartActivity(tf,stamp,source);
+    validateActiveChartSync(tf,source);
   }
   function paintStatus(status,detail=""){
     syncDiag({status});
@@ -1406,19 +1468,52 @@ const marketDataHub = (() => {
       connLed.style.whiteSpace = "normal";
     }
   }
-  function updateConn(ok,src=""){
-    if(ok && String(src).toLowerCase().includes("rest")) paintStatus("REST FALLBACK",src);
+  function refreshConnectionStatus(){
+    const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+    const chartAge = activeChartAge();
+    syncDiag();
+    if(waitingForFirstTick()){
+      paintStatus("RECONNECTING","waiting for first Binance tick");
+      return;
+    }
+    if(socketOpen() && chartAge <= ACTIVE_FEED_STALE_MS && activeChartSource() !== "rest"){
+      paintStatus("WS LIVE","active chart feed fresh");
+      return;
+    }
+    if((state.restInFlight || restFallbackRecent()) && chartAge > ACTIVE_FEED_STALE_MS){
+      paintStatus("REST FALLBACK","active chart feed stale");
+      return;
+    }
+    if(socketOpen() && globalAge <= WS_RECONNECT_MS){
+      paintStatus("WS STALE","active chart feed stale");
+      return;
+    }
+    if(state.reconnectTimer || socketState() === "connecting"){
+      paintStatus("RECONNECTING",diag.lastError || "reconnecting");
+      return;
+    }
+    paintStatus("OFFLINE / ERROR",diag.lastError || "Disconnected");
+  }
+  function setLegacyConnectionState(ok,src=""){
+    if(ok && String(src).toLowerCase().includes("rest")) paintStatus("REST FALLBACK",src || "REST");
     else if(ok) paintStatus("WS LIVE",src || "WebSocket");
     else paintStatus("OFFLINE / ERROR",src || "Disconnected");
   }
-  function refreshConnectionStatus(){
-    const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-    syncDiag();
-    if(waitingForFirstTick()) paintStatus("RECONNECTING","waiting for first Binance tick");
-    else if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
-    else if(socketOpen()) paintStatus("WS STALE");
-    else if(state.restInFlight) paintStatus("REST FALLBACK");
-    else paintStatus("OFFLINE / ERROR");
+  function resetConnectionState(reason="reset"){
+    lastWs = 0;
+    lastRest = 0;
+    diag.lastWsTickTime = 0;
+    diag.lastRestSyncTime = 0;
+    diag.lastMarkPriceTickTime = 0;
+    diag.latestAggTradeTickTime = 0;
+    diag.restFallbackTimestamp = 0;
+    diag.lastKlineTickByTf = {};
+    diag.lastChartActivityByTf = {};
+    diag.lastChartActivitySourceByTf = {};
+    diag.lastError = reason || null;
+    state.pendingTrade = null;
+    state.flushPending = false;
+    refreshConnectionStatus();
   }
   function closeSocket(connection){
     if(!connection) return;
@@ -1431,10 +1526,14 @@ const marketDataHub = (() => {
     closeSocket(ws);
     ws = null;
   }
+  function sharedTfConfig(tf){
+    return SHARED_SSSC_TFS.find(x => x.interval === tf) || null;
+  }
   function intervalKeep(tf){
-    if(tf === iv()) return Math.max((state.closedKlinesByTf[tf] || []).length, visibleCount || 0, 420);
-    const hit = SHARED_SSSC_TFS.find(x => x.interval === tf);
-    return hit ? hit.keep : 420;
+    const hit = sharedTfConfig(tf);
+    const ssscCap = state.ssscVisible && hit ? hit.cap : 0;
+    if(tf === iv()) return Math.max(ssscCap, visibleCount || 0, 420);
+    return hit ? (state.ssscVisible ? hit.cap : hit.keep) : 420;
   }
   function requiredKlineTimeframes(){
     const required = new Set([iv()]);
@@ -1484,6 +1583,13 @@ const marketDataHub = (() => {
   function trimClosedBuffer(tf,limitOverride){
     const limit = Math.max(10, limitOverride || intervalKeep(tf));
     const arr = state.closedKlinesByTf[tf] || (state.closedKlinesByTf[tf] = []);
+    arr.sort((a,b) => Number(a.time) - Number(b.time));
+    for(let i=arr.length-1;i>0;i--){
+      if(Number(arr[i].time) === Number(arr[i-1].time)){
+        arr[i-1] = mergeBufferRow(arr[i-1],arr[i]);
+        arr.splice(i,1);
+      }
+    }
     while(arr.length > limit) arr.shift();
     return arr;
   }
@@ -1498,30 +1604,69 @@ const marketDataHub = (() => {
     const closed = getClosedBuffer(tf).map(cloneRow);
     const forming = getFormingCandle(tf);
     if(!forming) return closed;
-    if(closed.length && Number(closed[closed.length-1].time) === Number(forming.time)){
-      closed[closed.length-1] = mergeBufferRow(closed[closed.length-1],forming);
+    const lastClosed = closed.length ? closed[closed.length-1] : null;
+    if(lastClosed && Number(forming.time) <= Number(lastClosed.time)){
       return closed;
     }
     closed.push(forming);
     return closed;
   }
-  function setFormingCandle(tf,row){
+  function validateActiveChartSync(tf,source){
+    if(tf !== iv() || !Array.isArray(candles)) return;
+    const t = now();
+    if(t - (diag.lastChartValidationWarnMs || 0) < 5000) return;
+    const last50 = candles.slice(-50);
+    const seen = new Set();
+    const duplicates = [];
+    let sorted = true;
+    for(let i=0;i<last50.length;i++){
+      const key = Number(last50[i] && last50[i].time);
+      if(seen.has(key)) duplicates.push(key);
+      seen.add(key);
+      if(i>0 && key < Number(last50[i-1] && last50[i-1].time)) sorted = false;
+    }
+    const hubLast50 = getChartBuffer(tf).slice(-50);
+    const sameLength = hubLast50.length === last50.length;
+    const sameRows = sameLength && last50.every((row,i) => {
+      const hubRow = hubLast50[i];
+      return hubRow &&
+        Number(row.time) === Number(hubRow.time) &&
+        Number(row.open) === Number(hubRow.open) &&
+        Number(row.high) === Number(hubRow.high) &&
+        Number(row.low) === Number(hubRow.low) &&
+        Number(row.close) === Number(hubRow.close);
+    });
+    if(duplicates.length || !sorted || !sameRows){
+      diag.lastChartValidationWarnMs = t;
+      console.warn("Active chart candle sync warning",{
+        source,
+        tf,
+        duplicates,
+        sorted,
+        matchesHub:sameRows,
+        chart:last50,
+        hub:hubLast50
+      });
+    }
+  }
+  function setFormingCandle(tf,row,{replace=false}={}){
     if(!row){
       delete state.formingKlineByTf[tf];
       return null;
     }
     const existing = state.formingKlineByTf[tf];
-    state.formingKlineByTf[tf] = mergeBufferRow(existing,row);
+    state.formingKlineByTf[tf] = replace ? {...row,final:false} : mergeBufferRow(existing,{...row,final:false});
     return state.formingKlineByTf[tf];
   }
   function upsertClosedBuffer(tf,row,limitOverride){
     if(!tf || !row || !Number.isFinite(Number(row.time))) return;
     const arr = state.closedKlinesByTf[tf] || (state.closedKlinesByTf[tf] = []);
+    const closedRow = {...row,final:true};
     const idx = arr.findIndex(x => x.time === row.time);
-    if(idx >= 0) arr[idx] = mergeBufferRow(arr[idx],row);
-    else if(!arr.length || row.time > arr[arr.length-1].time) arr.push({...row});
+    if(idx >= 0) arr[idx] = mergeBufferRow(arr[idx],closedRow);
+    else if(!arr.length || closedRow.time > arr[arr.length-1].time) arr.push(closedRow);
     else{
-      arr.push({...row});
+      arr.push(closedRow);
       arr.sort((a,b) => a.time - b.time);
     }
     trimClosedBuffer(tf,limitOverride);
@@ -1548,34 +1693,62 @@ const marketDataHub = (() => {
     if(!Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
     const limit = Math.max(10, limitOverride || intervalKeep(tf));
     if(replace){
-      let closed = rows.map(cloneRow);
+      let closed = rows.map(row => ({...cloneRow(row),final:true}));
       let forming = null;
       const tail = closed[closed.length-1];
       if(isFormingRow(tf,tail)){
-        forming = cloneRow(tail);
+        forming = {...cloneRow(tail),final:false};
         closed = closed.slice(0,-1);
       }
       state.closedKlinesByTf[tf] = closed.slice(-limit);
-      if(forming) setFormingCandle(tf,forming);
+      if(forming) setFormingCandle(tf,forming,{replace:true});
       else delete state.formingKlineByTf[tf];
       return getClosedBuffer(tf);
     }
     for(const row of rows){
-      if(isFormingRow(tf,row)) setFormingCandle(tf,row);
-      else upsertClosedBuffer(tf,row,limit);
+      if(isFormingRow(tf,row)) setFormingCandle(tf,{...row,final:false},{replace:true});
+      else upsertClosedBuffer(tf,{...row,final:true},limit);
     }
     return getClosedBuffer(tf);
   }
   async function seedBuffer(tf,count,force=false){
-    if(!force){
-      const existing = getClosedBuffer(tf);
-      if(existing.length >= count) return existing;
+    const existing = getClosedBuffer(tf);
+    const keepCfg = sharedTfConfig(tf);
+    const targetClosed = Math.max(1, Number(count) || 0);
+    const retentionCap = Math.max(targetClosed, keepCfg ? keepCfg.cap : intervalKeep(tf));
+    if(!force && existing.length >= targetClosed) return existing;
+
+    const fetchWindow = async (endMs,startRows,target) => {
+      let rows = Array.isArray(startRows) ? startRows.slice() : [];
+      let cursor = Number(endMs) || Date.now();
+      while(rows.length < target){
+        const remaining = target - rows.length;
+        const batch = await klinesForInterval(tf,cursor,Math.min(KLINE_LIMIT,remaining),cfg().symbol);
+        if(!batch.length) break;
+        rows = rows.length ? batch.concat(rows) : batch;
+        const oldest = batch[0];
+        if(batch.length < Math.min(KLINE_LIMIT,remaining) || !oldest || !Number.isFinite(Number(oldest.openTime || (oldest.time * 1000)))) break;
+        cursor = Number(oldest.openTime || (oldest.time * 1000)) - 1;
+      }
+      return rows;
+    };
+
+    if(force || !existing.length){
+      const rows = await fetchWindow(Date.now(),[],Math.max(targetClosed + 1,targetClosed));
+      ingestRestRows(tf,rows,{
+        replace:true,
+        limitOverride:retentionCap
+      });
+      return getClosedBuffer(tf);
     }
-    const rows = await klinesForInterval(tf,Date.now(),Math.min(KLINE_LIMIT,count),cfg().symbol);
-    ingestRestRows(tf,rows,{
-      replace:true,
-      limitOverride:Math.max(count,intervalKeep(tf))
-    });
+
+    const oldestExisting = existing[0];
+    const beforeMs = Number(oldestExisting && (oldestExisting.openTime || (oldestExisting.time * 1000))) - 1;
+    if(!Number.isFinite(beforeMs) || beforeMs <= 0) return existing;
+    const missing = Math.max(0, targetClosed - existing.length);
+    if(!missing) return existing;
+    const olderRows = await fetchWindow(beforeMs,[],missing);
+    prependClosedBuffer(tf,olderRows,retentionCap);
     return getClosedBuffer(tf);
   }
   async function seedSsscBuffers(force=false){
@@ -1594,7 +1767,7 @@ const marketDataHub = (() => {
     state.lastMessageSource = source;
     syncDiag({lastMessageSource:source});
     markLiveUpdate();
-    paintStatus("WS LIVE",source);
+    refreshConnectionStatus();
   }
   function flushTradeTick(){
     if(!state.pendingTrade) return;
@@ -1604,21 +1777,29 @@ const marketDataHub = (() => {
     const lastClosed = getClosedBuffer(tf)[getClosedBuffer(tf).length-1] || null;
     const forming = getFormingCandle(tf);
     const base = forming && Number(forming.time) === Number(tick.bucket) ? forming : null;
+    if(!base && lastClosed && Number(tick.bucket) <= Number(lastClosed.time)){
+      return;
+    }
     const open = base ? Number(base.open) : lastClosed ? Number(lastClosed.close) : Number(tick.close);
     const nextRow = {
       time:tick.bucket,
+      openTime:tick.bucket * 1000,
+      closeTime:(tick.bucket + ivSec(tf)) * 1000 - 1,
       open,
       high:Math.max(base ? Number(base.high) : open, tick.high),
       low:Math.min(base ? Number(base.low) : open, tick.low),
       close:tick.close,
-      volume:(base ? (Number(base.volume) || 0) : 0) + tick.volume
+      volume:(base ? (Number(base.volume) || 0) : 0) + tick.volume,
+      baseVolume:(base ? (Number(base.baseVolume ?? base.volume) || 0) : 0) + tick.volume,
+      quoteVolume:null,
+      final:false
     };
     setFormingCandle(tf,nextRow);
-    upsert(nextRow);
+    rehydrateActiveChartFromHub(tf,tick.ms || now(),"ws");
+    refreshConnectionStatus();
   }
   function queueTradeTick(d){
     const price = Number(d && d.p);
-    const qty = Number(d && d.q);
     const ms = Number((d && (d.T || d.E)) || now());
     if(!Number.isFinite(price) || price <= 0) return;
     diag.latestPrice = price;
@@ -1626,51 +1807,32 @@ const marketDataHub = (() => {
     lastMarkPrice = price;
     if(mClose) mClose.textContent = ip(price);
     updatePositionStrip({close:price});
-    const sec = Math.floor(ms / 1000);
-    const bucket = Math.floor(sec / ivSec()) * ivSec();
-    if(!state.pendingTrade || state.pendingTrade.bucket !== bucket){
-      flushTradeTick();
-      state.pendingTrade = {bucket,high:price,low:price,close:price,volume:Number.isFinite(qty) && qty > 0 ? qty : 0,ms};
-    }else{
-      state.pendingTrade.high = Math.max(state.pendingTrade.high,price);
-      state.pendingTrade.low = Math.min(state.pendingTrade.low,price);
-      state.pendingTrade.close = price;
-      if(Number.isFinite(qty) && qty > 0) state.pendingTrade.volume += qty;
-      state.pendingTrade.ms = ms;
-    }
-    if(!state.flushPending){
-      state.flushPending = true;
-      requestAnimationFrame(() => {
-        state.flushPending = false;
-        flushTradeTick();
-      });
-    }
   }
   function queueMarkPriceTick(d){
     const price = Number(d && d.p);
     const ms = Number((d && d.E) || now());
     if(!Number.isFinite(price) || price <= 0) return;
     diag.latestMarkPrice = price;
+    diag.lastMarkPriceTickTime = ms;
     lastMarkPrice = price;
     if(mClose) mClose.textContent = ip(price);
     updatePositionStrip({close:price});
     updateTabTitle();
-    if(now() - diag.latestAggTradeTickTime > 1500){
-      queueTradeTick({p:price,q:0,T:ms,E:ms});
-    }
   }
   function handleKline(d){
     const row = parseWsKline(d.k);
+    diag.lastKlineTickByTf[d.k.i] = Number((d && d.E) || d.k.t || now());
     if(d.k.x){
       row.final = true;
       upsertClosedBuffer(d.k.i,row,intervalKeep(d.k.i));
       delete state.formingKlineByTf[d.k.i];
     }else{
-      setFormingCandle(d.k.i,row);
+      setFormingCandle(d.k.i,row,{replace:true});
     }
     if(d.k.i === iv()){
-      upsert(row);
+      rehydrateActiveChartFromHub(d.k.i,Number((d && d.E) || d.k.t || now()),"ws");
     }
+    refreshConnectionStatus();
   }
   function scheduleReconnect(reason,delay=1500){
     if(!state.desiredLive || loading) return;
@@ -1694,18 +1856,15 @@ const marketDataHub = (() => {
     try{
       const rows = await klines(Date.now(),REST_LATEST_LIMIT);
       if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return;
-      const currentLastTime = candles.length ? candles[candles.length-1].time : 0;
+      const currentChart = getChartBuffer(requestInterval);
+      const currentLastTime = currentChart.length ? currentChart[currentChart.length-1].time : 0;
       const applicable = [];
       for(const row of rows){
         if(diag.lastWsTickTime > requestStarted && row.time >= currentLastTime) continue;
         applicable.push(row);
       }
       ingestRestRows(iv(),applicable,{replace:false,limitOverride:intervalKeep(iv())});
-      candles = getChartBuffer(iv());
-      indicators();
-      if(candles.length) metrics(candles[candles.length-1]);
-      clampView();
-      draw();
+      rehydrateActiveChartFromHub(iv(),now(),"rest");
       lastRest = now();
       diag.lastRestSyncTime = lastRest;
       refreshConnectionStatus();
@@ -1794,6 +1953,7 @@ const marketDataHub = (() => {
       state.reconnectTimer = null;
     }
     closeRealtimeSocket();
+    refreshConnectionStatus();
   }
   function rebuildRequirements(forceReconnect=false){
     const nextStreams = currentStreams();
@@ -1802,40 +1962,33 @@ const marketDataHub = (() => {
       connect();
     }
   }
-  function startPollLoop(){
-    stopPollLoop();
-    pollTimer = setInterval(() => {
-      if(waitingForFirstTick()) return;
-      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-      if(!socketOpen() || age > WS_STALE_MS) restSyncLatest("stale WebSocket");
-    },REST_FALLBACK_MS);
-  }
-  function stopPollLoop(){
-    if(pollTimer){
-      clearInterval(pollTimer);
-      pollTimer = null;
+  function runStatusLoop(){
+    refreshConnectionStatus();
+    if(loading || waitingForFirstTick()) return;
+    const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+    const chartAge = activeChartAge();
+    if((!socketOpen() || chartAge > ACTIVE_FEED_STALE_MS) && !state.restInFlight){
+      restSyncLatest("status loop stale");
+    }
+    if((!socketOpen() && globalAge > ACTIVE_FEED_STALE_MS) || globalAge > WS_RECONNECT_MS){
+      scheduleReconnect("stale WebSocket",1000);
     }
   }
-  function startWatchLoop(){
-    stopWatchLoop();
-    watchdogTimer = setInterval(() => {
-      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-      syncDiag();
-      if(waitingForFirstTick()) paintStatus("RECONNECTING","waiting for first Binance tick");
-      else if(socketOpen() && age <= WS_STALE_MS) paintStatus("WS LIVE");
-      else if(socketOpen() && age <= WS_RECONNECT_MS) paintStatus("WS STALE");
-      else if(!loading){
-        restSyncLatest("watchdog stale");
-        scheduleReconnect("stale WebSocket",1000);
-      }
-    },1000);
+  function startStatusLoop(){
+    stopStatusLoop();
+    state.statusTimer = setInterval(runStatusLoop,1000);
+    runStatusLoop();
   }
-  function stopWatchLoop(){
-    if(watchdogTimer){
-      clearInterval(watchdogTimer);
-      watchdogTimer = null;
+  function stopStatusLoop(){
+    if(state.statusTimer){
+      clearInterval(state.statusTimer);
+      state.statusTimer = null;
     }
   }
+  function startPollLoop(){ startStatusLoop(); }
+  function stopPollLoop(){ stopStatusLoop(); }
+  function startWatchLoop(){ startStatusLoop(); }
+  function stopWatchLoop(){ stopStatusLoop(); }
   function setSsscVisible(visible){
     state.ssscVisible = !!visible;
     if(!state.ssscVisible){
@@ -1852,10 +2005,21 @@ const marketDataHub = (() => {
     restSyncLatest("visibility/focus return");
     if(state.ssscVisible) seedSsscBuffers(false).catch(e => console.warn(MODULE + " SSSC resync failed",e));
     if(!socketOpen()) connect();
+    else refreshConnectionStatus();
+  }
+
+  function scheduleVisibilityRecovery(){
+    if(state.visibilityRecoveryTimer){
+      clearTimeout(state.visibilityRecoveryTimer);
+    }
+    state.visibilityRecoveryTimer = setTimeout(() => {
+      state.visibilityRecoveryTimer = null;
+      handleVisibilityReturn();
+    },80);
   }
 
   ["visibilitychange","focus","pageshow"].forEach(ev => {
-    window.addEventListener(ev,handleVisibilityReturn,true);
+    window.addEventListener(ev,scheduleVisibilityRecovery,true);
   });
 
   window.BINANCE_REALTIME_DIAG = diag;
@@ -1868,15 +2032,19 @@ const marketDataHub = (() => {
     stop,
     pollOnce: async () => {
       if(waitingForFirstTick()) return;
-      const age = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-      if(socketOpen() && age <= WS_STALE_MS) return;
+      const chartAge = activeChartAge();
+      if(socketOpen() && chartAge <= ACTIVE_FEED_STALE_MS) return;
       await restSyncLatest("manual/fallback sync");
     },
     startPollLoop,
     stopPollLoop,
     startWatchLoop,
     stopWatchLoop,
+    startStatusLoop,
+    stopStatusLoop,
     refreshConnectionStatus,
+    setLegacyConnectionState,
+    resetConnectionState,
     restSyncLatest,
     rebuildRequirements,
     setSsscVisible,
@@ -1892,14 +2060,14 @@ const marketDataHub = (() => {
 })();
 
 window.PUBLIC_MARKET_DATA_HUB = marketDataHub;
-refreshConn = window.refreshConn = function(){ marketDataHub.refreshConnectionStatus(); };
+window.refreshConn = refreshConn;
 
 function startPoll(){
-  marketDataHub.startPollLoop();
+  marketDataHub.startStatusLoop();
 }
 
 function stopPoll(){
-  marketDataHub.stopPollLoop();
+  marketDataHub.stopStatusLoop();
 }
 
 function connectWs(){
@@ -1907,11 +2075,11 @@ function connectWs(){
 }
 
 function startWatch(){
-  marketDataHub.startWatchLoop();
+  marketDataHub.startStatusLoop();
 }
 
 function stopWatch(){
-  marketDataHub.stopWatchLoop();
+  marketDataHub.stopStatusLoop();
 }
 
 async function loadChart(opt={}){
@@ -1930,18 +2098,14 @@ async function loadChart(opt={}){
 
   loading = true;
 
-  stopPoll();
   stopWatch();
   stopDailyTimer();
 
   marketDataHub.stop();
-
-  setConn(false);
+  marketDataHub.resetConnectionState("loading chart");
 
   try{
     const nextCandles = await fetchInitial(keepLoaded || undefined);
-    lastWs = 0;
-    lastRest = 0;
     lastMarkPrice = null;
     dailyState = null;
     candles = Array.isArray(nextCandles) ? nextCandles : marketDataHub.getChartBuffer(iv());
@@ -1988,12 +2152,11 @@ async function loadChart(opt={}){
     draw();
     marketDataHub.rebuildRequirements(true);
     await pollOnce();
-    startPoll();
     startDailyTimer();
     startWatch();
   }catch(e){
     console.error(e);
-    setConn(false);
+    marketDataHub.refreshConnectionStatus();
   }finally{
     loading = false;
   }
@@ -15453,7 +15616,7 @@ If there is NO open position, use this Section 2 instead:
   'use strict';
   const MODULE='R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3';
   const STORE='btc_futures_chart_r13_sssc_proto_v1_';
-  const TFS=[['1D','1d',300],['4H','4h',300],['1H','1h',300],['15M','15m',300],['5M','5m',300],['3M','3m',300],['1M','1m',300]];
+  const TFS=[['1D','1d',SSSC_TARGET_CLOSED_CANDLES],['4H','4h',SSSC_TARGET_CLOSED_CANDLES],['1H','1h',SSSC_TARGET_CLOSED_CANDLES],['15M','15m',SSSC_TARGET_CLOSED_CANDLES],['5M','5m',SSSC_TARGET_CLOSED_CANDLES],['3M','3m',SSSC_TARGET_CLOSED_CANDLES],['1M','1m',SSSC_TARGET_CLOSED_CANDLES]];
   const LIVE_DIAG_TFS=new Set(['15m','5m','3m','1m']);
   const PERIODS=[9,21,55,100,200];
   const PAIRS=[[9,21],[21,55],[55,100],[100,200]];
@@ -15492,10 +15655,10 @@ If there is NO open position, use this Section 2 instead:
   function crossState(fast,slow){ const len=Math.min(fast.length,slow.length); if(len<3)return {label:'None',age:null,dir:0,quality:0,forming:false}; const fa=fast[fast.length-1].value, sa=slow[slow.length-1].value, fp=fast[fast.length-2].value, sp=slow[slow.length-2].value; const dist=(fa-sa); let lastCross=null; for(let i=1;i<len;i++){const a0=fast[fast.length-len+i-1].value-slow[slow.length-len+i-1].value; const a1=fast[fast.length-len+i].value-slow[slow.length-len+i].value; if(a0<=0&&a1>0)lastCross={age:len-i-1,dir:1}; if(a0>=0&&a1<0)lastCross={age:len-i-1,dir:-1};} if(fp<=sp&&fa>sa)return {label:'Bull X Fresh',age:0,dir:1,quality:85}; if(fp>=sp&&fa<sa)return {label:'Bear X Fresh',age:0,dir:-1,quality:85}; if(Math.abs(dist/((sa||1)))<0.00035)return {label:(dist>=0?'Bull':'Bear')+' forming',age:null,dir:dist>=0?1:-1,quality:35,forming:true}; if(lastCross){const stale=lastCross.age>24;return {label:(lastCross.dir>0?'Bull X ':'Bear X ')+(stale?'Old':'Confirmed'),age:lastCross.age,dir:lastCross.dir,quality:stale?25:60};} return {label:'None',age:null,dir:0,quality:0}; }
   function eventForLevel(price,emaVal,dir){ if(price==null||emaVal==null)return 'n/a'; const d=(price-emaVal)/price*10000; if(Math.abs(d)<8)return 'Retest'; if(dir>=0&&price>emaVal)return 'Hold'; if(dir<0&&price<emaVal)return 'Reject'; return dir>=0?'Loss':'Reclaim'; }
   function clusterState(vals,price){ const spread=(Math.max(...vals)-Math.min(...vals))/(price||vals[0])*10000; if(spread<18)return 'Chop'; if(spread<42)return 'Compressing'; return 'Expanded'; }
-  function diagnose(label,tf,rows){ if(!rows||!rows.length)return {tf:label,interval:tf,available:false,reason:'Unavailable'}; const price=rows[rows.length-1].close; const emas={}; PERIODS.forEach(p=>emas[p]=ema(rows,p)); const vals=PERIODS.map(p=>last(emas[p])); if(vals.some(v=>v==null))return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length}; const stackDir=stackDirection(vals); const clean=stackClean(vals,price); const slopeDir=0.45*slopeScore(emas[21],price)+0.35*slopeScore(emas[55],price)+0.20*slopeScore(emas[100],price); const sprDir=spreadDir(vals,price); const c921=crossState(emas[9],emas[21]); const c2155=crossState(emas[21],emas[55]); const c55100=crossState(emas[55],emas[100]); const c100200=crossState(emas[100],emas[200]); const direction=clamp(stackDir*0.44+slopeDir*0.30+sprDir*0.20+c921.dir*6,-100,100); const slopePow=0.55*slopePower(emas[21],price)+0.30*slopePower(emas[55],price)+0.15*slopePower(emas[100],price); const sprPow=spreadPower(emas,price); const magnitude=clamp(slopePow*0.52+sprPow*0.42+(clean<20?-18:0),-100,100); const state=direction>55?'Bullish':direction>18?'Mixed Bullish':direction<-55?'Bearish':direction<-18?'Mixed Bearish':'Mixed'; const phase=clean<18?'Compression / Chop': magnitude>35?(direction>=0?'Bullish Markup / Trend':'Bearish Transition'):magnitude<-25?(direction>=0?'Bullish Fading':'Bearish Fading'):Math.abs(direction)<25?'Compression / Chop':'Pullback / Retest'; const magState=magnitude>35?'Expanding':magnitude>10?'Strengthening':magnitude<-35?'Fading':magnitude<-10?'Weakening':'Neutral'; const vw=vwapCalc(rows); const vwapEvent=vw==null?'Unavailable':price>vw?(direction>=0?'Hold':'Reclaim'):(direction>=0?'Loss':'Below'); const events={x921:c921.label,x2155:c2155.label,x55100:c55100.label,x100200:c100200.label,ema9:eventForLevel(price,vals[0],direction),ema21:eventForLevel(price,vals[1],direction),ema55:eventForLevel(price,vals[2],direction),vwap:vwapEvent,cluster:clusterState(vals,price),earlyWarning:'None'}; return {tf:label,interval:tf,available:true,rows:rows.length,price,vwap:vw,emas,emaVals:vals,direction,magnitude,state,phase,magState,stackDir,clean,slopeDir,sprDir,slopePow,sprPow,crosses:{c921,c2155,c55100,c100200},events,earlyWarning:null}; }
+  function diagnose(label,tf,rows){ if(!rows||!rows.length)return {tf:label,interval:tf,available:false,reason:'Unavailable'}; if(rows.length<SSSC_MIN_CLOSED_CANDLES)return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true}; const price=rows[rows.length-1].close; const emas={}; PERIODS.forEach(p=>emas[p]=ema(rows,p)); const vals=PERIODS.map(p=>last(emas[p])); if(vals.some(v=>v==null))return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true}; const stackDir=stackDirection(vals); const clean=stackClean(vals,price); const slopeDir=0.45*slopeScore(emas[21],price)+0.35*slopeScore(emas[55],price)+0.20*slopeScore(emas[100],price); const sprDir=spreadDir(vals,price); const c921=crossState(emas[9],emas[21]); const c2155=crossState(emas[21],emas[55]); const c55100=crossState(emas[55],emas[100]); const c100200=crossState(emas[100],emas[200]); const direction=clamp(stackDir*0.44+slopeDir*0.30+sprDir*0.20+c921.dir*6,-100,100); const slopePow=0.55*slopePower(emas[21],price)+0.30*slopePower(emas[55],price)+0.15*slopePower(emas[100],price); const sprPow=spreadPower(emas,price); const magnitude=clamp(slopePow*0.52+sprPow*0.42+(clean<20?-18:0),-100,100); const state=direction>55?'Bullish':direction>18?'Mixed Bullish':direction<-55?'Bearish':direction<-18?'Mixed Bearish':'Mixed'; const phase=clean<18?'Compression / Chop': magnitude>35?(direction>=0?'Bullish Markup / Trend':'Bearish Transition'):magnitude<-25?(direction>=0?'Bullish Fading':'Bearish Fading'):Math.abs(direction)<25?'Compression / Chop':'Pullback / Retest'; const magState=magnitude>35?'Expanding':magnitude>10?'Strengthening':magnitude<-35?'Fading':magnitude<-10?'Weakening':'Neutral'; const vw=vwapCalc(rows); const vwapEvent=vw==null?'Unavailable':price>vw?(direction>=0?'Hold':'Reclaim'):(direction>=0?'Loss':'Below'); const events={x921:c921.label,x2155:c2155.label,x55100:c55100.label,x100200:c100200.label,ema9:eventForLevel(price,vals[0],direction),ema21:eventForLevel(price,vals[1],direction),ema55:eventForLevel(price,vals[2],direction),vwap:vwapEvent,cluster:clusterState(vals,price),earlyWarning:'None'}; return {tf:label,interval:tf,available:true,rows:rows.length,price,vwap:vw,emas,emaVals:vals,direction,magnitude,state,phase,magState,stackDir,clean,slopeDir,sprDir,slopePow,sprPow,crosses:{c921,c2155,c55100,c100200},events,earlyWarning:null,reliability:rows.length>=SSSC_TARGET_CLOSED_CANDLES?'full-warmup':'minimum-warmup',warmupLimited:false}; }
   function deriveEarlyWarning(label,tf,closedRows,formingRow,confirmed){ if(!formingRow||!confirmed||!confirmed.available||!closedRows||!closedRows.length) return null; const trialRows=closedRows.concat([{...formingRow}]); const trial=diagnose(label,tf,trialRows); if(!trial||!trial.available) return null; const hints=[]; if(trial.crosses.c921.forming||trial.crosses.c2155.forming||trial.crosses.c55100.forming||trial.crosses.c100200.forming) hints.push('Unconfirmed cross forming'); if(trial.events.vwap!==confirmed.events.vwap) hints.push('Unconfirmed VWAP '+trial.events.vwap); if(trial.clean>=18&&confirmed.clean<18) hints.push('Unconfirmed compression break'); if(trial.phase!==confirmed.phase) hints.push('Unconfirmed '+trial.phase); if(trial.magnitude<confirmed.magnitude-10) hints.push('Unconfirmed momentum weakening'); if(!hints.length&&Math.sign(trial.direction)!==Math.sign(confirmed.direction)) hints.push('Unconfirmed transition'); if(!hints.length) return null; return {label:hints[0],trial}; }
   function liveRows(closedRows,formingRow){ if(!Array.isArray(closedRows)||!closedRows.length) return []; if(!formingRow||!Number.isFinite(Number(formingRow.time))) return closedRows.slice(); const out=closedRows.slice(); const last=out[out.length-1]; if(last&&Number(formingRow.time)<=Number(last.time)) return out; out.push({...formingRow}); return out; }
-  function buildDiagnosticSet(label,tf,count,h){ const closedRows=(h?h.getClosedBuffer(tf):[]).slice(-Math.max(count,360)); if(!closedRows.length) return null; const forming=h?h.getFormingCandle(tf):null; const confirmedDiagnostic=diagnose(label,tf,closedRows); const liveRowsForTf=LIVE_DIAG_TFS.has(tf) ? liveRows(closedRows,forming) : closedRows.slice(); const liveDiagnostic=diagnose(label,tf,liveRowsForTf); const warning=deriveEarlyWarning(label,tf,closedRows,forming,confirmedDiagnostic); const mode=LIVE_DIAG_TFS.has(tf)&&liveRowsForTf.length>closedRows.length?'live':'confirmed'; const active=(LIVE_DIAG_TFS.has(tf)&&liveDiagnostic&&liveDiagnostic.available)?liveDiagnostic:confirmedDiagnostic; if(active&&active.available){ active.mode=LIVE_DIAG_TFS.has(tf)?mode:'confirmed'; active.confirmedDiagnostic=confirmedDiagnostic; active.liveDiagnostic=liveDiagnostic; active.earlyWarning=warning; active.events.earlyWarning=warning?warning.label:'None'; } return active; }
+  function buildDiagnosticSet(label,tf,count,h){ const closedRows=(h?h.getClosedBuffer(tf):[]).slice(-Math.max(count,SSSC_MIN_CLOSED_CANDLES)); if(!closedRows.length) return null; const forming=h?h.getFormingCandle(tf):null; const confirmedDiagnostic=diagnose(label,tf,closedRows); const liveRowsForTf=LIVE_DIAG_TFS.has(tf) ? liveRows(closedRows,forming) : closedRows.slice(); const liveDiagnostic=diagnose(label,tf,liveRowsForTf); const warning=deriveEarlyWarning(label,tf,closedRows,forming,confirmedDiagnostic); const mode=LIVE_DIAG_TFS.has(tf)&&liveRowsForTf.length>closedRows.length?'live':'confirmed'; const active=(LIVE_DIAG_TFS.has(tf)&&liveDiagnostic&&liveDiagnostic.available)?liveDiagnostic:confirmedDiagnostic; if(active&&active.available){ active.mode=LIVE_DIAG_TFS.has(tf)?mode:'confirmed'; active.confirmedDiagnostic=confirmedDiagnostic; active.liveDiagnostic=liveDiagnostic; active.earlyWarning=warning; active.events.earlyWarning=warning?warning.label:'None'; } return active; }
   function action(dir,pow,clarity,risk){ let hasOpen=false, side=''; try{hasOpen=Array.isArray(openPositionBoxes)&&openPositionBoxes.length>0; side=openPositionBoxes[0]?.side||'';}catch(_e){} if(hasOpen){ if(side==='SHORT'){ if(dir>30)return 'EXIT SHORT'; if(dir>8)return 'TRIM SHORT'; if(dir< -35 && pow>20)return 'ADD SHORT'; return 'HOLD SHORT'; } else { if(dir<-30)return 'EXIT LONG'; if(dir<-8)return 'TRIM LONG'; if(dir>35&&pow>20)return 'ADD LONG'; return 'HOLD LONG'; }} if(clarity<52||risk>72)return 'WAIT'; if(dir>45&&pow>5)return 'FRESH LONG'; if(dir<-45&&pow>5)return 'FRESH SHORT'; return 'WAIT'; }
   function scorePos(score,c){ score=clamp(score,0,100); if(c==='red')return 50-score/2; if(c==='blue')return 50+score/2; return 50; }
   function segStrength(d){ const ratio=Math.min(1,d/32); if(ratio<.25)return 's1'; if(ratio<.50)return 's2'; if(ratio<.80)return 's3'; return 's4'; }
