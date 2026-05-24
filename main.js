@@ -692,27 +692,17 @@ function connVisual(status){
   }
 }
 
+// Legacy status names are kept as thin aliases; the hub is the only LED writer.
 function setConn(ok,src=""){
   if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.setLegacyConnectionState === "function"){
     window.PUBLIC_MARKET_DATA_HUB.setLegacyConnectionState(ok,src);
-    return;
   }
-  const visual = connVisual("OFFLINE / ERROR");
-  if(connLed){
-    connLed.textContent = visual.text;
-    connLed.style.background = visual.bg;
-    connLed.style.boxShadow =
-      "inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 1px rgba(75,85,99,.18), 0 0 8px " + visual.glow;
-  }
-  if(connWrap) connWrap.title = ok ? "Waiting for market-data hub" : "Disconnected";
 }
 
 function refreshConn(){
   if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.refreshConnectionStatus === "function"){
     window.PUBLIC_MARKET_DATA_HUB.refreshConnectionStatus();
-    return;
   }
-  setConn(false);
 }
 
 
@@ -1191,107 +1181,6 @@ async function olderIfNeeded(r){
   }
 }
 
-function upsert(c){
-  if(!c || !isFinite(c.time)) return;
-
-  const keep = rightOffset;
-  const follow = rightOffset <= 0;
-  const last = candles[candles.length-1];
-
-  function mergeLiveCandle(existing,incoming){
-    if(!existing) return incoming;
-    const eHigh = Number(existing.high), eLow = Number(existing.low);
-    const iHigh = Number(incoming.high), iLow = Number(incoming.low), iClose = Number(incoming.close);
-    const merged = {...existing,...incoming};
-    merged.open = isFinite(Number(existing.open)) ? existing.open : incoming.open;
-    merged.high = Math.max(
-      isFinite(eHigh) ? eHigh : -Infinity,
-      isFinite(iHigh) ? iHigh : -Infinity,
-      isFinite(iClose) ? iClose : -Infinity
-    );
-    merged.low = Math.min(
-      isFinite(eLow) ? eLow : Infinity,
-      isFinite(iLow) ? iLow : Infinity,
-      isFinite(iClose) ? iClose : Infinity
-    );
-    if(!isFinite(merged.high)) merged.high = incoming.high;
-    if(!isFinite(merged.low)) merged.low = incoming.low;
-    merged.close = incoming.close;
-    const eVol = Number(existing.volume), iVol = Number(incoming.volume);
-    if(isFinite(eVol) && isFinite(iVol)) merged.volume = Math.max(eVol,iVol);
-    return merged;
-  }
-
-  let add = false;
-
-  if(last && last.time === c.time){
-    candles[candles.length-1] = mergeLiveCandle(last,c);
-  }else if(!last || c.time > last.time){
-    candles.push(c);
-    add = true;
-  }else{
-    const i = candles.findIndex(x => x.time === c.time);
-    if(i >= 0) candles[i] = mergeLiveCandle(candles[i],c);
-  }
-
-  if(add && !follow) rightOffset += 1;
-  if(follow) rightOffset = keep;
-
-  indicators();
-  if(candles.length) metrics(candles[candles.length-1]);
-
-  clampView();
-  draw();
-}
-
-function liveTrade(p,q,ms){
-  p = +p;
-  q = +q;
-  ms = +ms;
-
-  if(!isFinite(p) || p <= 0) return;
-  if(!isFinite(q) || q < 0) q = 0;
-  if(!isFinite(ms) || ms <= 0) ms = Date.now();
-
-  const sec = Math.floor(ms / 1000);
-  const bucket = Math.floor(sec / ivSec()) * ivSec();
-  const last = candles[candles.length-1];
-
-  if(!last) return;
-
-  if(bucket === last.time){
-    upsert({
-      time:last.time,
-      open:last.open,
-      high:Math.max(last.high,p),
-      low:Math.min(last.low,p),
-      close:p,
-      volume:last.volume + q
-    });
-  }else if(bucket > last.time){
-    upsert({
-      time:bucket,
-      open:last.close,
-      high:Math.max(last.close,p),
-      low:Math.min(last.close,p),
-      close:p,
-      volume:q
-    });
-  }
-}
-
-function applyLivePrice(p,ms){
-  p = Number(p);
-  ms = Number(ms);
-  if(!Number.isFinite(p) || p <= 0) return;
-  if(!Number.isFinite(ms) || ms <= 0) ms = Date.now();
-
-  lastMarkPrice = p;
-  if(mClose) mClose.textContent = ip(p);
-  updatePositionStrip({close:p});
-  if(candles.length) liveTrade(p,0,ms);
-}
-
 async function pollOnce(){
   return marketDataHub.pollOnce();
 }
@@ -1350,8 +1239,6 @@ const marketDataHub = (() => {
     restInFlight:false,
     connectStartedAt:0,
     desiredLive:true,
-    pendingTrade:null,
-    flushPending:false,
     ssscVisible:false,
     lastMessageSource:"",
     visibilityRecoveryTimer:null,
@@ -1531,8 +1418,6 @@ const marketDataHub = (() => {
     diag.lastChartActivityByTf = {};
     diag.lastChartActivitySourceByTf = {};
     diag.lastError = reason || null;
-    state.pendingTrade = null;
-    state.flushPending = false;
     refreshConnectionStatus();
   }
   function closeSocket(connection){
@@ -1801,35 +1686,6 @@ const marketDataHub = (() => {
     state.lastMessageSource = source;
     syncDiag({lastMessageSource:source});
     markLiveUpdate();
-    refreshConnectionStatus();
-  }
-  function flushTradeTick(){
-    if(!state.pendingTrade) return;
-    const tick = state.pendingTrade;
-    state.pendingTrade = null;
-    const tf = iv();
-    const lastClosed = getClosedBuffer(tf)[getClosedBuffer(tf).length-1] || null;
-    const forming = getFormingCandle(tf);
-    const base = forming && Number(forming.time) === Number(tick.bucket) ? forming : null;
-    if(!base && lastClosed && Number(tick.bucket) <= Number(lastClosed.time)){
-      return;
-    }
-    const open = base ? Number(base.open) : lastClosed ? Number(lastClosed.close) : Number(tick.close);
-    const nextRow = {
-      time:tick.bucket,
-      openTime:tick.bucket * 1000,
-      closeTime:(tick.bucket + ivSec(tf)) * 1000 - 1,
-      open,
-      high:Math.max(base ? Number(base.high) : open, tick.high),
-      low:Math.min(base ? Number(base.low) : open, tick.low),
-      close:tick.close,
-      volume:(base ? (Number(base.volume) || 0) : 0) + tick.volume,
-      baseVolume:(base ? (Number(base.baseVolume ?? base.volume) || 0) : 0) + tick.volume,
-      quoteVolume:null,
-      final:false
-    };
-    setFormingCandle(tf,nextRow);
-    rehydrateActiveChartFromHub(tf,tick.ms || now(),"ws");
     refreshConnectionStatus();
   }
   function queueTradeTick(d){
@@ -2108,6 +1964,7 @@ const marketDataHub = (() => {
 window.PUBLIC_MARKET_DATA_HUB = marketDataHub;
 window.refreshConn = refreshConn;
 
+// Legacy lifecycle names are kept as thin aliases for older local call sites.
 function startPoll(){
   marketDataHub.startStatusLoop();
 }
@@ -15269,212 +15126,6 @@ If there is NO open position, use this Section 2 instead:
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",start,{once:true});
   else start();
   window.CANDLE_CLOSE_COUNTDOWN = {version:MODULE,countdownText};
-})();
-
-(() => {
-  "use strict";
-  const MODULE = "V13_REALTIME_RENDER_COALESCER";
-  const FALLBACK_REST_MS = 5000;
-  let renderPending = false;
-  let indicatorPending = true;
-  let lastIndicatorMs = 0;
-  let incrementalDirty = false;
-
-  function mergeCandle(existing,incoming){
-    if(!existing) return {...incoming};
-    const merged = {...existing,...incoming};
-    const eHigh = Number(existing.high), iHigh = Number(incoming.high), iClose = Number(incoming.close);
-    const eLow = Number(existing.low), iLow = Number(incoming.low), iCloseLow = Number(incoming.close);
-    merged.open = Number.isFinite(Number(existing.open)) ? existing.open : incoming.open;
-    merged.high = Math.max(
-      Number.isFinite(eHigh) ? eHigh : -Infinity,
-      Number.isFinite(iHigh) ? iHigh : -Infinity,
-      Number.isFinite(iClose) ? iClose : -Infinity
-    );
-    merged.low = Math.min(
-      Number.isFinite(eLow) ? eLow : Infinity,
-      Number.isFinite(iLow) ? iLow : Infinity,
-      Number.isFinite(iCloseLow) ? iCloseLow : Infinity
-    );
-    if(!Number.isFinite(merged.high)) merged.high = incoming.high;
-    if(!Number.isFinite(merged.low)) merged.low = incoming.low;
-    merged.close = incoming.close;
-    const eVol = Number(existing.volume), iVol = Number(incoming.volume);
-    if(Number.isFinite(eVol) && Number.isFinite(iVol)) merged.volume = Math.max(eVol,iVol);
-    return merged;
-  }
-
-  function periodFor(n){
-    try{
-      if(window.MA_VWAP_ISOLATION_R5 && typeof window.MA_VWAP_ISOLATION_R5.period === "function"){
-        return window.MA_VWAP_ISOLATION_R5.period(n);
-      }
-    }catch(_e){}
-    if(n === 1) return emaPeriod(emaPeriod1El,20);
-    if(n === 2) return emaPeriod(emaPeriod2El,50);
-    if(n === 3) return emaPeriod(emaPeriod3El,100);
-    const key = "btc_futures_chart_v13_32r1_ma" + n + "Period";
-    const fallback = n === 4 ? 100 : 200;
-    const stored = Number(localStorage.getItem(key));
-    return Number.isFinite(stored) && stored > 0 ? Math.round(stored) : fallback;
-  }
-
-  function updateEmaSeries(series,p){
-    if(!Array.isArray(candles) || !candles.length || candles.length < p) return [];
-    if(!Array.isArray(series)) series = [];
-    const expected = candles.length - p + 1;
-    if(expected <= 0) return [];
-    const lastCandle = candles[candles.length-1];
-
-    if(series.length < expected - 1 || series.length > expected){
-      return EMA(candles,p);
-    }
-
-    let value;
-    if(expected === 1){
-      let sum = 0;
-      for(let i=candles.length-p;i<candles.length;i++) sum += Number(candles[i].close) || 0;
-      value = sum / p;
-    }else{
-      const prev = series[expected - 2];
-      if(!prev || !Number.isFinite(Number(prev.value))) return EMA(candles,p);
-      const a = 2 / (p + 1);
-      value = Number(lastCandle.close) * a + Number(prev.value) * (1 - a);
-    }
-
-    const point = {time:lastCandle.time,value};
-    if(series.length === expected) series[expected - 1] = point;
-    else series.push(point);
-    return series;
-  }
-
-  function updateVwapTail(){
-    if(!Array.isArray(candles) || !candles.length) return [];
-    if(!Array.isArray(vwap)) vwap = [];
-    const latest = candles[candles.length-1];
-    let start = candles.length - 1;
-    while(start > 0 && sameDay(candles[start-1].time,latest.time)) start--;
-    let pv = 0;
-    let vol = 0;
-    const points = [];
-    for(let i=start;i<candles.length;i++){
-      const c = candles[i];
-      const cv = Number(c.volume) || 0;
-      const typ = (Number(c.high) + Number(c.low) + Number(c.close)) / 3;
-      pv += typ * cv;
-      vol += cv;
-      if(vol > 0) points.push({time:c.time,value:pv/vol});
-    }
-    const dayStartTime = candles[start].time;
-    vwap = vwap.filter(p => Number(p.time) < dayStartTime).concat(points);
-    window.vwap = vwap;
-    return vwap;
-  }
-
-  function updateIndicatorsIncremental(){
-    try{
-      ema20 = updateEmaSeries(ema20,periodFor(1)); window.ema20 = ema20;
-      ema50 = updateEmaSeries(ema50,periodFor(2)); window.ema50 = ema50;
-      ema3 = updateEmaSeries(ema3,periodFor(3)); window.ema3 = ema3;
-      window.ema4 = updateEmaSeries(window.ema4 || [],periodFor(4));
-      window.ema5 = updateEmaSeries(window.ema5 || [],periodFor(5));
-      updateVwapTail();
-    }catch(e){
-      console.error(MODULE + " incremental indicators failed",e);
-      indicators();
-    }
-  }
-
-  function scheduleRender(forceIndicators=false){
-    indicatorPending = indicatorPending || forceIndicators;
-    incrementalDirty = incrementalDirty || !forceIndicators;
-    if(renderPending) return;
-    renderPending = true;
-    requestAnimationFrame(() => {
-      renderPending = false;
-      const now = Date.now();
-      if(indicatorPending){
-        try{ indicators(); }catch(e){ console.error(MODULE + " indicators failed",e); }
-        indicatorPending = false;
-        incrementalDirty = false;
-        lastIndicatorMs = now;
-      }else if(incrementalDirty){
-        updateIndicatorsIncremental();
-        incrementalDirty = false;
-        lastIndicatorMs = now;
-      }
-      try{
-        if(candles.length) metrics(candles[candles.length-1]);
-        clampView();
-        draw();
-      }catch(e){
-        console.error(MODULE + " draw failed",e);
-      }
-    });
-  }
-
-  upsert = window.upsert = function(c){
-    if(!c || !Number.isFinite(Number(c.time))) return;
-    const keep = rightOffset;
-    const follow = rightOffset <= 0;
-    const last = candles[candles.length-1];
-    let added = false;
-
-    if(last && last.time === c.time){
-      candles[candles.length-1] = mergeCandle(last,c);
-    }else if(!last || c.time > last.time){
-      candles.push({...c});
-      added = true;
-    }else{
-      const i = candles.findIndex(x => x.time === c.time);
-      if(i >= 0) candles[i] = mergeCandle(candles[i],c);
-      else{
-        candles.push({...c});
-        candles.sort((a,b) => a.time - b.time);
-        added = true;
-      }
-    }
-
-    if(added && !follow) rightOffset += 1;
-    if(follow) rightOffset = keep;
-    scheduleRender(added || !!c.final);
-  };
-
-  liveTrade = window.liveTrade = function(p,q,ms){
-    p = +p;
-    q = +q;
-    ms = +ms;
-    if(!Number.isFinite(p) || p <= 0) return;
-    if(!Number.isFinite(q) || q < 0) q = 0;
-    if(!Number.isFinite(ms) || ms <= 0) ms = Date.now();
-
-    const sec = Math.floor(ms / 1000);
-    const bucket = Math.floor(sec / ivSec()) * ivSec();
-    const last = candles[candles.length-1];
-    if(!last) return;
-
-    if(bucket === last.time){
-      upsert({
-        time:last.time,
-        open:last.open,
-        high:Math.max(Number(last.high),p),
-        low:Math.min(Number(last.low),p),
-        close:p,
-        volume:Number(last.volume) + q
-      });
-    }else if(bucket > last.time){
-      upsert({
-        time:bucket,
-        open:last.close,
-        high:Math.max(Number(last.close),p),
-        low:Math.min(Number(last.close),p),
-        close:p,
-        volume:q
-      });
-    }
-  };
-
-  window.REALTIME_RENDER_COALESCER = {version:MODULE};
 })();
 
 (() => {
