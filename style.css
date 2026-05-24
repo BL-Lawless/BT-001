@@ -1271,7 +1271,7 @@ button:hover{filter:brightness(1.04)}
 .sssc-ui-row{grid-template-columns:48px 120px minmax(220px,1fr) 148px 82px 94px!important;padding-left:7px!important;padding-right:7px!important}
 .sssc-ui-power-state{font-weight:400!important;text-align:center!important}
 .sssc-ui-score{position:relative;display:flex;align-items:center;justify-content:center;text-align:center!important}
-.sssc-score-blink,.sssc-value-blink{animation:ssscScoreBlink .5s ease-in-out 0s 6 alternate}
+.sssc-value-blink{animation:ssscScoreBlink .5s ease-in-out 0s 6 alternate}
 @keyframes ssscScoreBlink{0%{filter:brightness(1);opacity:1}100%{filter:brightness(1.75);opacity:.28}}
 .sssc-gauge-wrap{height:62px!important;align-items:flex-end!important}.sssc-gauge{width:148px!important;height:68px!important}.sssc-gauge svg{width:148px!important;height:68px!important;overflow:hidden}.sssc-gauge .ghostNeedle{fill:#8f9aa5!important;opacity:.36!important}.sssc-gauge .hub{height:20px!important}.sssc-gauge .svgval{font-size:16px!important;font-weight:900!important}
 .sssc-odo{display:inline-flex;align-items:center;justify-content:center;gap:1px;white-space:nowrap;color:inherit;font-variant-numeric:tabular-nums lining-nums}
@@ -1279,7 +1279,7 @@ button:hover{filter:brightness(1.04)}
 .sssc-odo-sign.is-empty{opacity:0}
 .sssc-odo-digits{display:inline-flex;align-items:center;justify-content:center}
 .sssc-odo-slot{position:relative;display:inline-block;width:.68em;height:1em;overflow:hidden;line-height:1}
-.sssc-odo-stack{display:flex;flex-direction:column;transform:translateY(calc(var(--odo-pos,0) * -1em));transition:transform .5s ease-in-out;will-change:transform}
+.sssc-odo-roll{display:flex;flex-direction:column;transition:transform .6s cubic-bezier(.2,.75,.25,1);will-change:transform}
 .sssc-odo-cell{display:flex;align-items:center;justify-content:center;height:1em;line-height:1}
 .sssc-odo-blank{opacity:0}
 .sssc-ui-score .sssc-odo{font-size:1em;line-height:1;font-weight:inherit}
