@@ -678,6 +678,7 @@ function connVisual(status){
   switch(String(status || "")){
     case "WS LIVE":
       return {text:"W", bg:"#0ecb81", glow:"rgba(14,203,129,.45)"};
+    case "WS WAITING":
     case "RECONNECTING":
     case "WS STALE":
     case "REST FALLBACK":
@@ -696,20 +697,14 @@ function setConn(ok,src=""){
     window.PUBLIC_MARKET_DATA_HUB.setLegacyConnectionState(ok,src);
     return;
   }
-  const isWs = ok && String(src).toLowerCase().includes("websocket");
-  const isRest = ok && String(src).toLowerCase().includes("rest");
-  const visual = isWs
-    ? connVisual("WS LIVE")
-    : isRest
-      ? connVisual("REST FALLBACK")
-      : connVisual("OFFLINE / ERROR");
-
-  connLed.textContent = visual.text;
-  connLed.style.background = visual.bg;
-  connLed.style.boxShadow =
-    "inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 1px rgba(75,85,99,.18), 0 0 8px " + visual.glow;
-
-  connWrap.title = ok ? "Connected via " + src : "Disconnected";
+  const visual = connVisual("OFFLINE / ERROR");
+  if(connLed){
+    connLed.textContent = visual.text;
+    connLed.style.background = visual.bg;
+    connLed.style.boxShadow =
+      "inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 1px rgba(75,85,99,.18), 0 0 8px " + visual.glow;
+  }
+  if(connWrap) connWrap.title = ok ? "Waiting for market-data hub" : "Disconnected";
 }
 
 function refreshConn(){
@@ -1443,6 +1438,9 @@ const marketDataHub = (() => {
     syncDiag({status});
     const visual = connVisual(status);
     if(connWrap){
+      const chartAge = activeChartAge();
+      const priceAge = diag.latestAggTradeTickTime ? now() - diag.latestAggTradeTickTime : Infinity;
+      const markAge = diag.lastMarkPriceTickTime ? now() - diag.lastMarkPriceTickTime : Infinity;
       connWrap.style.width = "22px";
       connWrap.style.height = "22px";
       connWrap.style.borderRadius = "999px";
@@ -1452,6 +1450,9 @@ const marketDataHub = (() => {
         (diag.activeUrl ? " | url: " + diag.activeUrl : "") +
         " | streams: " + (diag.streams || []).join(", ") +
         " | last WS: " + (diag.lastWsTickTime ? Math.round((now()-diag.lastWsTickTime)/1000) + "s ago" : "never") +
+        " | active TF: " + iv() + " " + (Number.isFinite(chartAge) ? Math.round(chartAge/1000) + "s ago" : "never") +
+        " | aggTrade: " + (Number.isFinite(priceAge) ? Math.round(priceAge/1000) + "s ago" : "never") +
+        " | markPrice: " + (Number.isFinite(markAge) ? Math.round(markAge/1000) + "s ago" : "never") +
         " | reconnects: " + diag.reconnectCount +
         (diag.lastError ? " | last error: " + diag.lastError : "");
     }
@@ -1480,7 +1481,11 @@ const marketDataHub = (() => {
       paintStatus("WS LIVE","active chart feed fresh");
       return;
     }
-    if((state.restInFlight || restFallbackRecent()) && chartAge > ACTIVE_FEED_STALE_MS){
+    if(socketOpen() && !Number.isFinite(chartAge) && globalAge <= ACTIVE_FEED_STALE_MS){
+      paintStatus("WS WAITING","waiting for active chart kline");
+      return;
+    }
+    if((state.restInFlight || restFallbackRecent()) && (chartAge > ACTIVE_FEED_STALE_MS || activeChartSource() === "rest")){
       paintStatus("REST FALLBACK","active chart feed stale");
       return;
     }
@@ -1858,9 +1863,10 @@ const marketDataHub = (() => {
       if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return;
       const currentChart = getChartBuffer(requestInterval);
       const currentLastTime = currentChart.length ? currentChart[currentChart.length-1].time : 0;
+      const activeKlineTick = Number(diag.lastKlineTickByTf[requestInterval]) || 0;
       const applicable = [];
       for(const row of rows){
-        if(diag.lastWsTickTime > requestStarted && row.time >= currentLastTime) continue;
+        if(activeKlineTick > requestStarted && row.time >= currentLastTime) continue;
         applicable.push(row);
       }
       ingestRestRows(iv(),applicable,{replace:false,limitOverride:intervalKeep(iv())});
