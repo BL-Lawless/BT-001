@@ -1356,10 +1356,25 @@ const marketDataHub = (() => {
     lastMessageSource:"",
     visibilityRecoveryTimer:null,
     closedKlinesByTf:{},
-    formingKlineByTf:{}
+    formingKlineByTf:{},
+    bufferSymbol:null,
+    ssscSeedPromise:null
   };
 
   function now(){ return Date.now(); }
+  function ensureBufferSymbol(){
+    const symbol = String((cfg() && cfg().symbol) || "").toUpperCase();
+    if(state.bufferSymbol && state.bufferSymbol !== symbol){
+      state.closedKlinesByTf = {};
+      state.formingKlineByTf = {};
+      diag.lastKlineTickByTf = {};
+      diag.lastChartActivityByTf = {};
+      diag.lastChartActivitySourceByTf = {};
+      diag.lastActiveChartCandles = [];
+    }
+    state.bufferSymbol = symbol;
+    return symbol;
+  }
   function wsBase(){
     const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream").replace(/\/+$/,"");
     if(/\/market\/stream$/i.test(raw)) return raw;
@@ -1717,6 +1732,7 @@ const marketDataHub = (() => {
     return getClosedBuffer(tf);
   }
   async function seedBuffer(tf,count,force=false){
+    ensureBufferSymbol();
     const existing = getClosedBuffer(tf);
     const keepCfg = sharedTfConfig(tf);
     const targetClosed = Math.max(1, Number(count) || 0);
@@ -1757,9 +1773,22 @@ const marketDataHub = (() => {
     return getClosedBuffer(tf);
   }
   async function seedSsscBuffers(force=false){
+    ensureBufferSymbol();
     for(const tf of SHARED_SSSC_TFS){
       await seedBuffer(tf.interval,tf.keep,force);
     }
+  }
+  function ensureSsscBuffers(force=false){
+    if(state.ssscSeedPromise) return state.ssscSeedPromise;
+    state.ssscSeedPromise = seedSsscBuffers(force)
+      .catch(e => {
+        console.warn(MODULE + " SSSC seed failed",e);
+        throw e;
+      })
+      .finally(() => {
+        state.ssscSeedPromise = null;
+      });
+    return state.ssscSeedPromise;
   }
   function markWsTick(source){
     if(state.reconnectTimer){
@@ -1825,6 +1854,7 @@ const marketDataHub = (() => {
     updateTabTitle();
   }
   function handleKline(d){
+    ensureBufferSymbol();
     const row = parseWsKline(d.k);
     diag.lastKlineTickByTf[d.k.i] = Number((d && d.E) || d.k.t || now());
     if(d.k.x){
@@ -1884,6 +1914,7 @@ const marketDataHub = (() => {
   }
   function connect(){
     state.desiredLive = true;
+    ensureBufferSymbol();
     state.generation += 1;
     const token = state.generation;
     if(state.reconnectTimer){
@@ -1962,10 +1993,14 @@ const marketDataHub = (() => {
     refreshConnectionStatus();
   }
   function rebuildRequirements(forceReconnect=false){
+    ensureBufferSymbol();
     const nextStreams = currentStreams();
     const changed = diag.streams.join("|") !== nextStreams.join("|");
     if(forceReconnect || changed){
       connect();
+    }
+    if(state.ssscVisible){
+      ensureSsscBuffers(false).catch(() => {});
     }
   }
   function runStatusLoop(){
@@ -1996,6 +2031,7 @@ const marketDataHub = (() => {
   function startWatchLoop(){ startStatusLoop(); }
   function stopWatchLoop(){ stopStatusLoop(); }
   function setSsscVisible(visible){
+    ensureBufferSymbol();
     state.ssscVisible = !!visible;
     if(!state.ssscVisible){
       SHARED_SSSC_TFS.forEach(tf => {
@@ -2005,11 +2041,14 @@ const marketDataHub = (() => {
       });
     }
     rebuildRequirements(true);
+    if(state.ssscVisible){
+      ensureSsscBuffers(false).catch(() => {});
+    }
   }
   function handleVisibilityReturn(){
     if(document.hidden) return;
     restSyncLatest("visibility/focus return");
-    if(state.ssscVisible) seedSsscBuffers(false).catch(e => console.warn(MODULE + " SSSC resync failed",e));
+    if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
     if(!socketOpen()) connect();
     else refreshConnectionStatus();
   }
@@ -2056,6 +2095,7 @@ const marketDataHub = (() => {
     setSsscVisible,
     seedBuffer,
     seedSsscBuffers,
+    ensureSsscBuffers,
     getClosedBuffer,
     getFormingCandle,
     getChartBuffer,
@@ -15629,14 +15669,12 @@ If there is NO open position, use this Section 2 instead:
   const $=id=>document.getElementById(id);
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,Number(v)||0));
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
-  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-  let visible=false, renderTimer=null, calcTimer=null, resyncTimer=null, staleTimer=null, drag=null;
-  let data={}, lastFullFetch=0, lastRender=0, currentSymbol='', currentRest='';
+  let visible=false, calcTimer=null, drag=null;
+  let data={}, lastFullFetch=0, lastRender=0, currentSymbol='';
   let previousMomentumByTf={}, lastRenderedMomentumByTf={}, previousScoreByTf={}, previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
   function hub(){ return window.PUBLIC_MARKET_DATA_HUB || null; }
 
   function sym(){ try{return cfg().symbol}catch(_e){return (document.getElementById('market')?.value||'BTCUSDC').toUpperCase()} }
-  function restUrl(){ try{return cfg().rest}catch(_e){return 'https://fapi.binance.com/fapi/v1/klines'} }
   function fmt(v,d=0){ const n=num(v); return n==null?'-':n.toFixed(d); }
   function avg(list,key){ const xs=list.map(x=>x&&x[key]).filter(x=>Number.isFinite(x)); return xs.length?xs.reduce((a,b)=>a+b,0)/xs.length:0; }
   function clsSigned(v,blue=false){ if(v>20)return blue?'sssc-ui-blue':'sssc-ui-green'; if(v<-20)return 'sssc-ui-red'; return 'sssc-ui-gray'; }
@@ -15690,10 +15728,44 @@ If there is NO open position, use this Section 2 instead:
   function render(force=false){ if(!force && Date.now()-lastRender<500)return; lastRender=Date.now(); const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'}); updatePreviousMomentum(items); updatePreviousScores(items); const avail=items.filter(x=>x.available); const dir=avg(avail,'direction'); const pow=avg(avail,'magnitude'); const align=avail.length/items.length; const clarity=clamp(Math.abs(dir)*0.42+(100-Math.abs(pow))*0.12+align*42,0,100); const risk=clamp(100-clarity+(avail.slice(-2).some(x=>x.available&&Math.sign(x.direction)!==Math.sign(dir))?14:0),0,100); const act=action(dir,pow,clarity,risk); const dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED'; const dirCls=strengthClass(dir); const powCls=pow>20?'blue':pow<-20?'red':'gray'; const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`, momVal=signed(pow), clarityVal=Math.round(clarity)+'%', riskVal=Math.round(risk)+'%'; const topNode=$('ssscDashTop'); const rowsNode=$('ssscDashRows'); topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('MOMENTUM',`<span class="${blinkClass('kpi_mom',momVal)}">${momVal}</span>`,pow>20?'Expansion improving':pow<-20?'Momentum fading':'Neutral',powCls)+kpi('CLARITY',`<span class="${blinkClass('kpi_clarity',clarityVal)}">${clarityVal}</span>`,clarity>62?'Clean enough to read':'Signal needs caution',clarity>62?'green':'gray')+kpi('EXECUTION RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('ACTION',act,actionComment(act),'', 'action'); rowsNode.innerHTML=items.map(rowHtml).join(''); $('ssscDashEvents').innerHTML=eventRows(items); animateRollingDigits(rowsNode); settleScoreRoll(items); bindRows(); const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable')); const h=hub(); const wsTick=h&&h.diag?h.diag.lastWsTickTime:0; const wsAge=wsTick?Math.round((Date.now()-wsTick)/1000)+'s':'never'; $('ssscDashFooter').innerHTML=`Module: ${MODULE} | WS age: ${wsAge} | REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500–1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`; }
   function detail(tf){ const d=data[tf]; const box=$('ssscDashDetail'), title=$('ssscDashDetailTitle'), grid=$('ssscDashDetailGrid'); if(!d)return; box.classList.remove('hidden'); title.textContent='TF Detail — '+tf; const dt=$('ssscDetailToggle'); if(dt)dt.textContent='Collapse'; if(!d.available){grid.innerHTML=`<div class="sssc-ui-detail-box">Unavailable\n${d.reason||''}</div>`;return} const emaLines=PERIODS.map((p,i)=>`EMA${p}: ${fmt(d.emaVals[i],2)}`).join('\n'); const spreadLines=PAIRS.map(([a,b])=>`EMA${a}/${b}: ${fmt((d.emaVals[PERIODS.indexOf(a)]-d.emaVals[PERIODS.indexOf(b)])/d.price*10000,1)} bps`).join('\n'); const crossLines=`9/21: ${d.crosses.c921.label}\n21/55: ${d.crosses.c2155.label}\n55/100: ${d.crosses.c55100.label}\n100/200: ${d.crosses.c100200.label}`; const eventLines=Object.entries(d.events).map(([k,v])=>`${k}: ${v}`).join('\n'); grid.innerHTML=`<div class="sssc-ui-detail-box"><b>Values</b>\nPrice: ${fmt(d.price,2)}\nVWAP: ${d.vwap==null?'Unavailable':fmt(d.vwap,2)}\n${emaLines}</div><div class="sssc-ui-detail-box"><b>SSSC</b>\nDirection: ${signed(d.direction)}\nMomentum: ${signed(d.magnitude)}\nStack: ${fmt(d.stackDir,0)}\nSlope dir: ${fmt(d.slopeDir,0)}\nSpread dir: ${fmt(d.sprDir,0)}\nSlope momentum: ${fmt(d.slopePow,0)}\nSpread momentum: ${fmt(d.sprPow,0)}</div><div class="sssc-ui-detail-box"><b>Spreads / Crosses</b>\n${spreadLines}\n\n${crossLines}</div><div class="sssc-ui-detail-box"><b>Events</b>\n${eventLines}</div><div class="sssc-ui-detail-box"><b>Phase</b>\nState: ${d.state}\nPhase: ${d.phase}\nMomentum: ${d.magState}\nRows: ${d.rows}</div><div class="sssc-ui-detail-box"><b>Implication</b>\n${d.direction>35?'Bullish side favored.':d.direction<-35?'Bearish side favored.':'Mixed / wait for acceptance.'}\n${d.magnitude>25?'Current directional force strengthening.':d.magnitude<-25?'Current direction fading.':'Momentum stable / low signal.'}\n3M/1M warnings do not override 15M/1H/4H unless confirming failure/rejection/acceptance.</div>`; }
   function bindRows(){ document.querySelectorAll('#ssscDash [data-tf]').forEach(el=>{ if(el.__ssscBound)return; el.__ssscBound=true; el.addEventListener('click',()=>detail(el.dataset.tf)); }); }
-  function calculate(){ const h=hub(); for(const [label,tf,count] of TFS){ const diagnostic=buildDiagnosticSet(label,tf,count,h); if(diagnostic) data[label]=diagnostic; else if(!data[label]) data[label]={tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; } render(); }
-  async function restSeed(full=true){ const h=hub(); if(!h) return; currentSymbol=sym(); currentRest=restUrl(); for(const [label,tf,count] of TFS){ try{ await h.seedBuffer(tf,count,full); const diagnostic=buildDiagnosticSet(label,tf,count,h); data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; render(true); await sleep(35); }catch(e){ data[label]={tf:label,interval:tf,available:false,reason:e.message||'Unavailable',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; render(true); } } lastFullFetch=Date.now(); calculate(); }
-  function startLive(){ stopLive(false); visible=true; currentSymbol=sym(); currentRest=restUrl(); const h=hub(); if(h){ h.setSsscVisible(true); restSeed(true).catch(e=>console.warn(MODULE+' seed failed',e)); } calcTimer=setInterval(()=>visible&&calculate(),500); renderTimer=setInterval(()=>visible&&render(),1000); resyncTimer=setInterval(()=>visible&&restSeed(false),90000); staleTimer=setInterval(()=>{ if(!visible)return; if(currentSymbol!==sym()||currentRest!==restUrl()){ currentSymbol=sym(); currentRest=restUrl(); data={}; const liveHub=hub(); if(liveHub) liveHub.setSsscVisible(true); restSeed(true).catch(e=>console.warn(MODULE+' reseed failed',e)); return; } },5000); }
-  function stopLive(closeWs=true){ if(calcTimer)clearInterval(calcTimer); if(renderTimer)clearInterval(renderTimer); if(resyncTimer)clearInterval(resyncTimer); if(staleTimer)clearInterval(staleTimer); calcTimer=renderTimer=resyncTimer=staleTimer=null; if(closeWs){ const h=hub(); if(h) h.setSsscVisible(false); } }
+  function calculate(){ const h=hub(); const liveSymbol=sym(); if(currentSymbol&&currentSymbol!==liveSymbol){ data={}; } currentSymbol=liveSymbol; for(const [label,tf,count] of TFS){ const diagnostic=buildDiagnosticSet(label,tf,count,h); data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; } render(); }
+  async function seedFromHub(full=false){
+    const h=hub();
+    if(!h) return;
+    currentSymbol=sym();
+    try{
+      if(typeof h.ensureSsscBuffers==='function') await h.ensureSsscBuffers(full);
+      else for(const [,tf,count] of TFS) await h.seedBuffer(tf,count,full);
+    }catch(e){
+      console.warn(MODULE+' hub seed failed',e);
+    }
+    for(const [label,tf] of TFS){
+      const diagnostic=buildDiagnosticSet(label,tf,SSSC_TARGET_CLOSED_CANDLES,h);
+      data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
+    }
+    lastFullFetch=Date.now();
+    calculate();
+  }
+  function startLive(){
+    stopLive(false);
+    visible=true;
+    currentSymbol=sym();
+    const h=hub();
+    if(h){
+      h.setSsscVisible(true);
+      seedFromHub(false).catch(e=>console.warn(MODULE+' seed failed',e));
+    }
+    calculate();
+    calcTimer=setInterval(()=>visible&&calculate(),500);
+  }
+  function stopLive(closeWs=true){
+    if(calcTimer) clearInterval(calcTimer);
+    calcTimer=null;
+    if(closeWs){
+      const h=hub();
+      if(h) h.setSsscVisible(false);
+    }
+  }
   function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); startLive(); render(true); }
   function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); }
   function savePanel(){ const p=$('ssscDash'); if(!p)return; const r=p.getBoundingClientRect(); localStorage.setItem(STORE+'panel',JSON.stringify({left:r.left,top:r.top,width:r.width,height:r.height})); }
@@ -15703,9 +15775,9 @@ If there is NO open position, use this Section 2 instead:
   function installResizeGuard(){ installResizeHandles(); }
   function installResizeHandles(){ const p=$('ssscDash'); if(!p||p.__ssscResizeHandles)return; p.__ssscResizeHandles=true; ['n','s','e','w','ne','nw','se','sw'].forEach(dir=>{ const h=document.createElement('div'); h.className='sssc-resize-handle sssc-resize-'+dir; h.dataset.dir=dir; p.appendChild(h); h.addEventListener('pointerdown',e=>{ e.preventDefault(); e.stopPropagation(); const r=p.getBoundingClientRect(); const start={x:e.clientX,y:e.clientY,left:r.left,top:r.top,w:r.width,h:r.height,dir}; p.classList.add('sssc-resizing'); try{h.setPointerCapture(e.pointerId)}catch(_e){} const move=ev=>{ const dx=ev.clientX-start.x, dy=ev.clientY-start.y; let left=start.left, top=start.top, w=start.w, hgt=start.h; const minW=760,minH=440; if(start.dir.includes('e')) w=start.w+dx; if(start.dir.includes('s')) hgt=start.h+dy; if(start.dir.includes('w')){ w=start.w-dx; left=start.left+dx; } if(start.dir.includes('n')){ hgt=start.h-dy; top=start.top+dy; } if(w<minW){ if(start.dir.includes('w')) left-=minW-w; w=minW; } if(hgt<minH){ if(start.dir.includes('n')) top-=minH-hgt; hgt=minH; } left=clamp(left,6,window.innerWidth-80); top=clamp(top,6,window.innerHeight-60); w=Math.min(w,window.innerWidth-left-6); hgt=Math.min(hgt,window.innerHeight-top-6); p.style.left=left+'px'; p.style.top=top+'px'; p.style.bottom='auto'; p.style.width=w+'px'; p.style.height=hgt+'px'; }; const up=ev=>{ document.removeEventListener('pointermove',move,true); document.removeEventListener('pointerup',up,true); document.removeEventListener('pointercancel',up,true); p.classList.remove('sssc-resizing'); try{h.releasePointerCapture(ev.pointerId)}catch(_e){} savePanel(); }; document.addEventListener('pointermove',move,true); document.addEventListener('pointerup',up,true); document.addEventListener('pointercancel',up,true); },true); }); }
   function installDrag(){ const p=$('ssscDash'), h=$('ssscDashHead'); if(!p||!h||h.__ssscDrag)return; h.__ssscDrag=true; h.addEventListener('pointerdown',e=>{ if(e.target.closest('button')||e.target.closest('.sssc-resize-handle'))return; const r=p.getBoundingClientRect(); drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top}; h.setPointerCapture(e.pointerId); e.preventDefault(); }); h.addEventListener('pointermove',e=>{ if(!drag)return; p.style.left=clamp(drag.left+e.clientX-drag.x,6,window.innerWidth-80)+'px'; p.style.top=clamp(drag.top+e.clientY-drag.y,6,window.innerHeight-60)+'px'; p.style.bottom='auto'; }); const end=e=>{ if(drag){drag=null; savePanel(); try{h.releasePointerCapture(e.pointerId)}catch(_e){}}}; h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end); if(typeof ResizeObserver!=='undefined'){ new ResizeObserver(()=>visible&&savePanel()).observe(p); } }
-  function install(){ const top=document.querySelector('.topbar'); const anchor=document.getElementById('v13LabBtn')||document.getElementById('apiKeysBtn')||top?.firstElementChild; if(top&&!$('ssscDashBtn')){ const b=document.createElement('button'); b.id='ssscDashBtn'; b.type='button'; b.textContent='SSSC'; b.title='Show/hide SSSC dashboard'; anchor?anchor.insertAdjacentElement('afterend',b):top.insertAdjacentElement('afterbegin',b); b.addEventListener('click',()=>visible?hide():show()); } $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>restSeed(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); installSsscSettingsPlaceholder(); restorePanel(); }
+  function install(){ const top=document.querySelector('.topbar'); const anchor=document.getElementById('v13LabBtn')||document.getElementById('apiKeysBtn')||top?.firstElementChild; if(top&&!$('ssscDashBtn')){ const b=document.createElement('button'); b.id='ssscDashBtn'; b.type='button'; b.textContent='SSSC'; b.title='Show/hide SSSC dashboard'; anchor?anchor.insertAdjacentElement('afterend',b):top.insertAdjacentElement('afterbegin',b); b.addEventListener('click',()=>visible?hide():show()); } $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>seedFromHub(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); installSsscSettingsPlaceholder(); restorePanel(); }
 
   if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(installSsscSettingsPlaceholder,0); return r; }; }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
-  window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={version:MODULE,show,hide,refresh:()=>restSeed(true),diagnose};
+  window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={version:MODULE,show,hide,refresh:()=>seedFromHub(true),diagnose};
 })();
