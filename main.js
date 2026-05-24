@@ -98,6 +98,8 @@ const INIT_LIMIT = 1500;
 const OLDER_LIMIT = 1500;
 const OLDER_THRESHOLD = 120;
 const KLINE_LIMIT = 1500;
+const CHART_INDICATOR_WARMUP_MIN = 600;
+const CHART_BUFFER_RETENTION_CAP = 1500;
 
 const MAX_FUTURE_RATIO = 0.5;
 
@@ -764,6 +766,66 @@ function EMA(src,p){
   return out;
 }
 
+function chartIndicatorPeriodValue(n,fallback){
+  const ids = n <= 3
+    ? [`emaPeriod${n}`]
+    : [`maisoMA${n}Period`,`v33MA${n}Period`];
+  for(const id of ids){
+    const el = document.getElementById(id);
+    const value = Number(el && el.value);
+    if(Number.isFinite(value) && value > 0) return value;
+  }
+  try{
+    const key = n <= 3
+      ? STORE + `ema_period_${n}`
+      : `btc_futures_chart_v13_32r1_ma${n}Period`;
+    const stored = Number(localStorage.getItem(key));
+    if(Number.isFinite(stored) && stored > 0) return stored;
+  }catch(_e){}
+  return fallback;
+}
+
+function longestEnabledChartIndicatorPeriod(){
+  const defs = [
+    [tglEMA20,1,20],
+    [tglEMA50,2,50],
+    [tglEMA3,3,100],
+    [document.getElementById("tglEMA4"),4,100],
+    [document.getElementById("tglEMA5"),5,200]
+  ];
+  let longest = 0;
+  for(const [toggle,n,fallback] of defs){
+    if(toggle && toggle.checked) longest = Math.max(longest, chartIndicatorPeriodValue(n,fallback));
+  }
+  return longest;
+}
+
+function chartIndicatorWarmupTarget(){
+  return Math.min(
+    CHART_BUFFER_RETENTION_CAP - MIN_VISIBLE,
+    Math.max(CHART_INDICATOR_WARMUP_MIN, Math.ceil(longestEnabledChartIndicatorPeriod() * 3))
+  );
+}
+
+function chartDesiredClosedDepth(visible=visibleCount){
+  const desired = Math.ceil((Number(visible) || DEF_VISIBLE) + chartIndicatorWarmupTarget());
+  return clamp(desired, CHART_INDICATOR_WARMUP_MIN, CHART_BUFFER_RETENTION_CAP);
+}
+
+function candleOnlyYRange(vis){
+  const prices = [];
+  for(const c of vis || []) prices.push(Number(c.high),Number(c.low));
+  let max = Math.max(...prices);
+  let min = Math.min(...prices);
+  if(!isFinite(max) || !isFinite(min) || max === min){
+    max = 1;
+    min = 0;
+  }
+  const center = (max + min) / 2;
+  const range = (max - min) * 1.16 || 1;
+  return {min:center - range/2,max:center + range/2};
+}
+
 function sameDay(a,b){
   a = new Date(a*1000);
   b = new Date(b*1000);
@@ -1081,11 +1143,7 @@ async function klines(endMs,limit){
 async function fetchInitial(targetCount){
   const warmup = Math.max(
     Number(targetCount) || 0,
-    visibleCount || DEF_VISIBLE,
-    emaPeriod(emaPeriod1El,20),
-    emaPeriod(emaPeriod2El,50),
-    emaPeriod(emaPeriod3El,100),
-    600
+    chartDesiredClosedDepth(visibleCount || DEF_VISIBLE)
   );
   const desired = Math.max(1, Math.round(warmup));
   if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.seedBuffer === "function"){
@@ -1120,14 +1178,18 @@ async function olderIfNeeded(r){
   const zoomRequestedVisible = Number.isFinite(olderFetchTargetVisible) ? olderFetchTargetVisible : 0;
   const needsZoomBackfill = zoomRequestedVisible > candles.length;
   const nearLeftEdge = !!(r && r.start <= 2);
+  const warmupDeficit = r && Number.isFinite(r.start)
+    ? Math.max(0, chartIndicatorWarmupTarget() - r.start)
+    : 0;
+  const needsWarmupBackfill = warmupDeficit > 0;
   if(
     loading ||
     loadingOlder ||
     noMoreOlder ||
-    !olderFetchArmed ||
     !candles.length ||
     !r ||
-    (!nearLeftEdge && !needsZoomBackfill)
+    (!olderFetchArmed && !needsWarmupBackfill) ||
+    (!nearLeftEdge && !needsZoomBackfill && !needsWarmupBackfill)
   ) return;
 
   loadingOlder = true;
@@ -1141,7 +1203,7 @@ async function olderIfNeeded(r){
     );
     const neededVisible = Math.max(0, requestedVisible - oldLength);
     const loadLimit = clamp(
-      Math.max(OLDER_THRESHOLD, neededVisible + 24, Math.ceil(visibleCount * 0.6)),
+      Math.max(OLDER_THRESHOLD, neededVisible + 24, warmupDeficit + 24, Math.ceil(visibleCount * 0.6)),
       1,
       OLDER_LIMIT
     );
@@ -1166,7 +1228,8 @@ async function olderIfNeeded(r){
     if(old.length < loadLimit) noMoreOlder = true;
     olderFetchTargetVisible = Math.max(0, requestedVisible - candles.length);
     if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.prependClosedBuffer === "function"){
-      window.PUBLIC_MARKET_DATA_HUB.prependClosedBuffer(iv(), f);
+      const retention = Math.min(CHART_BUFFER_RETENTION_CAP, oldLength + f.length);
+      window.PUBLIC_MARKET_DATA_HUB.prependClosedBuffer(iv(), f, Math.max(retention, chartDesiredClosedDepth(visibleCount || DEF_VISIBLE)));
       if(typeof window.PUBLIC_MARKET_DATA_HUB.getChartBuffer === "function"){
         candles = window.PUBLIC_MARKET_DATA_HUB.getChartBuffer(iv());
       }
@@ -1437,7 +1500,11 @@ const marketDataHub = (() => {
   function intervalKeep(tf){
     const hit = sharedTfConfig(tf);
     const ssscCap = state.ssscVisible && hit ? hit.cap : 0;
-    if(tf === iv()) return Math.max(ssscCap, visibleCount || 0, 420);
+    if(tf === iv()) return Math.max(
+      ssscCap,
+      chartDesiredClosedDepth(visibleCount || DEF_VISIBLE),
+      Math.min(CHART_BUFFER_RETENTION_CAP, Array.isArray(candles) ? candles.length : 0)
+    );
     return hit ? (state.ssscVisible ? hit.cap : hit.keep) : 420;
   }
   function requiredKlineTimeframes(){
@@ -2780,70 +2847,7 @@ function priceAt(l,t){
 }
 
 function autoYRange(vis){
-  const prices = [];
-  const vr = visTime(vis);
-  const sym = cfg().symbol;
-
-  for(const c of vis) prices.push(c.high,c.low);
-
-  if(tglEMA20.checked){
-    for(const p of indVisible(ema20,vis)) prices.push(p.value);
-  }
-
-  if(tglEMA50.checked){
-    for(const p of indVisible(ema50,vis)) prices.push(p.value);
-  }
-
-  if(tglEMA3 && tglEMA3.checked){
-    for(const p of indVisible(ema3,vis)) prices.push(p.value);
-  }
-
-  if(tglVWAP.checked){
-    for(const p of indVisible(vwap,vis)) prices.push(p.value);
-  }
-
-  if(tglResults.checked){
-    for(const l of resultLinks.concat(openLotLinks)){
-      if(l.symbol !== sym || !linkOverlap(l,vis)) continue;
-
-      const t1 = Math.max(l.entryTime,vr.start);
-      const t2 = Math.min(l.exitTime,vr.end);
-
-      prices.push(priceAt(l,t1), priceAt(l,t2));
-    }
-  }
-
-  for(const m of fillMarkers){
-    if(
-      m.symbol === sym &&
-      inTime(m.time,vis) &&
-      (tglPositions.checked || openEntryMarkerIds.has(m.id))
-    ){
-      prices.push(m.price);
-    }
-  }
-
-  for(const b of openPositionBoxes){
-    if(b.symbol === sym && inTime(b.time,vis)){
-      prices.push(b.price);
-    }
-  }
-
-  let max = Math.max(...prices);
-  let min = Math.min(...prices);
-
-  if(!isFinite(max) || !isFinite(min) || max === min){
-    max = 1;
-    min = 0;
-  }
-
-  const center = (max + min) / 2;
-  const range = (max - min) * 1.16 || 1;
-
-  return {
-    min:center - range/2,
-    max:center + range/2
-  };
+  return candleOnlyYRange(vis);
 }
 
 function yRange(vis){
@@ -4656,29 +4660,7 @@ startTradeAuto();
 
   // Stable Y range: overlay toggles must not resize/pan the chart. Closed overlays no longer affect auto scale.
   autoYRange = function(vis){
-    const prices = [];
-    const sym = cfg().symbol;
-    for(const c of vis) prices.push(c.high,c.low);
-    if(tglEMA20 && tglEMA20.checked){ for(const p of indVisible(ema20,vis)) prices.push(p.value); }
-    if(tglEMA50 && tglEMA50.checked){ for(const p of indVisible(ema50,vis)) prices.push(p.value); }
-    if(tglEMA3 && tglEMA3.checked){ for(const p of indVisible(ema3,vis)) prices.push(p.value); }
-    if(tglVWAP && tglVWAP.checked){ for(const p of indVisible(vwap,vis)) prices.push(p.value); }
-    for(const l of openLotLinks || []){
-      if(l.symbol !== sym || !linkTimeOverlap15({entryTime:l.entryTime,exitTime:candles.length ? candles[candles.length-1].time : l.exitTime},vis)) continue;
-      prices.push(n15(l.entryPrice));
-    }
-    for(const m of fillMarkers || []){
-      if(m.symbol === sym && openEntryMarkerIds && openEntryMarkerIds.has(m.id) && inTime(m.time,vis)) prices.push(n15(m.price));
-    }
-    for(const b of openPositionBoxes || []){
-      if(b.symbol === sym) prices.push(n15(b.price));
-    }
-    let max = Math.max(...prices);
-    let min = Math.min(...prices);
-    if(!isFinite(max) || !isFinite(min) || max === min){ max = 1; min = 0; }
-    const center = (max + min) / 2;
-    const rangeV = (max - min) * 1.16 || 1;
-    return {min:center - rangeV/2,max:center + rangeV/2};
+    return candleOnlyYRange(vis);
   };
 
   function centerLastAndResetY15(){
@@ -11014,29 +10996,7 @@ startTradeAuto();
 
   // Stable Y range: overlay toggles must not resize/pan the chart. Closed overlays no longer affect auto scale.
   autoYRange = function(vis){
-    const prices = [];
-    const sym = cfg().symbol;
-    for(const c of vis) prices.push(c.high,c.low);
-    if(tglEMA20 && tglEMA20.checked){ for(const p of indVisible(ema20,vis)) prices.push(p.value); }
-    if(tglEMA50 && tglEMA50.checked){ for(const p of indVisible(ema50,vis)) prices.push(p.value); }
-    if(tglEMA3 && tglEMA3.checked){ for(const p of indVisible(ema3,vis)) prices.push(p.value); }
-    if(tglVWAP && tglVWAP.checked){ for(const p of indVisible(vwap,vis)) prices.push(p.value); }
-    for(const l of openLotLinks || []){
-      if(l.symbol !== sym || !linkTimeOverlap15({entryTime:l.entryTime,exitTime:candles.length ? candles[candles.length-1].time : l.exitTime},vis)) continue;
-      prices.push(n15(l.entryPrice));
-    }
-    for(const m of fillMarkers || []){
-      if(m.symbol === sym && openEntryMarkerIds && openEntryMarkerIds.has(m.id) && inTime(m.time,vis)) prices.push(n15(m.price));
-    }
-    for(const b of openPositionBoxes || []){
-      if(b.symbol === sym) prices.push(n15(b.price));
-    }
-    let max = Math.max(...prices);
-    let min = Math.min(...prices);
-    if(!isFinite(max) || !isFinite(min) || max === min){ max = 1; min = 0; }
-    const center = (max + min) / 2;
-    const rangeV = (max - min) * 1.16 || 1;
-    return {min:center - rangeV/2,max:center + rangeV/2};
+    return candleOnlyYRange(vis);
   };
 
   function centerLastAndResetY15(){
@@ -12130,25 +12090,7 @@ startTradeAuto();
   if(prevAutoY21 && !window.__v13Patch21AutoYWrapped){
     window.__v13Patch21AutoYWrapped = true;
     autoYRange = function(vis){
-      const r = prevAutoY21.apply(this,arguments);
-      try{
-        const latest = latest21();
-        if(!latest || !Array.isArray(openPositionBoxes) || !openPositionBoxes.length) return r;
-        let min = n21(r.min), max = n21(r.max);
-        for(const b of openPositionBoxes){
-          const o = pickStopForBox21(b,n21(latest.close));
-          if(o && Number.isFinite(o.price)){
-            min = Math.min(min,o.price);
-            max = Math.max(max,o.price);
-          }
-        }
-        if(max > min){
-          const center = (min + max) / 2;
-          const range = (max - min) * 1.16 || 1;
-          return {min:center - range/2,max:center + range/2};
-        }
-      }catch(e){}
-      return r;
+      return candleOnlyYRange(vis);
     };
   }
 
@@ -13809,15 +13751,7 @@ If there is NO open position, use this Section 2 instead:
 
   const prevAutoY=typeof autoYRange==='function'?autoYRange:null;
   if(prevAutoY&&!window.__v32r1AutoYWrapped){ window.__v32r1AutoYWrapped=true; autoYRange=function(vis){
-    const prices=[]; for(const c of vis||[]) prices.push(c.high,c.low);
-    try{ if(tglEMA20&&tglEMA20.checked) for(const p of indVisible(ema20,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(tglEMA50&&tglEMA50.checked) for(const p of indVisible(ema50,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(tglEMA3&&tglEMA3.checked) for(const p of indVisible(ema3,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(maEnabled(4)) for(const p of indVisible(ema4,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(maEnabled(5)) for(const p of indVisible(ema5,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(tglVWAP&&tglVWAP.checked) for(const p of indVisible(vwap,vis)) prices.push(p.value); }catch(_e){}
-    let max=Math.max(...prices), min=Math.min(...prices); if(!Number.isFinite(max)||!Number.isFinite(min)||max===min){max=1;min=0;}
-    const center=(max+min)/2, rangeV=(max-min)*1.16||1; return {min:center-rangeV/2,max:center+rangeV/2};
+    return candleOnlyYRange(vis);
   }; }
 
   const prevCandleTip=typeof candleTip==='function'?candleTip:null;
@@ -13975,15 +13909,7 @@ If there is NO open position, use this Section 2 instead:
   }
   if(typeof draw==='function'&&!window.__v32r2DrawWrapped){ const prev=draw; window.__v32r2DrawWrapped=true; draw=function(){ const r=prev.apply(this,arguments); try{drawExtraMAs();}catch(_e){} return r; }; }
   if(typeof autoYRange==='function'&&!window.__v32r2AutoYWrapped){ window.__v32r2AutoYWrapped=true; autoYRange=function(vis){
-    const prices=[]; for(const c of vis||[]) prices.push(c.high,c.low);
-    try{ if(tglEMA20&&tglEMA20.checked) for(const p of indVisible(ema20,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(tglEMA50&&tglEMA50.checked) for(const p of indVisible(ema50,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(tglEMA3&&tglEMA3.checked) for(const p of indVisible(ema3,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(maEnabled(4)) for(const p of indVisible(ema4,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(maEnabled(5)) for(const p of indVisible(ema5,vis)) prices.push(p.value); }catch(_e){}
-    try{ if(tglVWAP&&tglVWAP.checked) for(const p of indVisible(vwap,vis)) prices.push(p.value); }catch(_e){}
-    let max=Math.max(...prices), min=Math.min(...prices); if(!Number.isFinite(max)||!Number.isFinite(min)||max===min){max=1;min=0;}
-    const center=(max+min)/2, rangeV=(max-min)*1.16||1; return {min:center-rangeV/2,max:center+rangeV/2};
+    return candleOnlyYRange(vis);
   }; }
   if(typeof candleTip==='function'&&!window.__v32r2CandleTipWrapped){ window.__v32r2CandleTipWrapped=true; candleTip=function(c){
     const lines=[formatDateTime(c.time*1000),'O : '+ip(c.open),'H : '+ip(c.high),'L : '+ip(c.low),'C : '+ip(c.close),'V : '+fv(c.volume)];
@@ -14658,16 +14584,7 @@ If there is NO open position, use this Section 2 instead:
   }
   const prevAutoY = typeof autoYRange === "function" ? autoYRange : null;
   autoYRange = window.autoYRange = function(vis){
-    const base = prevAutoY ? prevAutoY.apply(this,arguments) : {min:0,max:1};
-    let min = num(base.min,0), max = num(base.max,1);
-    function include(arr){ try{ for(const p of indVisible(arr||[],vis)){ const v=num(p.value); if(v==null) continue; min=Math.min(min,v); max=Math.max(max,v); } }catch(_e){} }
-    if(localStorage.getItem("btc_futures_chart_v13_21_indicators_visible") !== "0"){
-      if(enabled(4)) include(window.ema4);
-      if(enabled(5)) include(window.ema5);
-    }
-    if(max <= min){ max=min+1; }
-    const center=(max+min)/2, range=(max-min)*1.02 || 1;
-    return {min:center-range/2,max:center+range/2};
+    return candleOnlyYRange(vis);
   };
   const prevDraw = typeof draw === "function" ? draw : null;
   draw = window.draw = function(){
