@@ -100,6 +100,7 @@ const OLDER_THRESHOLD = 120;
 const KLINE_LIMIT = 1500;
 const CHART_INDICATOR_WARMUP_MIN = 600;
 const CHART_BUFFER_RETENTION_CAP = 1500;
+const CHART_HISTORY_RETENTION_CAP = 10000;
 
 const MAX_FUTURE_RATIO = 0.5;
 
@@ -809,7 +810,7 @@ function chartIndicatorWarmupTarget(){
 
 function chartDesiredClosedDepth(visible=visibleCount){
   const desired = Math.ceil((Number(visible) || DEF_VISIBLE) + chartIndicatorWarmupTarget());
-  return clamp(desired, CHART_INDICATOR_WARMUP_MIN, CHART_BUFFER_RETENTION_CAP);
+  return clamp(desired, CHART_INDICATOR_WARMUP_MIN, CHART_HISTORY_RETENTION_CAP);
 }
 
 function candleOnlyYRange(vis){
@@ -1209,31 +1210,31 @@ async function olderIfNeeded(r){
     );
     const expandAfterFetch = zoomRequestedVisible > oldLength;
     const before = candles[0].time * 1000 - 1;
-    const old = await klines(before, loadLimit);
-    const f = old.filter(c => c.time < candles[0].time);
+    const retention = Math.max(
+      Math.min(CHART_HISTORY_RETENTION_CAP, oldLength + loadLimit),
+      chartDesiredClosedDepth(visibleCount || DEF_VISIBLE)
+    );
+    const backfill = window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.ensureOlderClosedCandles === "function"
+      ? await window.PUBLIC_MARKET_DATA_HUB.ensureOlderClosedCandles(iv(),before,loadLimit,retention)
+      : {added:0,fetched:0,noMore:true};
 
-    if(!f.length){
+    if(!backfill.fetched){
       noMoreOlder = true;
       olderFetchTargetVisible = 0;
       return;
     }
 
-    candles = f.concat(candles);
+    if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.getChartBuffer === "function"){
+      candles = window.PUBLIC_MARKET_DATA_HUB.getChartBuffer(iv());
+    }
     if(expandAfterFetch){
       visibleCount = Math.min(
         candles.length,
         Math.max(visibleCount, requestedVisible || visibleCount)
       );
     }
-    if(old.length < loadLimit) noMoreOlder = true;
+    if(backfill.noMore) noMoreOlder = true;
     olderFetchTargetVisible = Math.max(0, requestedVisible - candles.length);
-    if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.prependClosedBuffer === "function"){
-      const retention = Math.min(CHART_BUFFER_RETENTION_CAP, oldLength + f.length);
-      window.PUBLIC_MARKET_DATA_HUB.prependClosedBuffer(iv(), f, Math.max(retention, chartDesiredClosedDepth(visibleCount || DEF_VISIBLE)));
-      if(typeof window.PUBLIC_MARKET_DATA_HUB.getChartBuffer === "function"){
-        candles = window.PUBLIC_MARKET_DATA_HUB.getChartBuffer(iv());
-      }
-    }
     indicators();
     clampView();
     draw();
@@ -1503,7 +1504,7 @@ const marketDataHub = (() => {
     if(tf === iv()) return Math.max(
       ssscCap,
       chartDesiredClosedDepth(visibleCount || DEF_VISIBLE),
-      Math.min(CHART_BUFFER_RETENTION_CAP, Array.isArray(candles) ? candles.length : 0)
+      Math.min(CHART_HISTORY_RETENTION_CAP, Array.isArray(candles) ? candles.length : 0)
     );
     return hit ? (state.ssscVisible ? hit.cap : hit.keep) : 420;
   }
@@ -1643,7 +1644,7 @@ const marketDataHub = (() => {
     }
     trimClosedBuffer(tf,limitOverride);
   }
-  function prependClosedBuffer(tf,rows,limitOverride){
+  function prependClosedBuffer(tf,rows,limitOverride,{trimFromRight=false}={}){
     if(!tf || !Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
     const existing = getClosedBuffer(tf);
     const merged = rows
@@ -1658,8 +1659,61 @@ const marketDataHub = (() => {
       else deduped.push(row);
     }
     state.closedKlinesByTf[tf] = deduped;
-    trimClosedBuffer(tf,limitOverride || deduped.length);
+    if(trimFromRight){
+      const limit = Math.max(10, limitOverride || deduped.length);
+      while(state.closedKlinesByTf[tf].length > limit) state.closedKlinesByTf[tf].pop();
+    }else{
+      trimClosedBuffer(tf,limitOverride || deduped.length);
+    }
     return getClosedBuffer(tf);
+  }
+  async function ensureOlderClosedCandles(tf,beforeTime,neededCount,retentionLimit){
+    ensureBufferSymbol();
+    const existing = getClosedBuffer(tf);
+    const oldest = existing.length ? Number(existing[0].time) : Infinity;
+    const beforeMsRaw = Number(beforeTime);
+    const beforeMs = beforeMsRaw > 1e12 ? beforeMsRaw : beforeMsRaw * 1000;
+    const target = clamp(Math.ceil(Number(neededCount) || 0),1,OLDER_LIMIT);
+    const retention = Math.max(
+      10,
+      Number(retentionLimit) || intervalKeep(tf),
+      Math.min(CHART_HISTORY_RETENTION_CAP, existing.length + target)
+    );
+    if(!Number.isFinite(beforeMs) || beforeMs <= 0) return {added:0,fetched:0,rows:getClosedBuffer(tf),noMore:true};
+
+    const rows = [];
+    let cursor = beforeMs;
+    let terminalBatch = false;
+    while(rows.length < target){
+      const remaining = target - rows.length;
+      const batch = await klinesForInterval(tf,cursor,Math.min(KLINE_LIMIT,remaining),cfg().symbol);
+      if(!batch.length){
+        terminalBatch = true;
+        break;
+      }
+      const validOlder = batch.filter(row => {
+        const t = Number(row && row.time);
+        return Number.isFinite(t) && t < oldest && (t * 1000) < beforeMs;
+      });
+      rows.push(...validOlder);
+      const first = batch[0];
+      const firstMs = Number(first && (first.openTime || (first.time * 1000)));
+      if(batch.length < Math.min(KLINE_LIMIT,remaining) || !Number.isFinite(firstMs)){
+        terminalBatch = true;
+        break;
+      }
+      cursor = firstMs - 1;
+    }
+
+    const beforeLen = getClosedBuffer(tf).length;
+    if(rows.length) prependClosedBuffer(tf,rows,retention,{trimFromRight:true});
+    const after = getClosedBuffer(tf);
+    return {
+      added:Math.max(0,after.length - beforeLen),
+      fetched:rows.length,
+      rows:after,
+      noMore:terminalBatch && rows.length < target
+    };
   }
   function ingestRestRows(tf,rows,{replace=false,limitOverride}={}){
     if(!Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
@@ -2010,6 +2064,7 @@ const marketDataHub = (() => {
     rebuildRequirements,
     setSsscVisible,
     seedBuffer,
+    ensureOlderClosedCandles,
     seedSsscBuffers,
     ensureSsscBuffers,
     getClosedBuffer,
