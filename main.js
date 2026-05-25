@@ -1261,6 +1261,16 @@ const SHARED_SSSC_TFS = [
   {label:"3M", interval:"3m", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP},
   {label:"1M", interval:"1m", keep:SSSC_TARGET_CLOSED_CANDLES, min:SSSC_MIN_CLOSED_CANDLES, cap:SSSC_CLOSED_RETENTION_CAP}
 ];
+const SHARED_MA_STACK_TFS = [
+  {label:"1m", interval:"1m", keep:1000, cap:1200},
+  {label:"3m", interval:"3m", keep:1000, cap:1200},
+  {label:"5m", interval:"5m", keep:1000, cap:1200},
+  {label:"15m", interval:"15m", keep:1000, cap:1200},
+  {label:"30m", interval:"30m", keep:1000, cap:1200},
+  {label:"1H", interval:"1h", keep:1000, cap:1200},
+  {label:"4H", interval:"4h", keep:1000, cap:1200},
+  {label:"1D", interval:"1d", keep:1000, cap:1200}
+];
 
 const marketDataHub = (() => {
   const MODULE = "BINANCE_PUBLIC_MARKET_DATA_HUB";
@@ -1304,12 +1314,14 @@ const marketDataHub = (() => {
     connectStartedAt:0,
     desiredLive:true,
     ssscVisible:false,
+    maStackVisible:false,
     lastMessageSource:"",
     visibilityRecoveryTimer:null,
     closedKlinesByTf:{},
     formingKlineByTf:{},
     bufferSymbol:null,
-    ssscSeedPromise:null
+    ssscSeedPromise:null,
+    maStackSeedPromise:null
   };
 
   function now(){ return Date.now(); }
@@ -1496,22 +1508,27 @@ const marketDataHub = (() => {
     ws = null;
   }
   function sharedTfConfig(tf){
-    return SHARED_SSSC_TFS.find(x => x.interval === tf) || null;
+    return SHARED_SSSC_TFS.find(x => x.interval === tf) || SHARED_MA_STACK_TFS.find(x => x.interval === tf) || null;
   }
   function intervalKeep(tf){
     const hit = sharedTfConfig(tf);
-    const ssscCap = state.ssscVisible && hit ? hit.cap : 0;
+    const ssscCap = state.ssscVisible && SHARED_SSSC_TFS.some(x => x.interval === tf) && hit ? hit.cap : 0;
+    const maStackCap = state.maStackVisible && SHARED_MA_STACK_TFS.some(x => x.interval === tf) && hit ? hit.cap : 0;
     if(tf === iv()) return Math.max(
       ssscCap,
+      maStackCap,
       chartDesiredClosedDepth(visibleCount || DEF_VISIBLE),
       Math.min(CHART_HISTORY_RETENTION_CAP, Array.isArray(candles) ? candles.length : 0)
     );
-    return hit ? (state.ssscVisible ? hit.cap : hit.keep) : 420;
+    return hit ? ((state.ssscVisible || state.maStackVisible) ? hit.cap : hit.keep) : 420;
   }
   function requiredKlineTimeframes(){
     const required = new Set([iv()]);
     if(state.ssscVisible){
       SHARED_SSSC_TFS.forEach(tf => required.add(tf.interval));
+    }
+    if(state.maStackVisible){
+      SHARED_MA_STACK_TFS.forEach(tf => required.add(tf.interval));
     }
     return required;
   }
@@ -1784,6 +1801,12 @@ const marketDataHub = (() => {
       await seedBuffer(tf.interval,tf.keep,force);
     }
   }
+  async function seedMaStackBuffers(force=false){
+    ensureBufferSymbol();
+    for(const tf of SHARED_MA_STACK_TFS){
+      await seedBuffer(tf.interval,tf.keep,force);
+    }
+  }
   function ensureSsscBuffers(force=false){
     if(state.ssscSeedPromise) return state.ssscSeedPromise;
     state.ssscSeedPromise = seedSsscBuffers(force)
@@ -1795,6 +1818,18 @@ const marketDataHub = (() => {
         state.ssscSeedPromise = null;
       });
     return state.ssscSeedPromise;
+  }
+  function ensureMaStackBuffers(force=false){
+    if(state.maStackSeedPromise) return state.maStackSeedPromise;
+    state.maStackSeedPromise = seedMaStackBuffers(force)
+      .catch(e => {
+        console.warn(MODULE + " MA Stack seed failed",e);
+        throw e;
+      })
+      .finally(() => {
+        state.maStackSeedPromise = null;
+      });
+    return state.maStackSeedPromise;
   }
   function markWsTick(source){
     if(state.reconnectTimer){
@@ -1979,6 +2014,9 @@ const marketDataHub = (() => {
     if(state.ssscVisible){
       ensureSsscBuffers(false).catch(() => {});
     }
+    if(state.maStackVisible){
+      ensureMaStackBuffers(false).catch(() => {});
+    }
   }
   function runStatusLoop(){
     refreshConnectionStatus();
@@ -2015,10 +2053,25 @@ const marketDataHub = (() => {
       ensureSsscBuffers(false).catch(() => {});
     }
   }
+  function setMaStackVisible(visible){
+    ensureBufferSymbol();
+    const next = !!visible;
+    const changed = state.maStackVisible !== next;
+    state.maStackVisible = next;
+    if(!changed){
+      if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
+      return;
+    }
+    rebuildRequirements(true);
+    if(state.maStackVisible){
+      ensureMaStackBuffers(false).catch(() => {});
+    }
+  }
   function handleVisibilityReturn(){
     if(document.hidden) return;
     restSyncLatest("visibility/focus return");
     if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
+    if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
     if(!socketOpen()) connect();
     else refreshConnectionStatus();
   }
@@ -2063,10 +2116,13 @@ const marketDataHub = (() => {
     restSyncLatest,
     rebuildRequirements,
     setSsscVisible,
+    setMaStackVisible,
     seedBuffer,
     ensureOlderClosedCandles,
     seedSsscBuffers,
     ensureSsscBuffers,
+    seedMaStackBuffers,
+    ensureMaStackBuffers,
     getClosedBuffer,
     getFormingCandle,
     getChartBuffer,
@@ -14226,11 +14282,25 @@ If there is NO open position, use this Section 2 instead:
       {key:"30m", interval:"30m"},
       {key:"1H", interval:"1h"}, {key:"4H", interval:"4h"}, {key:"1D", interval:"1d"}
     ];
-    let timer = null, pending = false;
+    let refreshTimer = null, pending = false, lastRefresh = 0;
+    let blinkSymbol = "";
     const lastEventKeyByTf = new Map();
     const lastBlinkEventByTf = new Map();
-    function endpoint(){ try{ return cfg().rest || "https://fapi.binance.com/fapi/v1/klines"; }catch(_e){ return "https://fapi.binance.com/fapi/v1/klines"; } }
-    function symbol(){ try{ return cfg().symbol || "BTCUSDC"; }catch(_e){ return "BTCUSDC"; } }
+    const LIVE_TFS = new Set(["1m","3m","5m","15m","30m"]);
+    function hub(){ return window.PUBLIC_MARKET_DATA_HUB || null; }
+    function hubRowToKline(row){
+      if(!row) return null;
+      return [
+        Number(row.openTime || row.time * 1000),
+        Number(row.open),
+        Number(row.high),
+        Number(row.low),
+        Number(row.close),
+        Number(row.volume || row.baseVolume || 0),
+        Number(row.closeTime || ((Number(row.time) + (typeof ivSec === "function" ? ivSec(row.interval) : 0)) * 1000)),
+        Number(row.quoteVolume || 0)
+      ];
+    }
     function stackPeriods(){
       const defaults = [9,21,55,100,200];
       return [1,2,3,4,5].map((n,i)=>{
@@ -14260,7 +14330,6 @@ If there is NO open position, use this Section 2 instead:
       for(let i=p;i<values.length;i++){ cur = values[i]*a + cur*(1-a); out[i]=cur; }
       return out;
     }
-    function barsAgoText(n){ return n <= 0 ? "current candle" : (n + " bars ago"); }
     function pairLabel(periods,i,j){ return `EMA${periods[i]}/${periods[j]}`; }
     function maLabelP(periods,i){ return "EMA" + periods[i]; }
     function spreadScoreLabel(score){
@@ -14275,128 +14344,231 @@ If there is NO open position, use this Section 2 instead:
       const score = Math.round(Math.max(0,Math.min(100,spreadPct/0.65*100)));
       return `${spreadScoreLabel(score)} | ${score}`;
     }
-    function formatBlinkEvent(maPair){
-      const txt = String(maPair || "").trim();
-      if(!eventType(txt)) return "None";
-      const m = txt.match(/^(.*)\s+(current candle|\d+ bars ago)$/);
-      if(m) return `${m[1]} detected ${m[2]}`;
-      return `${txt} detected current candle`;
+    function clamp100(v){ return Math.max(0,Math.min(100,Math.round(v))); }
+    function eventText(ev,freshOnly=false){ if(!ev) return freshOnly ? "No fresh event" : "None"; if(freshOnly && ev.age > 5) return "No fresh event"; return ev.label; }
+    function setupDir(upPairs,downPairs,upSlope,downSlope){ if(upPairs || upSlope >= 4) return 1; if(downPairs || downSlope >= 4) return -1; return 0; }
+    function eventIdentity(tf,r){
+      if(!r || (r.blinkIntent !== "green" && r.blinkIntent !== "red") || !r.blinkEvent) return "";
+      const ev = r.blinkEvent;
+      return [
+        tf.key,
+        ev.eventClass || "",
+        ev.type || "",
+        ev.ref || ev.label || "",
+        ev.time || "",
+        ev.dir || 0,
+        r.blinkIntent
+      ].join("|");
     }
-    function detectMaPair(series, periods, lookback){
-      let best = null;
+    function maPairIntent(ev,ctx){
+      if(!ev || ev.age !== 0) return {intent:"none",reason:"No current-candle MA-pair event",display:"Event — none"};
+      const type = String(ev.type || "").toLowerCase();
+      const weakSetup = !ctx.setup || ctx.alignment < 60 || ctx.strength < 35 || ctx.quality < 40 || ctx.state === "mixed" || ctx.state === "transition" || ctx.state === "compression";
+      if(type.includes("cross risk") || type.includes("compression") || type.includes("transition")){
+        return {intent:"none",reason:"MA-pair compression/cross risk",display:"Event — transition risk"};
+      }
+      if(weakSetup){
+        return {intent:"none",reason:"Weak or mixed stack context",display:"Event — none"};
+      }
+      if(!ev.dir) return {intent:"none",reason:"Ambiguous MA-pair event",display:"Event — none"};
+      const supports = ev.dir === ctx.setup;
+      return {
+        intent:supports ? "green" : "red",
+        reason:`MA-pair event ${supports ? "supports setup" : "conflicts with setup"}`,
+        display:`Event — MA-pair event ${supports ? "supports setup" : "conflicts with setup"}`
+      };
+    }
+    function signOf(v){ return v > 0 ? 1 : v < 0 ? -1 : 0; }
+    function isConfirmedBounce(diff, fast, slow, idx){
+      const start = idx - 5;
+      if(start < 0) return false;
+      const signs = [], pct = [];
+      for(let k=start;k<=idx;k++){
+        const d = diff[k];
+        const s = slow[k];
+        if(!Number.isFinite(d)||!Number.isFinite(s)||!Number.isFinite(fast[k])) return false;
+        const sg = signOf(d);
+        if(!sg) return false;
+        signs.push(sg);
+        pct.push(Math.abs(d)/Math.max(1,Math.abs(s)));
+      }
+      if(!signs.every(s => s === signs[0])) return false;
+      let minLocal = 0;
+      for(let k=1;k<pct.length;k++) if(pct[k] < pct[minLocal]) minLocal = k;
+      if(minLocal < 2 || minLocal > 3) return false;
+      let shrinkCount = 0;
+      for(let k=1;k<=minLocal;k++) if(pct[k] < pct[k-1]) shrinkCount++;
+      if(shrinkCount < 2 || pct[minLocal] > 0.0012) return false;
+      const expandsTwice = pct[minLocal+1] > pct[minLocal] && pct[minLocal+2] > pct[minLocal+1];
+      const expandsMeaningfully = pct[pct.length-1] > Math.max(pct[minLocal]*1.35,pct[minLocal]+0.00025);
+      if(!expandsTwice && !expandsMeaningfully) return false;
+      const minIdx = start + minLocal;
+      const fastAway = signs[0] > 0 ? fast[idx] > fast[minIdx] : fast[idx] < fast[minIdx];
+      return fastAway;
+    }
+    function isFailedCross(diff, idx){
+      const start = Math.max(1,idx-5);
+      const curSign = signOf(diff[idx]);
+      if(!curSign) return false;
+      let crossIdx = -1;
+      for(let k=start;k<=idx;k++){
+        const prevSign = signOf(diff[k-1]), thisSign = signOf(diff[k]);
+        if(prevSign && thisSign && prevSign !== thisSign) crossIdx = k;
+      }
+      if(crossIdx < 0 || crossIdx === idx) return false;
+      const beforeSign = signOf(diff[crossIdx-1]);
+      const crossedSign = signOf(diff[crossIdx]);
+      if(!beforeSign || !crossedSign || beforeSign === crossedSign) return false;
+      const crossedBack = curSign === beforeSign;
+      const postCrossFailed = curSign === crossedSign && Math.abs(diff[idx]) < Math.abs(diff[crossIdx])*.65;
+      return crossedBack || postCrossFailed;
+    }
+    function detectMaPair(series, periods, ctx, lookback){
       const len = series[0] ? series[0].length : 0;
-      const start = Math.max(1, len - (lookback || 18));
+      const start = Math.max(2, len - (lookback || 18));
+      let best = null;
+      const add = ev => {
+        if(!ev) return;
+        if(!best || ev.age < best.age || (ev.age === best.age && ev.rank > best.rank)) best = ev;
+      };
       for(let a=0; a<periods.length-1; a++){
         for(let b=a+1; b<periods.length; b++){
           const fast = series[a], slow = series[b];
           if(!fast || !slow || !fast.length || !slow.length) continue;
+          const label = pairLabel(periods,a,b);
+          const diff = fast.map((v,k)=>Number.isFinite(v)&&Number.isFinite(slow[k]) ? v - slow[k] : NaN);
           for(let i=start;i<len;i++){
-            const a0 = fast[i-1], b0 = slow[i-1], a1 = fast[i], b1 = slow[i];
-            if(!Number.isFinite(a0)||!Number.isFinite(b0)||!Number.isFinite(a1)||!Number.isFinite(b1)) continue;
-            const prev = a0-b0, cur = a1-b1;
-            let dir = null;
-            if(prev <= 0 && cur > 0) dir = "bull cross";
-            if(prev >= 0 && cur < 0) dir = "bear cross";
-            if(dir){
-              const cand = {txt:`${pairLabel(periods,a,b)} ${dir}`, barsAgo:len-1-i, rank:3};
-              if(!best || cand.barsAgo < best.barsAgo || (cand.barsAgo === best.barsAgo && cand.rank > best.rank)) best = cand;
-            }
+            const f2=fast[i-2], s2=slow[i-2], f0=fast[i-1], s0=slow[i-1], f1=fast[i], s1=slow[i];
+            if(![f2,s2,f0,s0,f1,s1].every(Number.isFinite)) continue;
+            const prev=f0-s0, cur=f1-s1, older=f2-s2, age=len-1-i;
+            const ref=Math.max(1,Math.abs(s1));
+            const prevPct=Math.abs(prev)/ref, curPct=Math.abs(cur)/ref, olderPct=Math.abs(older)/ref;
+            const eventTime = ctx.times && ctx.times[i] ? ctx.times[i] : i;
+            const curSign = signOf(cur);
+            if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",ref:label,label:`${label} bull crossover`,age,dir:1,time:eventTime,rank:95});
+            if(prev >= 0 && cur < 0) add({eventClass:"MA-pair",type:"crossover",ref:label,label:`${label} bear crossover`,age,dir:-1,time:eventTime,rank:95});
+            if(isFailedCross(diff,i)) add({eventClass:"MA-pair",type:"failed crossover",ref:label,label:`${label} failed crossover`,age,dir:curSign || -signOf(diff[Math.max(0,i-1)]),time:eventTime,rank:82});
+            const sameSide = Math.sign(cur) === Math.sign(prev) && Math.sign(cur) !== 0;
+            const movingTogether = sameSide && curPct < prevPct && prevPct <= olderPct;
+            if(sameSide && isConfirmedBounce(diff,fast,slow,i)) add({eventClass:"MA-pair",type:"bounce/no-cross",ref:label,label:`${label} bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
+            if(sameSide && olderPct <= 0.0009 && curPct > Math.max(olderPct*1.55,0.0012)) add({eventClass:"MA-pair",type:"compression release",ref:label,label:`${label} compression release`,age,dir:curSign,time:eventTime,rank:70});
+            if(movingTogether && curPct <= 0.0018) add({eventClass:"MA-pair",type:"cross risk",ref:label,label:`${label} cross risk`,age,dir:0,time:eventTime,rank:52});
+            else if(curPct <= 0.0007) add({eventClass:"MA-pair",type:"compression",ref:label,label:`${label} compression`,age,dir:0,time:eventTime,rank:45});
+            if(sameSide && curPct > prevPct*1.35 && ctx.spreadDelta > 0.01) add({eventClass:"MA-pair",type:"expansion",ref:label,label:`${label} expansion`,age,dir:curSign,time:eventTime,rank:58});
           }
         }
       }
-      if(best) return `${best.txt} ${barsAgoText(best.barsAgo)}`;
-
-      let bounce = null, compression = null;
-      const last = len - 1;
-      const prevIdx = Math.max(0,last-4);
-      for(let a=0; a<periods.length-1; a++){
-        for(let b=a+1; b<periods.length; b++){
-          const fast = series[a], slow = series[b];
-          if(!fast || !slow || !Number.isFinite(fast[last]) || !Number.isFinite(slow[last]) || !Number.isFinite(fast[prevIdx]) || !Number.isFinite(slow[prevIdx])) continue;
-          const cur = fast[last]-slow[last], prev = fast[prevIdx]-slow[prevIdx];
-          const ref = Math.max(1,Math.abs(slow[last]));
-          const curPct = Math.abs(cur)/ref;
-          const prevPct = Math.abs(prev)/ref;
-          const sameSide = Math.sign(cur) === Math.sign(prev) && Math.sign(cur) !== 0;
-          if(sameSide && prevPct <= 0.0008 && curPct > prevPct*1.25 && !bounce){ bounce = `${pairLabel(periods,a,b)} bounce, no cross`; }
-          if(curPct <= 0.0007 && !compression){ compression = `${pairLabel(periods,a,b)} compression`; }
-        }
-      }
-      return bounce || compression || "None";
+      if(ctx.nearCross && !best) add({eventClass:"MA-pair",type:"stack transition",ref:"stack",label:"Stack transition",age:0,dir:0,time:ctx.times && ctx.times[len-1] ? ctx.times[len-1] : len-1,rank:45});
+      return best;
     }
-    function detectPriceMA(rows, series, periods, lookback){
+    function detectPriceMA(rows, series, periods, ctx, lookback){
       const len = rows.length;
       const start = Math.max(1, len - (lookback || 10));
+      let best = null;
+      const add = ev => {
+        if(!ev) return;
+        if(!best || ev.age < best.age || (ev.age === best.age && ev.rank > best.rank)) best = ev;
+      };
       for(let i=len-1;i>=start;i--){
         const row = rows[i] || [], prevRow = rows[i-1] || [];
-        const o=Number(row[1]), h=Number(row[2]), l=Number(row[3]), c=Number(row[4]);
-        const pc=Number(prevRow[4]);
+        const o=Number(row[1]), h=Number(row[2]), l=Number(row[3]), c=Number(row[4]), pc=Number(prevRow[4]);
         if(!Number.isFinite(o)||!Number.isFinite(h)||!Number.isFinite(l)||!Number.isFinite(c)||!Number.isFinite(pc)) continue;
-        const tol = Math.max(c * 0.0006, 1);
+        const age=len-1-i, tol=Math.max(c*0.0008,1);
         for(let idx=0; idx<series.length; idx++){
-          const ema = series[idx] && series[idx][i];
-          const pema = series[idx] && series[idx][i-1];
+          const ema=series[idx]&&series[idx][i], pema=series[idx]&&series[idx][i-1];
           if(!Number.isFinite(ema)||!Number.isFinite(pema)) continue;
-          const tag = maLabelP(periods,idx);
-          const crossedUp = pc <= pema && c > ema;
-          const crossedDown = pc >= pema && c < ema;
-          if(crossedUp || crossedDown) return `Price crossed ${tag} ${barsAgoText(len-1-i)}`;
-          if(l <= ema + tol && c > ema && c >= o) return `${tag} bounce success ${barsAgoText(len-1-i)}`;
-          if(h >= ema - tol && c < ema && c <= o) return `${tag} rejection success ${barsAgoText(len-1-i)}`;
-          if(l <= ema + tol && c < ema && pc > pema) return `${tag} bounce failed ${barsAgoText(len-1-i)}`;
-          if(h >= ema - tol && c > ema && pc < pema) return `${tag} rejection failed ${barsAgoText(len-1-i)}`;
+          const tag=maLabelP(periods,idx);
+          const eventTime = Number(row[0]) || i;
+          if(pc <= pema && c > ema) add({eventClass:"Price-MA",type:"price reclaim",ref:tag,label:`Price reclaim of ${tag}`,age,dir:1,time:eventTime,rank:70});
+          if(pc >= pema && c < ema) add({eventClass:"Price-MA",type:"price loss",ref:tag,label:`Price loss of ${tag}`,age,dir:-1,time:eventTime,rank:70});
+          if(l <= ema + tol && c > ema && c >= o) add({eventClass:"Price-MA",type:"price bounce",ref:tag,label:`Price bounce from ${tag}`,age,dir:1,time:eventTime,rank:62});
+          if(h >= ema - tol && c < ema && c <= o) add({eventClass:"Price-MA",type:"price rejection",ref:tag,label:`Price rejection from ${tag}`,age,dir:-1,time:eventTime,rank:62});
+          if(l <= ema + tol && c < ema && pc > pema) add({eventClass:"Price-MA",type:"failed breakdown",ref:tag,label:`Failed breakdown at ${tag}`,age,dir:1,time:eventTime,rank:54});
+          if(h >= ema - tol && c > ema && pc < pema) add({eventClass:"Price-MA",type:"failed reclaim",ref:tag,label:`Failed reclaim at ${tag}`,age,dir:-1,time:eventTime,rank:54});
+          if(Math.abs(c-ema) <= tol && Math.abs(pc-pema) <= tol) add({eventClass:"Price-MA",type:"MA hold / ride",ref:tag,label:`MA hold / ride at ${tag}`,age,dir:ctx.setup,time:eventTime,rank:38});
+          if((c>ema&&pc>pema&&l>ema) || (c<ema&&pc<pema&&h<ema)) add({eventClass:"Price-MA",type:"MA break with acceptance",ref:tag,label:`MA break with acceptance ${tag}`,age,dir:c>ema?1:-1,time:eventTime,rank:36});
         }
       }
-      return "None";
+      return best;
     }
     function unavailable(reason){
-      return {state:"mixed",icon:"~",strength:0,maPair:"None",title:`State: Unavailable\nStrength: 0%\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: None\n\n\nBlink event: None`};
+      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows){
       const periods = stackPeriods();
       const maxPeriod = Math.max(...periods);
       const candles = (Array.isArray(rows)?rows:[]).filter(r=>r && Number.isFinite(Number(r[4])));
       const closes = candles.map(r=>Number(r[4]));
+      const times = candles.map(r=>Number(r[0]) || 0);
       if(closes.length < maxPeriod + 10) return unavailable("Insufficient data");
       const latest = closes[closes.length-1];
       const series = periods.map(p=>emaSeries(closes,p));
       const vals = series.map(s=>s[s.length-1]);
       const prevIdx = Math.max(0, closes.length-6);
+      const prev2Idx = Math.max(0, closes.length-12);
       const prev = series.map(s=>s[prevIdx]);
-      if(vals.some(v=>!Number.isFinite(v)) || prev.some(v=>!Number.isFinite(v))) return unavailable("Insufficient MA data");
-      const upPairs = vals.slice(0,-1).every((v,i)=>v>vals[i+1]);
-      const downPairs = vals.slice(0,-1).every((v,i)=>v<vals[i+1]);
+      const prev2 = series.map(s=>s[prev2Idx]);
+      if(vals.some(v=>!Number.isFinite(v)) || prev.some(v=>!Number.isFinite(v)) || prev2.some(v=>!Number.isFinite(v))) return unavailable("Insufficient MA data");
+      const pairDirs = vals.slice(0,-1).map((v,i)=>Math.sign(v-vals[i+1]));
+      const upPairs = pairDirs.every(x=>x>0), downPairs = pairDirs.every(x=>x<0);
+      const orderedPairs = pairDirs.filter(x=>x!==0);
+      const dominantDir = orderedPairs.reduce((a,b)=>a+b,0);
+      const alignment = upPairs || downPairs ? 100 : clamp100(Math.abs(dominantDir)/(periods.length-1)*100);
       const spread = Math.max(...vals)-Math.min(...vals);
       const spreadPct = latest ? spread/latest*100 : 0;
       const prevSpread = Math.max(...prev)-Math.min(...prev);
       const prevSpreadPct = latest ? prevSpread/latest*100 : spreadPct;
+      const prev2Spread = Math.max(...prev2)-Math.min(...prev2);
+      const prev2SpreadPct = latest ? prev2Spread/latest*100 : prevSpreadPct;
       const spreadDelta = spreadPct - prevSpreadPct;
+      const spreadAccel = spreadDelta - (prevSpreadPct - prev2SpreadPct);
       const slopeSigns = vals.map((v,i)=>v-prev[i]);
-      const upSlope = slopeSigns.filter(x=>x>0).length;
-      const downSlope = slopeSigns.filter(x=>x<0).length;
+      const prevSlopeSigns = prev.map((v,i)=>v-prev2[i]);
+      const slopeMagPct = vals.reduce((s,v,i)=>s+Math.abs(v-prev[i])/Math.max(1,latest),0)/vals.length*100;
+      const accelPct = slopeSigns.reduce((s,v,i)=>s+Math.abs(v-prevSlopeSigns[i])/Math.max(1,latest),0)/vals.length*100;
+      const upSlope = slopeSigns.filter(x=>x>0).length, downSlope = slopeSigns.filter(x=>x<0).length;
+      const slopeAgree = Math.max(upSlope,downSlope);
       const tight = spreadPct < 0.15;
       const nearCross = vals.slice(0,-1).some((v,i)=> latest && Math.abs(v-vals[i+1])/latest < 0.0005);
-      let state="mixed", icon="~", dir=0, slopeAgree=Math.max(upSlope,downSlope), stateLabel="Mixed";
-      if(upPairs){ state="up"; icon="▲"; dir=1; slopeAgree=upSlope; stateLabel="Up stack"; }
-      else if(downPairs){ state="down"; icon="▼"; dir=-1; slopeAgree=downSlope; stateLabel="Down stack"; }
+      const setup = setupDir(upPairs,downPairs,upSlope,downSlope);
+      let state="mixed", icon="~", stateLabel="Mixed";
+      if(upPairs){ state="up"; icon="▲"; stateLabel="Up stack"; }
+      else if(downPairs){ state="down"; icon="▼"; stateLabel="Down stack"; }
       else if(tight){ state="compression"; icon="≋"; stateLabel="Compression"; }
       else if(nearCross){ state="transition"; icon="×"; stateLabel="Transition"; }
       let phase="Chop / Mixed";
-      if(tight && spreadDelta > 0.01) phase="Loaded Compression";
-      else if(tight && spreadDelta < -0.01) phase="Exhausted Compression";
+      if(tight && spreadDelta > 0.01) phase="Compression Release";
+      else if(tight && spreadDelta < -0.01) phase="Flattening Compression";
       else if(tight) phase="Neutral Compression";
-      else if(nearCross) phase="Transition";
-      else if(upPairs && upSlope >= 4) phase="Markup / Trend";
-      else if(downPairs && downSlope >= 4) phase="Markdown / Trend";
-      else if(upPairs || downPairs) phase="Pullback / Retest";
-      const orderScore = (upPairs || downPairs) ? 50 : (tight ? 20 : nearCross ? 25 : 10);
-      const slopeScore = (dir ? slopeAgree/5 : Math.max(upSlope,downSlope)/5) * 30;
-      const spreadScore = Math.max(0,Math.min(20,spreadPct/0.45*20));
-      const strength = Math.round(Math.max(0,Math.min(100,orderScore+slopeScore+spreadScore)));
-      const maPair = detectMaPair(series,periods,18);
-      const blinkEvent = formatBlinkEvent(maPair);
-      const title = `State: ${stateLabel}\nStrength: ${strength}%\nSpread: ${spreadDisplay(spreadPct)}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\n\n\nBlink event: ${blinkEvent}`;
-      return {state,icon,strength,title,phase,maPair,blinkEvent};
+      else if(nearCross) phase="Stack Transition";
+      else if((upPairs||downPairs) && spreadDelta > 0 && slopeAgree >= 4) phase="Clean Expanding Trend";
+      else if(upPairs || downPairs) phase="Ordered but Late/Flattening";
+      const spreadScore = clamp100(spreadPct/0.55*100);
+      const expansionScore = clamp100((spreadDelta+0.04)/0.12*100);
+      const slopeScore = clamp100(slopeMagPct/0.08*100);
+      const slopeAgreeScore = clamp100(slopeAgree/5*100);
+      const accelScore = clamp100(accelPct/0.04*100);
+      const compressionRelease = tight ? 45 : (prevSpreadPct < 0.18 && spreadDelta > 0.015 ? 85 : 55);
+      const flattenPenalty = spreadDelta < -0.01 || slopeMagPct < 0.012 ? 14 : 0;
+      const chopPenalty = (!upPairs && !downPairs && !tight) || nearCross ? 18 : 0;
+      const overextensionPenalty = spreadPct > 1.2 ? Math.min(18,(spreadPct-1.2)*12) : 0;
+      const strength = clamp100(alignment*.24 + spreadScore*.18 + expansionScore*.14 + slopeScore*.16 + slopeAgreeScore*.12 + accelScore*.08 + compressionRelease*.08 - flattenPenalty - chopPenalty - overextensionPenalty);
+      const ctx = {spreadDelta,nearCross,setup,times};
+      const maEvent = detectMaPair(series,periods,ctx,18);
+      const priceEvent = detectPriceMA(candles,series,periods,{setup},10);
+      const validStructure = maEvent ? 70 : 35;
+      const eventFreshScore = maEvent ? Math.max(0,100-maEvent.age*18) : 0;
+      const priceConfirm = priceEvent && priceEvent.dir && setup && priceEvent.dir === setup ? 80 : priceEvent ? 45 : 35;
+      const preCompression = prev2SpreadPct < 0.22 ? 82 : 45;
+      const quality = clamp100(preCompression*.16 + validStructure*.16 + expansionScore*.14 + slopeAgreeScore*.14 + alignment*.14 + priceConfirm*.12 + eventFreshScore*.10 + (chopPenalty?25:75)*.04 - chopPenalty*.55);
+      const maIntent = maPairIntent(maEvent,{setup,state,strength,quality,alignment});
+      const blink = maIntent;
+      const blinkEvent = blink.intent === "none" ? null : maEvent;
+      const maPair = eventText(maEvent,true);
+      const priceMa = eventText(priceEvent,false);
+      const spreadCondition = tight ? "compression" : spreadDelta > 0.01 ? "expanding" : spreadDelta < -0.01 ? "contracting" : "balanced";
+      const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
+      return {state,icon,strength,alignment,quality,title,phase,setup,maPair,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display};
     }
     function bg(state,strength){
       const a = 0.25 + Math.max(0,Math.min(100,strength))/100*0.32;
@@ -14412,60 +14584,158 @@ If there is NO open position, use this Section 2 instead:
         sel.dispatchEvent(new Event("change",{bubbles:true}));
       }
     }
-    function eventType(maPair){
-      const txt = String(maPair || "").toLowerCase();
-      if(!txt || txt === "none") return null;
-      if(txt.includes("bounce") && txt.includes("no cross")) return "bounce";
-      if(txt.includes("bull cross") || txt.includes("bear cross")) return "cross";
-      return null;
-    }
     function iconClass(icon){ return (icon === "▲" || icon === "▼") ? "v33-stack-icon" : "v33-stack-icon v33-stack-icon-alt"; }
+    function titleLine(title,label,fallback="-"){
+      const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + ":\\s*(.*)$","m"));
+      return m ? m[1] : fallback;
+    }
+    function compactEventText(text){
+      return String(text || "None").replace(/\s+(current candle|\d+ bars ago)$/,"");
+    }
+    function stateText(r){
+      const label = r.state === "up" ? "Up stack" : r.state === "down" ? "Down stack" : r.state === "compression" ? "Compression" : r.state === "transition" ? "Transition" : "Mixed";
+      return `${label} / ${r.phase || "-"}`;
+    }
+    function eventLine(r){
+      return r && r.eventDisplay ? r.eventDisplay : "Event — none";
+    }
+    function escHtml(v){ return String(v == null ? "" : v).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch])); }
+    function compactTooltipHtml(tf,r){
+      const alignment = Math.max(0,Math.min(5,Math.round((Number(r.alignment)||0)/20)));
+      const rows = [
+        `State: ${stateText(r)}`,
+        `Alignment: ${alignment}/5`,
+        `Strength: ${Number.isFinite(r.strength) ? r.strength : 0}%`,
+        `Quality: ${Number.isFinite(r.quality) ? r.quality : 0}%`,
+        `Spread: ${titleLine(r.title,"Spread")}`
+      ];
+      return `<div style="font-weight:800;font-size:13px;line-height:1.1;margin-bottom:8px">${escHtml(tf.key)}</div>`+
+        rows.map(line=>`<div>${escHtml(line)}</div>`).join("")+
+        `<div style="height:8px"></div>`+
+        `<div>${escHtml("MA Pair: " + compactEventText(r.maPair || "No fresh event"))}</div>`+
+        `<div style="height:8px"></div>`+
+        `<div>${escHtml(eventLine(r))}</div>`;
+    }
+    function ensureMaStackTooltip(){
+      let tip = document.getElementById("v33MAStackTooltip");
+      if(tip) return tip;
+      tip = document.createElement("div");
+      tip.id = "v33MAStackTooltip";
+      tip.style.cssText = "position:fixed;z-index:99999;display:none;pointer-events:none;background:rgba(17,24,39,.96);color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:6px;padding:8px 10px;font:11.5px Arial,sans-serif;line-height:1.35;box-shadow:0 8px 24px rgba(0,0,0,.24);white-space:nowrap";
+      document.body.appendChild(tip);
+      return tip;
+    }
+    function positionMaStackTooltip(btn){
+      const tip = ensureMaStackTooltip();
+      const r = btn.getBoundingClientRect();
+      const pad = 8;
+      let x = r.left;
+      let y = r.bottom + 8;
+      const tw = tip.offsetWidth || 180;
+      const th = tip.offsetHeight || 140;
+      if(x + tw + pad > window.innerWidth) x = Math.max(pad,window.innerWidth - tw - pad);
+      if(y + th + pad > window.innerHeight) y = Math.max(pad,r.top - th - 8);
+      tip.style.left = Math.round(x) + "px";
+      tip.style.top = Math.round(y) + "px";
+    }
+    function showMaStackTooltip(btn){
+      const tip = ensureMaStackTooltip();
+      tip.innerHTML = btn.__v33TipHtml || "";
+      tip.style.display = "block";
+      positionMaStackTooltip(btn);
+    }
+    function hideMaStackTooltip(){
+      const tip = document.getElementById("v33MAStackTooltip");
+      if(tip) tip.style.display = "none";
+    }
+    function applyHigherTfAgreement(results){
+      const order = TFs.map(x=>x.key);
+      order.forEach((key,idx)=>{
+        const r = results[key];
+        if(!r || !Number.isFinite(r.quality)) return;
+        const higher = order.slice(idx+1).map(k=>results[k]).find(x=>x && Number.isFinite(x.setup) && x.setup);
+        const agreement = higher && r.setup ? (higher.setup === r.setup ? "aligned" : "conflicting") : "mixed / unavailable";
+        const delta = agreement === "aligned" ? 8 : agreement === "conflicting" ? -12 : -3;
+        r.quality = clamp100(r.quality + delta);
+        r.title = String(r.title || "").replace(/Quality: \d+%/,`Quality: ${r.quality}%`).replace(/Higher TF agreement: .*/m,`Higher TF agreement: ${agreement}`);
+      });
+    }
     function render(results){
       ensureDom(); const strip=$id("v33MAStackStrip"); if(!strip) return;
-      strip.innerHTML = TFs.map(tf=>{
+      const tooltipHtmlByTf = new Map();
+      const html = TFs.map(tf=>{
         const r=results[tf.key] || unavailable("Unavailable");
         const style = bg(r.state,r.strength) ? ` style="background:${bg(r.state,r.strength)}"` : "";
-        const ev = eventType(r.maPair);
-        const eventKey = ev ? `${ev}:${r.maPair}` : "";
-        const fallbackBlink = lastBlinkEventByTf.get(tf.key) || "None";
-        const titleText = eventKey ? r.title : String(r.title || "").replace(/Blink event:.*$/m, `Blink event: ${fallbackBlink}`);
-        const title = (tf.key+" MA Stack\n"+titleText).replace(/"/g,"&quot;");
-        return `<button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" title="${title}"${style}><span class="v33-tf-label">${tf.key}</span><span class="${iconClass(r.icon)}">${r.icon}</span></button>`;
+        const ev = r.blinkIntent === "green" ? "green" : r.blinkIntent === "red" ? "red" : "";
+        const eventKey = eventIdentity(tf,r);
+        tooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
+        return `<button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" aria-label="${tf.key} MA Stack"${style}><span class="v33-tf-label">${tf.key}</span><span class="${iconClass(r.icon)}">${r.icon}</span></button>`;
       }).join("");
+      if(strip.__v33LastHtml !== html){
+        strip.innerHTML = html;
+        strip.__v33LastHtml = html;
+      }
       strip.querySelectorAll(".v33-ma-stack-box").forEach(btn=>{
         const tf = btn.dataset.tf || "";
         const ev = btn.dataset.event || "";
         const evKey = btn.dataset.eventKey || "";
+        btn.__v33TipHtml = tooltipHtmlByTf.get(tf) || "";
         if(ev && evKey && lastEventKeyByTf.get(tf) !== evKey){
           lastEventKeyByTf.set(tf,evKey);
-          lastBlinkEventByTf.set(tf, formatBlinkEvent((evKey.split(":").slice(1).join(":")) || ""));
+          lastBlinkEventByTf.set(tf, ev);
           btn.classList.remove("v33-flash-cross","v33-flash-bounce");
           void btn.offsetWidth;
-          btn.classList.add(ev === "cross" ? "v33-flash-cross" : "v33-flash-bounce");
+          btn.classList.add(ev === "red" ? "v33-flash-cross" : "v33-flash-bounce");
           setTimeout(()=>btn.classList.remove("v33-flash-cross","v33-flash-bounce"),1100);
         }
         if(btn.__v33ClickBound) return;
         btn.__v33ClickBound = true;
         btn.addEventListener("click",()=>switchTf(btn.dataset.interval),false);
+        btn.addEventListener("mouseenter",()=>showMaStackTooltip(btn),false);
+        btn.addEventListener("mousemove",()=>positionMaStackTooltip(btn),false);
+        btn.addEventListener("mouseleave",hideMaStackTooltip,false);
+        btn.addEventListener("focus",()=>showMaStackTooltip(btn),false);
+        btn.addEventListener("blur",hideMaStackTooltip,false);
       });
     }
     async function fetchTf(tf){
+      const h = hub();
+      if(!h) return null;
       const maxPeriod = Math.max(...stackPeriods());
       const limit = Math.max(260,Math.min(1000,maxPeriod+60));
-      const url = `${endpoint()}?symbol=${encodeURIComponent(symbol())}&interval=${encodeURIComponent(tf.interval)}&limit=${limit}&endTime=${Date.now()}`;
-      const ctrl = new AbortController(); const to=setTimeout(()=>ctrl.abort(),4500);
-      try{ const r=await API.fetch(url,{cache:"no-store",signal:ctrl.signal}); if(!r.ok) throw new Error("HTTP "+r.status); const rows=await r.json(); return Array.isArray(rows)?rows:null; }
-      finally{ clearTimeout(to); }
+      const sourceRows = LIVE_TFS.has(tf.interval) && typeof h.getChartBuffer === "function"
+        ? h.getChartBuffer(tf.interval)
+        : (typeof h.getClosedBuffer === "function" ? h.getClosedBuffer(tf.interval) : []);
+      const rows = (Array.isArray(sourceRows) ? sourceRows : [])
+        .slice(-limit)
+        .map(hubRowToKline)
+        .filter(row => row && row.every((v,idx) => idx > 5 || Number.isFinite(v)));
+      return rows.length ? rows : null;
     }
     async function refresh(){
       if(pending) return; pending=true; ensureDom();
-      const out={};
-      await Promise.all(TFs.map(async tf=>{ try{ const rows=await fetchTf(tf); out[tf.key]=rows?classify(rows):unavailable("Unavailable"); }catch(e){ out[tf.key]={state:"transition",icon:"×",strength:0,maPair:"None",title:"State: Fetch failed\nStrength: 0%\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: unavailable\nMA Pair: None\n\n\nBlink event: None\nReason: "+(e&&e.message?e.message:String(e))}; } }));
-      render(out); pending=false;
+      try{
+        const liveSymbol = (typeof cfg === "function" && cfg() && cfg().symbol ? cfg().symbol : "").toUpperCase();
+        if(liveSymbol && blinkSymbol !== liveSymbol){
+          blinkSymbol = liveSymbol;
+          lastEventKeyByTf.clear();
+          lastBlinkEventByTf.clear();
+        }
+        const out={};
+        const h = hub();
+        if(h && typeof h.ensureMaStackBuffers === "function"){
+          await h.ensureMaStackBuffers(false).catch(() => {});
+        }
+        await Promise.all(TFs.map(async tf=>{ try{ const rows=await fetchTf(tf); out[tf.key]=rows?classify(rows):unavailable("Unavailable"); }catch(e){ out[tf.key]=unavailable("Fetch failed: "+(e&&e.message?e.message:String(e))); } }));
+        applyHigherTfAgreement(out);
+        render(out); lastRefresh=Date.now();
+      }finally{
+        pending=false;
+      }
     }
-    function refreshSoon(){ setTimeout(refresh,50); }
-    function start(){ ensureDom(); refreshSoon(); if(timer) clearInterval(timer); timer=setInterval(refresh,60000); }
-    function stop(){ if(timer) clearInterval(timer); timer=null; }
+    function refreshSoon(){ if(refreshTimer || pending) return; const wait=Math.max(50,1000-(Date.now()-lastRefresh)); refreshTimer=setTimeout(()=>{ refreshTimer=null; refresh(); },wait); }
+    function start(){ ensureDom(); const h=hub(); if(h && typeof h.setMaStackVisible === "function") h.setMaStackVisible(true); refreshSoon(); }
+    function stop(){ if(refreshTimer) clearTimeout(refreshTimer); refreshTimer=null; const h=hub(); if(h && typeof h.setMaStackVisible === "function") h.setMaStackVisible(false); }
     return {start,stop,refresh,refreshSoon};
   })();
   window.MA_STACK_STRIP = MA_STACK_STRIP;
@@ -14482,7 +14752,7 @@ If there is NO open position, use this Section 2 instead:
   if(typeof draw === "function" && !window.__v33DrawWrapped){
     const prevDraw = draw;
     window.__v33DrawWrapped = true;
-    draw = window.draw = function(){ const r = prevDraw.apply(this,arguments); updateFinalExTotals(); return r; };
+    draw = window.draw = function(){ const r = prevDraw.apply(this,arguments); updateFinalExTotals(); try{ MA_STACK_STRIP.refreshSoon(); }catch(_e){} return r; };
   }
   if(typeof openSettings === "function" && !window.__v33OpenSettingsWrapped){
     const prevOpenSettings = openSettings;
