@@ -1233,6 +1233,102 @@ button:hover{filter:brightness(1.04)}
   margin:0;
 }
 
+/* MA Stack marker settings layout */
+.ma-stack-marker-card{
+  grid-column:1 / -1;
+}
+.ma-stack-marker-sections{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  margin-top:10px;
+}
+.ma-stack-marker-section{
+  border:1px solid rgba(217,220,225,.9);
+  border-radius:8px;
+  padding:10px;
+  background:#fbfcfd;
+  min-width:0;
+}
+.ma-stack-marker-section h4{
+  margin:0 0 8px;
+  font-size:12px;
+  line-height:1.2;
+  color:#1e2329;
+}
+.ma-stack-marker-control{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-wrap:wrap;
+  margin-top:7px;
+  min-width:0;
+}
+.ma-stack-marker-control:first-of-type{
+  margin-top:0;
+}
+.ma-stack-marker-control label,
+.ma-stack-marker-check,
+.ma-stack-marker-number{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  min-width:0;
+  font-size:12px;
+  color:#1e2329;
+}
+.ma-stack-marker-control select{
+  min-width:150px;
+  max-width:220px;
+  height:28px;
+}
+.ma-stack-marker-checkgrid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(160px,1fr));
+  gap:8px 14px;
+  min-width:0;
+}
+.ma-stack-marker-check input{
+  flex:0 0 auto;
+}
+.ma-stack-marker-number{
+  display:grid;
+  grid-template-columns:minmax(150px,1fr) minmax(130px,220px) 58px;
+  gap:10px;
+  margin-top:8px;
+}
+.ma-stack-marker-number:first-of-type{
+  margin-top:0;
+}
+.ma-stack-marker-number input[type="range"]{
+  width:100%;
+  min-width:0;
+}
+.ma-stack-marker-number input[type="number"]{
+  width:58px;
+}
+.ma-stack-marker-tfs{
+  grid-template-columns:repeat(4,minmax(54px,1fr));
+}
+@media(max-width:720px){
+  .ma-stack-marker-checkgrid{
+    grid-template-columns:1fr;
+  }
+  .ma-stack-marker-number{
+    grid-template-columns:1fr 1fr 58px;
+  }
+  .ma-stack-marker-number span{
+    grid-column:1 / -1;
+  }
+  .ma-stack-marker-control select{
+    width:100%;
+    max-width:none;
+  }
+  .ma-stack-marker-tfs{
+    grid-template-columns:repeat(2,minmax(54px,1fr));
+  }
+}
+
 /* =========================================================
    R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD
    Scope: isolated SSSC dashboard module only.

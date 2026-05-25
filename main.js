@@ -14625,7 +14625,7 @@ If there is NO open position, use this Section 2 instead:
       const priceMa = eventText(priceEvent,false);
       const spreadCondition = tight ? "compression" : spreadDelta > 0.01 ? "expanding" : spreadDelta < -0.01 ? "contracting" : "balanced";
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
-      return {state,icon,strength,alignment,quality,title,phase,setup,maPair,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display};
+      return {state,icon,strength,alignment,quality,title,phase,setup,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display};
     }
     function bg(state,strength){
       const a = 0.25 + Math.max(0,Math.min(100,strength))/100*0.32;
@@ -14793,14 +14793,323 @@ If there is NO open position, use this Section 2 instead:
     function refreshSoon(){ if(refreshTimer || pending) return; const wait=Math.max(50,1000-(Date.now()-lastRefresh)); refreshTimer=setTimeout(()=>{ refreshTimer=null; refresh(); },wait); }
     function start(){ ensureDom(); const h=hub(); if(h && typeof h.setMaStackVisible === "function") h.setMaStackVisible(true); refreshSoon(); }
     function stop(){ if(refreshTimer) clearTimeout(refreshTimer); refreshTimer=null; const h=hub(); if(h && typeof h.setMaStackVisible === "function") h.setMaStackVisible(false); }
-    return {start,stop,refresh,refreshSoon};
+    function markerEvents(tf,rows,opts={}){
+      const source = (Array.isArray(rows) ? rows : []).filter(row => row && row.every((v,idx) => idx > 5 || Number.isFinite(v)));
+      const maxPeriod = Math.max(...stackPeriods());
+      const start = Math.max(maxPeriod + 10, Number(opts.startIndex) || maxPeriod + 10);
+      const end = Math.min(source.length - 1, Number.isFinite(opts.endIndex) ? opts.endIndex : source.length - 1);
+      const windowSize = Math.max(maxPeriod + 25, Math.min(320,maxPeriod + 100));
+      const out = [];
+      for(let i=start;i<=end;i++){
+        const slice = source.slice(Math.max(0,i-windowSize+1),i+1);
+        if(slice.length < maxPeriod + 10) continue;
+        const r = classify(slice);
+        const ev = r && r.maEvent;
+        if(!ev || ev.age !== 0) continue;
+        out.push({
+          tf:tf.key,
+          interval:tf.interval,
+          time:Math.floor((Number(slice[slice.length-1][0]) || Number(ev.time) || 0)/1000),
+          price:Number(slice[slice.length-1][4]),
+          type:ev.type,
+          pairClass:ev.pairClass || "adjacent",
+          ref:ev.ref || "",
+          label:ev.label || "",
+          strength:r.strength || 0,
+          quality:r.quality || 0,
+          alignment:r.alignment || 0,
+          state:r.state || "mixed"
+        });
+      }
+      return out;
+    }
+    return {start,stop,refresh,refreshSoon,markerEvents,hubRowToKline,stackPeriods};
   })();
   window.MA_STACK_STRIP = MA_STACK_STRIP;
+
+  const MA_STACK_MARKERS = (() => {
+    const KEY = "btc_futures_chart_v13_ma_stack_markers_";
+    const TFs = [
+      {key:"1m", interval:"1m"}, {key:"3m", interval:"3m"}, {key:"5m", interval:"5m"}, {key:"15m", interval:"15m"},
+      {key:"1H", interval:"1h"}, {key:"4H", interval:"4h"}, {key:"1D", interval:"1d"}
+    ];
+    const cache = new Map();
+    function get(k,d){ const v=localStorage.getItem(KEY+k); return v == null ? d : v; }
+    function set(k,v){ localStorage.setItem(KEY+k,String(v)); cache.clear(); }
+    function on(k,d=true){ return get(k,d?"1":"0") === "1"; }
+    function settings(){
+      return {
+        show:on("show",false),
+        mode:get("mode","visible"),
+        types:{
+          crossover:on("type_crossover",true),
+          failed:on("type_failed",true),
+          bounce:on("type_bounce",true),
+          release:on("type_release",true),
+          transition:on("type_transition",true),
+          deepBounce:on("type_deep_bounce",true),
+          deepRisk:on("type_deep_risk",true)
+        },
+        adjacent:on("pairs_adjacent",true),
+        deep:on("pairs_deep",false),
+        minStrength:Math.max(0,Math.min(100,Math.round(num(get("min_strength","50"),50)))),
+        minQuality:Math.max(0,Math.min(100,Math.round(num(get("min_quality","60"),60)))),
+        minAlignment:Math.max(0,Math.min(5,Math.round(num(get("min_alignment","2"),2)))),
+        tfs:new Set(TFs.filter(tf => on("tf_"+tf.interval,["1m","3m","5m","15m"].includes(tf.interval))).map(tf=>tf.interval)),
+        max:get("max","20"),
+        group:on("group",true),
+        labelMode:get("label","label")
+      };
+    }
+    function eventBucket(ev){
+      const type = String(ev.type || "").toLowerCase();
+      const deep = ev.pairClass !== "adjacent";
+      if(type === "crossover") return "crossover";
+      if(type === "failed crossover") return "failed";
+      if(type === "bounce/no-cross") return deep ? "deepBounce" : "bounce";
+      if(type === "compression release") return "release";
+      if(type === "stack transition") return "transition";
+      if(deep && (type === "compression" || type === "cross risk")) return "deepRisk";
+      return "";
+    }
+    function shortPair(ref){
+      const m = String(ref || "").match(/EMA(\d+)\/(\d+)/);
+      return m ? `${m[1]}/${m[2]}` : String(ref || "Stack");
+    }
+    function markerLabel(ev){
+      const bucket = eventBucket(ev);
+      const pair = shortPair(ev.ref);
+      if(bucket === "crossover") return {icon:"×",text:`${pair} Cross`};
+      if(bucket === "failed") return {icon:"!",text:`${pair} Fail`};
+      if(bucket === "bounce") return {icon:"↩",text:`${pair} Bounce`};
+      if(bucket === "release") return {icon:"↗",text:`${pair} Release`};
+      if(bucket === "transition") return {icon:"⇄",text:"Stack Tx"};
+      if(bucket === "deepBounce") return {icon:"◆",text:`${pair} Deep`};
+      if(bucket === "deepRisk") return {icon:"◇",text:`${pair} Risk`};
+      return {icon:"•",text:pair};
+    }
+    function allowed(ev,s){
+      const bucket = eventBucket(ev);
+      if(!bucket || !s.types[bucket]) return false;
+      const deep = ev.pairClass !== "adjacent";
+      if(deep && !s.deep) return false;
+      if(!deep && !s.adjacent) return false;
+      if((ev.strength || 0) < s.minStrength) return false;
+      if((ev.quality || 0) < (deep ? Math.max(70,s.minQuality) : s.minQuality)) return false;
+      if(Math.round((ev.alignment || 0)/20) < s.minAlignment) return false;
+      return true;
+    }
+    function activeVisibleTimeRange(){
+      if(!Array.isArray(candles) || !candles.length) return null;
+      const r = range();
+      const first = candles[Math.max(0,r.start)];
+      const last = candles[Math.max(0,Math.min(candles.length-1,r.end-1))];
+      return first && last ? {start:first.time,end:last.time,startIndex:r.start,endIndex:r.end-1} : null;
+    }
+    function cacheKey(tf,rows,s,rangeInfo){
+      const last = rows.length ? rows[rows.length-1][0] : 0;
+      const sig = [tf.interval,rows.length,last,s.mode,Object.keys(s.types).filter(k=>s.types[k]).join("."),s.adjacent,s.deep,s.minStrength,s.minQuality,s.minAlignment,s.max,s.group,s.labelMode,rangeInfo?rangeInfo.start:"",rangeInfo?rangeInfo.end:""].join("|");
+      return sig;
+    }
+    function sourceRows(tf,s,rangeInfo){
+      const h = window.PUBLIC_MARKET_DATA_HUB;
+      if(!h || typeof h.getClosedBuffer !== "function") return [];
+      let rows = h.getClosedBuffer(tf.interval) || [];
+      if(s.mode === "live"){
+        rows = (typeof h.getChartBuffer === "function" ? h.getChartBuffer(tf.interval) : rows).slice(-80);
+      }else if(s.mode === "visible" && rangeInfo){
+        const pad = Math.max(...MA_STACK_STRIP.stackPeriods()) + 80;
+        const start = Math.max(0,rows.findIndex(r => Number(r.time) >= rangeInfo.start) - pad);
+        const end = rows.findIndex(r => Number(r.time) > rangeInfo.end);
+        rows = rows.slice(start,end > 0 ? end : rows.length);
+      }else{
+        rows = rows.slice(-1800);
+      }
+      return rows.map(MA_STACK_STRIP.hubRowToKline).filter(Boolean);
+    }
+    function events(){
+      const s = settings();
+      if(!s.show) return [];
+      const rangeInfo = activeVisibleTimeRange();
+      if(!rangeInfo) return [];
+      let out = [];
+      TFs.forEach(tf => {
+        if(!s.tfs.has(tf.interval)) return;
+        const rows = sourceRows(tf,s,rangeInfo);
+        if(rows.length < 50) return;
+        const key = cacheKey(tf,rows,s,rangeInfo);
+        let evs = cache.get(key);
+        if(!evs){
+          evs = MA_STACK_STRIP.markerEvents(tf,rows,{});
+          cache.set(key,evs);
+        }
+        out = out.concat(evs.filter(ev => {
+          if(ev.time < rangeInfo.start || ev.time > rangeInfo.end) return false;
+          return allowed(ev,s);
+        }));
+      });
+      return limitEvents(out,s);
+    }
+    function limitEvents(evs,s){
+      const max = s.max === "unlimited" ? Infinity : Number(s.max) || 20;
+      let arr = evs.slice().sort((a,b)=>a.time-b.time);
+      if(s.group){
+        const grouped = [];
+        arr.forEach(ev => {
+          const last = grouped[grouped.length-1];
+          if(last && Math.abs(ev.time-last.time) <= (typeof ivSec === "function" ? ivSec() * 2 : 300)){
+            if((ev.quality > last.quality) || (ev.quality === last.quality && ev.strength > last.strength)) grouped[grouped.length-1] = ev;
+          }else grouped.push(ev);
+        });
+        arr = grouped;
+      }
+      if(arr.length > max) arr = arr.slice(-max);
+      return arr;
+    }
+    function xForTime(t,vis,mapX){
+      if(!vis.length || t < Number(vis[0].time) || t > Number(vis[vis.length-1].time)) return null;
+      let best = -1;
+      for(let i=0;i<vis.length;i++){ if(Number(vis[i].time) <= t) best = i; else break; }
+      return best >= 0 ? mapX(best) : null;
+    }
+    function draw(){
+      const s = settings();
+      if(!s.show || !ctx || !canvas || !Array.isArray(candles) || candles.length < 2 || !(lastYMax > lastYMin)) return;
+      const r = range(), vis = candles.slice(r.start,r.end);
+      if(vis.length < 2) return;
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      const left = LEFT_PAD, right = RIGHT_AXIS, top = 18, bottom = 30;
+      const priceH = lastAreaH || Math.floor((h-top-bottom) * .78);
+      const chartW = w - left - right;
+      const total = Math.max(2,vis.length + (r.futureBars || 0));
+      const slot = chartW / total;
+      const mapX = i => left + i*slot + slot/2;
+      const mapY = p => top + ((lastYMax-p)/(lastYMax-lastYMin))*priceH;
+      const evs = events();
+      ctx.save();
+      ctx.beginPath(); ctx.rect(left,top,chartW,priceH); ctx.clip();
+      ctx.font = "10px Arial";
+      ctx.textBaseline = "middle";
+      evs.forEach(ev => {
+        const x = xForTime(ev.time,vis,mapX);
+        const y = mapY(ev.price);
+        if(x == null || !Number.isFinite(y) || x < left || x > left + chartW || y < top || y > top + priceH) return;
+        const meta = markerLabel(ev);
+        const text = s.labelMode === "icon" ? meta.icon : `${meta.icon} ${meta.text}`;
+        const tw = ctx.measureText(text).width + 8;
+        const bx = Math.max(left+2,Math.min(left+chartW-tw-2,x-tw/2));
+        const by = Math.max(top+10,Math.min(top+priceH-10,y-18));
+        ctx.fillStyle = "rgba(255,255,255,.92)";
+        ctx.strokeStyle = ev.pairClass === "adjacent" ? "rgba(23,37,84,.65)" : "rgba(88,72,26,.72)";
+        ctx.lineWidth = 1;
+        ctx.fillRect(bx,by-8,tw,16);
+        ctx.strokeRect(bx,by-8,tw,16);
+        ctx.fillStyle = "#111";
+        ctx.fillText(text,bx+4,by+1);
+      });
+      ctx.restore();
+    }
+    function installSettings(){
+      const grid = document.querySelector("#settingsModal .settings-grid");
+      if(!grid) return;
+      const tabs = grid.querySelector(":scope > .v24-settings-tabs");
+      const panelsRoot = grid.querySelector(":scope > .v24-settings-panels");
+      if(!tabs || !panelsRoot) return;
+      if(!$id("maStackMarkersSettingsTab")){
+        const btn=document.createElement("button");
+        btn.type="button"; btn.id="maStackMarkersSettingsTab"; btn.className="v24-settings-tab"; btn.dataset.tab="ma-stack-markers"; btn.textContent="MA Stack";
+        tabs.appendChild(btn);
+        btn.addEventListener("click",()=>activateSettings(),false);
+      }
+      if(!$id("maStackMarkersSettingsPanel")){
+        const panel=document.createElement("div");
+        panel.id="maStackMarkersSettingsPanel"; panel.className="v24-settings-panel"; panel.dataset.tab="ma-stack-markers";
+        const inner=document.createElement("div"); inner.className="v24-settings-panel-grid";
+        inner.innerHTML = settingsHtml();
+        panel.appendChild(inner); panelsRoot.appendChild(panel);
+      }
+      bindSettings();
+      if(get("last_tab","") === "1") activateSettings();
+    }
+    function activateSettings(){
+      const root=document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid");
+      if(!root) return;
+      root.querySelectorAll(".v24-settings-tab").forEach(btn=>btn.classList.toggle("active",btn.dataset.tab==="ma-stack-markers"));
+      root.querySelectorAll(".v24-settings-panel").forEach(panel=>panel.classList.toggle("active",panel.dataset.tab==="ma-stack-markers"));
+      set("last_tab","1");
+    }
+    function cb(id,label,checked){ return `<label class="ma-stack-marker-check"><input id="${id}" type="checkbox"${checked?" checked":""}>${label}</label>`; }
+    function section(title,body){ return `<section class="ma-stack-marker-section"><h4>${title}</h4>${body}</section>`; }
+    function settingsHtml(){
+      const s=settings();
+      return `<div class="settings-card ma-stack-marker-card">
+        <div class="settings-card-title">MA Stack chart markers</div>
+        <div class="settings-card-desc">Visual chart annotations generated from hub-owned MA Stack candle data. MA Stack and the strip remain always active.</div>
+        <div class="ma-stack-marker-sections">
+          ${section("Marker Display",`
+            <div class="ma-stack-marker-control">${cb("maStackMarkersShow","Show MA Stack event markers",s.show)}</div>
+            <div class="ma-stack-marker-control"><label>Marker mode<select id="maStackMarkersMode"><option value="live"${s.mode==="live"?" selected":""}>Live only</option><option value="visible"${s.mode==="visible"?" selected":""}>Visible history</option><option value="loaded"${s.mode==="loaded"?" selected":""}>Loaded history</option></select></label></div>
+            <div class="ma-stack-marker-control"><label>Label mode<select id="maStackLabelMode"><option value="icon"${s.labelMode==="icon"?" selected":""}>Icon only</option><option value="label"${s.labelMode==="label"?" selected":""}>Icon + short label</option></select></label></div>
+          `)}
+          ${section("Event Types",`<div class="ma-stack-marker-checkgrid">${cb("maStackTypeCrossover","MA crossover",s.types.crossover)}${cb("maStackTypeFailed","Failed crossover",s.types.failed)}${cb("maStackTypeBounce","Bounce / no-cross",s.types.bounce)}${cb("maStackTypeRelease","Compression release",s.types.release)}${cb("maStackTypeTransition","Stack transition",s.types.transition)}${cb("maStackTypeDeepBounce","Deep/wide MA bounce",s.types.deepBounce)}${cb("maStackTypeDeepRisk","Deep/wide compression / cross risk",s.types.deepRisk)}</div>`)}
+          ${section("Pair Groups",`<div class="ma-stack-marker-checkgrid">${cb("maStackPairsAdjacent","Adjacent structural pairs",s.adjacent)}${cb("maStackPairsDeep","Deep/wide pairs",s.deep)}</div>`)}
+          ${section("Score Filters",`
+            <label class="ma-stack-marker-number"><span>Minimum Strength %</span><input id="maStackMinStrength" type="range" min="0" max="100" step="1" value="${s.minStrength}"><input id="maStackMinStrengthNum" type="number" min="0" max="100" step="1" value="${s.minStrength}"></label>
+            <label class="ma-stack-marker-number"><span>Minimum Quality %</span><input id="maStackMinQuality" type="range" min="0" max="100" step="1" value="${s.minQuality}"><input id="maStackMinQualityNum" type="number" min="0" max="100" step="1" value="${s.minQuality}"></label>
+            <label class="ma-stack-marker-number"><span>Minimum Alignment x/5</span><input id="maStackMinAlignment" type="range" min="0" max="5" step="1" value="${s.minAlignment}"><input id="maStackMinAlignmentNum" type="number" min="0" max="5" step="1" value="${s.minAlignment}"></label>
+          `)}
+          ${section("Timeframes",`<div class="ma-stack-marker-checkgrid ma-stack-marker-tfs">${TFs.map(tf=>cb("maStackTf_"+tf.interval,tf.key,s.tfs.has(tf.interval))).join("")}</div>`)}
+          ${section("Density",`
+            <div class="ma-stack-marker-control"><label>Max markers on screen<select id="maStackMaxMarkers"><option value="10"${s.max==="10"?" selected":""}>10</option><option value="20"${s.max==="20"?" selected":""}>20</option><option value="40"${s.max==="40"?" selected":""}>40</option><option value="unlimited"${s.max==="unlimited"?" selected":""}>unlimited</option></select></label></div>
+            <div class="ma-stack-marker-control">${cb("maStackGroupNearby","Group nearby events",s.group)}</div>
+          `)}
+        </div>
+      </div>`;
+    }
+    function bind(id,key,normal){
+      const el=$id(id); if(!el || el.__maStackMarkerBound) return;
+      el.__maStackMarkerBound=true;
+      const sync=()=>{
+        const value = normal ? normal(el) : (el.type==="checkbox" ? (el.checked?"1":"0") : el.value);
+        set(key,value);
+        const pairs = {
+          maStackMinStrength:"maStackMinStrengthNum",
+          maStackMinStrengthNum:"maStackMinStrength",
+          maStackMinQuality:"maStackMinQualityNum",
+          maStackMinQualityNum:"maStackMinQuality",
+          maStackMinAlignment:"maStackMinAlignmentNum",
+          maStackMinAlignmentNum:"maStackMinAlignment"
+        };
+        const mate = $id(pairs[id]);
+        if(mate && String(mate.value) !== String(value)) mate.value = value;
+        try{ draw(); }catch(_e){}
+        try{ window.draw(); }catch(_e){}
+      };
+      el.addEventListener("input",sync,false); el.addEventListener("change",sync,false);
+    }
+    function bindSettings(){
+      bind("maStackMarkersShow","show");
+      bind("maStackMarkersMode","mode",el=>el.value);
+      [["maStackTypeCrossover","type_crossover"],["maStackTypeFailed","type_failed"],["maStackTypeBounce","type_bounce"],["maStackTypeRelease","type_release"],["maStackTypeTransition","type_transition"],["maStackTypeDeepBounce","type_deep_bounce"],["maStackTypeDeepRisk","type_deep_risk"],["maStackPairsAdjacent","pairs_adjacent"],["maStackPairsDeep","pairs_deep"],["maStackGroupNearby","group"]].forEach(x=>bind(x[0],x[1]));
+      bind("maStackMinStrength","min_strength",el=>Math.max(0,Math.min(100,Math.round(num(el.value,50)))));
+      bind("maStackMinStrengthNum","min_strength",el=>Math.max(0,Math.min(100,Math.round(num(el.value,50)))));
+      bind("maStackMinQuality","min_quality",el=>Math.max(0,Math.min(100,Math.round(num(el.value,60)))));
+      bind("maStackMinQualityNum","min_quality",el=>Math.max(0,Math.min(100,Math.round(num(el.value,60)))));
+      bind("maStackMinAlignment","min_alignment",el=>Math.max(0,Math.min(5,Math.round(num(el.value,2)))));
+      bind("maStackMinAlignmentNum","min_alignment",el=>Math.max(0,Math.min(5,Math.round(num(el.value,2)))));
+      TFs.forEach(tf=>bind("maStackTf_"+tf.interval,"tf_"+tf.interval));
+      bind("maStackMaxMarkers","max",el=>el.value);
+      bind("maStackLabelMode","label",el=>el.value);
+    }
+    return {installSettings,draw,settings};
+  })();
+  window.MA_STACK_MARKERS = MA_STACK_MARKERS;
 
   function installAll(){
     installReloadReset();
     ensureMaToggles();
     rebuildMaSettings();
+    MA_STACK_MARKERS.installSettings();
     installClosedLinksRow();
     updateFinalExTotals();
     MA_STACK_STRIP.start();
@@ -14809,12 +15118,12 @@ If there is NO open position, use this Section 2 instead:
   if(typeof draw === "function" && !window.__v33DrawWrapped){
     const prevDraw = draw;
     window.__v33DrawWrapped = true;
-    draw = window.draw = function(){ const r = prevDraw.apply(this,arguments); updateFinalExTotals(); try{ MA_STACK_STRIP.refreshSoon(); }catch(_e){} return r; };
+    draw = window.draw = function(){ const r = prevDraw.apply(this,arguments); updateFinalExTotals(); try{ MA_STACK_STRIP.refreshSoon(); }catch(_e){} try{ MA_STACK_MARKERS.draw(); }catch(_e){} return r; };
   }
   if(typeof openSettings === "function" && !window.__v33OpenSettingsWrapped){
     const prevOpenSettings = openSettings;
     window.__v33OpenSettingsWrapped = true;
-    openSettings = window.openSettings = function(){ const r = prevOpenSettings.apply(this,arguments); setTimeout(installAll,0); setTimeout(()=>{rebuildMaSettings();installClosedLinksRow();},150); return r; };
+    openSettings = window.openSettings = function(){ const r = prevOpenSettings.apply(this,arguments); setTimeout(installAll,0); setTimeout(()=>{rebuildMaSettings();MA_STACK_MARKERS.installSettings();installClosedLinksRow();},150); return r; };
   }
   ["market","interval"].forEach(id=>{ const el=$id(id); if(el && !el.__v33MaStackBound){ el.__v33MaStackBound=true; el.addEventListener("change",()=>MA_STACK_STRIP.refreshSoon(),false); } });
 
