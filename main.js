@@ -14360,14 +14360,32 @@ If there is NO open position, use this Section 2 instead:
         r.blinkIntent
       ].join("|");
     }
+    function pairEventRank(ev){
+      if(!ev) return 0;
+      const t = String(ev.type || "").toLowerCase();
+      const adjacent = ev.pairClass === "adjacent";
+      if(adjacent && (t === "crossover" || t === "failed crossover" || t === "bounce/no-cross")) return 500;
+      if(adjacent && (t === "compression release" || t === "stack transition")) return 400;
+      if(!adjacent && (t === "bounce/no-cross" || t === "deep defense")) return 300;
+      if(!adjacent && (t === "compression" || t === "cross risk")) return 200;
+      return adjacent ? 100 : 50;
+    }
+    function actionableMaPair(ev){
+      if(!ev) return false;
+      const type = String(ev.type || "").toLowerCase();
+      return type === "crossover" || type === "failed crossover" || type === "bounce/no-cross" || type === "compression release" || type === "deep defense";
+    }
     function maPairIntent(ev,ctx){
       if(!ev || ev.age !== 0) return {intent:"none",reason:"No current-candle MA-pair event",display:"Event — none"};
       const type = String(ev.type || "").toLowerCase();
       const weakSetup = !ctx.setup || ctx.alignment < 60 || ctx.strength < 35 || ctx.quality < 40 || ctx.state === "mixed" || ctx.state === "transition" || ctx.state === "compression";
       if(type.includes("cross risk") || type.includes("compression") || type.includes("transition")){
-        return {intent:"none",reason:"MA-pair compression/cross risk",display:"Event — transition risk"};
+        return {intent:"none",reason:"MA-pair compression/cross risk",display:ev.pairClass === "adjacent" ? "Event — transition risk" : "Event — compression risk"};
       }
       if(weakSetup){
+        if(actionableMaPair(ev)){
+          return {intent:"none",reason:"Weak or mixed stack context",display:ev.pairClass === "adjacent" ? "Event — transition risk" : "Event — deep MA defense"};
+        }
         return {intent:"none",reason:"Weak or mixed stack context",display:"Event — none"};
       }
       if(!ev.dir) return {intent:"none",reason:"Ambiguous MA-pair event",display:"Event — none"};
@@ -14377,6 +14395,22 @@ If there is NO open position, use this Section 2 instead:
         reason:`MA-pair event ${supports ? "supports setup" : "conflicts with setup"}`,
         display:`Event — MA-pair event ${supports ? "supports setup" : "conflicts with setup"}`
       };
+    }
+    function normalizeMaPairEvent(ev,ctx){
+      if(!ev) return null;
+      const type = String(ev.type || "").toLowerCase();
+      if(ev.age > 5) return null;
+      const weakDeep = ev.pairClass !== "adjacent" && (ctx.alignment < 40 || ctx.strength < 25 || ctx.quality < 45 || ctx.state === "mixed" || ctx.state === "transition" || ctx.state === "compression");
+      if(weakDeep && type === "bounce/no-cross"){
+        return {
+          ...ev,
+          type:"cross risk",
+          dir:0,
+          label:`${ev.ref} ${ev.pairClass === "wide" ? "wide-pair" : "deep"} cross risk`,
+          rank:Math.min(ev.rank || 0,52)
+        };
+      }
+      return ev;
     }
     function signOf(v){ return v > 0 ? 1 : v < 0 ? -1 : 0; }
     function isConfirmedBounce(diff, fast, slow, idx){
@@ -14429,13 +14463,18 @@ If there is NO open position, use this Section 2 instead:
       let best = null;
       const add = ev => {
         if(!ev) return;
-        if(!best || ev.age < best.age || (ev.age === best.age && ev.rank > best.rank)) best = ev;
+        if(ev.age > 5 && best && best.age <= 5) return;
+        const score = pairEventRank(ev) + (100 - Math.min(99,ev.age || 0)) + (ev.rank || 0) / 1000;
+        const bestScore = best ? pairEventRank(best) + (100 - Math.min(99,best.age || 0)) + (best.rank || 0) / 1000 : -1;
+        if(!best || score > bestScore) best = ev;
       };
       for(let a=0; a<periods.length-1; a++){
         for(let b=a+1; b<periods.length; b++){
           const fast = series[a], slow = series[b];
           if(!fast || !slow || !fast.length || !slow.length) continue;
           const label = pairLabel(periods,a,b);
+          const pairClass = b === a + 1 ? "adjacent" : (b - a >= 3 ? "wide" : "deep");
+          const pairPrefix = pairClass === "adjacent" ? "" : (pairClass === "wide" ? "wide-pair " : "deep ");
           const diff = fast.map((v,k)=>Number.isFinite(v)&&Number.isFinite(slow[k]) ? v - slow[k] : NaN);
           for(let i=start;i<len;i++){
             const f2=fast[i-2], s2=slow[i-2], f0=fast[i-1], s0=slow[i-1], f1=fast[i], s1=slow[i];
@@ -14445,16 +14484,17 @@ If there is NO open position, use this Section 2 instead:
             const prevPct=Math.abs(prev)/ref, curPct=Math.abs(cur)/ref, olderPct=Math.abs(older)/ref;
             const eventTime = ctx.times && ctx.times[i] ? ctx.times[i] : i;
             const curSign = signOf(cur);
-            if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",ref:label,label:`${label} bull crossover`,age,dir:1,time:eventTime,rank:95});
-            if(prev >= 0 && cur < 0) add({eventClass:"MA-pair",type:"crossover",ref:label,label:`${label} bear crossover`,age,dir:-1,time:eventTime,rank:95});
-            if(isFailedCross(diff,i)) add({eventClass:"MA-pair",type:"failed crossover",ref:label,label:`${label} failed crossover`,age,dir:curSign || -signOf(diff[Math.max(0,i-1)]),time:eventTime,rank:82});
+            if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:label,label:`${label} ${pairPrefix}bull crossover`,age,dir:1,time:eventTime,rank:95});
+            if(prev >= 0 && cur < 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:label,label:`${label} ${pairPrefix}bear crossover`,age,dir:-1,time:eventTime,rank:95});
+            if(isFailedCross(diff,i)) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:label,label:`${label} ${pairPrefix}failed crossover`,age,dir:curSign || -signOf(diff[Math.max(0,i-1)]),time:eventTime,rank:82});
             const sameSide = Math.sign(cur) === Math.sign(prev) && Math.sign(cur) !== 0;
             const movingTogether = sameSide && curPct < prevPct && prevPct <= olderPct;
-            if(sameSide && isConfirmedBounce(diff,fast,slow,i)) add({eventClass:"MA-pair",type:"bounce/no-cross",ref:label,label:`${label} bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
-            if(sameSide && olderPct <= 0.0009 && curPct > Math.max(olderPct*1.55,0.0012)) add({eventClass:"MA-pair",type:"compression release",ref:label,label:`${label} compression release`,age,dir:curSign,time:eventTime,rank:70});
-            if(movingTogether && curPct <= 0.0018) add({eventClass:"MA-pair",type:"cross risk",ref:label,label:`${label} cross risk`,age,dir:0,time:eventTime,rank:52});
-            else if(curPct <= 0.0007) add({eventClass:"MA-pair",type:"compression",ref:label,label:`${label} compression`,age,dir:0,time:eventTime,rank:45});
-            if(sameSide && curPct > prevPct*1.35 && ctx.spreadDelta > 0.01) add({eventClass:"MA-pair",type:"expansion",ref:label,label:`${label} expansion`,age,dir:curSign,time:eventTime,rank:58});
+            const deepBounceOk = pairClass === "adjacent" || (ctx.alignment >= 40 && ctx.setup && curSign === ctx.setup && ctx.spreadDelta >= -0.005);
+            if(sameSide && deepBounceOk && isConfirmedBounce(diff,fast,slow,i)) add({eventClass:"MA-pair",type:"bounce/no-cross",pairClass,ref:label,label:`${label} ${pairPrefix}bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
+            if(sameSide && olderPct <= 0.0009 && curPct > Math.max(olderPct*1.55,0.0012)) add({eventClass:"MA-pair",type:"compression release",pairClass,ref:label,label:`${label} ${pairPrefix}compression release`,age,dir:curSign,time:eventTime,rank:70});
+            if(movingTogether && curPct <= 0.0018) add({eventClass:"MA-pair",type:"cross risk",pairClass,ref:label,label:`${label} ${pairPrefix}cross risk`,age,dir:0,time:eventTime,rank:52});
+            else if(curPct <= 0.0007) add({eventClass:"MA-pair",type:"compression",pairClass,ref:label,label:`${label} ${pairPrefix}compression`,age,dir:0,time:eventTime,rank:45});
+            if(sameSide && curPct > prevPct*1.35 && ctx.spreadDelta > 0.01) add({eventClass:"MA-pair",type:"expansion",pairClass,ref:label,label:`${label} ${pairPrefix}expansion`,age,dir:curSign,time:eventTime,rank:58});
           }
         }
       }
@@ -14511,9 +14551,23 @@ If there is NO open position, use this Section 2 instead:
       if(vals.some(v=>!Number.isFinite(v)) || prev.some(v=>!Number.isFinite(v)) || prev2.some(v=>!Number.isFinite(v))) return unavailable("Insufficient MA data");
       const pairDirs = vals.slice(0,-1).map((v,i)=>Math.sign(v-vals[i+1]));
       const upPairs = pairDirs.every(x=>x>0), downPairs = pairDirs.every(x=>x<0);
-      const orderedPairs = pairDirs.filter(x=>x!==0);
-      const dominantDir = orderedPairs.reduce((a,b)=>a+b,0);
-      const alignment = upPairs || downPairs ? 100 : clamp100(Math.abs(dominantDir)/(periods.length-1)*100);
+      let allBull=0, allBear=0, allTotal=0, slowBull=0, slowBear=0, slowTotal=0;
+      for(let i=0;i<vals.length-1;i++){
+        for(let j=i+1;j<vals.length;j++){
+          const d = Math.sign(vals[i]-vals[j]);
+          if(!d) continue;
+          allTotal++;
+          if(d>0) allBull++; else allBear++;
+          if(i > 0){
+            slowTotal++;
+            if(d>0) slowBull++; else slowBear++;
+          }
+        }
+      }
+      const adjacentScore = clamp100(Math.max(pairDirs.filter(x=>x>0).length,pairDirs.filter(x=>x<0).length)/(periods.length-1)*100);
+      const allScore = allTotal ? clamp100(Math.max(allBull,allBear)/allTotal*100) : 0;
+      const slowScore = slowTotal ? clamp100(Math.max(slowBull,slowBear)/slowTotal*100) : adjacentScore;
+      const alignment = upPairs || downPairs ? 100 : clamp100(Math.max(adjacentScore*.50 + slowScore*.35 + allScore*.15, Math.min(80,allScore*.85)));
       const spread = Math.max(...vals)-Math.min(...vals);
       const spreadPct = latest ? spread/latest*100 : 0;
       const prevSpread = Math.max(...prev)-Math.min(...prev);
@@ -14552,15 +14606,18 @@ If there is NO open position, use this Section 2 instead:
       const flattenPenalty = spreadDelta < -0.01 || slopeMagPct < 0.012 ? 14 : 0;
       const chopPenalty = (!upPairs && !downPairs && !tight) || nearCross ? 18 : 0;
       const overextensionPenalty = spreadPct > 1.2 ? Math.min(18,(spreadPct-1.2)*12) : 0;
-      const strength = clamp100(alignment*.24 + spreadScore*.18 + expansionScore*.14 + slopeScore*.16 + slopeAgreeScore*.12 + accelScore*.08 + compressionRelease*.08 - flattenPenalty - chopPenalty - overextensionPenalty);
-      const ctx = {spreadDelta,nearCross,setup,times};
-      const maEvent = detectMaPair(series,periods,ctx,18);
+      const rawStrength = alignment*.24 + spreadScore*.18 + expansionScore*.14 + slopeScore*.16 + slopeAgreeScore*.12 + accelScore*.08 + compressionRelease*.08 - flattenPenalty - chopPenalty - overextensionPenalty;
+      const structureFloor = alignment >= 40 ? Math.min(35,14 + alignment*.20 + slopeAgreeScore*.05) : alignment >= 20 ? Math.min(25,10 + alignment*.22) : 0;
+      const strength = clamp100(Math.max(rawStrength,structureFloor));
+      const ctx = {spreadDelta,nearCross,setup,times,alignment};
+      const rawMaEvent = detectMaPair(series,periods,ctx,18);
       const priceEvent = detectPriceMA(candles,series,periods,{setup},10);
-      const validStructure = maEvent ? 70 : 35;
-      const eventFreshScore = maEvent ? Math.max(0,100-maEvent.age*18) : 0;
+      const validStructure = rawMaEvent ? 70 : 35;
+      const eventFreshScore = rawMaEvent ? Math.max(0,100-rawMaEvent.age*18) : 0;
       const priceConfirm = priceEvent && priceEvent.dir && setup && priceEvent.dir === setup ? 80 : priceEvent ? 45 : 35;
       const preCompression = prev2SpreadPct < 0.22 ? 82 : 45;
       const quality = clamp100(preCompression*.16 + validStructure*.16 + expansionScore*.14 + slopeAgreeScore*.14 + alignment*.14 + priceConfirm*.12 + eventFreshScore*.10 + (chopPenalty?25:75)*.04 - chopPenalty*.55);
+      const maEvent = normalizeMaPairEvent(rawMaEvent,{alignment,strength,quality,state});
       const maIntent = maPairIntent(maEvent,{setup,state,strength,quality,alignment});
       const blink = maIntent;
       const blinkEvent = blink.intent === "none" ? null : maEvent;
