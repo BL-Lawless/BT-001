@@ -1308,10 +1308,82 @@ button:hover{filter:brightness(1.04)}
   width:58px;
 }
 .ma-stack-marker-tfs{
-  grid-template-columns:repeat(4,minmax(54px,1fr));
+  grid-template-columns:repeat(7,minmax(38px,46px));
+  gap:5px;
+  justify-content:start;
+}
+.ma-stack-marker-tfs .ma-stack-marker-check{
+  position:relative;
+  justify-content:center;
+  border:1px solid rgba(217,220,225,.95);
+  border-radius:6px;
+  padding:4px 6px;
+  background:#f4f5f6;
+  font-weight:800;
+  font-size:11px;
+  text-align:center;
+}
+.ma-stack-marker-tfs .ma-stack-marker-check input{
+  position:absolute;
+  opacity:0;
+  pointer-events:none;
+}
+.ma-stack-marker-tfs .ma-stack-marker-check:has(input:checked){
+  border-color:#69727d;
+  background:#fff;
+  box-shadow:inset 0 0 0 1px rgba(105,114,125,.24);
+}
+.ma-stack-lab-card{
+  max-width:100%;
+}
+.ma-stack-lab-events{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.ma-stack-lab-event{
+  border:1px solid rgba(217,220,225,.9);
+  border-radius:7px;
+  background:#fff;
+  padding:8px 10px;
+}
+.ma-stack-lab-event summary{
+  cursor:pointer;
+  font-size:12px;
+  font-weight:800;
+  color:#1e2329;
+}
+.ma-stack-lab-common,
+.ma-stack-lab-specific{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(180px,1fr));
+  gap:8px 12px;
+  margin-top:10px;
+}
+.ma-stack-lab-common label,
+.ma-stack-lab-specific label{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  min-width:0;
+  font-size:12px;
+}
+.ma-stack-lab-common select,
+.ma-stack-lab-specific select{
+  min-width:120px;
+  max-width:220px;
+}
+.ma-stack-lab-common input[type="number"],
+.ma-stack-lab-specific input[type="number"]{
+  width:64px;
+  min-width:54px;
 }
 @media(max-width:720px){
   .ma-stack-marker-checkgrid{
+    grid-template-columns:1fr;
+  }
+  .ma-stack-lab-common,
+  .ma-stack-lab-specific{
     grid-template-columns:1fr;
   }
   .ma-stack-marker-number{

@@ -14793,12 +14793,70 @@ If there is NO open position, use this Section 2 instead:
     function refreshSoon(){ if(refreshTimer || pending) return; const wait=Math.max(50,1000-(Date.now()-lastRefresh)); refreshTimer=setTimeout(()=>{ refreshTimer=null; refresh(); },wait); }
     function start(){ ensureDom(); const h=hub(); if(h && typeof h.setMaStackVisible === "function") h.setMaStackVisible(true); refreshSoon(); }
     function stop(){ if(refreshTimer) clearTimeout(refreshTimer); refreshTimer=null; const h=hub(); if(h && typeof h.setMaStackVisible === "function") h.setMaStackVisible(false); }
+    function labEventBucket(ev){
+      const type = String(ev && ev.type || "").toLowerCase();
+      const deep = ev && ev.pairClass !== "adjacent";
+      if(type === "crossover") return "crossover";
+      if(type === "failed crossover") return "failed";
+      if(type === "bounce/no-cross") return deep ? "deepBounce" : "bounce";
+      if(type === "compression") return deep ? "deepRisk" : "compression";
+      if(type === "compression release") return "release";
+      if(type === "stack transition") return "transition";
+      if(deep && type === "cross risk") return "deepRisk";
+      return "";
+    }
+    function labEventSettingKey(bucket){
+      return bucket === "deepBounce" || bucket === "deepRisk" ? "deep" : bucket;
+    }
+    function labPairIndexes(periods,ref){
+      const m = String(ref || "").match(/EMA(\d+)\/(\d+)/);
+      if(!m) return null;
+      const a = periods.indexOf(Number(m[1])), b = periods.indexOf(Number(m[2]));
+      return a >= 0 && b >= 0 ? {a,b} : null;
+    }
+    function labPairStillValid(ev,series,periods,candidateIdx,confirmedIdx){
+      const pair = labPairIndexes(periods,ev.ref);
+      if(!pair) return true;
+      if(confirmedIdx <= candidateIdx) return true;
+      const fast = series[pair.a], slow = series[pair.b];
+      if(!fast || !slow) return false;
+      const cd = Number(fast[candidateIdx]) - Number(slow[candidateIdx]);
+      const pd = Number(fast[Math.max(0,candidateIdx-1)]) - Number(slow[Math.max(0,candidateIdx-1)]);
+      const fd = Number(fast[confirmedIdx]) - Number(slow[confirmedIdx]);
+      if(![cd,pd,fd].every(Number.isFinite)) return false;
+      const type = String(ev.type || "").toLowerCase();
+      const dir = Number(ev.dir) || signOf(cd) || signOf(fd);
+      const confirmedSign = signOf(fd);
+      const sameSideThroughConfirmation = () => {
+        if(!dir) return false;
+        for(let k=candidateIdx;k<=confirmedIdx;k++){
+          const d = Number(fast[k]) - Number(slow[k]);
+          if(!Number.isFinite(d) || signOf(d) !== dir) return false;
+        }
+        return true;
+      };
+      if(type === "crossover") return dir && confirmedSign === dir;
+      if(type === "failed crossover") return dir && confirmedSign === dir;
+      if(type === "bounce/no-cross") return sameSideThroughConfirmation() && Math.abs(fd) >= Math.abs(cd) * 0.98;
+      if(type === "compression release") return dir && confirmedSign === dir && Math.abs(fd) >= Math.abs(cd) * 1.02;
+      if(type === "compression" || type === "cross risk") return Math.abs(fd) <= Math.max(Math.abs(cd) * 1.35,Math.abs(Number(slow[confirmedIdx])) * 0.0025);
+      return true;
+    }
+    function labStackStillValid(ev,confirmed){
+      if(!confirmed) return false;
+      const type = String(ev.type || "").toLowerCase();
+      if(type !== "stack transition") return true;
+      return confirmed.state === "transition" || !!(confirmed.maEvent && String(confirmed.maEvent.type || "").toLowerCase() === "stack transition");
+    }
     function markerEvents(tf,rows,opts={}){
       const source = (Array.isArray(rows) ? rows : []).filter(row => row && row.every((v,idx) => idx > 5 || Number.isFinite(v)));
       const maxPeriod = Math.max(...stackPeriods());
       const start = Math.max(maxPeriod + 10, Number(opts.startIndex) || maxPeriod + 10);
       const end = Math.min(source.length - 1, Number.isFinite(opts.endIndex) ? opts.endIndex : source.length - 1);
       const windowSize = Math.max(maxPeriod + 25, Math.min(320,maxPeriod + 100));
+      const periods = stackPeriods();
+      const closes = source.map(r=>Number(r[4]));
+      const series = periods.map(p=>emaSeries(closes,p));
       const out = [];
       for(let i=start;i<=end;i++){
         const slice = source.slice(Math.max(0,i-windowSize+1),i+1);
@@ -14806,19 +14864,54 @@ If there is NO open position, use this Section 2 instead:
         const r = classify(slice);
         const ev = r && r.maEvent;
         if(!ev || ev.age !== 0) continue;
+        const bucket = labEventBucket(ev);
+        const settingKey = labEventSettingKey(bucket);
+        const confirmationCandles = typeof opts.confirmationCandlesFor === "function"
+          ? Math.max(0,Math.min(20,Math.round(Number(opts.confirmationCandlesFor(settingKey,bucket,ev)) || 0)))
+          : 0;
+        const confirmedIndex = i + confirmationCandles;
+        if(confirmedIndex > end || confirmedIndex >= source.length) continue;
+        const confirmedSlice = source.slice(Math.max(0,confirmedIndex-windowSize+1),confirmedIndex+1);
+        if(confirmedSlice.length < maxPeriod + 10) continue;
+        const confirmed = confirmationCandles ? classify(confirmedSlice) : r;
+        if(!labPairStillValid(ev,series,periods,i,confirmedIndex)) continue;
+        if(!labStackStillValid(ev,confirmed)) continue;
+        const candidateRow = source[i] || [];
+        const confirmedRow = source[confirmedIndex] || [];
+        const candidateTime = Math.floor((Number(candidateRow[0]) || Number(ev.time) || 0)/1000);
+        const confirmedTime = Math.floor((Number(confirmedRow[0]) || Number(ev.time) || 0)/1000);
+        const strength = Number(confirmed && confirmed.strength) || Number(r.strength) || 0;
+        const quality = Number(confirmed && confirmed.quality) || Number(r.quality) || 0;
+        const alignment = Number(confirmed && confirmed.alignment) || Number(r.alignment) || 0;
+        const outcomeWindow = typeof opts.outcomeWindowFor === "function"
+          ? opts.outcomeWindowFor(settingKey,bucket,ev)
+          : undefined;
         out.push({
           tf:tf.key,
           interval:tf.interval,
-          time:Math.floor((Number(slice[slice.length-1][0]) || Number(ev.time) || 0)/1000),
-          price:Number(slice[slice.length-1][4]),
+          time:confirmedTime,
+          candidateTime,
+          confirmedTime,
+          confirmationCandles,
+          price:Number(confirmedRow[4]),
           type:ev.type,
+          eventType:ev.type,
           pairClass:ev.pairClass || "adjacent",
           ref:ev.ref || "",
+          pair:ev.ref || "",
           label:ev.label || "",
-          strength:r.strength || 0,
-          quality:r.quality || 0,
-          alignment:r.alignment || 0,
-          state:r.state || "mixed"
+          timeframe:tf.key,
+          strength,
+          quality,
+          alignment,
+          Strength:strength,
+          Quality:quality,
+          Alignment:alignment,
+          outcomeWindow,
+          sourceIndex:confirmedIndex,
+          candidateIndex:i,
+          confirmedIndex,
+          state:(confirmed && confirmed.state) || r.state || "mixed"
         });
       }
       return out;
@@ -14833,6 +14926,16 @@ If there is NO open position, use this Section 2 instead:
       {key:"1m", interval:"1m"}, {key:"3m", interval:"3m"}, {key:"5m", interval:"5m"}, {key:"15m", interval:"15m"},
       {key:"1H", interval:"1h"}, {key:"4H", interval:"4h"}, {key:"1D", interval:"1d"}
     ];
+    const EVENT_TYPES = [
+      {key:"crossover",label:"Crossover"},
+      {key:"failed",label:"Failed crossover"},
+      {key:"bounce",label:"Bounce / no-cross"},
+      {key:"compression",label:"Compression"},
+      {key:"release",label:"Compression release"},
+      {key:"transition",label:"Stack transition"},
+      {key:"deep",label:"Deep/wide MA event"}
+    ];
+    const OUTCOME_WINDOWS = [1,2,3,5,10,20];
     const cache = new Map();
     function get(k,d){ const v=localStorage.getItem(KEY+k); return v == null ? d : v; }
     function set(k,v){ localStorage.setItem(KEY+k,String(v)); cache.clear(); }
@@ -14840,25 +14943,41 @@ If there is NO open position, use this Section 2 instead:
     function settings(){
       return {
         show:on("show",false),
-        mode:get("mode","visible"),
+        range:get("range","visible"),
         types:{
           crossover:on("type_crossover",true),
           failed:on("type_failed",true),
           bounce:on("type_bounce",true),
+          compression:on("type_compression",true),
           release:on("type_release",true),
           transition:on("type_transition",true),
           deepBounce:on("type_deep_bounce",true),
           deepRisk:on("type_deep_risk",true)
         },
-        adjacent:on("pairs_adjacent",true),
-        deep:on("pairs_deep",false),
-        minStrength:Math.max(0,Math.min(100,Math.round(num(get("min_strength","50"),50)))),
-        minQuality:Math.max(0,Math.min(100,Math.round(num(get("min_quality","60"),60)))),
-        minAlignment:Math.max(0,Math.min(5,Math.round(num(get("min_alignment","2"),2)))),
         tfs:new Set(TFs.filter(tf => on("tf_"+tf.interval,["1m","3m","5m","15m"].includes(tf.interval))).map(tf=>tf.interval)),
         max:get("max","20"),
         group:on("group",true),
         labelMode:get("label","label")
+      };
+    }
+    function eventSetting(type,name,def){ return get("event_"+type+"_"+name,def); }
+    function eventOn(type,name,def=true){ return eventSetting(type,name,def?"1":"0") === "1"; }
+    function eventConfig(type){
+      return {
+        pair:eventSetting(type,"pair","all"),
+        minAlignment:Math.max(0,Math.min(5,Math.round(num(eventSetting(type,"min_alignment","2"),2)))),
+        minStrength:Math.max(0,Math.min(100,Math.round(num(eventSetting(type,"min_strength",type==="deep"?"45":"50"),50)))),
+        minQuality:Math.max(0,Math.min(100,Math.round(num(eventSetting(type,"min_quality",type==="deep"?"70":"60"),60)))),
+        confirm:Math.max(0,Math.min(20,Math.round(num(eventSetting(type,"confirm","1"),1)))),
+        outcome:OUTCOME_WINDOWS.includes(Number(eventSetting(type,"outcome","5"))) ? Number(eventSetting(type,"outcome","5")) : 5,
+        failureType:eventSetting(type,"failure_type","cross-back"),
+        proximity:eventSetting(type,"proximity","normal"),
+        direction:eventSetting(type,"direction","either"),
+        context:eventSetting(type,"context","pullback defense"),
+        requireSlope:eventOn(type,"require_slope",true),
+        requireDefense:eventOn(type,"require_defense",true),
+        requireAdjacent:eventOn(type,"require_adjacent",false),
+        conflict:eventOn(type,"conflict",true)
       };
     }
     function eventBucket(ev){
@@ -14888,16 +15007,84 @@ If there is NO open position, use this Section 2 instead:
       if(bucket === "deepRisk") return {icon:"◇",text:`${pair} Risk`};
       return {icon:"•",text:pair};
     }
-    function allowed(ev,s){
-      const bucket = eventBucket(ev);
-      if(!bucket || !s.types[bucket]) return false;
+    function eventBucketLab(ev){
+      const type = String(ev.type || "").toLowerCase();
       const deep = ev.pairClass !== "adjacent";
-      if(deep && !s.deep) return false;
-      if(!deep && !s.adjacent) return false;
-      if((ev.strength || 0) < s.minStrength) return false;
-      if((ev.quality || 0) < (deep ? Math.max(70,s.minQuality) : s.minQuality)) return false;
-      if(Math.round((ev.alignment || 0)/20) < s.minAlignment) return false;
+      if(type === "crossover") return "crossover";
+      if(type === "failed crossover") return "failed";
+      if(type === "bounce/no-cross") return deep ? "deepBounce" : "bounce";
+      if(type === "compression") return deep ? "deepRisk" : "compression";
+      if(type === "compression release") return "release";
+      if(type === "stack transition") return "transition";
+      if(deep && type === "cross risk") return "deepRisk";
+      return "";
+    }
+    function eventTypeForBucket(bucket){
+      if(bucket === "deepBounce" || bucket === "deepRisk") return "deep";
+      return bucket;
+    }
+    function allowedLab(ev,s){
+      const bucket = eventBucketLab(ev);
+      if(!bucket || !s.types[bucket]) return false;
+      const cfg = eventConfig(eventTypeForBucket(bucket));
+      const deep = ev.pairClass !== "adjacent";
+      if(cfg.pair !== "all" && ev.ref !== cfg.pair) return false;
+      if((ev.strength || 0) < cfg.minStrength) return false;
+      if((ev.quality || 0) < (deep ? Math.max(70,cfg.minQuality) : cfg.minQuality)) return false;
+      if(Math.round((ev.alignment || 0)/20) < cfg.minAlignment) return false;
       return true;
+    }
+    function markerLabelLab(ev){
+      const bucket = eventBucketLab(ev);
+      const pair = shortPair(ev.ref);
+      if(bucket === "crossover") return {icon:"X",text:`${pair} Cross`};
+      if(bucket === "failed") return {icon:"F",text:`${pair} Fail`};
+      if(bucket === "bounce") return {icon:"B",text:`${pair} Bounce`};
+      if(bucket === "compression") return {icon:"C",text:`${pair} Comp`};
+      if(bucket === "release") return {icon:"R",text:`${pair} Release`};
+      if(bucket === "transition") return {icon:"T",text:"Stack Tx"};
+      if(bucket === "deepBounce") return {icon:"D",text:`${pair} Deep`};
+      if(bucket === "deepRisk") return {icon:"!",text:`${pair} Risk`};
+      return {icon:"*",text:pair};
+    }
+    function eventNameLab(ev){
+      const bucket = eventBucketLab(ev);
+      if(bucket === "crossover") return "MA crossover";
+      if(bucket === "failed") return "Failed crossover";
+      if(bucket === "bounce") return "Bounce / no-cross";
+      if(bucket === "compression") return "Compression";
+      if(bucket === "release") return "Compression release";
+      if(bucket === "transition") return "Stack transition";
+      if(bucket === "deepBounce") return "Deep/wide MA bounce";
+      if(bucket === "deepRisk") return "Deep/wide compression / cross risk";
+      return String(ev.type || "MA event");
+    }
+    function markerTooltipLab(ev){
+      const cfg = eventConfig(eventTypeForBucket(eventBucketLab(ev)));
+      const outcome = Number.isFinite(Number(ev.outcomePct))
+        ? `${Number(ev.outcomePct) >= 0 ? "+" : ""}${Number(ev.outcomePct).toFixed(2)}%`
+        : "Pending / not scored";
+      return [
+        eventNameLab(ev),
+        "Pair: " + (shortPair(ev.ref) || "-"),
+        "Timeframe: " + (ev.tf || (typeof iv === "function" ? iv() : "-")),
+        "Strength: " + Math.round(Number(ev.strength) || 0) + "%",
+        "Quality: " + Math.round(Number(ev.quality) || 0) + "%",
+        "Alignment: " + Math.round((Number(ev.alignment) || 0) / 20) + "/5",
+        "Confirmation candles: " + (Number.isFinite(Number(ev.confirmationCandles)) ? Number(ev.confirmationCandles) : cfg.confirm),
+        "Outcome window: " + (Number(ev.outcomeWindow) || cfg.outcome) + " candle" + ((Number(ev.outcomeWindow) || cfg.outcome) === 1 ? "" : "s"),
+        "Outcome: " + outcome
+      ];
+    }
+    function withOutcomeLab(ev,rows){
+      const cfg = eventConfig(eventTypeForBucket(eventBucketLab(ev)));
+      const idx = Number(ev.sourceIndex);
+      const outcomeWindow = Number(ev.outcomeWindow) || cfg.outcome;
+      const future = Number.isFinite(idx) ? rows[Math.min(rows.length-1,idx + outcomeWindow)] : null;
+      const base = Number(ev.price);
+      const futureClose = future ? Number(future[4]) : NaN;
+      const changePct = Number.isFinite(base) && base && Number.isFinite(futureClose) ? (futureClose - base) / base * 100 : null;
+      return {...ev,outcomeWindow,outcomePct:changePct};
     }
     function activeVisibleTimeRange(){
       if(!Array.isArray(candles) || !candles.length) return null;
@@ -14908,20 +15095,32 @@ If there is NO open position, use this Section 2 instead:
     }
     function cacheKey(tf,rows,s,rangeInfo){
       const last = rows.length ? rows[rows.length-1][0] : 0;
-      const sig = [tf.interval,rows.length,last,s.mode,Object.keys(s.types).filter(k=>s.types[k]).join("."),s.adjacent,s.deep,s.minStrength,s.minQuality,s.minAlignment,s.max,s.group,s.labelMode,rangeInfo?rangeInfo.start:"",rangeInfo?rangeInfo.end:""].join("|");
+      const eventSig = EVENT_TYPES.map(type => {
+        const cfg = eventConfig(type.key);
+        return [type.key,cfg.pair,cfg.minStrength,cfg.minQuality,cfg.minAlignment,cfg.confirm,cfg.outcome].join(":");
+      }).join(",");
+      const typeSig = Object.keys(s.types).sort().map(key => `${key}:${s.types[key] ? 1 : 0}`).join(",");
+      const tfSig = Array.from(s.tfs).sort().join(",");
+      const sig = [tf.interval,rows.length,last,s.range,tfSig,typeSig,eventSig,s.max,s.group,s.labelMode,rangeInfo?rangeInfo.start:"",rangeInfo?rangeInfo.end:""].join("|");
       return sig;
     }
     function sourceRows(tf,s,rangeInfo){
       const h = window.PUBLIC_MARKET_DATA_HUB;
       if(!h || typeof h.getClosedBuffer !== "function") return [];
       let rows = h.getClosedBuffer(tf.interval) || [];
-      if(s.mode === "live"){
+      const warmup = Math.max(...MA_STACK_STRIP.stackPeriods()) + 80;
+      if(s.range === "last100"){
+        rows = rows.slice(-(100 + warmup));
+      }else if(s.range === "last300"){
+        rows = rows.slice(-(300 + warmup));
+      }else if(s.range === "live"){
         rows = (typeof h.getChartBuffer === "function" ? h.getChartBuffer(tf.interval) : rows).slice(-80);
-      }else if(s.mode === "visible" && rangeInfo){
-        const pad = Math.max(...MA_STACK_STRIP.stackPeriods()) + 80;
-        const start = Math.max(0,rows.findIndex(r => Number(r.time) >= rangeInfo.start) - pad);
+      }else if(s.range === "visible" && rangeInfo){
+        const start = Math.max(0,rows.findIndex(r => Number(r.time) >= rangeInfo.start) - warmup);
         const end = rows.findIndex(r => Number(r.time) > rangeInfo.end);
         rows = rows.slice(start,end > 0 ? end : rows.length);
+      }else if(s.range === "loaded"){
+        rows = rows.slice();
       }else{
         rows = rows.slice(-1800);
       }
@@ -14934,30 +15133,38 @@ If there is NO open position, use this Section 2 instead:
       if(!rangeInfo) return [];
       let out = [];
       TFs.forEach(tf => {
-        if(!s.tfs.has(tf.interval)) return;
+        if(!s.tfs.has(tf.interval) || tf.interval !== iv()) return;
         const rows = sourceRows(tf,s,rangeInfo);
         if(rows.length < 50) return;
         const key = cacheKey(tf,rows,s,rangeInfo);
         let evs = cache.get(key);
         if(!evs){
-          evs = MA_STACK_STRIP.markerEvents(tf,rows,{});
+          evs = MA_STACK_STRIP.markerEvents(tf,rows,{
+            confirmationCandlesFor:(type)=>eventConfig(type).confirm,
+            outcomeWindowFor:(type)=>eventConfig(type).outcome
+          });
           cache.set(key,evs);
         }
         out = out.concat(evs.filter(ev => {
-          if(ev.time < rangeInfo.start || ev.time > rangeInfo.end) return false;
-          return allowed(ev,s);
-        }));
+          const markerTime = Number(ev.confirmedTime) || Number(ev.time);
+          if(s.range === "visible" && (markerTime < rangeInfo.start || markerTime > rangeInfo.end)) return false;
+          if(s.range === "last100" && ev.sourceIndex < rows.length - 100) return false;
+          if(s.range === "last300" && ev.sourceIndex < rows.length - 300) return false;
+          return allowedLab(ev,s);
+        }).map(ev => withOutcomeLab(ev,rows)));
       });
       return limitEvents(out,s);
     }
     function limitEvents(evs,s){
       const max = s.max === "unlimited" ? Infinity : Number(s.max) || 20;
-      let arr = evs.slice().sort((a,b)=>a.time-b.time);
+      let arr = evs.slice().sort((a,b)=>(Number(a.confirmedTime)||Number(a.time)||0)-(Number(b.confirmedTime)||Number(b.time)||0));
       if(s.group){
         const grouped = [];
         arr.forEach(ev => {
           const last = grouped[grouped.length-1];
-          if(last && Math.abs(ev.time-last.time) <= (typeof ivSec === "function" ? ivSec() * 2 : 300)){
+          const evTime = Number(ev.confirmedTime) || Number(ev.time) || 0;
+          const lastTime = Number(last && last.confirmedTime) || Number(last && last.time) || 0;
+          if(last && Math.abs(evTime-lastTime) <= (typeof ivSec === "function" ? ivSec() * 2 : 300)){
             if((ev.quality > last.quality) || (ev.quality === last.quality && ev.strength > last.strength)) grouped[grouped.length-1] = ev;
           }else grouped.push(ev);
         });
@@ -14991,10 +15198,10 @@ If there is NO open position, use this Section 2 instead:
       ctx.font = "10px Arial";
       ctx.textBaseline = "middle";
       evs.forEach(ev => {
-        const x = xForTime(ev.time,vis,mapX);
+        const x = xForTime(Number(ev.confirmedTime) || Number(ev.time),vis,mapX);
         const y = mapY(ev.price);
         if(x == null || !Number.isFinite(y) || x < left || x > left + chartW || y < top || y > top + priceH) return;
-        const meta = markerLabel(ev);
+        const meta = markerLabelLab(ev);
         const text = s.labelMode === "icon" ? meta.icon : `${meta.icon} ${meta.text}`;
         const tw = ctx.measureText(text).width + 8;
         const bx = Math.max(left+2,Math.min(left+chartW-tw-2,x-tw/2));
@@ -15006,8 +15213,53 @@ If there is NO open position, use this Section 2 instead:
         ctx.strokeRect(bx,by-8,tw,16);
         ctx.fillStyle = "#111";
         ctx.fillText(text,bx+4,by+1);
+        if(Array.isArray(overlayHitItems)){
+          overlayHitItems.push({
+            kind:"maStackLabMarker",
+            x1:bx,
+            y1:by-8,
+            x2:bx+tw,
+            y2:by+8,
+            x,
+            y:by,
+            lines:markerTooltipLab(ev)
+          });
+        }
       });
       ctx.restore();
+      const hit = hoverLabMarker();
+      if(hit && mouse && typeof tooltip === "function") tooltip(hit.lines,mouse.x,mouse.y);
+    }
+    function hoverLabMarker(){
+      if(!mouse || !Array.isArray(overlayHitItems)) return null;
+      for(let i=overlayHitItems.length-1;i>=0;i--){
+        const it = overlayHitItems[i];
+        if(it && it.kind === "maStackLabMarker" && mouse.x >= it.x1 && mouse.x <= it.x2 && mouse.y >= it.y1 && mouse.y <= it.y2) return it;
+      }
+      return null;
+    }
+    function installHover(){
+      if(window.__maStackLabMarkerHoverInstalled) return;
+      window.__maStackLabMarkerHoverInstalled = true;
+      if(typeof hoverItem === "function"){
+        const prevHover = hoverItem;
+        hoverItem = window.hoverItem = function(){
+          const hit = hoverLabMarker();
+          if(hit) return hit;
+          return prevHover.apply(this,arguments);
+        };
+      }
+      if(typeof drawHoverTooltip === "function"){
+        const prevTip = drawHoverTooltip;
+        drawHoverTooltip = window.drawHoverTooltip = function(){
+          const it = typeof hoverItem === "function" ? hoverItem() : null;
+          if(it && it.kind === "maStackLabMarker" && mouse && Array.isArray(it.lines)){
+            tooltip(it.lines,mouse.x,mouse.y);
+            return;
+          }
+          return prevTip.apply(this,arguments);
+        };
+      }
     }
     function installSettings(){
       const grid = document.querySelector("#settingsModal .settings-grid");
@@ -15017,9 +15269,11 @@ If there is NO open position, use this Section 2 instead:
       if(!tabs || !panelsRoot) return;
       if(!$id("maStackMarkersSettingsTab")){
         const btn=document.createElement("button");
-        btn.type="button"; btn.id="maStackMarkersSettingsTab"; btn.className="v24-settings-tab"; btn.dataset.tab="ma-stack-markers"; btn.textContent="MA Stack";
+        btn.type="button"; btn.id="maStackMarkersSettingsTab"; btn.className="v24-settings-tab"; btn.dataset.tab="ma-stack-markers"; btn.textContent="MAs Event Lab";
         tabs.appendChild(btn);
         btn.addEventListener("click",()=>activateSettings(),false);
+      }else{
+        $id("maStackMarkersSettingsTab").textContent = "MAs Event Lab";
       }
       if(!$id("maStackMarkersSettingsPanel")){
         const panel=document.createElement("div");
@@ -15027,8 +15281,12 @@ If there is NO open position, use this Section 2 instead:
         const inner=document.createElement("div"); inner.className="v24-settings-panel-grid";
         inner.innerHTML = settingsHtml();
         panel.appendChild(inner); panelsRoot.appendChild(panel);
+      }else{
+        const inner = $id("maStackMarkersSettingsPanel").querySelector(".v24-settings-panel-grid");
+        if(inner && !inner.__maStackLabFocused) inner.innerHTML = settingsHtml();
       }
       bindSettings();
+      installHover();
       if(get("last_tab","") === "1") activateSettings();
     }
     function activateSettings(){
@@ -15040,29 +15298,105 @@ If there is NO open position, use this Section 2 instead:
     }
     function cb(id,label,checked){ return `<label class="ma-stack-marker-check"><input id="${id}" type="checkbox"${checked?" checked":""}>${label}</label>`; }
     function section(title,body){ return `<section class="ma-stack-marker-section"><h4>${title}</h4>${body}</section>`; }
+    function selectOptions(values,current){
+      return values.map(v => {
+        const value = typeof v === "object" ? v.value : v;
+        const label = typeof v === "object" ? v.label : v;
+        return `<option value="${value}"${String(current)===String(value)?" selected":""}>${label}</option>`;
+      }).join("");
+    }
+    function pairOptions(type,current){
+      const periods = MA_STACK_STRIP.stackPeriods();
+      const opts = [{value:"all",label:"All configured pairs"}];
+      for(let i=0;i<periods.length-1;i++){
+        for(let j=i+1;j<periods.length;j++){
+          const ref = `EMA${periods[i]}/${periods[j]}`;
+          const adjacent = j === i + 1;
+          if(type === "deep" && adjacent) continue;
+          opts.push({value:ref,label:adjacent ? `${periods[i]}/${periods[j]} adjacent` : `${periods[i]}/${periods[j]} deep/wide`});
+        }
+      }
+      return selectOptions(opts,current);
+    }
+    function eventPanelHtml(type){
+      const cfg = eventConfig(type.key);
+      const outcomeOptions = selectOptions(OUTCOME_WINDOWS.map(v=>({value:String(v),label:`${v} candle${v===1?"":"s"}`})),String(cfg.outcome));
+      const common = `
+        <div class="ma-stack-lab-common">
+          <label>MA pair<select id="maLab_${type.key}_pair">${pairOptions(type.key,cfg.pair)}</select></label>
+          <label>Min Alignment x/5<input id="maLab_${type.key}_minAlignment" type="number" min="0" max="5" step="1" value="${cfg.minAlignment}"></label>
+          <label>Min Strength %<input id="maLab_${type.key}_minStrength" type="number" min="0" max="100" step="1" value="${cfg.minStrength}"></label>
+          <label>Min Quality %<input id="maLab_${type.key}_minQuality" type="number" min="0" max="100" step="1" value="${cfg.minQuality}"></label>
+          <label>Confirmation candles<input id="maLab_${type.key}_confirm" type="number" min="0" max="20" step="1" value="${cfg.confirm}"></label>
+          <label>Outcome window<select id="maLab_${type.key}_outcome">${outcomeOptions}</select></label>
+        </div>`;
+      let specific = "";
+      if(type.key === "crossover") specific = `
+        <label>Minimum post-cross separation<input id="maLab_crossover_separation" type="number" min="0" max="100" step="1" value="${eventSetting("crossover","separation","0")}"></label>
+        <label>Minimum fast-MA slope after cross<input id="maLab_crossover_slope" type="number" min="0" max="100" step="1" value="${eventSetting("crossover","slope","0")}"></label>
+        <label>Minimum spread expansion after cross<input id="maLab_crossover_expansion" type="number" min="0" max="100" step="1" value="${eventSetting("crossover","expansion","0")}"></label>
+        <label>Max chop density<input id="maLab_crossover_chop" type="number" min="0" max="100" step="1" value="${eventSetting("crossover","chop","100")}"></label>`;
+      else if(type.key === "failed") specific = `
+        <label>Failure window candles<input id="maLab_failed_failureWindow" type="number" min="1" max="20" step="1" value="${eventSetting("failed","failureWindow","5")}"></label>
+        <label>Failure type<select id="maLab_failed_failureType">${selectOptions([{value:"cross-back",label:"cross-back required"},{value:"no-expansion",label:"no expansion after cross"},{value:"rejection",label:"rejection back into prior side"}],cfg.failureType)}</select></label>
+        <label>Minimum post-failure separation/expansion<input id="maLab_failed_expansion" type="number" min="0" max="100" step="1" value="${eventSetting("failed","expansion","0")}"></label>`;
+      else if(type.key === "bounce") specific = `
+        <label>Convergence lookback candles<input id="maLab_bounce_lookback" type="number" min="3" max="20" step="1" value="${eventSetting("bounce","lookback","5")}"></label>
+        <label>Minimum contraction candles<input id="maLab_bounce_contract" type="number" min="1" max="10" step="1" value="${eventSetting("bounce","contract","2")}"></label>
+        <label>Proximity strictness<select id="maLab_bounce_proximity">${selectOptions(["loose","normal","strict"],cfg.proximity)}</select></label>
+        <label>Turn-away confirmation candles<input id="maLab_bounce_turnaway" type="number" min="1" max="10" step="1" value="${eventSetting("bounce","turnaway","2")}"></label>
+        <label>Minimum spread re-expansion<input id="maLab_bounce_reexpand" type="number" min="0" max="100" step="1" value="${eventSetting("bounce","reexpand","0")}"></label>
+        ${cb("maLab_bounce_requireSlope","Fast-MA slope turn-away required",cfg.requireSlope)}
+        ${cb("maLab_bounce_requireDefense","Setup-defense required",cfg.requireDefense)}`;
+      else if(type.key === "compression") specific = `
+        <label>Pair/group selection<select id="maLab_compression_pairGroup">${pairOptions("compression",cfg.pair)}</select></label>
+        <label>Compression lookback<input id="maLab_compression_lookback" type="number" min="3" max="50" step="1" value="${eventSetting("compression","lookback","12")}"></label>
+        <label>Max normalized spread<input id="maLab_compression_maxSpread" type="number" min="0" max="100" step="1" value="${eventSetting("compression","maxSpread","15")}"></label>
+        <label>Minimum contraction candles<input id="maLab_compression_contract" type="number" min="1" max="20" step="1" value="${eventSetting("compression","contract","3")}"></label>
+        <label>Slope flatness threshold<input id="maLab_compression_flatness" type="number" min="0" max="100" step="1" value="${eventSetting("compression","flatness","20")}"></label>
+        <label>Minimum compression duration<input id="maLab_compression_duration" type="number" min="1" max="50" step="1" value="${eventSetting("compression","duration","3")}"></label>`;
+      else if(type.key === "release") specific = `
+        ${cb("maLab_release_priorCompression","Prior compression required",eventOn("release","priorCompression",true))}
+        <label>Minimum compression duration<input id="maLab_release_duration" type="number" min="1" max="50" step="1" value="${eventSetting("release","duration","3")}"></label>
+        <label>Release confirmation candles<input id="maLab_release_releaseConfirm" type="number" min="1" max="20" step="1" value="${eventSetting("release","releaseConfirm","1")}"></label>
+        <label>Minimum spread expansion<input id="maLab_release_expansion" type="number" min="0" max="100" step="1" value="${eventSetting("release","expansion","0")}"></label>
+        <label>Fast-stack expansion weight<input id="maLab_release_fastWeight" type="number" min="0" max="100" step="1" value="${eventSetting("release","fastWeight","70")}"></label>
+        <label>Full-stack expansion weight<input id="maLab_release_fullWeight" type="number" min="0" max="100" step="1" value="${eventSetting("release","fullWeight","30")}"></label>
+        <label>Minimum slope acceleration<input id="maLab_release_accel" type="number" min="0" max="100" step="1" value="${eventSetting("release","accel","0")}"></label>
+        <label>Alignment improvement required<select id="maLab_release_alignmentImprove">${selectOptions(["none","soft","strict"],eventSetting("release","alignmentImprove","soft"))}</select></label>`;
+      else if(type.key === "transition") specific = `
+        <label>Minimum Alignment change<input id="maLab_transition_alignmentChange" type="number" min="0" max="5" step="1" value="${eventSetting("transition","alignmentChange","1")}"></label>
+        <label>Minimum Strength change<input id="maLab_transition_strengthChange" type="number" min="0" max="100" step="1" value="${eventSetting("transition","strengthChange","10")}"></label>
+        <label>Minimum Quality change<input id="maLab_transition_qualityChange" type="number" min="0" max="100" step="1" value="${eventSetting("transition","qualityChange","10")}"></label>
+        <label>Max flip-flop allowed<input id="maLab_transition_flipflop" type="number" min="0" max="20" step="1" value="${eventSetting("transition","flipflop","3")}"></label>
+        <label>Transition direction<select id="maLab_transition_direction">${selectOptions(["bullish","bearish","either"],cfg.direction)}</select></label>
+        ${cb("maLab_transition_requireAdjacent","Require adjacent-pair confirmation",cfg.requireAdjacent)}`;
+      else if(type.key === "deep") specific = `
+        <label>Non-adjacent pair<select id="maLab_deep_pairDeep">${pairOptions("deep",cfg.pair)}</select></label>
+        <label>Stricter minimum Quality<input id="maLab_deep_strictQuality" type="number" min="0" max="100" step="1" value="${eventSetting("deep","strictQuality","70")}"></label>
+        <label>Proximity strictness<select id="maLab_deep_proximity">${selectOptions(["loose","normal","strict"],cfg.proximity)}</select></label>
+        <label>Turn-away confirmation candles<input id="maLab_deep_turnaway" type="number" min="1" max="10" step="1" value="${eventSetting("deep","turnaway","2")}"></label>
+        <label>Minimum spread re-expansion<input id="maLab_deep_reexpand" type="number" min="0" max="100" step="1" value="${eventSetting("deep","reexpand","0")}"></label>
+        <label>Context required<select id="maLab_deep_context">${selectOptions(["pullback defense","deep compression","cross risk","slow-base defense"],cfg.context)}</select></label>
+        ${cb("maLab_deep_conflict","Must not conflict with state",cfg.conflict)}`;
+      return `<details class="ma-stack-lab-event" open><summary>${type.label}</summary>${common}<div class="ma-stack-lab-specific">${specific}</div></details>`;
+    }
     function settingsHtml(){
       const s=settings();
-      return `<div class="settings-card ma-stack-marker-card">
-        <div class="settings-card-title">MA Stack chart markers</div>
-        <div class="settings-card-desc">Visual chart annotations generated from hub-owned MA Stack candle data. MA Stack and the strip remain always active.</div>
+      return `<div class="settings-card ma-stack-marker-card ma-stack-lab-card">
         <div class="ma-stack-marker-sections">
           ${section("Marker Display",`
-            <div class="ma-stack-marker-control">${cb("maStackMarkersShow","Show MA Stack event markers",s.show)}</div>
-            <div class="ma-stack-marker-control"><label>Marker mode<select id="maStackMarkersMode"><option value="live"${s.mode==="live"?" selected":""}>Live only</option><option value="visible"${s.mode==="visible"?" selected":""}>Visible history</option><option value="loaded"${s.mode==="loaded"?" selected":""}>Loaded history</option></select></label></div>
+            <div class="ma-stack-marker-control">${cb("maStackMarkersShow","Marker display ON",s.show)}</div>
             <div class="ma-stack-marker-control"><label>Label mode<select id="maStackLabelMode"><option value="icon"${s.labelMode==="icon"?" selected":""}>Icon only</option><option value="label"${s.labelMode==="label"?" selected":""}>Icon + short label</option></select></label></div>
-          `)}
-          ${section("Event Types",`<div class="ma-stack-marker-checkgrid">${cb("maStackTypeCrossover","MA crossover",s.types.crossover)}${cb("maStackTypeFailed","Failed crossover",s.types.failed)}${cb("maStackTypeBounce","Bounce / no-cross",s.types.bounce)}${cb("maStackTypeRelease","Compression release",s.types.release)}${cb("maStackTypeTransition","Stack transition",s.types.transition)}${cb("maStackTypeDeepBounce","Deep/wide MA bounce",s.types.deepBounce)}${cb("maStackTypeDeepRisk","Deep/wide compression / cross risk",s.types.deepRisk)}</div>`)}
-          ${section("Pair Groups",`<div class="ma-stack-marker-checkgrid">${cb("maStackPairsAdjacent","Adjacent structural pairs",s.adjacent)}${cb("maStackPairsDeep","Deep/wide pairs",s.deep)}</div>`)}
-          ${section("Score Filters",`
-            <label class="ma-stack-marker-number"><span>Minimum Strength %</span><input id="maStackMinStrength" type="range" min="0" max="100" step="1" value="${s.minStrength}"><input id="maStackMinStrengthNum" type="number" min="0" max="100" step="1" value="${s.minStrength}"></label>
-            <label class="ma-stack-marker-number"><span>Minimum Quality %</span><input id="maStackMinQuality" type="range" min="0" max="100" step="1" value="${s.minQuality}"><input id="maStackMinQualityNum" type="number" min="0" max="100" step="1" value="${s.minQuality}"></label>
-            <label class="ma-stack-marker-number"><span>Minimum Alignment x/5</span><input id="maStackMinAlignment" type="range" min="0" max="5" step="1" value="${s.minAlignment}"><input id="maStackMinAlignmentNum" type="number" min="0" max="5" step="1" value="${s.minAlignment}"></label>
-          `)}
-          ${section("Timeframes",`<div class="ma-stack-marker-checkgrid ma-stack-marker-tfs">${TFs.map(tf=>cb("maStackTf_"+tf.interval,tf.key,s.tfs.has(tf.interval))).join("")}</div>`)}
-          ${section("Density",`
             <div class="ma-stack-marker-control"><label>Max markers on screen<select id="maStackMaxMarkers"><option value="10"${s.max==="10"?" selected":""}>10</option><option value="20"${s.max==="20"?" selected":""}>20</option><option value="40"${s.max==="40"?" selected":""}>40</option><option value="unlimited"${s.max==="unlimited"?" selected":""}>unlimited</option></select></label></div>
             <div class="ma-stack-marker-control">${cb("maStackGroupNearby","Group nearby events",s.group)}</div>
           `)}
+          ${section("Lab Scope",`
+            <div class="ma-stack-marker-control"><label>History range<select id="maStackLabRange"><option value="visible"${s.range==="visible"?" selected":""}>Visible chart</option><option value="last100"${s.range==="last100"?" selected":""}>Last 100 candles</option><option value="last300"${s.range==="last300"?" selected":""}>Last 300 candles</option><option value="loaded"${s.range==="loaded"?" selected":""}>Loaded history</option></select></label></div>
+            <div class="ma-stack-marker-checkgrid ma-stack-marker-tfs">${TFs.map(tf=>cb("maStackTf_"+tf.interval,tf.key,s.tfs.has(tf.interval))).join("")}</div>
+          `)}
+          ${section("Event Types",`<div class="ma-stack-marker-checkgrid">${cb("maStackTypeCrossover","MA crossover",s.types.crossover)}${cb("maStackTypeFailed","Failed crossover",s.types.failed)}${cb("maStackTypeBounce","Bounce / no-cross",s.types.bounce)}${cb("maStackTypeCompression","Compression",s.types.compression)}${cb("maStackTypeRelease","Compression release",s.types.release)}${cb("maStackTypeTransition","Stack transition",s.types.transition)}${cb("maStackTypeDeepBounce","Deep/wide MA bounce",s.types.deepBounce)}${cb("maStackTypeDeepRisk","Deep/wide compression / cross risk",s.types.deepRisk)}</div>`)}
+          ${section("Event Definition Panels",`<div class="ma-stack-lab-events">${EVENT_TYPES.map(eventPanelHtml).join("")}</div>`)}
         </div>
       </div>`;
     }
@@ -15072,34 +15406,45 @@ If there is NO open position, use this Section 2 instead:
       const sync=()=>{
         const value = normal ? normal(el) : (el.type==="checkbox" ? (el.checked?"1":"0") : el.value);
         set(key,value);
-        const pairs = {
-          maStackMinStrength:"maStackMinStrengthNum",
-          maStackMinStrengthNum:"maStackMinStrength",
-          maStackMinQuality:"maStackMinQualityNum",
-          maStackMinQualityNum:"maStackMinQuality",
-          maStackMinAlignment:"maStackMinAlignmentNum",
-          maStackMinAlignmentNum:"maStackMinAlignment"
-        };
-        const mate = $id(pairs[id]);
-        if(mate && String(mate.value) !== String(value)) mate.value = value;
         try{ draw(); }catch(_e){}
         try{ window.draw(); }catch(_e){}
       };
       el.addEventListener("input",sync,false); el.addEventListener("change",sync,false);
     }
+    function bindEventControl(id,key,normal){
+      const el=$id(id); if(!el || el.__maStackLabBound) return;
+      el.__maStackLabBound=true;
+      const sync=()=>{ set(key,normal ? normal(el) : (el.type==="checkbox" ? (el.checked?"1":"0") : el.value)); try{ window.draw(); }catch(_e){} };
+      el.addEventListener("input",sync,false); el.addEventListener("change",sync,false);
+    }
+    function bindEventPanels(){
+      EVENT_TYPES.forEach(type=>{
+        const p = "event_"+type.key+"_";
+        bindEventControl(`maLab_${type.key}_pair`,p+"pair",el=>el.value);
+        bindEventControl(`maLab_${type.key}_minAlignment`,p+"min_alignment",el=>Math.max(0,Math.min(5,Math.round(num(el.value,2)))));
+        bindEventControl(`maLab_${type.key}_minStrength`,p+"min_strength",el=>Math.max(0,Math.min(100,Math.round(num(el.value,50)))));
+        bindEventControl(`maLab_${type.key}_minQuality`,p+"min_quality",el=>Math.max(0,Math.min(100,Math.round(num(el.value,60)))));
+        bindEventControl(`maLab_${type.key}_confirm`,p+"confirm",el=>Math.max(0,Math.min(20,Math.round(num(el.value,1)))));
+        bindEventControl(`maLab_${type.key}_outcome`,p+"outcome",el=>el.value);
+      });
+      [
+        ["maLab_crossover_separation","event_crossover_separation"],["maLab_crossover_slope","event_crossover_slope"],["maLab_crossover_expansion","event_crossover_expansion"],["maLab_crossover_chop","event_crossover_chop"],
+        ["maLab_failed_failureWindow","event_failed_failureWindow"],["maLab_failed_failureType","event_failed_failure_type"],["maLab_failed_expansion","event_failed_expansion"],
+        ["maLab_bounce_lookback","event_bounce_lookback"],["maLab_bounce_contract","event_bounce_contract"],["maLab_bounce_proximity","event_bounce_proximity"],["maLab_bounce_turnaway","event_bounce_turnaway"],["maLab_bounce_reexpand","event_bounce_reexpand"],["maLab_bounce_requireSlope","event_bounce_require_slope"],["maLab_bounce_requireDefense","event_bounce_require_defense"],
+        ["maLab_compression_pairGroup","event_compression_pair"],["maLab_compression_lookback","event_compression_lookback"],["maLab_compression_maxSpread","event_compression_maxSpread"],["maLab_compression_contract","event_compression_contract"],["maLab_compression_flatness","event_compression_flatness"],["maLab_compression_duration","event_compression_duration"],
+        ["maLab_release_priorCompression","event_release_priorCompression"],["maLab_release_duration","event_release_duration"],["maLab_release_releaseConfirm","event_release_releaseConfirm"],["maLab_release_expansion","event_release_expansion"],["maLab_release_fastWeight","event_release_fastWeight"],["maLab_release_fullWeight","event_release_fullWeight"],["maLab_release_accel","event_release_accel"],["maLab_release_alignmentImprove","event_release_alignmentImprove"],
+        ["maLab_transition_alignmentChange","event_transition_alignmentChange"],["maLab_transition_strengthChange","event_transition_strengthChange"],["maLab_transition_qualityChange","event_transition_qualityChange"],["maLab_transition_flipflop","event_transition_flipflop"],["maLab_transition_direction","event_transition_direction"],["maLab_transition_requireAdjacent","event_transition_require_adjacent"],
+        ["maLab_deep_pairDeep","event_deep_pair"],["maLab_deep_strictQuality","event_deep_strictQuality"],["maLab_deep_proximity","event_deep_proximity"],["maLab_deep_turnaway","event_deep_turnaway"],["maLab_deep_reexpand","event_deep_reexpand"],["maLab_deep_context","event_deep_context"],["maLab_deep_conflict","event_deep_conflict"]
+      ].forEach(([id,key])=>bindEventControl(id,key,el=>el.type==="checkbox"?(el.checked?"1":"0"):el.value));
+    }
     function bindSettings(){
       bind("maStackMarkersShow","show");
-      bind("maStackMarkersMode","mode",el=>el.value);
-      [["maStackTypeCrossover","type_crossover"],["maStackTypeFailed","type_failed"],["maStackTypeBounce","type_bounce"],["maStackTypeRelease","type_release"],["maStackTypeTransition","type_transition"],["maStackTypeDeepBounce","type_deep_bounce"],["maStackTypeDeepRisk","type_deep_risk"],["maStackPairsAdjacent","pairs_adjacent"],["maStackPairsDeep","pairs_deep"],["maStackGroupNearby","group"]].forEach(x=>bind(x[0],x[1]));
-      bind("maStackMinStrength","min_strength",el=>Math.max(0,Math.min(100,Math.round(num(el.value,50)))));
-      bind("maStackMinStrengthNum","min_strength",el=>Math.max(0,Math.min(100,Math.round(num(el.value,50)))));
-      bind("maStackMinQuality","min_quality",el=>Math.max(0,Math.min(100,Math.round(num(el.value,60)))));
-      bind("maStackMinQualityNum","min_quality",el=>Math.max(0,Math.min(100,Math.round(num(el.value,60)))));
-      bind("maStackMinAlignment","min_alignment",el=>Math.max(0,Math.min(5,Math.round(num(el.value,2)))));
-      bind("maStackMinAlignmentNum","min_alignment",el=>Math.max(0,Math.min(5,Math.round(num(el.value,2)))));
+      bind("maStackLabRange","range",el=>el.value);
+      [["maStackTypeCrossover","type_crossover"],["maStackTypeFailed","type_failed"],["maStackTypeBounce","type_bounce"],["maStackTypeCompression","type_compression"],["maStackTypeRelease","type_release"],["maStackTypeTransition","type_transition"],["maStackTypeDeepBounce","type_deep_bounce"],["maStackTypeDeepRisk","type_deep_risk"],["maStackGroupNearby","group"]].forEach(x=>bind(x[0],x[1]));
       TFs.forEach(tf=>bind("maStackTf_"+tf.interval,"tf_"+tf.interval));
       bind("maStackMaxMarkers","max",el=>el.value);
       bind("maStackLabelMode","label",el=>el.value);
+      bindEventPanels();
     }
     return {installSettings,draw,settings};
   })();
