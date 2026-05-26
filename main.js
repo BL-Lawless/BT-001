@@ -77,6 +77,7 @@ const MARKETS = {
     rest:"https://fapi.binance.com/fapi/v1/klines",
     time:"https://fapi.binance.com/fapi/v1/time",
     userTrades:"https://fapi.binance.com/fapi/v1/userTrades",
+    income:"https://fapi.binance.com/fapi/v1/income",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
     ws:"wss://fstream.binance.com/market/stream"
@@ -86,6 +87,7 @@ const MARKETS = {
     rest:"https://fapi.binance.com/fapi/v1/klines",
     time:"https://fapi.binance.com/fapi/v1/time",
     userTrades:"https://fapi.binance.com/fapi/v1/userTrades",
+    income:"https://fapi.binance.com/fapi/v1/income",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
     ws:"wss://fstream.binance.com/market/stream"
@@ -142,6 +144,9 @@ let resultLinks = [];
 let openLotLinks = [];
 let openPositionBoxes = [];
 let openEntryMarkerIds = new Set();
+let activeOpenParentChainIds = new Set();
+let fundingIncomeRows = [];
+let fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
 let unresolvedCount = 0;
 
 let dailyState = null;
@@ -2366,6 +2371,74 @@ async function getTrades(key,sec,off){
   return all;
 }
 
+/* PATCH_37_REDO_NET_PL_FUNDING_UI_FIX: focused signed read-only funding income lookup. */
+async function getFundingIncome(key,sec,off){
+  const c = cfg();
+  const endpoint = c.income || "https://fapi.binance.com/fapi/v1/income";
+  const rw = reportRangeMs();
+  const end = rw.end;
+  const start = Math.max(0,rw.start - RECON_LOOKBACK_WEEKS * WEEK_MS);
+  const all = [];
+  const seen = new Set();
+
+  let chunk = start;
+  while(chunk < end){
+    const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,end);
+    let page = chunk;
+    let n = 0;
+
+    while(page <= chunkEnd && n < 30){
+      const rows = await signedGet(
+        endpoint,
+        {
+          symbol:c.symbol,
+          incomeType:"FUNDING_FEE",
+          startTime:String(Math.floor(page)),
+          endTime:String(Math.floor(chunkEnd)),
+          limit:"1000"
+        },
+        key,
+        sec,
+        off
+      );
+
+      if(!Array.isArray(rows) || !rows.length) break;
+
+      for(const row of rows){
+        const k =
+          String(row.tranId ?? row.time ?? "") + "_" +
+          String(row.symbol ?? "") + "_" +
+          String(row.income ?? "");
+        if(!seen.has(k)){
+          seen.add(k);
+          all.push(row);
+        }
+      }
+
+      if(rows.length < 1000) break;
+
+      const lt = Math.max(...rows.map(r => Number(r.time || 0)));
+      if(!isFinite(lt) || lt <= page) break;
+      page = lt + 1;
+      n++;
+    }
+
+    chunk = chunkEnd + 1;
+  }
+
+  fundingIncomeFetchStats = {rows:all.length,start,end,symbol:c.symbol};
+  if(typeof window !== "undefined"){
+    window.__v13Patch37CFundingStats = {
+      fetchedRows:all.length,
+      fetchStart:start,
+      fetchEnd:end,
+      symbol:c.symbol,
+      matches:{}
+    };
+  }
+  return all;
+}
+
 async function getPositions(key,sec,off){
   const rows = await signedGet(
     cfg().positionRisk,
@@ -2587,6 +2660,7 @@ function reconstruct(rows,symbol){
           realizedPnl:rpPart,
           fees:ef + xf,
           netPnl:net,
+          binanceRealizedPnl:rpPart,
           tradeId:tid,
           orderId:oid,
           unresolved:false,
@@ -2844,6 +2918,11 @@ async function loadTrades(opt={}){
 
     const off = await timeOffset();
     const rows = await getTrades(key,sec,off);
+    fundingIncomeRows = await getFundingIncome(key,sec,off).catch(e => {
+      console.warn("Funding income fetch failed",e);
+      fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:cfg().symbol};
+      return [];
+    });
     const risk = await getPositions(key,sec,off);
     const balanceRows = await getAccountBalance(key,sec,off).catch(e => {
       console.warn("Balance fetch failed",e);
@@ -2855,6 +2934,7 @@ async function loadTrades(opt={}){
     const rec = filterReconstructionForReport(full);
 
     openEntryMarkerIds = new Set((full.openLots || []).map(l => l.markerId));
+    activeOpenParentChainIds = new Set((full.openLots || []).map(l => l && (l.parentTradeId || l.chainId || l.tradeChainId)).filter(Boolean));
 
     fillMarkers = rec.markers;
     resultLinks = rec.links;
@@ -2886,6 +2966,9 @@ function clearTrades(){
   resultLinks = [];
   openLotLinks = [];
   openPositionBoxes = [];
+  activeOpenParentChainIds = new Set();
+  fundingIncomeRows = [];
+  fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
   openEntryMarkerIds = new Set();
   unresolvedCount = 0;
   tradeCountEl.textContent = "Trades: 0";
@@ -3873,19 +3956,11 @@ function draw(){
 
   tradeOverlays(vis,mapX,mapY,slot,clip);
 
-  ctx.strokeStyle = "#8a8f98";
-  ctx.lineWidth = hairline();
-  ctx.setLineDash([5,5]);
-  ctx.beginPath();
-  ctx.moveTo(px(left),px(latestY));
-  ctx.lineTo(px(w-right),px(latestY));
-  ctx.stroke();
-  ctx.setLineDash([]);
+  /* PATCH_37F: single current-price dashed line is owned by drawCountdown(). */
 
   ctx.restore();
 
-  ctx.fillStyle = "#111";
-  ctx.fillText(ip(latest.close),w-right+8,latestY-6);
+  /* PATCH_37C: current price is drawn only in the shared right-axis price/countdown box. */
 
   for(let i=0;i<vis.length;i++){
     const c = vis[i];
@@ -4369,16 +4444,96 @@ startTradeAuto();
     const entries = markers.filter(m => m.role === 'entry').sort(sortMarker15);
     const exits = markers.filter(m => m.role === 'close' && !m.unresolved).sort(sortMarker15).map(m => {
       const eventLinks = links.filter(l => l.exitMarkerId === m.id);
-      const pnl = eventLinks.length ? eventLinks.reduce((a,l) => a + n15(l.netPnl),0) : n15(m.pnl);
-      return {marker:m,type:m.isFinalExit ? 'EX' : 'P',qty:Math.abs(n15(m.qty)),pnl,time:n15(m.time),price:n15(m.price),links:eventLinks};
+      const pnl = eventLinks.length ? realizedSum15(eventLinks) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
+      const fees = eventLinks.length ? signedFeeSum15(eventLinks) : signedFeeValue15(m.fee);
+      const netPnl = pnl + fees;
+      return {marker:m,type:m.isFinalExit ? 'EX' : 'P',qty:Math.abs(n15(m.qty)),pnl,fees,netPnl,time:n15(m.time),price:n15(m.price),links:eventLinks};
     });
     const firstEntry = entries[0] || null;
     const finalExit = exits.filter(e => e.type === 'EX').slice(-1)[0] || null;
-    const total = exits.reduce((a,e) => a + n15(e.pnl),0);
+    const total = links.length ? realizedSum15(links) : exits.reduce((a,e) => a + n15(e.pnl),0);
+    const fees = links.length ? signedFeeSum15(links) : exits.reduce((a,e) => a + n15(e.fees),0);
     const totalLots = exits.reduce((a,e) => a + n15(e.qty),0);
     const dir = firstEntry ? sideDir15(firstEntry.side) : (links[0] ? sideDir15(links[0].side) : '');
     const firstTime = markers.length ? Math.min(...markers.map(m => n15(m.time)).filter(Boolean)) : 0;
-    return {parentId,markers,links,entries,exits,firstEntry,finalExit,total,totalLots,dir,firstTime};
+    const lastExitTime = exits.length ? Math.max(...exits.map(e => n15(e.time)).filter(Boolean)) : 0;
+    const fundingInfo = fundingMatchInfo15(firstTime,finalExit ? n15(finalExit.time) : lastExitTime,(markers[0] && markers[0].symbol) || (links[0] && links[0].symbol) || cfg().symbol,parentId);
+    const funding = fundingInfo.sum;
+    const netTotal = total + fees + funding;
+    return {parentId,markers,links,entries,exits,firstEntry,finalExit,total,fees,funding,fundingRows:fundingInfo.count,netTotal,totalLots,dir,firstTime};
+  }
+
+  function realizedValue15(l){
+    return n15(l && (l.binanceRealizedPnl ?? l.realizedPnl));
+  }
+  function realizedSum15(rows){
+    return (rows || []).reduce((a,l) => a + realizedValue15(l),0);
+  }
+  function signedFeeValue15(v){
+    const n = n15(v);
+    return n > 0 ? -n : n;
+  }
+  function signedFeeSum15(rows){
+    return (rows || []).reduce((a,l) => a + signedFeeValue15(l && (l.fees ?? l.fee)),0);
+  }
+  function netValue15(l){
+    return realizedValue15(l) + signedFeeValue15(l && (l.fees ?? l.fee));
+  }
+  function fundingValue15(row){
+    return n15(row && (row.income ?? row.fundingFee ?? row.funding));
+  }
+  function fundingMatchInfo15(start,end,sym,parentId){
+    const s = normalizeTimeSec15(start);
+    const e = normalizeTimeSec15(end);
+    const out = {sum:0,count:0,start:s,end:e};
+    if(!s || !e || e < s) return out;
+    const symbol = String(sym || cfg().symbol || '').toUpperCase();
+    (fundingIncomeRows || []).forEach(row => {
+      const t = normalizeTimeSec15(row && row.time);
+      const rowSym = String(row && row.symbol || symbol).toUpperCase();
+      if(t >= s && t <= e && (!symbol || rowSym === symbol)){
+        out.count++;
+        out.sum += fundingValue15(row);
+      }
+    });
+    if(parentId && typeof window !== 'undefined'){
+      const root = window.__v13Patch37CFundingStats || {
+        fetchedRows:fundingIncomeFetchStats.rows || (fundingIncomeRows || []).length,
+        fetchStart:fundingIncomeFetchStats.start || 0,
+        fetchEnd:fundingIncomeFetchStats.end || 0,
+        symbol:fundingIncomeFetchStats.symbol || symbol,
+        matches:{}
+      };
+      root.matches[String(parentId)] = {count:out.count,sum:out.sum,start:s,end:e,symbol};
+      window.__v13Patch37CFundingStats = root;
+    }
+    return out;
+  }
+  function fundingSumForWindow15(start,end,sym,parentId){
+    return fundingMatchInfo15(start,end,sym,parentId).sum;
+  }
+  function currentOpenRenderChainIds15(sym){
+    const ids = new Set();
+    (openLotLinks || []).forEach(l => {
+      if(l && (!sym || l.symbol === sym)){
+        const id = cid15(l);
+        if(id) ids.add(id);
+      }
+    });
+    (openPositionBoxes || []).forEach(b => {
+      if(b && (!sym || b.symbol === sym)){
+        const id = cid15(b);
+        if(id) ids.add(id);
+      }
+    });
+    return ids;
+  }
+  function activeOpenChainIds15(sym){
+    const ids = currentOpenRenderChainIds15(sym);
+    if(!sym || sym === cfg().symbol){
+      (activeOpenParentChainIds || new Set()).forEach(id => { if(id) ids.add(id); });
+    }
+    return ids;
   }
 
   function allParentTrades15(){
@@ -4391,7 +4546,7 @@ startTradeAuto();
   function entryContribution15(parentId,entryId){
     return (resultLinks || [])
       .filter(l => cid15(l) === parentId && l.entryMarkerId === entryId)
-      .reduce((a,l) => a + n15(l.netPnl),0);
+      .reduce((a,l) => a + netValue15(l),0);
   }
 
   function exitEvent15(markerId){
@@ -4403,16 +4558,21 @@ startTradeAuto();
   function fullTradeTooltip15(parentId){
     const rec = tradeRecord15(parentId);
     if(!rec) return [];
-    const lines = ['Parent trade','Direction: ' + (rec.dir || '-')];
+    const lines = ['Direction: ' + (rec.dir || '-')];
     if(rec.entries.length){
-      lines.push('Entries:');
+      lines.push(`Entries (${rec.entries.length}):`);
       rec.entries.forEach(m => lines.push(`${m.letter || 'E'} ${fq(m.qty)} | ${fm(entryContribution15(rec.parentId,m.id))}`));
     }
     if(rec.exits.length){
-      lines.push('Exits:');
-      rec.exits.forEach(e => lines.push(`${e.type} ${fq(e.qty)} | Exit ${p2(e.price)} | ${fm(e.pnl)}`));
+      lines.push(`Exits (${rec.exits.length}):`);
+      rec.exits.forEach(e => lines.push(`${e.type} ${fq(e.qty)} | ${fm(e.pnl)}`));
     }
-    lines.push('Total trade P/L: ' + fm(rec.total));
+    lines.push('');
+    lines.push('Closing PnL | ' + fm(rec.total));
+    lines.push('Trading Fee | ' + fm(rec.fees));
+    lines.push('Funding Fee | ' + fm(rec.funding));
+    lines.push('');
+    lines.push('Net P/L | ' + fm(rec.netTotal));
     return lines;
   }
 
@@ -4426,8 +4586,60 @@ startTradeAuto();
       return [title,'Size: ' + fq(m.qty) + ' BTC','Price: ' + p2(m.price),'P/L contribution: ' + fm(pid ? entryContribution15(pid,markerId) : 0),'Time: ' + ft(m.time)];
     }
     const ev = exitEvent15(markerId);
-    if(ev) return [ev.type === 'EX' ? 'Final exit' : 'Partial exit','Size: ' + fq(ev.qty) + ' BTC','Price: ' + p2(ev.price),'P/L: ' + fm(ev.pnl),'Time: ' + ft(ev.time)];
+    if(ev) return [ev.type === 'EX' ? 'Final exit' : 'Partial exit',`${ev.type} ${fq(ev.qty)} | ${fm(ev.pnl)}`,'Trading Fee | ' + fm(ev.fees),'','Net P/L | ' + fm(ev.netPnl),'Time: ' + ft(ev.time)];
     return ['Trade event','Size: ' + fq(m.qty) + ' BTC','Price: ' + p2(m.price),'Time: ' + ft(m.time)];
+  }
+
+  function pnlColor15(v){
+    const n = Number(v);
+    if(!Number.isFinite(n) || Math.abs(n) < 1e-12) return '#111827';
+    return n > 0 ? '#047857' : '#f6465d';
+  }
+
+  function colorTooltipValue15(line){
+    const s = String(line || '');
+    const money = s.match(/([+-]?\$[0-9][0-9,]*(?:\.[0-9]+)?|-?\$[0-9][0-9,]*(?:\.[0-9]+)?)\s*$/);
+    if(!money) return null;
+    const raw = money[1];
+    const n = Number(raw.replace(/[$,]/g,''));
+    if(!Number.isFinite(n)) return null;
+    const idx = s.lastIndexOf(raw);
+    return {prefix:s.slice(0,idx),value:raw,color:pnlColor15(n)};
+  }
+
+  function coloredClosedTooltip15(lines,x,y){
+    const safe = (lines || []).map(line => String(line == null ? '' : line));
+    ctx.save();
+    ctx.font = '12px Arial';
+    const pad = 12;
+    const lh = 17;
+    const w = Math.max(...safe.map(s => ctx.measureText(s).width),0) + pad*2;
+    const h = safe.length * lh + pad*2;
+    let tx = x + 14;
+    let ty = y + 14;
+    if(tx + w > canvas.clientWidth - RIGHT_AXIS) tx = x - w - 14;
+    if(ty + h > canvas.clientHeight - 10) ty = y - h - 14;
+    ctx.fillStyle = 'rgba(255,255,255,.98)';
+    ctx.strokeStyle = '#d9dce1';
+    ctx.fillRect(tx,ty,w,h);
+    ctx.strokeRect(tx,ty,w,h);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    safe.forEach((line,i) => {
+      const yLine = ty + pad + i*lh;
+      const parsed = colorTooltipValue15(line);
+      ctx.font = '12px Arial';
+      if(!parsed){
+        ctx.fillStyle = '#111827';
+        ctx.fillText(line,tx+pad,yLine);
+        return;
+      }
+      ctx.fillStyle = '#111827';
+      ctx.fillText(parsed.prefix,tx+pad,yLine);
+      ctx.fillStyle = parsed.color;
+      ctx.fillText(parsed.value,tx+pad+ctx.measureText(parsed.prefix).width,yLine);
+    });
+    ctx.restore();
   }
 
   function pairLinks15(){
@@ -4437,13 +4649,14 @@ startTradeAuto();
       const xm = marker15(l.exitMarkerId);
       if(!em || !xm) continue;
       const key = [cid15(l)||cid15(em)||cid15(xm), l.entryMarkerId, l.exitMarkerId].join('|');
-      if(!groups.has(key)) groups.set(key,{...l,qty:0,netPnl:0,grossPnl:0,realizedPnl:0,fees:0});
+      if(!groups.has(key)) groups.set(key,{...l,qty:0,netPnl:0,grossPnl:0,realizedPnl:0,binanceRealizedPnl:0,fees:0});
       const g = groups.get(key);
       g.qty += n15(l.qty);
-      g.netPnl += n15(l.netPnl);
       g.grossPnl += n15(l.grossPnl);
-      g.realizedPnl += n15(l.realizedPnl);
-      g.fees += n15(l.fees);
+      g.realizedPnl += realizedValue15(l);
+      g.binanceRealizedPnl += realizedValue15(l);
+      g.netPnl += netValue15(l);
+      g.fees += signedFeeValue15(l.fees);
     }
     return [...groups.values()];
   }
@@ -4525,8 +4738,10 @@ startTradeAuto();
   }
 
   function drawSimplifiedTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
+    const activeOpenChains = activeOpenChainIds15(cfg().symbol);
     for(const rec of allParentTrades15()){
       if(!visibleByIsoRecord15(rec)) continue;
+      if(activeOpenChains.has(rec.parentId)) continue;
       const first = rec.firstEntry;
       const ex = rec.finalExit && rec.finalExit.marker;
       if(!first || !ex) continue;
@@ -4534,7 +4749,7 @@ startTradeAuto();
       if(!linkTimeOverlap15(synthetic,vis)) continue;
       const s = segmentFromMarkers15(first,ex,vis,mapX,mapY,slot);
       if(!s) continue;
-      const col = rec.total >= 0 ? '#1e88e5' : '#f6465d';
+      const col = rec.netTotal >= 0 ? '#1e88e5' : '#f6465d';
       ctx.strokeStyle = col;
       ctx.lineWidth = getClosedLinkWidth();
       ctx.globalAlpha = .9 * (typeof getClosedLinkAlpha === 'function' ? getClosedLinkAlpha() : 1);
@@ -4546,7 +4761,7 @@ startTradeAuto();
       overlayHitItems.push({kind:'line',...s,id:'simple_'+rec.parentId,qty:rec.totalLots,side:rec.dir,open:false,chainId:rec.parentId,parentTradeId:rec.parentId});
       const mx = (s.x1 + s.x2) / 2;
       const my = (s.y1 + s.y2) / 2;
-      reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.total):fm(rec.total).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId}});
+      reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.netTotal):fm(rec.netTotal).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId}});
       if(showLots) reserveLabel15(fq(rec.totalLots),mx,my + 18,col,clip,placedLabels,{fixedX:true,offsets:[0,16,32,-16,-32,48,-48]});
       if(inTime(first.time,vis)) drawMarker15(first,vis,mapX,mapY,slot);
       if(inTime(ex.time,vis)) drawMarker15(ex,vis,mapX,mapY,slot);
@@ -4554,12 +4769,14 @@ startTradeAuto();
   }
 
   function drawFullTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
+    const activeOpenChains = activeOpenChainIds15(cfg().symbol);
     for(const l of pairLinks15()){
       if(l.symbol !== cfg().symbol) continue;
+      if(activeOpenChains.has(cid15(l))) continue;
       if(!visibleByIsoLink15(l)) continue;
       const s = segmentFromLink15(l,vis,mapX,mapY,slot);
       if(!s) continue;
-      const col = n15(l.netPnl) >= 0 ? '#1e88e5' : '#f6465d';
+      const col = netValue15(l) >= 0 ? '#1e88e5' : '#f6465d';
       ctx.strokeStyle = col;
       ctx.lineWidth = getClosedLinkWidth();
       ctx.globalAlpha = .86 * (typeof getClosedLinkAlpha === 'function' ? getClosedLinkAlpha() : 1);
@@ -4573,6 +4790,7 @@ startTradeAuto();
     }
     for(const m of fillMarkers || []){
       if(m.symbol !== cfg().symbol || !visibleByIsoMarker15(m.id)) continue;
+      if(activeOpenChains.has(cid15(m))) continue;
       drawMarker15(m,vis,mapX,mapY,slot);
       if(m.role === 'close' && !m.unresolved && inTime(m.time,vis)){
         const ev = exitEvent15(m.id);
@@ -4580,7 +4798,7 @@ startTradeAuto();
         if(x !== null){
           const y = mapY(n15(m.price));
           const recForExVal15 = (ev && ev.type === 'EX') ? tradeRecord15(parentIdFromMarker15(m.id)) : null;
-          const val = recForExVal15 ? recForExVal15.total : (ev ? ev.pnl : n15(m.pnl));
+          const val = recForExVal15 ? recForExVal15.netTotal : (ev ? ev.pnl : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl));
           const isExLabel15 = !!(m.isFinalExit || m.letter === 'EX');
           const labelColor15 = val >= 0 ? '#1e88e5' : '#f6465d';
           const labelOpt15 = isExLabel15
@@ -4596,12 +4814,29 @@ startTradeAuto();
     const sym = cfg().symbol;
     const latest = candles.length ? candles[candles.length-1] : null;
     if(!latest) return;
+    const openChains = currentOpenRenderChainIds15(sym);
 
     // Open round position icons: always visible regardless of closed-trade toggles.
     for(const m of fillMarkers || []){
       if(m.symbol !== sym || !openEntryMarkerIds || !openEntryMarkerIds.has(m.id)) continue;
       if(!inTime(m.time,vis)) continue;
       drawMarker15(m,vis,mapX,mapY,slot,true);
+    }
+
+    // Active-parent partial exits are live open-position visuals, independent of Trades / Positions.
+    for(const m of fillMarkers || []){
+      if(m.symbol !== sym || m.role !== 'close' || m.unresolved || !openChains.has(cid15(m))) continue;
+      if(!inTime(m.time,vis)) continue;
+      m.letter = 'P';
+      m.isFinalExit = false;
+      drawMarker15(m,vis,mapX,mapY,slot,true);
+      const x = markerTimeX(m,vis,mapX,slot);
+      if(x === null) continue;
+      const y = mapY(n15(m.price));
+      const links = (resultLinks || []).filter(l => l.exitMarkerId === m.id);
+      const val = links.length ? realizedSum15(links) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
+      const col = val >= 0 ? '#1e88e5' : '#f6465d';
+      reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y - 18,col,clip,placedLabels,{fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]});
     }
 
     // Open lot connectors and lot labels: independent of Trades / Positions / Lots.
@@ -4731,9 +4966,10 @@ startTradeAuto();
       const m = marker15(it.markerId);
       if(m && m.role === 'close' && m.isFinalExit){
         const lines = fullTradeTooltip15(parentIdFromMarker15(it.markerId));
-        if(lines.length){ tooltip(lines,mouse.x,mouse.y); return; }
+        if(lines.length){ coloredClosedTooltip15(lines,mouse.x,mouse.y); return; }
       }
-      tooltip(markerOwnTooltip15(it.markerId),mouse.x,mouse.y);
+      if(m && m.role === 'close') coloredClosedTooltip15(markerOwnTooltip15(it.markerId),mouse.x,mouse.y);
+      else tooltip(markerOwnTooltip15(it.markerId),mouse.x,mouse.y);
       return;
     }
     if(it.kind === 'line'){
@@ -8513,11 +8749,10 @@ startTradeAuto();
     if(tglVWAP.checked) drawInd(vwap,vis,im,mapX,mapY,getIndicatorStroke('vwap','#f59e0b'),2);
 
     tradeOverlays(vis,mapX,mapY,slot,clip);
-    ctx.strokeStyle = '#8a8f98'; ctx.lineWidth = hairline(); ctx.setLineDash([5,5]);
-    ctx.beginPath(); ctx.moveTo(px(left),px(latestY)); ctx.lineTo(px(w-right),px(latestY)); ctx.stroke(); ctx.setLineDash([]);
+    /* PATCH_37F: single current-price dashed line is owned by drawCountdown(). */
     ctx.restore();
 
-    ctx.fillStyle = '#111'; ctx.fillText(ip(latest.close),w-right+8,latestY-6);
+    /* PATCH_37C: current price is drawn only in the shared right-axis price/countdown box. */
 
     for(let i=0;i<vis.length;i++){
       const c = vis[i], x = mapX(i), y = mapV(c.volume), bull = c.close >= c.open;
@@ -9263,6 +9498,7 @@ startTradeAuto();
             realizedPnl:rpPart,
             fees:ef + xf,
             netPnl:net,
+            binanceRealizedPnl:rpPart,
             tradeId:g.tradeId,
             orderId:g.orderId,
             unresolved:false,
@@ -10448,7 +10684,7 @@ startTradeAuto();
       if(!linkTimeOverlap14(synthetic,vis)) continue;
       const s = segmentFromMarkers14(first,ex,vis,mapX,mapY);
       if(!s) continue;
-      const col = rec.total >= 0 ? '#1e88e5' : '#f6465d';
+      const col = rec.netTotal >= 0 ? '#1e88e5' : '#f6465d';
       ctx.strokeStyle = col;
       ctx.lineWidth = getClosedLinkWidth();
       ctx.globalAlpha = .9 * (typeof getClosedLinkAlpha === 'function' ? getClosedLinkAlpha() : 1);
@@ -10708,6 +10944,7 @@ startTradeAuto();
         openPositionBoxes = [];
         openLotLinks = [];
         openEntryMarkerIds = new Set();
+        activeOpenParentChainIds = new Set();
       }
       updatePositionStrip(candles.length ? candles[candles.length-1] : null);
       updateTabTitle();
@@ -10806,16 +11043,96 @@ startTradeAuto();
     const entries = markers.filter(m => m.role === 'entry').sort(sortMarker15);
     const exits = markers.filter(m => m.role === 'close' && !m.unresolved).sort(sortMarker15).map(m => {
       const eventLinks = links.filter(l => l.exitMarkerId === m.id);
-      const pnl = eventLinks.length ? eventLinks.reduce((a,l) => a + n15(l.netPnl),0) : n15(m.pnl);
-      return {marker:m,type:m.isFinalExit ? 'EX' : 'P',qty:Math.abs(n15(m.qty)),pnl,time:n15(m.time),price:n15(m.price),links:eventLinks};
+      const pnl = eventLinks.length ? realizedSum15(eventLinks) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
+      const fees = eventLinks.length ? signedFeeSum15(eventLinks) : signedFeeValue15(m.fee);
+      const netPnl = pnl + fees;
+      return {marker:m,type:m.isFinalExit ? 'EX' : 'P',qty:Math.abs(n15(m.qty)),pnl,fees,netPnl,time:n15(m.time),price:n15(m.price),links:eventLinks};
     });
     const firstEntry = entries[0] || null;
     const finalExit = exits.filter(e => e.type === 'EX').slice(-1)[0] || null;
-    const total = exits.reduce((a,e) => a + n15(e.pnl),0);
+    const total = links.length ? realizedSum15(links) : exits.reduce((a,e) => a + n15(e.pnl),0);
+    const fees = links.length ? signedFeeSum15(links) : exits.reduce((a,e) => a + n15(e.fees),0);
     const totalLots = exits.reduce((a,e) => a + n15(e.qty),0);
     const dir = firstEntry ? sideDir15(firstEntry.side) : (links[0] ? sideDir15(links[0].side) : '');
     const firstTime = markers.length ? Math.min(...markers.map(m => n15(m.time)).filter(Boolean)) : 0;
-    return {parentId,markers,links,entries,exits,firstEntry,finalExit,total,totalLots,dir,firstTime};
+    const lastExitTime = exits.length ? Math.max(...exits.map(e => n15(e.time)).filter(Boolean)) : 0;
+    const fundingInfo = fundingMatchInfo15(firstTime,finalExit ? n15(finalExit.time) : lastExitTime,(markers[0] && markers[0].symbol) || (links[0] && links[0].symbol) || cfg().symbol,parentId);
+    const funding = fundingInfo.sum;
+    const netTotal = total + fees + funding;
+    return {parentId,markers,links,entries,exits,firstEntry,finalExit,total,fees,funding,fundingRows:fundingInfo.count,netTotal,totalLots,dir,firstTime};
+  }
+
+  function realizedValue15(l){
+    return n15(l && (l.binanceRealizedPnl ?? l.realizedPnl));
+  }
+  function realizedSum15(rows){
+    return (rows || []).reduce((a,l) => a + realizedValue15(l),0);
+  }
+  function signedFeeValue15(v){
+    const n = n15(v);
+    return n > 0 ? -n : n;
+  }
+  function signedFeeSum15(rows){
+    return (rows || []).reduce((a,l) => a + signedFeeValue15(l && (l.fees ?? l.fee)),0);
+  }
+  function netValue15(l){
+    return realizedValue15(l) + signedFeeValue15(l && (l.fees ?? l.fee));
+  }
+  function fundingValue15(row){
+    return n15(row && (row.income ?? row.fundingFee ?? row.funding));
+  }
+  function fundingMatchInfo15(start,end,sym,parentId){
+    const s = normalizeTimeSec15(start);
+    const e = normalizeTimeSec15(end);
+    const out = {sum:0,count:0,start:s,end:e};
+    if(!s || !e || e < s) return out;
+    const symbol = String(sym || cfg().symbol || '').toUpperCase();
+    (fundingIncomeRows || []).forEach(row => {
+      const t = normalizeTimeSec15(row && row.time);
+      const rowSym = String(row && row.symbol || symbol).toUpperCase();
+      if(t >= s && t <= e && (!symbol || rowSym === symbol)){
+        out.count++;
+        out.sum += fundingValue15(row);
+      }
+    });
+    if(parentId && typeof window !== 'undefined'){
+      const root = window.__v13Patch37CFundingStats || {
+        fetchedRows:fundingIncomeFetchStats.rows || (fundingIncomeRows || []).length,
+        fetchStart:fundingIncomeFetchStats.start || 0,
+        fetchEnd:fundingIncomeFetchStats.end || 0,
+        symbol:fundingIncomeFetchStats.symbol || symbol,
+        matches:{}
+      };
+      root.matches[String(parentId)] = {count:out.count,sum:out.sum,start:s,end:e,symbol};
+      window.__v13Patch37CFundingStats = root;
+    }
+    return out;
+  }
+  function fundingSumForWindow15(start,end,sym,parentId){
+    return fundingMatchInfo15(start,end,sym,parentId).sum;
+  }
+  function currentOpenRenderChainIds15(sym){
+    const ids = new Set();
+    (openLotLinks || []).forEach(l => {
+      if(l && (!sym || l.symbol === sym)){
+        const id = cid15(l);
+        if(id) ids.add(id);
+      }
+    });
+    (openPositionBoxes || []).forEach(b => {
+      if(b && (!sym || b.symbol === sym)){
+        const id = cid15(b);
+        if(id) ids.add(id);
+      }
+    });
+    return ids;
+  }
+  function activeOpenChainIds15(sym){
+    const ids = currentOpenRenderChainIds15(sym);
+    if(!sym || sym === cfg().symbol){
+      (activeOpenParentChainIds || new Set()).forEach(id => { if(id) ids.add(id); });
+    }
+    return ids;
   }
 
   function allParentTrades15(){
@@ -10828,7 +11145,7 @@ startTradeAuto();
   function entryContribution15(parentId,entryId){
     return (resultLinks || [])
       .filter(l => cid15(l) === parentId && l.entryMarkerId === entryId)
-      .reduce((a,l) => a + n15(l.netPnl),0);
+      .reduce((a,l) => a + netValue15(l),0);
   }
 
   function exitEvent15(markerId){
@@ -10840,16 +11157,21 @@ startTradeAuto();
   function fullTradeTooltip15(parentId){
     const rec = tradeRecord15(parentId);
     if(!rec) return [];
-    const lines = ['Parent trade','Direction: ' + (rec.dir || '-')];
+    const lines = ['Direction: ' + (rec.dir || '-')];
     if(rec.entries.length){
-      lines.push('Entries:');
+      lines.push(`Entries (${rec.entries.length}):`);
       rec.entries.forEach(m => lines.push(`${m.letter || 'E'} ${fq(m.qty)} | ${fm(entryContribution15(rec.parentId,m.id))}`));
     }
     if(rec.exits.length){
-      lines.push('Exits:');
-      rec.exits.forEach(e => lines.push(`${e.type} ${fq(e.qty)} | Exit ${p2(e.price)} | ${fm(e.pnl)}`));
+      lines.push(`Exits (${rec.exits.length}):`);
+      rec.exits.forEach(e => lines.push(`${e.type} ${fq(e.qty)} | ${fm(e.pnl)}`));
     }
-    lines.push('Total trade P/L: ' + fm(rec.total));
+    lines.push('');
+    lines.push('Closing PnL | ' + fm(rec.total));
+    lines.push('Trading Fee | ' + fm(rec.fees));
+    lines.push('Funding Fee | ' + fm(rec.funding));
+    lines.push('');
+    lines.push('Net P/L | ' + fm(rec.netTotal));
     return lines;
   }
 
@@ -10863,8 +11185,60 @@ startTradeAuto();
       return [title,'Size: ' + fq(m.qty) + ' BTC','Price: ' + p2(m.price),'P/L contribution: ' + fm(pid ? entryContribution15(pid,markerId) : 0),'Time: ' + ft(m.time)];
     }
     const ev = exitEvent15(markerId);
-    if(ev) return [ev.type === 'EX' ? 'Final exit' : 'Partial exit','Size: ' + fq(ev.qty) + ' BTC','Price: ' + p2(ev.price),'P/L: ' + fm(ev.pnl),'Time: ' + ft(ev.time)];
+    if(ev) return [ev.type === 'EX' ? 'Final exit' : 'Partial exit',`${ev.type} ${fq(ev.qty)} | ${fm(ev.pnl)}`,'Trading Fee | ' + fm(ev.fees),'','Net P/L | ' + fm(ev.netPnl),'Time: ' + ft(ev.time)];
     return ['Trade event','Size: ' + fq(m.qty) + ' BTC','Price: ' + p2(m.price),'Time: ' + ft(m.time)];
+  }
+
+  function pnlColor15(v){
+    const n = Number(v);
+    if(!Number.isFinite(n) || Math.abs(n) < 1e-12) return '#111827';
+    return n > 0 ? '#047857' : '#f6465d';
+  }
+
+  function colorTooltipValue15(line){
+    const s = String(line || '');
+    const money = s.match(/([+-]?\$[0-9][0-9,]*(?:\.[0-9]+)?|-?\$[0-9][0-9,]*(?:\.[0-9]+)?)\s*$/);
+    if(!money) return null;
+    const raw = money[1];
+    const n = Number(raw.replace(/[$,]/g,''));
+    if(!Number.isFinite(n)) return null;
+    const idx = s.lastIndexOf(raw);
+    return {prefix:s.slice(0,idx),value:raw,color:pnlColor15(n)};
+  }
+
+  function coloredClosedTooltip15(lines,x,y){
+    const safe = (lines || []).map(line => String(line == null ? '' : line));
+    ctx.save();
+    ctx.font = '12px Arial';
+    const pad = 12;
+    const lh = 17;
+    const w = Math.max(...safe.map(s => ctx.measureText(s).width),0) + pad*2;
+    const h = safe.length * lh + pad*2;
+    let tx = x + 14;
+    let ty = y + 14;
+    if(tx + w > canvas.clientWidth - RIGHT_AXIS) tx = x - w - 14;
+    if(ty + h > canvas.clientHeight - 10) ty = y - h - 14;
+    ctx.fillStyle = 'rgba(255,255,255,.98)';
+    ctx.strokeStyle = '#d9dce1';
+    ctx.fillRect(tx,ty,w,h);
+    ctx.strokeRect(tx,ty,w,h);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    safe.forEach((line,i) => {
+      const yLine = ty + pad + i*lh;
+      const parsed = colorTooltipValue15(line);
+      ctx.font = '12px Arial';
+      if(!parsed){
+        ctx.fillStyle = '#111827';
+        ctx.fillText(line,tx+pad,yLine);
+        return;
+      }
+      ctx.fillStyle = '#111827';
+      ctx.fillText(parsed.prefix,tx+pad,yLine);
+      ctx.fillStyle = parsed.color;
+      ctx.fillText(parsed.value,tx+pad+ctx.measureText(parsed.prefix).width,yLine);
+    });
+    ctx.restore();
   }
 
   function pairLinks15(){
@@ -10874,13 +11248,14 @@ startTradeAuto();
       const xm = marker15(l.exitMarkerId);
       if(!em || !xm) continue;
       const key = [cid15(l)||cid15(em)||cid15(xm), l.entryMarkerId, l.exitMarkerId].join('|');
-      if(!groups.has(key)) groups.set(key,{...l,qty:0,netPnl:0,grossPnl:0,realizedPnl:0,fees:0});
+      if(!groups.has(key)) groups.set(key,{...l,qty:0,netPnl:0,grossPnl:0,realizedPnl:0,binanceRealizedPnl:0,fees:0});
       const g = groups.get(key);
       g.qty += n15(l.qty);
-      g.netPnl += n15(l.netPnl);
       g.grossPnl += n15(l.grossPnl);
-      g.realizedPnl += n15(l.realizedPnl);
-      g.fees += n15(l.fees);
+      g.realizedPnl += realizedValue15(l);
+      g.binanceRealizedPnl += realizedValue15(l);
+      g.netPnl += netValue15(l);
+      g.fees += signedFeeValue15(l.fees);
     }
     return [...groups.values()];
   }
@@ -10957,8 +11332,10 @@ startTradeAuto();
   }
 
   function drawSimplifiedTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
+    const activeOpenChains = activeOpenChainIds15(cfg().symbol);
     for(const rec of allParentTrades15()){
       if(!visibleByIsoRecord15(rec)) continue;
+      if(activeOpenChains.has(rec.parentId)) continue;
       const first = rec.firstEntry;
       const ex = rec.finalExit && rec.finalExit.marker;
       if(!first || !ex) continue;
@@ -10966,7 +11343,7 @@ startTradeAuto();
       if(!linkTimeOverlap15(synthetic,vis)) continue;
       const s = segmentFromMarkers15(first,ex,vis,mapX,mapY,slot);
       if(!s) continue;
-      const col = rec.total >= 0 ? '#1e88e5' : '#f6465d';
+      const col = rec.netTotal >= 0 ? '#1e88e5' : '#f6465d';
       ctx.strokeStyle = col;
       ctx.lineWidth = getClosedLinkWidth();
       ctx.globalAlpha = .9 * (typeof getClosedLinkAlpha === 'function' ? getClosedLinkAlpha() : 1);
@@ -10978,7 +11355,7 @@ startTradeAuto();
       overlayHitItems.push({kind:'line',...s,id:'simple_'+rec.parentId,qty:rec.totalLots,side:rec.dir,open:false,chainId:rec.parentId,parentTradeId:rec.parentId});
       const mx = (s.x1 + s.x2) / 2;
       const my = (s.y1 + s.y2) / 2;
-      reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.total):fm(rec.total).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId}});
+      reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.netTotal):fm(rec.netTotal).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId}});
       if(showLots) reserveLabel15(fq(rec.totalLots),mx,my + 18,col,clip,placedLabels,{fixedX:true,offsets:[0,16,32,-16,-32,48,-48]});
       if(inTime(first.time,vis)) drawMarker15(first,vis,mapX,mapY,slot);
       if(inTime(ex.time,vis)) drawMarker15(ex,vis,mapX,mapY,slot);
@@ -10986,12 +11363,14 @@ startTradeAuto();
   }
 
   function drawFullTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
+    const activeOpenChains = activeOpenChainIds15(cfg().symbol);
     for(const l of pairLinks15()){
       if(l.symbol !== cfg().symbol) continue;
+      if(activeOpenChains.has(cid15(l))) continue;
       if(!visibleByIsoLink15(l)) continue;
       const s = segmentFromLink15(l,vis,mapX,mapY,slot);
       if(!s) continue;
-      const col = n15(l.netPnl) >= 0 ? '#1e88e5' : '#f6465d';
+      const col = netValue15(l) >= 0 ? '#1e88e5' : '#f6465d';
       ctx.strokeStyle = col;
       ctx.lineWidth = getClosedLinkWidth();
       ctx.globalAlpha = .86 * (typeof getClosedLinkAlpha === 'function' ? getClosedLinkAlpha() : 1);
@@ -11005,6 +11384,7 @@ startTradeAuto();
     }
     for(const m of fillMarkers || []){
       if(m.symbol !== cfg().symbol || !visibleByIsoMarker15(m.id)) continue;
+      if(activeOpenChains.has(cid15(m))) continue;
       drawMarker15(m,vis,mapX,mapY,slot);
       if(m.role === 'close' && !m.unresolved && inTime(m.time,vis)){
         const ev = exitEvent15(m.id);
@@ -11012,7 +11392,7 @@ startTradeAuto();
         if(x !== null){
           const y = mapY(n15(m.price));
           const recForExVal15 = (ev && ev.type === 'EX') ? tradeRecord15(parentIdFromMarker15(m.id)) : null;
-          const val = recForExVal15 ? recForExVal15.total : (ev ? ev.pnl : n15(m.pnl));
+          const val = recForExVal15 ? recForExVal15.netTotal : (ev ? ev.pnl : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl));
           const isExLabel15 = !!(m.isFinalExit || m.letter === 'EX');
           const labelColor15 = val >= 0 ? '#1e88e5' : '#f6465d';
           const labelOpt15 = isExLabel15
@@ -11028,12 +11408,29 @@ startTradeAuto();
     const sym = cfg().symbol;
     const latest = candles.length ? candles[candles.length-1] : null;
     if(!latest) return;
+    const openChains = currentOpenRenderChainIds15(sym);
 
     // Open round position icons: always visible regardless of closed-trade toggles.
     for(const m of fillMarkers || []){
       if(m.symbol !== sym || !openEntryMarkerIds || !openEntryMarkerIds.has(m.id)) continue;
       if(!inTime(m.time,vis)) continue;
       drawMarker15(m,vis,mapX,mapY,slot,true);
+    }
+
+    // Active-parent partial exits are live open-position visuals, independent of Trades / Positions.
+    for(const m of fillMarkers || []){
+      if(m.symbol !== sym || m.role !== 'close' || m.unresolved || !openChains.has(cid15(m))) continue;
+      if(!inTime(m.time,vis)) continue;
+      m.letter = 'P';
+      m.isFinalExit = false;
+      drawMarker15(m,vis,mapX,mapY,slot,true);
+      const x = markerTimeX(m,vis,mapX,slot);
+      if(x === null) continue;
+      const y = mapY(n15(m.price));
+      const links = (resultLinks || []).filter(l => l.exitMarkerId === m.id);
+      const val = links.length ? realizedSum15(links) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
+      const col = val >= 0 ? '#1e88e5' : '#f6465d';
+      reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y - 18,col,clip,placedLabels,{fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]});
     }
 
     // Open lot connectors and lot labels: independent of Trades / Positions / Lots.
@@ -11163,9 +11560,10 @@ startTradeAuto();
       const m = marker15(it.markerId);
       if(m && m.role === 'close' && m.isFinalExit){
         const lines = fullTradeTooltip15(parentIdFromMarker15(it.markerId));
-        if(lines.length){ tooltip(lines,mouse.x,mouse.y); return; }
+        if(lines.length){ coloredClosedTooltip15(lines,mouse.x,mouse.y); return; }
       }
-      tooltip(markerOwnTooltip15(it.markerId),mouse.x,mouse.y);
+      if(m && m.role === 'close') coloredClosedTooltip15(markerOwnTooltip15(it.markerId),mouse.x,mouse.y);
+      else tooltip(markerOwnTooltip15(it.markerId),mouse.x,mouse.y);
       return;
     }
     if(it.kind === 'line'){
@@ -11969,6 +12367,7 @@ startTradeAuto();
       openPositionBoxes = [];
       openLotLinks = [];
       openEntryMarkerIds = new Set();
+      activeOpenParentChainIds = new Set();
     }
     try{ if(typeof updatePositionStrip === "function") updatePositionStrip(latest21()); }catch(e){}
     try{ if(typeof updateTabTitle === "function") updateTabTitle(); }catch(e){}
@@ -14249,21 +14648,77 @@ If there is NO open position, use this Section 2 instead:
     return {...rec, markers:outMarkers, links:outLinks, openConnectors, unresolved:outMarkers.filter(m => m.unresolved).length};
   };
 
-  /* Ensure final EX marker carries whole parent-chain P/L for tooltip hit data and any marker fallback. */
+  /* Keep marker fallback data on Binance realized P/L; labels compute Net P/L separately. */
   function updateFinalExTotals(){
     try{
       if(!Array.isArray(fillMarkers) || !Array.isArray(resultLinks)) return;
       const totals = new Map();
+      const exitTotals = new Map();
+      const netTotals = new Map();
+      const exitNetTotals = new Map();
+      const windows = new Map();
+      fillMarkers.forEach(m => {
+        const cid = chainIdOf(m);
+        const t = n0(m && m.time);
+        if(!cid || !t) return;
+        const w = windows.get(cid) || {start:t,end:t,symbol:m.symbol};
+        w.start = Math.min(w.start,t);
+        w.end = Math.max(w.end,t);
+        w.symbol = w.symbol || m.symbol;
+        windows.set(cid,w);
+      });
+      const fundingForCid = cid => {
+        const w = windows.get(cid);
+        if(!w || !w.start || !w.end) return 0;
+        const sym = String(w.symbol || (typeof cfg === "function" ? cfg().symbol : "") || "").toUpperCase();
+        let count = 0;
+        const sum = (fundingIncomeRows || []).reduce((total,row) => {
+          const rawTime = n0(row && row.time);
+          const t = rawTime > 1e12 ? Math.floor(rawTime / 1000) : rawTime;
+          const rowSym = String(row && row.symbol || sym).toUpperCase();
+          if(t >= w.start && t <= w.end && (!sym || rowSym === sym)){
+            count++;
+            return total + n0(row && row.income);
+          }
+          return total;
+        },0);
+        if(typeof window !== "undefined"){
+          const root = window.__v13Patch37CFundingStats || {fetchedRows:(fundingIncomeRows || []).length,matches:{}};
+          root.matches = root.matches || {};
+          root.matches[String(cid)] = {count,sum,start:w.start,end:w.end,symbol:sym};
+          window.__v13Patch37CFundingStats = root;
+        }
+        return sum;
+      };
       resultLinks.forEach(l => {
         const cid = chainIdOf(l);
+        const realized = n0(l.binanceRealizedPnl ?? l.realizedPnl);
+        const fee = n0(l.fees ?? l.fee);
+        const signedFee = fee > 0 ? -fee : fee;
+        const net = realized + signedFee;
         if(!cid) return;
-        totals.set(cid,(totals.get(cid)||0) + n0(l.netPnl));
+        totals.set(cid,(totals.get(cid)||0) + realized);
+        netTotals.set(cid,(netTotals.get(cid)||0) + net);
+        if(l.exitMarkerId){
+          exitTotals.set(l.exitMarkerId,(exitTotals.get(l.exitMarkerId)||0) + realized);
+          exitNetTotals.set(l.exitMarkerId,(exitNetTotals.get(l.exitMarkerId)||0) + net);
+        }
       });
       fillMarkers.forEach(m => {
         const cid = chainIdOf(m);
+        if(m && m.role === "close" && exitTotals.has(m.id)){
+          m.pnl = exitTotals.get(m.id);
+          m.binanceRealizedPnl = exitTotals.get(m.id);
+          m.netPnl = exitNetTotals.get(m.id);
+        }
         if(m && m.role === "close" && (m.isFinalExit || String(m.letter||"").toUpperCase() === "EX") && totals.has(cid)){
+          const funding = fundingForCid(cid);
           m.pnl = totals.get(cid);
           m.totalTradePnl = totals.get(cid);
+          m.binanceRealizedPnl = totals.get(cid);
+          m.fundingFee = funding;
+          m.netPnl = netTotals.get(cid) + funding;
+          m.totalTradeNetPnl = netTotals.get(cid) + funding;
           m.letter = "EX";
         }
       });
@@ -14271,7 +14726,13 @@ If there is NO open position, use this Section 2 instead:
         overlayHitItems.forEach(it => {
           if(!it || it.kind !== "marker" || String(it.letter||"").toUpperCase() !== "EX") return;
           const cid = it.parentTradeId || it.chainId;
-          if(totals.has(cid)) it.pnl = totals.get(cid);
+          if(totals.has(cid)){
+            const funding = fundingForCid(cid);
+            it.pnl = totals.get(cid);
+            it.binanceRealizedPnl = totals.get(cid);
+            it.fundingFee = funding;
+            it.netPnl = netTotals.get(cid) + funding;
+          }
         });
       }
     }catch(_e){}
@@ -15760,7 +16221,7 @@ If there is NO open position, use this Section 2 instead:
 
 (() => {
   "use strict";
-  const MODULE = "V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_BOLD";
+  const MODULE = "V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_PLAIN";
   const STYLE = "btc_futures_chart_v13_05_";
   const EXTRA = "btc_futures_chart_v13_32r1_";
   const DEFAULT_COLORS = {
@@ -15833,7 +16294,7 @@ If there is NO open position, use this Section 2 instead:
     return Number.isFinite(n) ? Math.round(n).toLocaleString("en-US") : "-";
   };
   const textOf = line => String(line && line.text != null ? line.text : line || "");
-  const fontOf = line => (line && line.bold ? "bold " : "") + "11px Arial";
+  const fontOf = () => "11px Arial";
 
   if(typeof candleTip !== "function") return;
 
@@ -15853,7 +16314,7 @@ If there is NO open position, use this Section 2 instead:
           lines.push({
             text:label(n) + " : " + fmtPrice(valueAt(series(n),c.time)),
             color:maColor(n),
-            bold:true
+            bold:false
           });
         }
       }catch(_e){}
@@ -15887,7 +16348,7 @@ If there is NO open position, use this Section 2 instead:
     ctx.restore();
   };
 
-  window.V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_BOLD = {version:MODULE};
+  window.V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_PLAIN = {version:MODULE};
 })();
 
 (() => {
@@ -16143,20 +16604,49 @@ If there is NO open position, use this Section 2 instead:
     const price = Number(latest && latest.close);
     if(!Number.isFinite(price)) return;
     const right = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
-    const left = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
     const top = 18;
     const priceH = lastAreaH || Math.floor((canvas.clientHeight - top - 30) * .78);
     const chartRight = canvas.clientWidth - right;
-    const y = top + ((lastYMax - price) / (lastYMax - lastYMin)) * priceH;
-    const text = countdownText();
+    const left = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
+    const priceY = top + ((lastYMax - price) / (lastYMax - lastYMin)) * priceH;
+    const priceText = typeof ip === "function" ? ip(price) : String(price);
+    const timeText = countdownText();
     ctx.save();
-    ctx.font = "12px Arial";
-    const tw = ctx.measureText(text).width;
-    const x = Math.max(left + 4, chartRight - tw - 8);
-    ctx.textAlign = "left";
+    const padX = 6;
+    const gap = 3;
+    const priceFont = "11px Arial";
+    const timerFont = "10px Arial";
+    ctx.font = priceFont;
+    const priceW = ctx.measureText(priceText).width;
+    ctx.font = timerFont;
+    const timerW = ctx.measureText(timeText).width;
+    const boxW = Math.min(right - 8,Math.max(priceW,timerW) + padX * 2);
+    const boxH = 29;
+    const x = chartRight + Math.max(3,Math.floor((right - boxW) / 2));
+    const centerY = priceY;
+    const y = centerY - boxH / 2;
+    const boxLeft = x;
+    ctx.strokeStyle = "#8a8f98";
+    ctx.lineWidth = typeof hairline === "function" ? hairline() : 1;
+    ctx.setLineDash([5,5]);
+    ctx.beginPath();
+    ctx.moveTo(px(left),px(priceY));
+    ctx.lineTo(px(boxLeft),px(priceY));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = 1;
+    ctx.fillRect(x,y,boxW,boxH);
+    ctx.strokeRect(x,y,boxW,boxH);
+    ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.fillStyle = "#4b5563";
-    ctx.fillText(text,x,y + 8);
+    ctx.font = priceFont;
+    ctx.fillStyle = "#111827";
+    ctx.fillText(priceText,x + boxW / 2,y + 4);
+    ctx.font = timerFont;
+    ctx.fillStyle = "#374151";
+    ctx.fillText(timeText,x + boxW / 2,y + 4 + 11 + gap);
     ctx.restore();
   }
 
