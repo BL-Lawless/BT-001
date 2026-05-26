@@ -137,6 +137,8 @@ let candles = [];
 let ema20 = [];
 let ema50 = [];
 let ema3 = [];
+let ema4 = [];
+let ema5 = [];
 let vwap = [];
 
 let fillMarkers = [];
@@ -194,6 +196,7 @@ let lastYMin = 0;
 let lastYMax = 1;
 let lastRange = 1;
 let lastAreaH = 1;
+let currentPriceLineState = null;
 
 let overlayHitItems = [];
 
@@ -772,6 +775,38 @@ function EMA(src,p){
   return out;
 }
 
+function canonicalMAExtraKey(n,suffix){
+  return `btc_futures_chart_v13_32r1_ma${n}${suffix}`;
+}
+
+function canonicalMAStroke(n){
+  const defaults = {4:"#0b7a00",5:"#008c7a"};
+  const hex = localStorage.getItem(canonicalMAExtraKey(n,"Color")) || defaults[n] || "#111827";
+  const alphaRaw = Number(localStorage.getItem(canonicalMAExtraKey(n,"Alpha")));
+  const alpha = Number.isFinite(alphaRaw) ? clamp(alphaRaw,0,100) / 100 : 1;
+  let h = String(hex || "#111827").replace("#","");
+  if(h.length === 3) h = h.split("").map(c => c + c).join("");
+  h = (h + "000000").slice(0,6);
+  return `rgba(${parseInt(h.slice(0,2),16)||0},${parseInt(h.slice(2,4),16)||0},${parseInt(h.slice(4,6),16)||0},${alpha})`;
+}
+
+function canonicalMAWidth(n){
+  const raw = Number(localStorage.getItem(canonicalMAExtraKey(n,"Width")));
+  return Number.isFinite(raw) ? clamp(raw,1,10) : 2;
+}
+
+function canonicalMAEnabled(n){
+  const el = document.getElementById("tglEMA" + n);
+  return !!(el && el.checked);
+}
+
+function rebuildCanonicalMASeries(){
+  ema4 = EMA(candles,chartIndicatorPeriodValue(4,100));
+  ema5 = EMA(candles,chartIndicatorPeriodValue(5,200));
+  window.ema4 = ema4;
+  window.ema5 = ema5;
+}
+
 function chartIndicatorPeriodValue(n,fallback){
   const ids = n <= 3
     ? [`emaPeriod${n}`]
@@ -867,6 +902,10 @@ function indicators(){
   ema20 = EMA(candles,emaPeriod(emaPeriod1El,20));
   ema50 = EMA(candles,emaPeriod(emaPeriod2El,50));
   ema3 = EMA(candles,emaPeriod(emaPeriod3El,100));
+  window.ema20 = ema20;
+  window.ema50 = ema50;
+  window.ema3 = ema3;
+  rebuildCanonicalMASeries();
   vwap = VWAP(candles);
 }
 
@@ -3865,6 +3904,13 @@ function draw(){
 
   const latest = vis[vis.length-1];
   const latestY = mapY(latest.close);
+  currentPriceLineState = {
+    price:Number(latest.close),
+    priceY:latestY,
+    left,
+    chartRight:w-right,
+    right
+  };
 
   ctx.fillStyle = "#fafafa";
   ctx.fillRect(w-right,top,right,priceH);
@@ -3952,6 +3998,8 @@ function draw(){
   if(tglEMA20.checked) drawInd(ema20,vis,im,mapX,mapY,getIndicatorStroke("ema1","#3b82f6"),2);
   if(tglEMA50.checked) drawInd(ema50,vis,im,mapX,mapY,getIndicatorStroke("ema2","#a855f7"),2);
   if(tglEMA3 && tglEMA3.checked) drawInd(ema3,vis,im,mapX,mapY,getIndicatorStroke("ema3","#14b8a6"),2);
+  if(canonicalMAEnabled(4)) drawInd(ema4,vis,im,mapX,mapY,canonicalMAStroke(4),canonicalMAWidth(4));
+  if(canonicalMAEnabled(5)) drawInd(ema5,vis,im,mapX,mapY,canonicalMAStroke(5),canonicalMAWidth(5));
   if(tglVWAP.checked) drawInd(vwap,vis,im,mapX,mapY,getIndicatorStroke("vwap","#f59e0b"),2);
 
   tradeOverlays(vis,mapX,mapY,slot,clip);
@@ -8710,6 +8758,13 @@ startTradeAuto();
     const clip = {left,top,width:chartW,height:priceH};
     const latest = vis[vis.length-1];
     const latestY = mapY(latest.close);
+    currentPriceLineState = {
+      price:Number(latest.close),
+      priceY:latestY,
+      left,
+      chartRight:w-right,
+      right
+    };
 
     ctx.fillStyle = '#fafafa';
     ctx.fillRect(w-right,top,right,priceH);
@@ -8746,6 +8801,8 @@ startTradeAuto();
     if(tglEMA20.checked) drawInd(ema20,vis,im,mapX,mapY,getIndicatorStroke('ema1','#3b82f6'),2);
     if(tglEMA50.checked) drawInd(ema50,vis,im,mapX,mapY,getIndicatorStroke('ema2','#a855f7'),2);
     if(tglEMA3 && tglEMA3.checked) drawInd(ema3,vis,im,mapX,mapY,getIndicatorStroke('ema3','#14b8a6'),2);
+    if(canonicalMAEnabled(4)) drawInd(ema4,vis,im,mapX,mapY,canonicalMAStroke(4),canonicalMAWidth(4));
+    if(canonicalMAEnabled(5)) drawInd(ema5,vis,im,mapX,mapY,canonicalMAStroke(5),canonicalMAWidth(5));
     if(tglVWAP.checked) drawInd(vwap,vis,im,mapX,mapY,getIndicatorStroke('vwap','#f59e0b'),2);
 
     tradeOverlays(vis,mapX,mapY,slot,clip);
@@ -14346,26 +14403,15 @@ If there is NO open position, use this Section 2 instead:
     bindMA(4); bindMA(5);
   }
   function calcExtraMAs(){
-    try{ ema4=typeof EMA==='function'?EMA(candles,period(4)):[]; ema5=typeof EMA==='function'?EMA(candles,period(5)):[]; window.ema4=ema4; window.ema5=ema5; }catch(_e){ ema4=[]; ema5=[]; }
+    try{ if(typeof rebuildCanonicalMASeries === 'function') rebuildCanonicalMASeries(); }catch(_e){}
   }
   const prevIndicators=typeof indicators==='function'?indicators:null;
-  if(prevIndicators&&!window.__v32r1IndicatorsWrapped){ window.__v32r1IndicatorsWrapped=true; indicators=function(){ const r=prevIndicators.apply(this,arguments); calcExtraMAs(); return r; }; }
+  // PATCH_38: legacy extra-MA indicators wrapper disabled; canonical indicators() owns MA1-MA5.
   function drawExtraMAs(){
-    if(!canvas||!ctx||!Array.isArray(candles)||candles.length<2) return;
-    const r=range(); const vis=candles.slice(r.start,r.end); if(vis.length<2) return;
-    const w=canvas.clientWidth,h=canvas.clientHeight,left=LEFT_PAD,right=RIGHT_AXIS,top=18,bottom=42,gap=20;
-    const usable=Math.max(120,h-top-bottom-gap), volFrac=Math.max(.10,Math.min(.45,window.__p10VolumeFrac||.22));
-    const volH=Math.max(38,Math.floor(usable*volFrac)), priceH=Math.max(120,usable-volH), chartW=w-left-right;
-    const minP=lastYMin,maxP=lastYMax; if(!(maxP>minP)) return;
-    const total=Math.max(2,vis.length+(r.futureBars||0)), slot=chartW/total;
-    const im=idxMap(vis), mapX=i=>left+i*slot+slot/2, mapY=p=>top+((maxP-p)/(maxP-minP))*priceH;
-    ctx.save(); ctx.beginPath(); ctx.rect(left,top,chartW,priceH); ctx.clip();
-    if(maEnabled(4)){ window.__patch18LastIndicatorKey=null; drawInd(ema4,vis,im,mapX,mapY,rgba(ls('ma4Color'),ls('ma4Alpha')),widthFor(4)); }
-    if(maEnabled(5)){ window.__patch18LastIndicatorKey=null; drawInd(ema5,vis,im,mapX,mapY,rgba(ls('ma5Color'),ls('ma5Alpha')),widthFor(5)); }
-    ctx.restore();
+    return;
   }
   const prevDraw=typeof draw==='function'?draw:null;
-  if(prevDraw&&!window.__v32r1DrawWrapped){ window.__v32r1DrawWrapped=true; draw=function(){ const r=prevDraw.apply(this,arguments); try{drawExtraMAs();}catch(_e){} return r; }; }
+  // PATCH_38: legacy MA4/MA5 redraw wrapper disabled.
 
   const prevAutoY=typeof autoYRange==='function'?autoYRange:null;
   if(prevAutoY&&!window.__v32r1AutoYWrapped){ window.__v32r1AutoYWrapped=true; autoYRange=function(vis){
@@ -14508,24 +14554,13 @@ If there is NO open position, use this Section 2 instead:
   }
   let ema4=[], ema5=[]; window.ema4=ema4; window.ema5=ema5;
   function calcExtraMAs(){
-    try{ ema4=(typeof EMA==='function')?EMA(candles,period(4)):[]; ema5=(typeof EMA==='function')?EMA(candles,period(5)):[]; window.ema4=ema4; window.ema5=ema5; }catch(_e){ema4=[];ema5=[];}
+    try{ if(typeof rebuildCanonicalMASeries === 'function') rebuildCanonicalMASeries(); }catch(_e){}
   }
-  if(typeof indicators==='function'&&!window.__v32r2IndicatorsWrapped){ const prev=indicators; window.__v32r2IndicatorsWrapped=true; indicators=function(){ const r=prev.apply(this,arguments); calcExtraMAs(); return r; }; }
+  // PATCH_38: legacy extra-MA indicators wrapper disabled; canonical indicators() owns MA1-MA5.
   function drawExtraMAs(){
-    if(!canvas||!ctx||!Array.isArray(candles)||candles.length<2) return;
-    const r=range(); const vis=candles.slice(r.start,r.end); if(vis.length<2) return;
-    const w=canvas.clientWidth,h=canvas.clientHeight,left=LEFT_PAD,right=RIGHT_AXIS,top=18,bottom=42,gap=20;
-    const usable=Math.max(120,h-top-bottom-gap), volFrac=Math.max(.10,Math.min(.45,window.__p10VolumeFrac||.22));
-    const volH=Math.max(38,Math.floor(usable*volFrac)), priceH=Math.max(120,usable-volH), chartW=w-left-right;
-    if(!(lastYMax>lastYMin)) return;
-    const total=Math.max(2,vis.length+(r.futureBars||0)), slot=chartW/total;
-    const im=idxMap(vis), mapX=i=>left+i*slot+slot/2, mapY=p=>top+((lastYMax-p)/(lastYMax-lastYMin))*priceH;
-    ctx.save(); ctx.beginPath(); ctx.rect(left,top,chartW,priceH); ctx.clip();
-    if(maEnabled(4)){ window.__patch18LastIndicatorKey=null; drawInd(ema4,vis,im,mapX,mapY,hexToRgba(get('ma4Color'),get('ma4Alpha')),width(4)); }
-    if(maEnabled(5)){ window.__patch18LastIndicatorKey=null; drawInd(ema5,vis,im,mapX,mapY,hexToRgba(get('ma5Color'),get('ma5Alpha')),width(5)); }
-    ctx.restore();
+    return;
   }
-  if(typeof draw==='function'&&!window.__v32r2DrawWrapped){ const prev=draw; window.__v32r2DrawWrapped=true; draw=function(){ const r=prev.apply(this,arguments); try{drawExtraMAs();}catch(_e){} return r; }; }
+  // PATCH_38: legacy MA4/MA5 redraw wrapper disabled.
   if(typeof autoYRange==='function'&&!window.__v32r2AutoYWrapped){ window.__v32r2AutoYWrapped=true; autoYRange=function(vis){
     return candleOnlyYRange(vis);
   }; }
@@ -16142,8 +16177,7 @@ If there is NO open position, use this Section 2 instead:
       window.ema20 = ema20 = computeEMA(candles,period(1));
       window.ema50 = ema50 = computeEMA(candles,period(2));
       window.ema3 = ema3 = computeEMA(candles,period(3));
-      window.ema4 = computeEMA(candles,period(4));
-      window.ema5 = computeEMA(candles,period(5));
+      if(typeof rebuildCanonicalMASeries === "function") rebuildCanonicalMASeries();
       if(typeof VWAP === "function") window.vwap = vwap = VWAP(candles);
     }catch(e){ console.error(MODULE + " rebuildSeries failed", e); }
     updateLabels();
@@ -16180,36 +16214,13 @@ If there is NO open position, use this Section 2 instead:
     if(started) ctx.stroke(); ctx.restore();
   }
   function drawCleanExtra(vis,mapX,mapY,slot,clip){
-    if(localStorage.getItem("btc_futures_chart_v13_21_indicators_visible") === "0") return;
-    const im = typeof idxMap === "function" ? idxMap(vis) : new Map(vis.map((c,i)=>[c.time,i]));
-    ctx.save(); ctx.beginPath(); ctx.rect(clip.left,clip.top,clip.width,clip.height); ctx.clip();
-    if(enabled(4)) cleanDrawInd(window.ema4 || [],vis,im,mapX,mapY,strokeFor(4),width(4));
-    if(enabled(5)) cleanDrawInd(window.ema5 || [],vis,im,mapX,mapY,strokeFor(5),width(5));
-    ctx.restore();
+    return;
   }
   const prevAutoY = typeof autoYRange === "function" ? autoYRange : null;
   autoYRange = window.autoYRange = function(vis){
     return candleOnlyYRange(vis);
   };
-  const prevDraw = typeof draw === "function" ? draw : null;
-  draw = window.draw = function(){
-    const e4=$id("tglEMA4"), e5=$id("tglEMA5");
-    const want4=!!(e4&&e4.checked), want5=!!(e5&&e5.checked);
-    // Prevent older stacked MA wrappers from drawing MA4/MA5 with leaked styles.
-    if(e4) e4.checked=false; if(e5) e5.checked=false;
-    window.__maisoTooltipToggleState = {4:want4,5:want5};
-    try{ if(prevDraw) prevDraw.apply(this,arguments); } finally {
-      delete window.__maisoTooltipToggleState;
-      if(e4) e4.checked=want4;
-      if(e5) e5.checked=want5;
-    }
-    try{
-      const r=range(); const vis=candles.slice(r.start,r.end); if(!vis || vis.length<2 || !(lastYMax>lastYMin)) return;
-      const w=canvas.clientWidth,h=canvas.clientHeight,left=LEFT_PAD,right=RIGHT_AXIS,top=18,priceH=lastAreaH||Math.floor((h-48)*.78),chartW=w-left-right,total=Math.max(2,vis.length+(r.futureBars||0)),slot=chartW/total;
-      const mapX=i=>left+i*slot+slot/2, mapY=p=>top+((lastYMax-p)/(lastYMax-lastYMin))*priceH;
-      drawCleanExtra(vis,mapX,mapY,slot,{left,top,width:chartW,height:priceH});
-    }catch(e){ console.error(MODULE + " draw clean extra failed", e); }
-  };
+  // PATCH_38: MA4/MA5 are drawn by the canonical candle draw pass, not by a late redraw wrapper.
   if(typeof openSettings === "function" && !window.__maisoOpenWrapped){
     const prevOpen = openSettings; window.__maisoOpenWrapped = true;
     openSettings = window.openSettings = function(){ const r=prevOpen.apply(this,arguments); setTimeout(rebuildSettings,0); setTimeout(rebuildSettings,150); setTimeout(rebuildSettings,500); return r; };
@@ -16599,16 +16610,16 @@ If there is NO open position, use this Section 2 instead:
   }
 
   function drawCountdown(){
-    if(!ctx || !canvas || !Array.isArray(candles) || !candles.length || !(lastYMax > lastYMin)) return;
+    if(!ctx || !canvas || !Array.isArray(candles) || !candles.length) return;
+    const state = currentPriceLineState || null;
     const latest = candles[candles.length - 1];
-    const price = Number(latest && latest.close);
+    const price = Number(state && Number.isFinite(state.price) ? state.price : latest && latest.close);
+    const priceY = Number(state && state.priceY);
     if(!Number.isFinite(price)) return;
     const right = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
-    const top = 18;
-    const priceH = lastAreaH || Math.floor((canvas.clientHeight - top - 30) * .78);
-    const chartRight = canvas.clientWidth - right;
-    const left = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
-    const priceY = top + ((lastYMax - price) / (lastYMax - lastYMin)) * priceH;
+    const chartRight = Number.isFinite(Number(state && state.chartRight)) ? Number(state.chartRight) : canvas.clientWidth - right;
+    const left = Number.isFinite(Number(state && state.left)) ? Number(state.left) : (typeof LEFT_PAD === "number" ? LEFT_PAD : 14);
+    if(!Number.isFinite(priceY)) return;
     const priceText = typeof ip === "function" ? ip(price) : String(price);
     const timeText = countdownText();
     ctx.save();
