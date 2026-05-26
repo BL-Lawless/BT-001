@@ -805,6 +805,22 @@ button:hover{filter:brightness(1.04)}
   color:#9ca3af;
   text-decoration:line-through;
 }
+.v22-session-tf-badge{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:30px;
+  height:22px;
+  margin-left:5px;
+  padding:0 6px;
+  border:1px solid rgba(190,196,205,.9);
+  border-radius:6px;
+  background:rgba(255,255,255,.82);
+  color:#111;
+  font-size:11px;
+  font-weight:700;
+  line-height:1;
+}
 .v22-session-grid{
   display:grid;
   grid-template-columns:repeat(2,minmax(0,1fr));

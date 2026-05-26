@@ -3900,13 +3900,7 @@ function draw(){
     ctx.fillRect(ix(x-candleW/2),ix(y),Math.max(2,ix(candleW)),Math.max(1,ix(volTop+volH-y)));
   }
 
-  ctx.fillStyle = "#1e2329";
-  ctx.font = "13px Arial";
-  ctx.fillText(
-    cfg().symbol + " " + iv() + " / Report " + reportLabel() + " / One-way reconstruction",
-    left,
-    14
-  );
+  /* PATCH_35: remove on-chart header text line. */
 
   ctx.fillStyle = "#707a8a";
   ctx.font = "11px Arial";
@@ -5004,12 +4998,34 @@ startTradeAuto();
     window.addEventListener("click", setIsoClickMode, true);
   }
 
+  function patch36Cid(o){
+    return o && (o.parentTradeId || o.chainId || o.tradeChainId || null);
+  }
+
+  function patch36ClosedTradePlBox(it){
+    try{
+      if(!it || it.kind !== "plbox" || !it.markerId) return false;
+      if(typeof tglResults !== "undefined" && tglResults && !tglResults.checked) return false;
+      const m = Array.isArray(fillMarkers) ? fillMarkers.find(x => x && x.id === it.markerId) : null;
+      if(!m || m.role !== "close" || m.unresolved) return false;
+      const id = patch36Cid(m) || patch36Cid(it);
+      if(!id) return true;
+      const openChain = Array.isArray(openLotLinks) && openLotLinks.some(l => patch36Cid(l) === id);
+      return !openChain;
+    }catch(_e){
+      return false;
+    }
+  }
+
+  window.__v13Patch36IsClosedTradePlBox = patch36ClosedTradePlBox;
+
   function plHitFromMouse(){
     try{
       if(typeof mouse === "undefined" || !mouse || !Array.isArray(overlayHitItems)) return null;
       for(let i = overlayHitItems.length - 1; i >= 0; i--){
         const it = overlayHitItems[i];
         if(!it || it.kind !== "plbox") continue;
+        if(!patch36ClosedTradePlBox(it)) continue;
         if(mouse.x >= it.x1 - 4 && mouse.x <= it.x2 + 4 && mouse.y >= it.y1 - 4 && mouse.y <= it.y2 + 4) return it;
       }
     }catch(_e){}
@@ -5036,7 +5052,8 @@ startTradeAuto();
           };
         }
         const h = prevHover.apply(this, arguments);
-        if(h && h.kind === "marker") return null;
+        // PATCH_36: isolate click-mode suppresses broad overlay hits; only closed-trade P/L boxes map through.
+        if(h && (h.kind === "marker" || h.kind === "box" || (h.kind === "line" && h.open) || h.kind === "maStackLabMarker")) return null;
         return h;
       }
       return prevHover.apply(this, arguments);
@@ -5052,7 +5069,7 @@ startTradeAuto();
         const p = plHitFromMouse();
         if(p) return;
         const h = typeof hoverItem === "function" ? hoverItem() : null;
-        if(h && h.kind === "marker"){
+        if(h && (h.kind === "marker" || h.kind === "box" || (h.kind === "line" && h.open) || h.kind === "maStackLabMarker")){
           e.stopImmediatePropagation();
         }
       }catch(_e){}
@@ -5133,6 +5150,7 @@ startTradeAuto();
       for(let i=(overlayHitItems||[]).length-1;i>=0;i--){
         const it=overlayHitItems[i];
         if(!it || it.kind!=="plbox") continue;
+        if(typeof window.__v13Patch36IsClosedTradePlBox === "function" && !window.__v13Patch36IsClosedTradePlBox(it)) continue;
         if(x>=it.x1-4 && x<=it.x2+4 && y>=it.y1-4 && y<=it.y2+4) return true;
       }
     }catch(_e){}
@@ -5150,7 +5168,7 @@ startTradeAuto();
   }
 
   // Final safety: position/trade marker icons have zero isolate-trigger relationship.
-  // P/L boxes remain the only allowed isolate click target.
+  // PATCH_36: closed-trade P/L boxes are the only allowed isolate click target.
   if(typeof canvas !== "undefined" && canvas && !canvas.__v34r3MarkerBlocker){
     canvas.__v34r3MarkerBlocker = true;
     canvas.addEventListener("click", e => {
@@ -6976,6 +6994,7 @@ startTradeAuto();
   }
 
   canvas.addEventListener('click', e => {
+    if(window.__v13Patch36StrictPlOnly) return;
     if(dragChart || dragAxis) return;
     const r = canvas.getBoundingClientRect();
     mouse = {x:e.clientX-r.left, y:e.clientY-r.top};
@@ -6986,6 +7005,7 @@ startTradeAuto();
     for(let i = (overlayHitItems || []).length - 1; i >= 0; i--){
       const it = overlayHitItems[i];
       if(!it || it.kind !== 'plbox') continue;
+      if(typeof window.__v13Patch36IsClosedTradePlBox === 'function' && !window.__v13Patch36IsClosedTradePlBox(it)) continue;
       if(mouse.x >= it.x1 - 4 && mouse.x <= it.x2 + 4 && mouse.y >= it.y1 - 4 && mouse.y <= it.y2 + 4){
         hit = it;
         break;
@@ -7521,6 +7541,7 @@ startTradeAuto();
   if(canvas && !window.__patch8CanvasClickInstalled){
     window.__patch8CanvasClickInstalled = true;
     canvas.addEventListener('click', e => {
+      if(window.__v13Patch36StrictPlOnly) return;
       const r = canvas.getBoundingClientRect();
       mouse = {x:e.clientX-r.left, y:e.clientY-r.top};
       const hit = hoverItem();
@@ -8428,7 +8449,8 @@ startTradeAuto();
 
     const left = LEFT_PAD;
     const right = RIGHT_AXIS;
-    const top = 18;
+    /* PATCH_35: reclaim header-text vertical space for chart area. */
+    const top = 8;
     const bottom = 42;
     const gap = 20;
     const usable = Math.max(120,h-top-bottom-gap);
@@ -8503,8 +8525,7 @@ startTradeAuto();
       ctx.fillRect(ix(x-candleW/2),ix(y),Math.max(2,ix(candleW)),Math.max(1,ix(volTop+volH-y)));
     }
 
-    ctx.fillStyle = '#1e2329'; ctx.font = '13px Arial';
-    ctx.fillText(cfg().symbol + ' ' + iv() + ' / Report ' + reportLabel() + ' / One-way reconstruction',left,14);
+    /* PATCH_35: remove on-chart header text line. */
     ctx.fillStyle = '#707a8a'; ctx.font = '11px Arial'; ctx.textAlign = 'center';
     for(let i=0;i<=4;i++){
       const idx = Math.floor((vis.length-1)*i/4);
@@ -8529,6 +8550,30 @@ startTradeAuto();
         const txt = ip(cursorPrice); const tw = ctx.measureText(txt).width + 10; const tx = w-right-tw-4; const ty = mouse.y-10;
         ctx.save(); ctx.fillStyle = 'rgba(255,255,255,.96)'; ctx.strokeStyle = '#d9dce1'; ctx.fillRect(tx,ty,tw,18); ctx.strokeRect(tx,ty,tw,18);
         ctx.fillStyle = '#111'; ctx.font = 'bold 12px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt,tx+tw/2,ty+9); ctx.restore();
+        /* PATCH_35: passive expected P/L label under right-axis cursor price marker. */
+        const tglFloat = document.getElementById("tglFloatingPL");
+        const floatOn = !tglFloat || !!tglFloat.checked;
+        const hasOpen = Array.isArray(openPositionBoxes) && openPositionBoxes.length > 0;
+        const exp = floatOn && hasOpen && Number.isFinite(cursorPrice) && typeof openBoxesFloating === "function"
+          ? openBoxesFloating(cursorPrice)
+          : null;
+        if(floatOn && hasOpen && Number.isFinite(exp)){
+          const line = "Expected P/L: " + fm(exp);
+          const pw = Math.max(tw,ctx.measureText(line).width + 10);
+          const pxBox = w-right-pw-4;
+          const pyBox = ty + 20;
+          ctx.save();
+          ctx.fillStyle = 'rgba(255,255,255,.96)';
+          ctx.strokeStyle = '#d9dce1';
+          ctx.fillRect(pxBox,pyBox,pw,18);
+          ctx.strokeRect(pxBox,pyBox,pw,18);
+          ctx.fillStyle = exp > 0 ? '#047857' : exp < 0 ? '#b91c1c' : '#111';
+          ctx.font = 'bold 11px Arial';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(line,pxBox+pw/2,pyBox+9);
+          ctx.restore();
+        }
       }
       const idx = Math.floor((mouse.x-left)/slot);
       if(idx >= 0 && idx < vis.length) candleTip(vis[idx]);
@@ -8760,6 +8805,20 @@ startTradeAuto();
     return String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0');
   }
 
+  /* PATCH_35: expected open-position P/L at cursor price (UI-only). */
+  function p11ExpectedPlAtPrice(cursorPrice){
+    if(!Number.isFinite(Number(cursorPrice))) return null;
+    if(!Array.isArray(openPositionBoxes) || !openPositionBoxes.length) return null;
+    if(typeof openBoxesFloating === "function") return openBoxesFloating(Number(cursorPrice));
+    let total = 0;
+    let has = false;
+    for(const b of openPositionBoxes){
+      const v = typeof openBoxFloating === "function" ? openBoxFloating(b,Number(cursorPrice)) : null;
+      if(Number.isFinite(v)){ total += v; has = true; }
+    }
+    return has ? total : null;
+  }
+
   // Trade overlay override: P/EX dollar values only; EX is final remaining exit only.
   tradeOverlays = function(vis,mapX,mapY,slot,clip){
     const showP = tglPositions.checked;
@@ -8769,6 +8828,7 @@ startTradeAuto();
     const sym = cfg().symbol;
     const latest = candles.length ? candles[candles.length-1] : null;
     const closedW = getClosedLinkWidth();
+    const openChainIds35 = new Set((openLotLinks || []).filter(l => l && l.symbol === sym).map(l => p11Cid(l)).filter(Boolean));
 
     ctx.save();
     ctx.beginPath();
@@ -8829,11 +8889,26 @@ startTradeAuto();
       const x = markerTimeX(m,vis,mapX,slot);
       if(x === null) continue;
       const y = mapY(m.price);
+      if(m.role === 'close' && openChainIds35.has(p11Cid(m))){
+        /* PATCH_35: open parent-trade closes are partials only, never EX. */
+        m.letter = 'P';
+        m.isFinalExit = false;
+      }
       let col = m.side === 'SHORT' || m.letter === 'S' || m.letter === 'ES' ? '#f6465d' : '#0ecb81';
       if(m.role === 'close') col = m.unresolved ? '#f59e0b' : (m.side === 'SHORT' ? '#f6465d' : '#0ecb81');
       circle(ix(x),ix(y),m.letter,col,m.unresolved);
       overlayHitItems.push({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:m.unresolved ? 11 : Math.max(9, String(m.letter||'').length > 1 ? 14 : 7),qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:p11Cid(m),parentTradeId:p11Cid(m),note:m.note || ''});
       if(showR && showD && m.role === 'close' && !m.unresolved){
+        const g = p11ExitGroupForMarker(m);
+        const key = g ? g.key : m.id;
+        if(!drawnExitLabels.has(key)){
+          drawnExitLabels.add(key);
+          const val = g ? g.pnl : p11Num(m.pnl);
+          const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
+          pnlLabel(fm(val),x,y - 18,lblCol,clip);
+        }
+      }else if(showD && m.role === 'close' && !m.unresolved && openChainIds35.has(p11Cid(m))){
+        /* PATCH_35: show realized partial P/L for active open parent trade. */
         const g = p11ExitGroupForMarker(m);
         const key = g ? g.key : m.id;
         if(!drawnExitLabels.has(key)){
@@ -10142,6 +10217,7 @@ startTradeAuto();
       if(tglPositions) tglPositions.checked = false;
       if(tglLots) tglLots.checked = false;
       p14IsoKilled = true; // turning Trades OFF ends effective isolate mode for closed overlays
+      try{ if(typeof window.clearIsolateState === 'function') window.clearIsolateState({redraw:false,clearTargets:true}); }catch(_e){}
     }
     if(tglPositions) tglPositions.disabled = !tradesOn;
     if(tglLots) tglLots.disabled = !tradesOn;
@@ -10158,7 +10234,7 @@ startTradeAuto();
 
   // Allow new isolate clicks after Trades are back on.
   try{
-    canvas.addEventListener('click',() => { if(tglResults && tglResults.checked) p14IsoKilled = false; },true);
+    canvas.addEventListener('click',() => { if(window.__v13Patch36StrictPlOnly) return; if(tglResults && tglResults.checked) p14IsoKilled = false; },true);
   }catch(e){}
 
   function normalizeTimeSec14(t){
@@ -12373,6 +12449,32 @@ startTradeAuto();
     btn.title = on ? "Sessions overlay on" : "Sessions overlay off";
   }
 
+  /* PATCH_35: compact selected-TF badge next to session toggle (UI-only). */
+  function sessionTfText35(tf){
+    const v = String(tf || "").trim();
+    if(!v) return "--";
+    return v === "1M" ? "1M" : v.toLowerCase();
+  }
+  function syncSessionTfBadge22(){
+    const badge = document.getElementById("v22SessionTfBadge");
+    const sel = document.getElementById("interval");
+    if(!badge) return;
+    badge.textContent = sessionTfText35(sel ? sel.value : "");
+    badge.title = "Selected timeframe";
+  }
+  function ensureSessionTfBadge22(){
+    const btn = document.getElementById("v22SessionsToggle");
+    if(!btn) return;
+    let badge = document.getElementById("v22SessionTfBadge");
+    if(!badge){
+      badge = document.createElement("span");
+      badge.id = "v22SessionTfBadge";
+      badge.className = "v22-session-tf-badge";
+      btn.insertAdjacentElement("afterend", badge);
+    }
+    syncSessionTfBadge22();
+  }
+
   function installChartToggle22(){
     const toggles = document.querySelector(".indicator-toggles");
     if(!toggles || document.getElementById("v22SessionsToggle")) return;
@@ -12387,6 +12489,12 @@ startTradeAuto();
     });
     toggles.appendChild(btn);
     syncSessionToggle22();
+    ensureSessionTfBadge22();
+    const tfSel = document.getElementById("interval");
+    if(tfSel && !tfSel.__v22TfBadgeBound){
+      tfSel.__v22TfBadgeBound = true;
+      tfSel.addEventListener("change",syncSessionTfBadge22,false);
+    }
   }
 
   function installSettings22(){
@@ -16083,6 +16191,7 @@ If there is NO open position, use this Section 2 instead:
       for(let i=overlayHitItems.length-1;i>=0;i--){
         const it = overlayHitItems[i];
         if(!it || it.kind !== "plbox") continue;
+        if(typeof window.__v13Patch36IsClosedTradePlBox === "function" && !window.__v13Patch36IsClosedTradePlBox(it)) continue;
         if(mouse.x >= it.x1-3 && mouse.x <= it.x2+3 && mouse.y >= it.y1-3 && mouse.y <= it.y2+3) return it;
       }
     }catch(_e){}
@@ -16096,7 +16205,8 @@ If there is NO open position, use this Section 2 instead:
         const p = plHit();
         if(p && p.markerId) return {kind:"marker",markerId:p.markerId,x:p.x,y:p.y,letter:"EX",chainId:p.chainId,parentTradeId:p.parentTradeId};
         const h = prevHover.apply(this,arguments);
-        if(h && h.kind === "marker") return null;
+        // PATCH_36: open-position and broad overlay hits must not fall through to isolate paths.
+        if(h && (h.kind === "marker" || h.kind === "box" || (h.kind === "line" && h.open) || h.kind === "maStackLabMarker")) return null;
         return h;
       }
       return prevHover.apply(this,arguments);
@@ -16253,6 +16363,248 @@ If there is NO open position, use this Section 2 instead:
   }
 
   window.V13_PATCH_34_R2 = {version: MODULE};
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "V13_UI_V2_PATCH_36_ISOLATE_AUDIT_STRICT_PL_ONLY";
+
+  /*
+    PATCH_36 final owner:
+    - one active isolate state lives here;
+    - activation is accepted only from current closed-trade P/L label hit boxes;
+    - older marker/hover/canvas isolate paths are bypassed by the document capture gate.
+  */
+
+  window.__v13Patch36StrictPlOnly = true;
+
+  const isolate36 = {
+    active:false,
+    markerIds:new Set(),
+    closedLinkIds:new Set(),
+    chainIds:new Set(),
+    markerId:null,
+    parentTradeId:null,
+    chainId:null,
+    lastHit:null
+  };
+
+  function cid36(o){
+    return o && (o.parentTradeId || o.chainId || o.tradeChainId || null);
+  }
+
+  function marker36(id){
+    return (Array.isArray(fillMarkers) ? fillMarkers.find(m => m && m.id === id) : null) || null;
+  }
+
+  function resetTransientFlags36(){
+    window.__v34r1IsolateClickMode = false;
+    window.__v34r2IsolateClickMode = false;
+    window.__v13Patch36LastPlHit = null;
+    window.__v13Patch36HoverIsoTarget = null;
+    window.__v13Patch36ArmedIsoTarget = null;
+    window.__v13Patch36StrictClickMode = false;
+  }
+
+  function openChainHas36(id){
+    return !!(id && Array.isArray(openLotLinks) && openLotLinks.some(l => cid36(l) === id));
+  }
+
+  function isClosedTradePlLabel36(it){
+    try{
+      if(!it || it.kind !== "plbox" || !it.markerId) return false;
+      if(Array.isArray(overlayHitItems) && !overlayHitItems.includes(it)) return false;
+      if(typeof tglResults !== "undefined" && tglResults && !tglResults.checked) return false;
+      const m = marker36(it.markerId);
+      if(!m || m.role !== "close" || m.unresolved) return false;
+      const id = cid36(it) || cid36(m);
+      if(openChainHas36(id)) return false;
+      return true;
+    }catch(_e){
+      return false;
+    }
+  }
+
+  function plLabelHitAt36(x,y){
+    if(!Array.isArray(overlayHitItems)) return null;
+    for(let i = overlayHitItems.length - 1; i >= 0; i--){
+      const it = overlayHitItems[i];
+      if(!isClosedTradePlLabel36(it)) continue;
+      if(x >= it.x1 - 4 && x <= it.x2 + 4 && y >= it.y1 - 4 && y <= it.y2 + 4) return it;
+    }
+    return null;
+  }
+
+  function buildChain36(markerId,chainHint){
+    const markerIds = new Set();
+    const closedLinkIds = new Set();
+    const chainIds = new Set();
+    const m = marker36(markerId);
+    const hinted = chainHint || cid36(m);
+    if(hinted) chainIds.add(hinted);
+
+    if(chainIds.size){
+      (fillMarkers || []).forEach(x => { if(chainIds.has(cid36(x))) markerIds.add(x.id); });
+      (resultLinks || []).forEach(l => {
+        if(chainIds.has(cid36(l))){
+          closedLinkIds.add(l.id);
+          if(l.entryMarkerId) markerIds.add(l.entryMarkerId);
+          if(l.exitMarkerId) markerIds.add(l.exitMarkerId);
+        }
+      });
+    }else if(markerId){
+      markerIds.add(markerId);
+      let changed = true;
+      while(changed){
+        changed = false;
+        (resultLinks || []).forEach(l => {
+          if(markerIds.has(l.entryMarkerId) || markerIds.has(l.exitMarkerId)){
+            if(!closedLinkIds.has(l.id)){ closedLinkIds.add(l.id); changed = true; }
+            if(l.entryMarkerId && !markerIds.has(l.entryMarkerId)){ markerIds.add(l.entryMarkerId); changed = true; }
+            if(l.exitMarkerId && !markerIds.has(l.exitMarkerId)){ markerIds.add(l.exitMarkerId); changed = true; }
+            const lid = cid36(l);
+            if(lid) chainIds.add(lid);
+          }
+        });
+      }
+    }
+    return {markerIds,closedLinkIds,chainIds};
+  }
+
+  function setVisibilityApi36(){
+    window.isIsolateActive = () => isolate36.active;
+    window.isMarkerVisibleInIsolate = id => !isolate36.active || isolate36.markerIds.has(id);
+    window.isClosedLinkVisibleInIsolate = l => !isolate36.active || isolate36.closedLinkIds.has(l && l.id) || isolate36.chainIds.has(cid36(l));
+    window.isOpenLinkVisibleInIsolate = () => true;
+    window.isOpenBoxVisibleInIsolate = () => true;
+  }
+
+  function clearIsolateState36(options={}){
+    isolate36.active = false;
+    isolate36.markerIds = new Set();
+    isolate36.closedLinkIds = new Set();
+    isolate36.chainIds = new Set();
+    isolate36.markerId = null;
+    isolate36.parentTradeId = null;
+    isolate36.chainId = null;
+    isolate36.lastHit = null;
+    resetTransientFlags36();
+    if(options.clearTargets && Array.isArray(overlayHitItems)){
+      overlayHitItems = overlayHitItems.filter(it => !it || it.kind !== "plbox");
+    }
+    setVisibilityApi36();
+    if(options.redraw !== false){
+      try{ if(typeof draw === "function") draw(); }catch(_e){}
+    }
+  }
+
+  function activateIsolateFromPlLabel36(hit){
+    if(!isClosedTradePlLabel36(hit)) return false;
+    const m = marker36(hit.markerId);
+    if(!m) return false;
+    const chainId = cid36(hit) || cid36(m);
+    // PATCH_36B: closed-trade P/L labels toggle by stable parent/chain id.
+    if(isolate36.active && chainId && (isolate36.parentTradeId === chainId || isolate36.chainId === chainId || isolate36.chainIds.has(chainId))){
+      clearIsolateState36({redraw:true,clearTargets:false});
+      return true;
+    }
+    const chain = buildChain36(hit.markerId,chainId);
+    isolate36.active = true;
+    isolate36.markerIds = chain.markerIds;
+    isolate36.closedLinkIds = chain.closedLinkIds;
+    isolate36.chainIds = chain.chainIds;
+    isolate36.markerId = hit.markerId;
+    isolate36.parentTradeId = chainId || null;
+    isolate36.chainId = chainId || null;
+    isolate36.lastHit = null;
+    resetTransientFlags36();
+    setVisibilityApi36();
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+    return true;
+  }
+
+  function canvasPoint36(e){
+    if(typeof canvas === "undefined" || !canvas) return null;
+    const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+    if(e.target !== canvas && !path.includes(canvas)) return null;
+    const r = canvas.getBoundingClientRect();
+    return {x:e.clientX - r.left,y:e.clientY - r.top};
+  }
+
+  function focusIsolate36(){
+    if(!isolate36.active || !Array.isArray(candles) || !candles.length) return;
+    const times = [];
+    (fillMarkers || []).forEach(m => { if(isolate36.markerIds.has(m.id) && Number.isFinite(Number(m.time))) times.push(Number(m.time)); });
+    (resultLinks || []).forEach(l => {
+      if(isolate36.closedLinkIds.has(l.id)){
+        if(Number.isFinite(Number(l.entryTime))) times.push(Number(l.entryTime));
+        if(Number.isFinite(Number(l.exitTime))) times.push(Number(l.exitTime));
+      }
+    });
+    if(!times.length) return;
+    const mid = (Math.min(...times) + Math.max(...times)) / 2;
+    let idx = 0, best = Infinity;
+    for(let i=0;i<candles.length;i++){
+      const d = Math.abs(Number(candles[i].time) - mid);
+      if(d < best){ best = d; idx = i; }
+    }
+    if(typeof clamp === "function"){
+      visibleCount = clamp(visibleCount || DEF_VISIBLE, Math.min(MIN_VISIBLE,candles.length), Math.max(1,candles.length));
+    }
+    const desiredEnd = Math.min(candles.length, Math.max(visibleCount, idx + Math.floor(visibleCount/2)));
+    rightOffset = candles.length - desiredEnd;
+    try{ if(typeof clampView === "function") clampView(); }catch(_e){}
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+  }
+
+  window.clearIsolateState = clearIsolateState36;
+  window.__v34ClearIsolateState = clearIsolateState36;
+  window.activateIsolateFromPlLabel = activateIsolateFromPlLabel36;
+  window.__v13Patch36IsClosedTradePlBox = isClosedTradePlLabel36;
+  setVisibilityApi36();
+  clearIsolateState36({redraw:false,clearTargets:false});
+
+  if(typeof document !== "undefined" && !window.__v13Patch36StrictDocClickBound){
+    window.__v13Patch36StrictDocClickBound = true;
+    document.addEventListener("click", e => {
+      const pt = canvasPoint36(e);
+      if(!pt) return;
+      mouse = {x:pt.x,y:pt.y};
+      window.__v13Patch36StrictClickMode = true;
+      setTimeout(() => { window.__v13Patch36StrictClickMode = false; },0);
+      const hit = plLabelHitAt36(pt.x,pt.y);
+      if(hit){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        activateIsolateFromPlLabel36(hit);
+        return;
+      }
+      e.stopImmediatePropagation();
+    }, true);
+  }
+
+  if(typeof document !== "undefined" && !window.__v13Patch36StrictKeyBound){
+    window.__v13Patch36StrictKeyBound = true;
+    document.addEventListener("keydown", e => {
+      if(e.code !== "Space" || !isolate36.active) return;
+      const tag = (e.target && e.target.tagName || "").toLowerCase();
+      if(tag === "input" || tag === "textarea" || tag === "select" || (e.target && e.target.isContentEditable)) return;
+      e.preventDefault();
+      focusIsolate36();
+    }, true);
+  }
+
+  if(typeof tglResults !== "undefined" && tglResults && !tglResults.__patch36StrictResetBound){
+    tglResults.__patch36StrictResetBound = true;
+    tglResults.addEventListener("change", () => {
+      clearIsolateState36({redraw:!tglResults.checked,clearTargets:true});
+      if(tglResults.checked){
+        try{ if(typeof draw === "function") draw(); }catch(_e){}
+      }
+    }, true);
+  }
+
+  window.V13_PATCH_36_STRICT_PL_ONLY = {version:MODULE,clearIsolateState:clearIsolateState36,activateIsolateFromPlLabel:activateIsolateFromPlLabel36};
 })();
 
 (() => {
