@@ -3909,7 +3909,11 @@ function draw(){
     priceY:latestY,
     left,
     chartRight:w-right,
-    right
+    right,
+    top,
+    priceH,
+    minP,
+    maxP
   };
 
   ctx.fillStyle = "#fafafa";
@@ -8763,7 +8767,11 @@ startTradeAuto();
       priceY:latestY,
       left,
       chartRight:w-right,
-      right
+      right,
+      top,
+      priceH,
+      minP,
+      maxP
     };
 
     ctx.fillStyle = '#fafafa';
@@ -17233,4 +17241,575 @@ If there is NO open position, use this Section 2 instead:
   if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(installSsscSettingsPlaceholder,0); return r; }; }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
   window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={version:MODULE,show,hide,refresh:()=>seedFromHub(true),diagnose};
+})();
+
+(() => {
+  "use strict";
+
+  const MODULE = "CALCULATOR_MODULE";
+  const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
+  const OPEN_ALGO_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
+  const STORE = "btc_futures_chart_v13_calculator_";
+  let zTop = 82;
+  let direction = "LONG";
+  let syncingStop = false;
+  let lastStopEdit = "level";
+
+  function q(id){ return document.getElementById(id); }
+  function num(v){
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  function clamp(v,min,max){ return Math.max(min,Math.min(max,v)); }
+  function fmtPrice(v){
+    const n = num(v);
+    return n == null ? "-" : Math.round(n).toLocaleString("en-US");
+  }
+  function fmtLot(v){
+    const n = num(v);
+    return n == null ? "-" : Number(n.toFixed(3)).toFixed(3);
+  }
+  function fmtMoney(v){
+    const n = num(v);
+    if(n == null) return "-";
+    return (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
+  }
+  function moneyColor(v){
+    const n = num(v);
+    return n == null || n === 0 ? "#111" : n > 0 ? "#047857" : "#f6465d";
+  }
+  function setMoney(node,value){
+    if(!node) return;
+    node.textContent = fmtMoney(value);
+    node.style.color = moneyColor(value);
+  }
+  function setStatus(text){
+    const el = q("calcModuleStatus");
+    if(el) el.textContent = text || "";
+  }
+
+  function ensureButton(){
+    const account = q("mBalance") && q("mBalance").closest(".metric");
+    const assess = q("v29AssessMetric");
+    let wrap = q("calcModuleMetric");
+    let btn = q("calcOpenBtn");
+    if(btn && wrap) return btn;
+    if(!wrap){
+      wrap = document.createElement("div");
+      wrap.id = "calcModuleMetric";
+      wrap.className = "calc-module-metric";
+    }
+    if(!btn){
+      btn = document.createElement("button");
+      btn.id = "calcOpenBtn";
+      btn.type = "button";
+      btn.className = "calc-module-icon";
+    }
+    if(btn.parentNode !== wrap){
+      wrap.innerHTML = "";
+      wrap.appendChild(btn);
+    }
+    btn.title = "Position Calculator";
+    btn.setAttribute("aria-label","Open position calculator");
+    btn.textContent = "🧮";
+    if(assess && assess.parentNode){
+      assess.insertAdjacentElement("afterend",wrap);
+    }else if(account && account.parentNode){
+      account.insertAdjacentElement("beforebegin",wrap);
+    }else{
+      document.querySelector(".metrics")?.appendChild(wrap);
+    }
+    return btn;
+  }
+
+  function ensureWindow(){
+    let win = q("calcModuleWindow");
+    if(win) return win;
+    win = document.createElement("div");
+    win.id = "calcModuleWindow";
+    win.className = "calc-module-window hidden";
+    win.innerHTML = `
+      <div class="calc-module-resize calc-module-resize-n" data-resize="n"></div>
+      <div class="calc-module-resize calc-module-resize-s" data-resize="s"></div>
+      <div class="calc-module-resize calc-module-resize-e" data-resize="e"></div>
+      <div class="calc-module-resize calc-module-resize-w" data-resize="w"></div>
+      <div class="calc-module-resize calc-module-resize-ne" data-resize="ne"></div>
+      <div class="calc-module-resize calc-module-resize-nw" data-resize="nw"></div>
+      <div class="calc-module-resize calc-module-resize-se" data-resize="se"></div>
+      <div class="calc-module-resize calc-module-resize-sw" data-resize="sw"></div>
+      <div class="calc-module-head" id="calcModuleHead">
+        <div class="calc-module-title">Position Calculator</div>
+        <div class="calc-module-actions">
+          <button id="calcModuleClose" type="button" title="Close">x</button>
+        </div>
+      </div>
+      <div class="calc-module-body" id="calcModuleBody">
+        <div class="calc-module-grid">
+          <div class="calc-module-col">
+            <div class="calc-module-col-head">
+              <div class="calc-module-col-title"><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></div>
+              <button class="calc-module-add" id="calcModuleAddEntry" type="button">Add</button>
+            </div>
+            <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
+            <div id="calcModuleEntryRows"></div>
+          </div>
+          <div class="calc-module-col">
+            <div class="calc-module-col-head">
+              <div class="calc-module-col-title">EXITS <span class="calc-module-title-sum" id="calcModuleExitSum">0.000</span></div>
+              <button class="calc-module-add" id="calcModuleAddExit" type="button">Add</button>
+            </div>
+            <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
+            <div id="calcModuleExitRows"></div>
+          </div>
+        </div>
+        <div class="calc-module-stop">
+          <label for="calcModuleStopLevel">Stop Level</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" placeholder="Level">
+          <label for="calcModuleStopDistance">SL Distance</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" placeholder="Distance">
+        </div>
+        <div class="calc-module-panel">
+          <div class="calc-module-section-title is-toggle" id="calcModulePlTitle">PL @ Exits <span class="calc-module-caret" id="calcModulePlCaret">v</span></div>
+          <div id="calcModuleExitPlRows"></div>
+        </div>
+        <div class="calc-module-panel">
+          <div class="calc-module-section-title is-toggle" id="calcModuleSummaryTitle">Summary <span class="calc-module-caret" id="calcModuleSummaryCaret">v</span></div>
+          <div id="calcModuleSummaryBody">
+            <div class="calc-module-summary-row"><div class="calc-module-label">Total lots</div><div class="calc-module-value" id="calcModuleEntrySize">-</div></div>
+            <div class="calc-module-summary-row"><div class="calc-module-label">Average Entry</div><div class="calc-module-value" id="calcModuleAvgEntry">-</div></div>
+            <div class="calc-module-summary-row"><div class="calc-module-label">Risk</div><div class="calc-module-value" id="calcModuleRisk">-</div></div>
+            <div class="calc-module-summary-row"><div class="calc-module-label">Reward</div><div class="calc-module-value" id="calcModuleReward">-</div></div>
+          </div>
+        </div>
+        <div class="calc-module-binance-flat">
+          <div class="calc-module-binance-actions">
+            <button id="calcModuleRead" type="button">Read</button>
+            <button id="calcModuleSend" type="button" disabled title="No order action in calculator module">Send</button>
+          </div>
+          <div class="calc-module-status" id="calcModuleStatus"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(win);
+    return win;
+  }
+
+  function rows(containerId){
+    return Array.from(q(containerId)?.querySelectorAll(".calc-module-row") || []);
+  }
+  function readRows(containerId){
+    return rows(containerId).map(row => ({
+      row,
+      level:num(row.querySelector(".calc-module-level")?.value),
+      lot:num(row.querySelector(".calc-module-lot")?.value)
+    })).filter(r => r.level != null && r.lot != null && r.lot > 0);
+  }
+  function readEntry(){
+    const list = readRows("calcModuleEntryRows");
+    let qty = 0;
+    let value = 0;
+    list.forEach(r => {
+      qty += r.lot;
+      value += r.level * r.lot;
+    });
+    return {rows:list, qty, avg:qty > 0 ? value / qty : null};
+  }
+  function capExitLots(maxQty){
+    let remaining = Math.max(0,Number(maxQty) || 0);
+    rows("calcModuleExitRows").forEach(row => {
+      const input = row.querySelector(".calc-module-lot");
+      const lot = num(input?.value);
+      if(!input || lot == null || lot <= 0) return;
+      const capped = Math.max(0,Math.min(lot,remaining));
+      if(Math.abs(capped - lot) > 1e-9) input.value = capped > 0 ? capped.toFixed(3) : "";
+      remaining -= capped;
+    });
+  }
+  function setDirection(next){
+    direction = next === "SHORT" ? "SHORT" : "LONG";
+    const btn = q("calcModuleDir");
+    if(!btn) return;
+    btn.textContent = direction;
+    btn.classList.toggle("is-long",direction === "LONG");
+    btn.classList.toggle("is-short",direction === "SHORT");
+  }
+  function syncStopFromLevel(avg){
+    if(syncingStop) return;
+    const stop = num(q("calcModuleStopLevel")?.value);
+    if(avg == null || stop == null) return;
+    syncingStop = true;
+    q("calcModuleStopDistance").value = Math.abs(avg - stop).toFixed(0);
+    syncingStop = false;
+  }
+  function syncStopFromDistance(avg){
+    if(syncingStop) return;
+    const dist = num(q("calcModuleStopDistance")?.value);
+    if(avg == null || dist == null) return;
+    syncingStop = true;
+    const stop = direction === "LONG" ? avg - Math.abs(dist) : avg + Math.abs(dist);
+    q("calcModuleStopLevel").value = Math.round(stop);
+    syncingStop = false;
+  }
+  function syncStopForAvg(avg){
+    if(lastStopEdit === "distance") syncStopFromDistance(avg);
+    else syncStopFromLevel(avg);
+  }
+  function calculate(){
+    const entry = readEntry();
+    capExitLots(entry.qty);
+    const exits = readRows("calcModuleExitRows");
+    let exitQty = 0;
+    let reward = 0;
+    const plRows = q("calcModuleExitPlRows");
+    if(plRows) plRows.innerHTML = "";
+
+    exits.forEach((row,index) => {
+      exitQty += row.lot;
+      const pl = entry.avg == null
+        ? null
+        : direction === "LONG"
+          ? (row.level - entry.avg) * row.lot
+          : (entry.avg - row.level) * row.lot;
+      if(pl != null) reward += pl;
+      const line = document.createElement("div");
+      line.className = "calc-module-summary-row calc-module-exit-pl";
+      line.innerHTML = `<div class="calc-module-label">PL @ Ex ${index + 1}</div><div class="calc-module-value"></div>`;
+      setMoney(line.querySelector(".calc-module-value"),pl);
+      plRows?.appendChild(line);
+    });
+
+    syncStopForAvg(entry.avg);
+    const stop = num(q("calcModuleStopLevel")?.value);
+    const risk = entry.avg != null && stop != null && entry.qty > 0
+      ? direction === "LONG"
+        ? (stop - entry.avg) * entry.qty
+        : (entry.avg - stop) * entry.qty
+      : null;
+
+    q("calcModuleEntrySum").textContent = fmtLot(entry.qty || 0);
+    q("calcModuleExitSum").textContent = fmtLot(exitQty || 0);
+    q("calcModuleExitSum").classList.toggle("calc-module-underfilled",entry.qty > 0 && exitQty < entry.qty);
+    q("calcModuleEntrySize").textContent = entry.qty > 0 ? fmtLot(entry.qty) : "-";
+    q("calcModuleAvgEntry").textContent = entry.avg != null ? fmtPrice(entry.avg) : "-";
+    setMoney(q("calcModuleRisk"),risk);
+    setMoney(q("calcModuleReward"),exits.length ? reward : null);
+  }
+  function addRow(containerId,level="",lot=""){
+    const container = q(containerId);
+    if(!container) return null;
+    const row = document.createElement("div");
+    row.className = "calc-module-row";
+    row.innerHTML = `
+      <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
+      <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" placeholder="Lot" value="${lot}">
+      <button class="calc-module-remove" type="button" title="Remove">x</button>`;
+    row.querySelectorAll("input").forEach(input => input.addEventListener("input",calculate,false));
+    row.querySelector(".calc-module-remove").addEventListener("click",() => {
+      row.remove();
+      calculate();
+    },false);
+    container.appendChild(row);
+    calculate();
+    return row;
+  }
+  function setRows(containerId,data){
+    const container = q(containerId);
+    if(!container) return;
+    container.innerHTML = "";
+    (data && data.length ? data : [{}]).forEach(item => {
+      addRow(containerId,item.level == null ? "" : Math.round(item.level),item.lot == null ? "" : Number(item.lot).toFixed(3));
+    });
+  }
+
+  function currentSymbol(){
+    try{ return cfg().symbol; }catch(_e){ return (marketEl && marketEl.value ? marketEl.value : "").toUpperCase(); }
+  }
+  function sideFromPosition(row){
+    const amt = Number(row && row.positionAmt);
+    const ps = String(row && row.positionSide || "").toUpperCase();
+    return amt < 0 || ps === "SHORT" ? "SHORT" : "LONG";
+  }
+  function openBoxPosition(){
+    const boxes = Array.isArray(openPositionBoxes) ? openPositionBoxes.filter(b => b && (!b.symbol || b.symbol === currentSymbol())) : [];
+    if(!boxes.length) return null;
+    const side = String(boxes[0].side || boxes[0].letter || "").toUpperCase().includes("SHORT") || boxes[0].letter === "S" ? "SHORT" : "LONG";
+    let qty = 0;
+    let value = 0;
+    boxes.forEach(b => {
+      const qv = Math.abs(Number(b.qty));
+      const px = Number(b.price);
+      if(Number.isFinite(qv) && qv > 0 && Number.isFinite(px) && px > 0){
+        qty += qv;
+        value += px * qv;
+      }
+    });
+    return qty > 0 ? {side,qty,entry:value / qty,source:"openPositionBoxes"} : null;
+  }
+  async function signedPosition(){
+    if(typeof hasKeys !== "function" || !hasKeys()) return null;
+    const key = apiKeyEl.value.trim();
+    const sec = apiSecretEl.value.trim();
+    const off = typeof timeOffset === "function" ? await timeOffset() : 0;
+    const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
+    const row = (risk || []).find(r => r && r.symbol === currentSymbol() && Math.abs(Number(r.positionAmt)) > 1e-12);
+    if(!row) return null;
+    const qty = Math.abs(Number(row.positionAmt));
+    const entry = Number(row.entryPrice);
+    if(!(qty > 0) || !(entry > 0)) return null;
+    return {side:sideFromPosition(row),qty,entry,source:"positionRisk"};
+  }
+  function unwrapOrders(rows){
+    if(Array.isArray(rows)) return rows;
+    if(rows && Array.isArray(rows.orders)) return rows.orders;
+    if(rows && Array.isArray(rows.data)) return rows.data;
+    return [];
+  }
+  async function readOpenOrders(){
+    let pool = [].concat(window.v13OpenOrders21 || [], window.v13OpenAlgoOrders21 || []);
+    if(typeof hasKeys === "function" && hasKeys() && typeof signedGet === "function"){
+      const key = apiKeyEl.value.trim();
+      const sec = apiSecretEl.value.trim();
+      const off = typeof timeOffset === "function" ? await timeOffset() : 0;
+      const sym = currentSymbol();
+      try{ pool = pool.concat(unwrapOrders(await signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off))); }catch(_e){}
+      try{ pool = pool.concat(unwrapOrders(await signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off))); }catch(_e){}
+    }
+    return pool;
+  }
+  function orderStopPrice(order){
+    for(const key of ["stopPrice","triggerPrice","activatePrice","price"]){
+      const n = num(order && order[key]);
+      if(n != null && n > 0) return n;
+    }
+    return null;
+  }
+  function isLiveOrder(order){
+    const status = String(order && (order.status || order.orderStatus || "NEW") || "NEW").toUpperCase();
+    return !status || status === "NEW" || status === "PENDING" || status === "ACCEPTED" || status === "PARTIALLY_FILLED" || status.includes("NEW");
+  }
+  function isStopOrder(order){
+    const text = [order && order.type,order && order.origType,order && order.orderType,order && order.algoType]
+      .map(v => String(v || "").toUpperCase())
+      .join(" ");
+    return text.includes("STOP") && !text.includes("TAKE_PROFIT") && !text.includes("TRAILING") && orderStopPrice(order) != null;
+  }
+  async function findStopForPosition(pos){
+    const sym = currentSymbol();
+    const opposite = pos.side === "SHORT" ? "BUY" : "SELL";
+    const orders = await readOpenOrders();
+    const candidates = orders
+      .filter(o => o && String(o.symbol || "") === sym)
+      .filter(isLiveOrder)
+      .filter(isStopOrder)
+      .filter(o => String(o.side || "").toUpperCase() === opposite)
+      .filter(o => {
+        const ps = String(o.positionSide || "").toUpperCase();
+        return !ps || ps === "BOTH" || ps === pos.side;
+      })
+      .map(o => ({price:orderStopPrice(o), order:o}))
+      .filter(x => x.price != null);
+    if(!candidates.length) return null;
+    const directional = candidates.filter(x => pos.side === "LONG" ? x.price < pos.entry : x.price > pos.entry);
+    const pool = directional.length ? directional : candidates;
+    pool.sort((a,b) => pos.side === "LONG" ? b.price - a.price : a.price - b.price);
+    return pool[0].price;
+  }
+  async function readBinance(){
+    setStatus("Reading current open position...");
+    try{
+      const pos = await signedPosition() || openBoxPosition();
+      if(!pos){
+        setStatus("No current open position found.");
+        return;
+      }
+      setDirection(pos.side);
+      setRows("calcModuleEntryRows",[{level:pos.entry,lot:pos.qty}]);
+      const stop = await findStopForPosition(pos);
+      if(stop != null){
+        q("calcModuleStopLevel").value = Math.round(stop);
+        lastStopEdit = "level";
+        syncStopFromLevel(pos.entry);
+      }
+      calculate();
+      setStatus(stop != null ? "" : "No stop found.");
+    }catch(e){
+      console.warn(MODULE + " Binance read failed",e);
+      setStatus("Read failed.");
+    }
+  }
+
+  function installDragResize(win){
+    const head = q("calcModuleHead");
+    let drag = null;
+    head.addEventListener("pointerdown",e => {
+      if(e.target.closest("button")) return;
+      const r = win.getBoundingClientRect();
+      drag = {x:e.clientX,y:e.clientY,left:r.left,top:r.top};
+      win.style.zIndex = String(++zTop);
+      head.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    },false);
+    head.addEventListener("pointermove",e => {
+      if(!drag) return;
+      win.style.left = clamp(drag.left + e.clientX - drag.x,0,window.innerWidth - 80) + "px";
+      win.style.top = clamp(drag.top + e.clientY - drag.y,0,window.innerHeight - 40) + "px";
+    },false);
+    const endDrag = e => {
+      if(!drag) return;
+      drag = null;
+      try{ head.releasePointerCapture(e.pointerId); }catch(_e){}
+    };
+    head.addEventListener("pointerup",endDrag,false);
+    head.addEventListener("pointercancel",endDrag,false);
+
+    win.querySelectorAll(".calc-module-resize").forEach(handle => {
+      handle.addEventListener("pointerdown",e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = win.getBoundingClientRect();
+        const start = {x:e.clientX,y:e.clientY,left:r.left,top:r.top,width:r.width,height:r.height,dir:handle.dataset.resize || ""};
+        win.style.zIndex = String(++zTop);
+        handle.setPointerCapture(e.pointerId);
+        const move = ev => {
+          const dx = ev.clientX - start.x;
+          const dy = ev.clientY - start.y;
+          let left = start.left, top = start.top, width = start.width, height = start.height;
+          const minW = 395, minH = 320;
+          if(start.dir.includes("e")) width = start.width + dx;
+          if(start.dir.includes("s")) height = start.height + dy;
+          if(start.dir.includes("w")){ width = start.width - dx; left = start.left + dx; }
+          if(start.dir.includes("n")){ height = start.height - dy; top = start.top + dy; }
+          if(width < minW){ if(start.dir.includes("w")) left -= minW - width; width = minW; }
+          if(height < minH){ if(start.dir.includes("n")) top -= minH - height; height = minH; }
+          left = clamp(left,0,window.innerWidth - 80);
+          top = clamp(top,0,window.innerHeight - 40);
+          width = Math.min(width,window.innerWidth - left - 6);
+          height = Math.min(height,window.innerHeight - top - 6);
+          win.style.left = left + "px";
+          win.style.top = top + "px";
+          win.style.width = width + "px";
+          win.style.height = height + "px";
+        };
+        const up = ev => {
+          document.removeEventListener("pointermove",move,true);
+          document.removeEventListener("pointerup",up,true);
+          document.removeEventListener("pointercancel",up,true);
+          try{ handle.releasePointerCapture(ev.pointerId); }catch(_e){}
+        };
+        document.addEventListener("pointermove",move,true);
+        document.addEventListener("pointerup",up,true);
+        document.addEventListener("pointercancel",up,true);
+      },true);
+    });
+  }
+
+  function priceFromCanvasY(y){
+    const state = currentPriceLineState || {};
+    const top = num(state.top) ?? 8;
+    const priceH = num(state.priceH) ?? lastAreaH;
+    const minP = num(state.minP) ?? lastYMin;
+    const maxP = num(state.maxP) ?? lastYMax;
+    if(priceH == null || !(priceH > 0) || minP == null || maxP == null || !(maxP > minP)) return null;
+    const chartY = clamp(y,top,top + priceH);
+    return maxP - ((chartY - top) / priceH) * (maxP - minP);
+  }
+  function copyText(text){
+    if(navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try{ document.execCommand("copy"); }finally{ ta.remove(); }
+    return Promise.resolve();
+  }
+  function ensureContextMenu(){
+    let menu = q("calcModuleContextMenu");
+    if(menu) return menu;
+    menu = document.createElement("div");
+    menu.id = "calcModuleContextMenu";
+    menu.className = "calc-module-context-menu hidden";
+    menu.innerHTML = `<button id="calcModuleCopyPrice" type="button">Copy Price | -</button>`;
+    document.body.appendChild(menu);
+    return menu;
+  }
+  function hideContextMenu(){
+    q("calcModuleContextMenu")?.classList.add("hidden");
+  }
+  function installContextMenu(){
+    if(!canvas || canvas.__calculatorModuleContextMenu) return;
+    canvas.__calculatorModuleContextMenu = true;
+    canvas.addEventListener("contextmenu",e => {
+      const rect = canvas.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const price = priceFromCanvasY(y);
+      if(price == null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const label = fmtPrice(price);
+      const menu = ensureContextMenu();
+      const btn = q("calcModuleCopyPrice");
+      btn.textContent = "Copy Price | " + label;
+      btn.onclick = () => copyText(label).finally(hideContextMenu);
+      menu.style.left = Math.min(e.clientX,window.innerWidth - 176) + "px";
+      menu.style.top = Math.min(e.clientY,window.innerHeight - 42) + "px";
+      menu.classList.remove("hidden");
+    },false);
+    document.addEventListener("click",e => {
+      if(!e.target.closest || !e.target.closest("#calcModuleContextMenu")) hideContextMenu();
+    },true);
+    window.addEventListener("blur",hideContextMenu,false);
+    document.addEventListener("keydown",e => { if(e.key === "Escape") hideContextMenu(); },false);
+  }
+
+  function bindCalculator(){
+    const win = ensureWindow();
+    const openBtn = ensureButton();
+    if(win.__calculatorModuleBound) return;
+    win.__calculatorModuleBound = true;
+
+    openBtn.addEventListener("click",() => {
+      win.classList.remove("hidden");
+      win.style.zIndex = String(++zTop);
+    },false);
+    q("calcModuleClose").addEventListener("click",() => win.classList.add("hidden"),false);
+    q("calcModuleDir").addEventListener("click",() => {
+      setDirection(direction === "LONG" ? "SHORT" : "LONG");
+      lastStopEdit = "distance";
+      syncStopFromDistance(readEntry().avg);
+      calculate();
+    },false);
+    q("calcModuleAddEntry").addEventListener("click",() => addRow("calcModuleEntryRows"),false);
+    q("calcModuleAddExit").addEventListener("click",() => addRow("calcModuleExitRows"),false);
+    q("calcModuleStopLevel").addEventListener("input",() => {
+      lastStopEdit = "level";
+      syncStopFromLevel(readEntry().avg);
+      calculate();
+    },false);
+    q("calcModuleStopDistance").addEventListener("input",() => {
+      lastStopEdit = "distance";
+      syncStopFromDistance(readEntry().avg);
+      calculate();
+    },false);
+    q("calcModulePlTitle").addEventListener("click",() => {
+      const body = q("calcModuleExitPlRows");
+      const closed = body.classList.toggle("calc-module-collapsed");
+      q("calcModulePlCaret").textContent = closed ? ">" : "v";
+    },false);
+    q("calcModuleSummaryTitle").addEventListener("click",() => {
+      const body = q("calcModuleSummaryBody");
+      const closed = body.classList.toggle("calc-module-collapsed");
+      q("calcModuleSummaryCaret").textContent = closed ? ">" : "v";
+    },false);
+    q("calcModuleRead").addEventListener("click",readBinance,false);
+
+    installDragResize(win);
+    setDirection("LONG");
+    addRow("calcModuleEntryRows");
+    addRow("calcModuleExitRows");
+    installContextMenu();
+    window.CALCULATOR_MODULE = {version:MODULE,open:() => openBtn.click(),calculate,priceFromCanvasY};
+  }
+
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",bindCalculator,{once:true});
+  else bindCalculator();
 })();
