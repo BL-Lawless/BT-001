@@ -1689,7 +1689,12 @@ const marketDataHub = (() => {
       return null;
     }
     const existing = state.formingKlineByTf[tf];
-    state.formingKlineByTf[tf] = replace ? {...row,final:false} : mergeBufferRow(existing,{...row,final:false});
+    const sameOpenTime = existing && Number(existing.time) === Number(row.time);
+    // Live forming candles must preserve intrabar extremes. Same-open-time kline
+    // packets are merged; a different open time starts a fresh forming candle.
+    state.formingKlineByTf[tf] = sameOpenTime
+      ? mergeBufferRow(existing,{...row,final:false})
+      : {...row,final:false};
     return state.formingKlineByTf[tf];
   }
   function upsertClosedBuffer(tf,row,limitOverride){
