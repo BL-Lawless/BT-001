@@ -1689,7 +1689,7 @@ button:hover{filter:brightness(1.04)}
   font-weight:700;
 }
 .calc-module-collapsed{display:none}
-@keyframes calcModuleLotHeartbeat{0%,100%{opacity:1}45%{opacity:.38}60%{opacity:1}75%{opacity:.38}}
+@keyframes calcModuleLotHeartbeat{0%,100%{color:inherit}45%{color:#f6465d}60%{color:inherit}75%{color:#f6465d}}
 .calc-module-underfilled{animation:calcModuleLotHeartbeat 2.4s ease-in-out infinite}
 .calc-module-summary-row{
   display:grid;

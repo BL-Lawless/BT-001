@@ -12417,9 +12417,23 @@ startTradeAuto();
     const sym = currentSymbol21();
     return (Array.isArray(risk) ? risk : [])
       .filter(r => r && r.symbol === sym && Math.abs(n21(r.positionAmt)) > 1e-12)
-      .map(r => [r.symbol,r.positionSide || "BOTH",String(r.positionAmt),String(r.entryPrice)].join(":"))
+      .map(r => {
+        const amt = n21(r.positionAmt);
+        const side = amt < 0 || String(r.positionSide || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+        const size = Math.abs(amt).toFixed(8);
+        const avg = n21(r.entryPrice).toFixed(8);
+        return [r.symbol,side,size,avg].join(":");
+      })
       .sort()
       .join("|");
+  }
+  function activePosition21(risk){
+    const sym = currentSymbol21();
+    const row = (Array.isArray(risk) ? risk : []).find(r => r && r.symbol === sym && Math.abs(n21(r.positionAmt)) > 1e-12);
+    if(!row) return null;
+    const amt = n21(row.positionAmt);
+    const side = amt < 0 || String(row.positionSide || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    return {symbol:sym,side,sign:side === "SHORT" ? -1 : 1,qty:Math.abs(amt),avg:n21(row.entryPrice)};
   }
   function updateBoxesFromRisk21(risk){
     if(typeof buildOpenBoxes !== "function") return;
@@ -12436,6 +12450,306 @@ startTradeAuto();
     }
     try{ if(typeof updatePositionStrip === "function") updatePositionStrip(latest21()); }catch(e){}
     try{ if(typeof updateTabTitle === "function") updateTabTitle(); }catch(e){}
+  }
+  function tradeFillKey21(row){
+    return [
+      String(row && row.id != null ? row.id : (row && row.tradeId != null ? row.tradeId : "")),
+      String(row && row.orderId != null ? row.orderId : ""),
+      String(row && row.rawTime != null ? row.rawTime : (row && row.time != null ? row.time : "")),
+      String(row && row.rawSide != null ? row.rawSide : (row && row.side != null ? row.side : ""))
+    ].join("_");
+  }
+  function markerForTradeFill21(row,role){
+    const key = tradeFillKey21(row);
+    return (fillMarkers || []).find(m => {
+      const sameIds = String(m && m.tradeId != null ? m.tradeId : "") === String(row && row.id != null ? row.id : (row && row.tradeId != null ? row.tradeId : ""))
+        && String(m && m.orderId != null ? m.orderId : "") === String(row && row.orderId != null ? row.orderId : "");
+      if(sameIds && (!role || m.role === role)) return true;
+      const mk = [
+        String(m && m.tradeId != null ? m.tradeId : ""),
+        String(m && m.orderId != null ? m.orderId : ""),
+        String(m && m.rawTime != null ? m.rawTime : (m && m.time ? n21(m.time) * 1000 : "")),
+        String(m && m.rawSide != null ? m.rawSide : "")
+      ].join("_");
+      return mk === key && (!role || m.role === role);
+    }) || null;
+  }
+  function recentOpenRows21(rows,active){
+    if(!active) return [];
+    return (Array.isArray(rows) ? rows : []).filter(row => {
+      if(!row || row.symbol !== active.symbol) return false;
+      const q = n21(row.qty);
+      const p = n21(row.price);
+      const t = n21(row.time);
+      if(q <= 0 || p <= 0 || t <= 0) return false;
+      const s = String(row.side || "").toUpperCase() === "BUY" ? 1 : -1;
+      if(s === active.sign) return true;
+      return s === -active.sign && Math.abs(n21(row.realizedPnl)) > 1e-12;
+    }).sort((a,b) => n21(a.time) - n21(b.time) || n21(a.id) - n21(b.id));
+  }
+  async function fetchRecentUserTrades21(key,sec,off,start,end){
+    if(typeof signedGet !== "function" || typeof cfg !== "function") return [];
+    const c = cfg();
+    const out = [];
+    const seen = new Set();
+    let page = Math.max(0,Math.floor(start));
+    const stop = Math.max(page,Math.floor(end));
+    let guard = 0;
+    while(page <= stop && guard < 10){
+      const rows = await signedGet(c.userTrades,{
+        symbol:c.symbol,
+        startTime:String(page),
+        endTime:String(stop),
+        limit:"1000"
+      },key,sec,off);
+      if(!Array.isArray(rows) || !rows.length) break;
+      for(const row of rows){
+        const k = tradeFillKey21(row);
+        if(!seen.has(k)){
+          seen.add(k);
+          out.push(row);
+        }
+      }
+      if(rows.length < 1000) break;
+      const lt = Math.max(...rows.map(r => n21(r.time)));
+      if(!Number.isFinite(lt) || lt <= page) break;
+      page = lt + 1;
+      guard++;
+    }
+    return out;
+  }
+  let lastOpenTradeSyncTime21 = 0;
+  let pendingOpenAuth21 = null;
+  const appliedOpenFillKeys21 = new Set();
+  async function fetchOpenTradeDeltaRows21(key,sec,off,active){
+    const now = Date.now() + off;
+    const windows = [];
+    if(lastOpenTradeSyncTime21){
+      windows.push({label:"lastSync-30s",start:Math.max(0,lastOpenTradeSyncTime21 - 30000),end:now});
+    }
+    windows.push({label:"15m",start:Math.max(0,now - 15 * 60 * 1000),end:now});
+    windows.push({label:"60m",start:Math.max(0,now - 60 * 60 * 1000),end:now});
+
+    for(const win of windows){
+      const rows = await fetchRecentUserTrades21(key,sec,off,win.start,win.end);
+      const matches = recentOpenRows21(rows,active);
+      if(matches.length){
+        lastOpenTradeSyncTime21 = Math.max(now,...matches.map(r => n21(r.time)).filter(Number.isFinite));
+        window.__v13OpenTradeSync21 = {window:win.label,start:win.start,end:win.end,rows:rows.length,matches:matches.length,at:Date.now()};
+        return matches;
+      }
+    }
+    lastOpenTradeSyncTime21 = now;
+    window.__v13OpenTradeSync21 = {window:"none",start:0,end:now,rows:0,matches:0,at:Date.now()};
+    return [];
+  }
+  function activeOpenChainId21(active,rows){
+    const fromSet = activeOpenParentChainIds && activeOpenParentChainIds.size ? [...activeOpenParentChainIds].find(Boolean) : null;
+    if(fromSet) return fromSet;
+    const fromLink = (openLotLinks || []).find(l => l && (!active || l.symbol === active.symbol));
+    if(cid21(fromLink)) return cid21(fromLink);
+    const fromBox = (openPositionBoxes || []).find(b => b && (!active || b.symbol === active.symbol));
+    if(cid21(fromBox)) return cid21(fromBox);
+    const firstTime = rows && rows.length ? n21(rows[0].time) : Date.now();
+    return "open21_" + (active ? active.symbol : currentSymbol21()) + "_" + (active ? active.side : "OPEN") + "_" + Math.floor(firstTime);
+  }
+  function hasOpenParentContext21(active){
+    if(!active) return false;
+    if(activeOpenParentChainIds && activeOpenParentChainIds.size) return true;
+    if((openLotLinks || []).some(l => l && l.symbol === active.symbol && sideDir21(l.side) === active.side)) return true;
+    return (fillMarkers || []).some(m => m && m.symbol === active.symbol && openEntryMarkerIds && openEntryMarkerIds.has(m.id));
+  }
+  function hasEarlierOpenEntry21(active,row){
+    if(!active || !row) return false;
+    const rowTime = n21(row.time);
+    return (fillMarkers || []).some(m => {
+      if(!m || m.symbol !== active.symbol || !(openEntryMarkerIds && openEntryMarkerIds.has(m.id))) return false;
+      if(String(m.tradeId ?? "") === String(row.id ?? "") && String(m.orderId ?? "") === String(row.orderId ?? "")) return false;
+      const mt = n21(m.rawTime != null ? m.rawTime : n21(m.time) * 1000);
+      return mt > 0 && rowTime > 0 && mt < rowTime - 1;
+    }) || (openLotLinks || []).some(l => {
+      if(!l || l.symbol !== active.symbol || sideDir21(l.side) !== active.side) return false;
+      const lt = n21(l.entryTime) * 1000;
+      return lt > 0 && rowTime > 0 && lt < rowTime - 1;
+    });
+  }
+  function feeQuote21(row){
+    try{ if(typeof feeQuote === "function") return feeQuote(row,currentSymbol21()); }catch(e){}
+    return n21(row && row.commission);
+  }
+  function makeOpenFillMarker21(row,role,active,chainId,isOpeningFill){
+    const isEntry = role === "entry";
+    const rawSide = String(row.side || "").toUpperCase();
+    const id = "op21_" + tradeFillKey21(row).replace(/[^a-zA-Z0-9_:-]/g,"");
+    const t = Math.floor(n21(row.time) / 1000);
+    const entryLetter = isOpeningFill
+      ? (active.side === "SHORT" ? "ES" : "EL")
+      : (active.side === "SHORT" ? "S" : "B");
+    return {
+      id,
+      symbol:active.symbol,
+      role,
+      letter:isEntry ? entryLetter : "P",
+      time:t,
+      rawTime:n21(row.time),
+      price:n21(row.price),
+      qty:n21(row.qty),
+      pnl:isEntry ? 0 : n21(row.realizedPnl),
+      realizedPnl:isEntry ? 0 : n21(row.realizedPnl),
+      binanceRealizedPnl:isEntry ? 0 : n21(row.realizedPnl),
+      fee:feeQuote21(row),
+      side:active.side,
+      unresolved:false,
+      tradeId:row.id,
+      orderId:row.orderId,
+      rawSide,
+      note:isEntry ? (isOpeningFill ? "Open-position recent opening fill" : "Open-position recent add fill") : "Open-position recent partial fill",
+      chainId,
+      tradeChainId:chainId,
+      isFinalExit:false,
+      candleTime:typeof ivSec === "function" ? Math.floor(t / ivSec()) * ivSec() : t
+    };
+  }
+  function upsertFillMarker21(marker){
+    const existing = markerForTradeFill21(marker,marker.role) || (fillMarkers || []).find(m => m.id === marker.id);
+    if(existing){
+      Object.assign(existing,marker,{id:existing.id});
+      return existing;
+    }
+    fillMarkers.push(marker);
+    return marker;
+  }
+  function upsertOpenConnector21(marker,active,chainId){
+    if(!openLotLinks) openLotLinks = [];
+    let link = openLotLinks.find(l => l.entryMarkerId === marker.id);
+    if(!link){
+      link = {
+        id:"open_" + marker.id,
+        symbol:active.symbol,
+        entryMarkerId:marker.id,
+        entryTime:marker.time,
+        entryPrice:marker.price,
+        exitTime:latest21() ? latest21().time : Math.floor(Date.now()/1000),
+        exitPrice:latest21() ? latest21().close : marker.price,
+        qty:marker.qty,
+        side:active.side,
+        open:true,
+        chainId,
+        tradeChainId:chainId
+      };
+      openLotLinks.push(link);
+    }else{
+      link.qty = marker.qty;
+      link.entryPrice = marker.price;
+      link.entryTime = marker.time;
+      link.side = active.side;
+      link.chainId = chainId;
+      link.tradeChainId = chainId;
+    }
+  }
+  function reduceOpenConnectors21(marker,active,chainId,row){
+    if(!openLotLinks) openLotLinks = [];
+    let remaining = n21(row.qty);
+    const links = openLotLinks
+      .filter(l => l && l.symbol === active.symbol && sideDir21(l.side) === active.side)
+      .sort((a,b) => n21(a.entryTime) - n21(b.entryTime));
+    const totalQty = Math.max(remaining,links.reduce((a,l) => a + Math.max(0,n21(l.qty)),0));
+    for(const l of links){
+      if(remaining <= 1e-12) break;
+      const before = Math.max(0,n21(l.qty));
+      if(before <= 1e-12) continue;
+      const used = Math.min(before,remaining);
+      const rp = n21(row.realizedPnl) * (used / Math.max(n21(row.qty),1e-12));
+      const fee = feeQuote21(row) * (used / Math.max(n21(row.qty),1e-12));
+      const linkId = "op21_l_" + marker.id + "_" + l.entryMarkerId;
+      if(!(resultLinks || []).some(x => x && (x.id === linkId || (String(x.tradeId) === String(row.id) && String(x.orderId) === String(row.orderId) && x.entryMarkerId === l.entryMarkerId && x.exitMarkerId === marker.id)))){
+        resultLinks.push({
+          id:linkId,
+          symbol:active.symbol,
+          entryMarkerId:l.entryMarkerId,
+          exitMarkerId:marker.id,
+          entryTime:l.entryTime,
+          entryPrice:l.entryPrice,
+          exitTime:marker.time,
+          exitPrice:marker.price,
+          qty:used,
+          side:active.side,
+          grossPnl:active.side === "SHORT" ? (n21(l.entryPrice) - marker.price) * used : (marker.price - n21(l.entryPrice)) * used,
+          realizedPnl:rp,
+          fees:fee,
+          netPnl:rp - fee,
+          binanceRealizedPnl:rp,
+          tradeId:row.id,
+          orderId:row.orderId,
+          unresolved:false,
+          chainId,
+          tradeChainId:chainId,
+          exitIsFinal:false,
+          open:true
+        });
+      }
+      l.qty = before - used;
+      remaining -= used;
+    }
+    openLotLinks = openLotLinks.filter(l => Math.max(0,n21(l.qty)) > 1e-12);
+    if(totalQty <= 1e-12 && !openLotLinks.length){
+      marker.qty = n21(row.qty);
+    }
+  }
+  function rebalanceOpenConnectorsToPosition21(active){
+    if(!active || !Array.isArray(openLotLinks) || !openLotLinks.length) return;
+    const links = openLotLinks.filter(l => l && l.symbol === active.symbol && sideDir21(l.side) === active.side);
+    const total = links.reduce((a,l) => a + Math.max(0,n21(l.qty)),0);
+    if(total <= 1e-12 || Math.abs(total - active.qty) <= 1e-8) return;
+    const scale = active.qty / total;
+    links.forEach(l => { l.qty = Math.max(0,n21(l.qty) * scale); });
+  }
+  function pruneOppositeOpenSide21(active){
+    if(!active || !Array.isArray(openLotLinks)) return;
+    const removed = new Set();
+    openLotLinks = openLotLinks.filter(l => {
+      const drop = l && l.symbol === active.symbol && sideDir21(l.side) !== active.side;
+      if(drop && l.entryMarkerId) removed.add(l.entryMarkerId);
+      return !drop;
+    });
+    if(removed.size && openEntryMarkerIds && typeof openEntryMarkerIds.delete === "function"){
+      removed.forEach(id => openEntryMarkerIds.delete(id));
+    }
+  }
+  async function syncRecentOpenTradeFills21(key,sec,off,risk){
+    const active = activePosition21(risk);
+    if(!active) return;
+    const rows = await fetchOpenTradeDeltaRows21(key,sec,off,active);
+    if(!rows.length) return;
+    pruneOppositeOpenSide21(active);
+    const hadParentContext = hasOpenParentContext21(active);
+    const chainId = activeOpenChainId21(active,rows);
+    activeOpenParentChainIds = new Set([chainId]);
+    let hasParentContext = hadParentContext;
+
+    for(const row of rows){
+      const fillKey = tradeFillKey21(row);
+      if(appliedOpenFillKeys21.has(fillKey)) continue;
+      const fillSign = String(row.side || "").toUpperCase() === "BUY" ? 1 : -1;
+      const isEntry = fillSign === active.sign;
+      const existingEntryMarker = isEntry ? markerForTradeFill21(row,"entry") : null;
+      const existingOpeningMarker = !!(existingEntryMarker && (existingEntryMarker.letter === "EL" || existingEntryMarker.letter === "ES"));
+      const hasEarlierEntry = hasEarlierOpenEntry21(active,row);
+      const isOpeningFill = isEntry && !hasEarlierEntry && (!hasParentContext || existingOpeningMarker);
+      const marker = upsertFillMarker21(makeOpenFillMarker21(row,isEntry ? "entry" : "close",active,chainId,isOpeningFill));
+      appliedOpenFillKeys21.add(fillKey);
+      if(isEntry){
+        openEntryMarkerIds.add(marker.id);
+        upsertOpenConnector21(marker,active,chainId);
+        hasParentContext = true;
+      }else{
+        marker.letter = "P";
+        marker.isFinalExit = false;
+        reduceOpenConnectors21(marker,active,chainId,row);
+      }
+    }
+    rebalanceOpenConnectorsToPosition21(active);
+    updateBoxesFromRisk21(risk);
   }
   function unwrapOrders21(rows){
     if(Array.isArray(rows)) return rows;
@@ -12473,7 +12787,29 @@ startTradeAuto();
 
   let busy21 = false;
   let lastSig21 = null;
-  let lastTradeSync21 = 0;
+  let pendingOpenRisk21 = null;
+  let openVisualSyncTimer21 = null;
+  async function applyOpenPositionVisualSync21(risk,auth){
+    updateBoxesFromRisk21(risk);
+    if(auth && auth.key && auth.sec){
+      try{ await syncRecentOpenTradeFills21(auth.key,auth.sec,auth.off,risk); }
+      catch(e){ console.warn("PATCH_21 recent open-trade sync failed",e); }
+    }
+    try{ if(typeof draw === "function") draw(); }catch(e){}
+  }
+  function scheduleOpenPositionVisualSync21(risk,auth){
+    pendingOpenRisk21 = Array.isArray(risk) ? risk : [];
+    pendingOpenAuth21 = auth || null;
+    if(openVisualSyncTimer21) clearTimeout(openVisualSyncTimer21);
+    openVisualSyncTimer21 = setTimeout(async () => {
+      openVisualSyncTimer21 = null;
+      const nextRisk = pendingOpenRisk21;
+      const nextAuth = pendingOpenAuth21;
+      pendingOpenRisk21 = null;
+      pendingOpenAuth21 = null;
+      await applyOpenPositionVisualSync21(nextRisk,nextAuth);
+    },350);
+  }
   async function refreshPositionVisualsAndStops21(){
     if(busy21 || typeof hasKeys !== "function" || !hasKeys()) return;
     busy21 = true;
@@ -12483,14 +12819,18 @@ startTradeAuto();
       const off = typeof timeOffset === "function" ? await timeOffset() : 0;
       const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
       const sig = positionSig21(risk);
-      updateBoxesFromRisk21(risk);
-
-      const needsTradeSync = sig && sig !== lastSig21 && (lastSig21 !== null || !(openLotLinks && openLotLinks.length));
-      lastSig21 = sig;
-      if(needsTradeSync && typeof loadTrades === "function" && Date.now() - lastTradeSync21 > 8000){
-        lastTradeSync21 = Date.now();
-        try{ await loadTrades({silent:true}); }catch(e){ console.warn("PATCH_21 silent trade sync failed",e); }
+      const openPositionChanged = sig !== lastSig21;
+      const auth21 = {key,sec,off};
+      if(lastSig21 === null){
+        updateBoxesFromRisk21(risk);
+        try{ if(typeof draw === "function") draw(); }catch(e){}
+        if(sig && !(Array.isArray(openLotLinks) && openLotLinks.length)) scheduleOpenPositionVisualSync21(risk,auth21);
+      }else if(openPositionChanged){
+        updateBoxesFromRisk21(risk);
+        try{ if(typeof draw === "function") draw(); }catch(e){}
+        scheduleOpenPositionVisualSync21(risk,auth21);
       }
+      lastSig21 = sig;
 
       if(sig) await fetchOpenOrders21(key,sec,off);
       else{
@@ -12500,7 +12840,7 @@ startTradeAuto();
         window.v13OpenOrdersStatus21 = "flat";
       }
 
-      try{ if(typeof draw === "function") draw(); }catch(e){}
+      if(!openPositionChanged) try{ if(typeof draw === "function") draw(); }catch(e){}
     }catch(e){
       console.warn("PATCH_21 position visual refresh failed",e);
     }finally{
@@ -17311,6 +17651,7 @@ If there is NO open position, use this Section 2 instead:
     }
     btn.title = "Position Calculator";
     btn.setAttribute("aria-label","Open position calculator");
+    btn.setAttribute("aria-pressed","false");
     btn.textContent = "🧮";
     if(assess && assess.parentNode){
       assess.insertAdjacentElement("afterend",wrap);
@@ -17767,11 +18108,23 @@ If there is NO open position, use this Section 2 instead:
     if(win.__calculatorModuleBound) return;
     win.__calculatorModuleBound = true;
 
-    openBtn.addEventListener("click",() => {
+    function showCalculator(){
       win.classList.remove("hidden");
       win.style.zIndex = String(++zTop);
+      openBtn.classList.add("is-on");
+      openBtn.setAttribute("aria-pressed","true");
+    }
+    function hideCalculator(){
+      win.classList.add("hidden");
+      openBtn.classList.remove("is-on");
+      openBtn.setAttribute("aria-pressed","false");
+    }
+
+    openBtn.addEventListener("click",() => {
+      if(win.classList.contains("hidden")) showCalculator();
+      else hideCalculator();
     },false);
-    q("calcModuleClose").addEventListener("click",() => win.classList.add("hidden"),false);
+    q("calcModuleClose").addEventListener("click",hideCalculator,false);
     q("calcModuleDir").addEventListener("click",() => {
       setDirection(direction === "LONG" ? "SHORT" : "LONG");
       lastStopEdit = "distance";
@@ -17807,7 +18160,7 @@ If there is NO open position, use this Section 2 instead:
     addRow("calcModuleEntryRows");
     addRow("calcModuleExitRows");
     installContextMenu();
-    window.CALCULATOR_MODULE = {version:MODULE,open:() => openBtn.click(),calculate,priceFromCanvasY};
+    window.CALCULATOR_MODULE = {version:MODULE,open:showCalculator,hide:hideCalculator,calculate,priceFromCanvasY};
   }
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",bindCalculator,{once:true});
