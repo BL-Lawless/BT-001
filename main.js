@@ -17660,6 +17660,9 @@ If there is NO open position, use this Section 2 instead:
   let direction = "LONG";
   let syncingStop = false;
   let lastStopEdit = "level";
+  let binanceLimitRowSeq = 0;
+  const binanceLimitRowMetaByRowId = new Map();
+  let lastReadDiagnostic = null;
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -17898,17 +17901,36 @@ If there is NO open position, use this Section 2 instead:
     setMoney(q("calcModuleRisk"),risk);
     setMoney(q("calcModuleReward"),exits.length ? reward : null);
   }
-  function addRow(containerId,level="",lot=""){
+  function addRow(containerId,level="",lot="",options){
     const container = q(containerId);
     if(!container) return null;
+    const opts = options || {};
     const row = document.createElement("div");
     row.className = "calc-module-row";
     row.innerHTML = `
       <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
       <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" placeholder="Lot" value="${lot}">
       <button class="calc-module-remove" type="button" title="Remove">x</button>`;
+    if(opts.source){
+      row.dataset.source = String(opts.source);
+      if(opts.source === "binance-limit"){
+        row.classList.add("calc-module-row-binance-limit");
+        row.title = "Binance LIMIT order";
+      }
+    }
+    if(opts.rowId){
+      row.dataset.calcRowId = String(opts.rowId);
+    }
+    if(opts.meta){
+      const rowId = row.dataset.calcRowId || ("calc_row_" + (++binanceLimitRowSeq));
+      row.dataset.calcRowId = rowId;
+      row.__binanceLimitOrderMeta = opts.meta;
+      binanceLimitRowMetaByRowId.set(rowId,opts.meta);
+    }
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",calculate,false));
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
+      const rowId = row.dataset.calcRowId;
+      if(rowId) binanceLimitRowMetaByRowId.delete(rowId);
       row.remove();
       calculate();
     },false);
@@ -17968,17 +17990,149 @@ If there is NO open position, use this Section 2 instead:
     if(rows && Array.isArray(rows.data)) return rows.data;
     return [];
   }
-  async function readOpenOrders(){
-    let pool = [].concat(window.v13OpenOrders21 || [], window.v13OpenAlgoOrders21 || []);
+  function toUpper(v){
+    return String(v == null ? "" : v).toUpperCase();
+  }
+  function safeCloneOrder(order){
+    if(order == null || typeof order !== "object") return order;
+    if(typeof structuredClone === "function"){
+      try{ return structuredClone(order); }catch(_e){}
+    }
+    try{ return JSON.parse(JSON.stringify(order)); }catch(_e){ return order; }
+  }
+  function isLimitOrder(order){
+    return toUpper(order && order.type) === "LIMIT";
+  }
+  function isReduceOnly(order){
+    const ro = order && order.reduceOnly;
+    return ro === true || String(ro).toLowerCase() === "true";
+  }
+  function orderContextDirection(order,fallbackDirection){
+    const ps = toUpper(order && order.positionSide);
+    if(ps === "LONG") return "LONG";
+    if(ps === "SHORT") return "SHORT";
+    return fallbackDirection === "SHORT" ? "SHORT" : "LONG";
+  }
+  function buildLimitOrderMeta(order){
+    return {
+      orderId:order && order.orderId != null ? order.orderId : null,
+      clientOrderId:order && order.clientOrderId != null ? order.clientOrderId : null,
+      symbol:order && order.symbol != null ? order.symbol : null,
+      side:order && order.side != null ? order.side : null,
+      positionSide:order && order.positionSide != null ? order.positionSide : null,
+      type:order && order.type != null ? order.type : null,
+      status:order && (order.status != null ? order.status : order.orderStatus != null ? order.orderStatus : null),
+      price:order && order.price != null ? order.price : null,
+      origQty:order && order.origQty != null ? order.origQty : null,
+      executedQty:order && order.executedQty != null ? order.executedQty : null,
+      timeInForce:order && order.timeInForce != null ? order.timeInForce : null,
+      reduceOnly:order && order.reduceOnly != null ? order.reduceOnly : null,
+      workingType:order && order.workingType != null ? order.workingType : null,
+      updateTime:order && order.updateTime != null ? order.updateTime : null,
+      rawOrder:safeCloneOrder(order)
+    };
+  }
+  function clearMappedLimitRows(containerId){
+    rows(containerId).forEach(row => {
+      if(row.dataset.source !== "binance-limit") return;
+      const rowId = row.dataset.calcRowId;
+      if(rowId) binanceLimitRowMetaByRowId.delete(rowId);
+      row.remove();
+    });
+  }
+  function publishReadDiagnostic(diag){
+    lastReadDiagnostic = diag || null;
+    window.__calculatorReadDiagnostic = lastReadDiagnostic;
+    try{ console.info(MODULE + " read diagnostic",lastReadDiagnostic); }catch(_e){}
+  }
+  async function readOpenOrdersSnapshot(){
+    const sym = currentSymbol();
+    const snapshot = {
+      symbol:sym,
+      normalOrders:Array.isArray(window.v13OpenOrders21) ? window.v13OpenOrders21.slice() : [],
+      algoOrders:Array.isArray(window.v13OpenAlgoOrders21) ? window.v13OpenAlgoOrders21.slice() : [],
+      normalFetchError:null,
+      algoFetchError:null
+    };
     if(typeof hasKeys === "function" && hasKeys() && typeof signedGet === "function"){
       const key = apiKeyEl.value.trim();
       const sec = apiSecretEl.value.trim();
       const off = typeof timeOffset === "function" ? await timeOffset() : 0;
-      const sym = currentSymbol();
-      try{ pool = pool.concat(unwrapOrders(await signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off))); }catch(_e){}
-      try{ pool = pool.concat(unwrapOrders(await signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off))); }catch(_e){}
+      try{
+        snapshot.normalOrders = unwrapOrders(await signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off));
+      }catch(e){
+        snapshot.normalFetchError = e;
+      }
+      try{
+        snapshot.algoOrders = unwrapOrders(await signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off));
+      }catch(e){
+        snapshot.algoFetchError = e;
+      }
     }
-    return pool;
+    return snapshot;
+  }
+  function mapLimitOrdersForCalculator(snapshot,activeDirection){
+    const directionCtx = activeDirection === "SHORT" ? "SHORT" : "LONG";
+    const sym = toUpper(snapshot && snapshot.symbol);
+    const normalLive = (snapshot && snapshot.normalOrders || [])
+      .filter(o => o && toUpper(o.symbol) === sym)
+      .filter(isLiveOrder);
+    const algoLive = (snapshot && snapshot.algoOrders || [])
+      .filter(o => o && toUpper(o.symbol) === sym)
+      .filter(isLiveOrder);
+    const limitOrders = normalLive.filter(isLimitOrder);
+    const nonLimitOrders = normalLive.filter(o => !isLimitOrder(o));
+    const mappedEntries = [];
+    const mappedExits = [];
+    let ignoredByPositionSide = 0;
+    limitOrders.forEach((order,index) => {
+      const orderCtx = orderContextDirection(order,directionCtx);
+      if(orderCtx !== directionCtx){
+        ignoredByPositionSide++;
+        return;
+      }
+      const side = toUpper(order && order.side);
+      let role = null;
+      if(isReduceOnly(order)){
+        role = "exit";
+      }else if(orderCtx === "LONG"){
+        if(side === "BUY") role = "entry";
+        else if(side === "SELL") role = "exit";
+      }else{
+        if(side === "SELL") role = "entry";
+        else if(side === "BUY") role = "exit";
+      }
+      if(!role) return;
+      const level = num(order && order.price);
+      if(level == null || level <= 0) return;
+      const lot = num(order && order.origQty);
+      const rowId = "binance_limit_" + String(order && order.orderId != null ? order.orderId : "na") + "_" + String(++binanceLimitRowSeq) + "_" + String(index);
+      const mapped = {
+        rowId,
+        level,
+        lot:lot != null && lot > 0 ? lot : null,
+        source:"binance-limit",
+        meta:buildLimitOrderMeta(order)
+      };
+      if(role === "entry") mappedEntries.push(mapped);
+      else mappedExits.push(mapped);
+    });
+    return {
+      entryRows:mappedEntries,
+      exitRows:mappedExits,
+      diagnostic:{
+        normalLimitOrdersFound:limitOrders.length,
+        mappedEntries:mappedEntries.length,
+        mappedExits:mappedExits.length,
+        ignoredAlgoOrders:algoLive.length,
+        ignoredNonLimitOrders:nonLimitOrders.length,
+        ignoredByPositionSide
+      }
+    };
+  }
+  async function readOpenOrders(){
+    const snapshot = await readOpenOrdersSnapshot();
+    return [].concat(snapshot.normalOrders || [], snapshot.algoOrders || []);
   }
   function orderStopPrice(order){
     for(const key of ["stopPrice","triggerPrice","activatePrice","price"]){
@@ -17997,10 +18151,12 @@ If there is NO open position, use this Section 2 instead:
       .join(" ");
     return text.includes("STOP") && !text.includes("TAKE_PROFIT") && !text.includes("TRAILING") && orderStopPrice(order) != null;
   }
-  async function findStopForPosition(pos){
+  async function findStopForPosition(pos,snapshot){
     const sym = currentSymbol();
     const opposite = pos.side === "SHORT" ? "BUY" : "SELL";
-    const orders = await readOpenOrders();
+    const orders = snapshot
+      ? [].concat(snapshot.normalOrders || [], snapshot.algoOrders || [])
+      : await readOpenOrders();
     const candidates = orders
       .filter(o => o && String(o.symbol || "") === sym)
       .filter(isLiveOrder)
@@ -18020,25 +18176,87 @@ If there is NO open position, use this Section 2 instead:
   }
   async function readBinance(){
     setStatus("Reading current open position...");
+    const diag = {
+      at:new Date().toISOString(),
+      symbol:currentSymbol(),
+      positionSource:null,
+      positionSide:null,
+      normalLimitOrdersFound:0,
+      mappedEntries:0,
+      mappedExits:0,
+      ignoredAlgoOrders:0,
+      ignoredNonLimitOrders:0,
+      ignoredByPositionSide:0,
+      openOrdersReadStatus:"not-requested"
+    };
     try{
       const pos = await signedPosition() || openBoxPosition();
-      if(!pos){
-        setStatus("No current open position found.");
-        return;
+      if(pos){
+        diag.positionSource = pos.source || null;
+        diag.positionSide = pos.side || null;
+        setDirection(pos.side);
+        setRows("calcModuleEntryRows",[{level:pos.entry,lot:pos.qty}]);
       }
-      setDirection(pos.side);
-      setRows("calcModuleEntryRows",[{level:pos.entry,lot:pos.qty}]);
-      const stop = await findStopForPosition(pos);
-      if(stop != null){
+
+      clearMappedLimitRows("calcModuleEntryRows");
+      clearMappedLimitRows("calcModuleExitRows");
+      binanceLimitRowMetaByRowId.clear();
+
+      let snapshot = null;
+      try{
+        snapshot = await readOpenOrdersSnapshot();
+        const normalErr = !!snapshot.normalFetchError;
+        const algoErr = !!snapshot.algoFetchError;
+        diag.openOrdersReadStatus = normalErr && algoErr ? "error" : (normalErr || algoErr ? "partial" : "ok");
+      }catch(_e){
+        diag.openOrdersReadStatus = "error";
+      }
+
+      if(snapshot){
+        const mapped = mapLimitOrdersForCalculator(snapshot,pos ? pos.side : direction);
+        diag.normalLimitOrdersFound = mapped.diagnostic.normalLimitOrdersFound;
+        diag.mappedEntries = mapped.diagnostic.mappedEntries;
+        diag.mappedExits = mapped.diagnostic.mappedExits;
+        diag.ignoredAlgoOrders = mapped.diagnostic.ignoredAlgoOrders;
+        diag.ignoredNonLimitOrders = mapped.diagnostic.ignoredNonLimitOrders;
+        diag.ignoredByPositionSide = mapped.diagnostic.ignoredByPositionSide;
+        mapped.entryRows.forEach(item => addRow(
+          "calcModuleEntryRows",
+          Math.round(item.level),
+          item.lot == null ? "" : Number(item.lot).toFixed(3),
+          {source:item.source,rowId:item.rowId,meta:item.meta}
+        ));
+        mapped.exitRows.forEach(item => addRow(
+          "calcModuleExitRows",
+          Math.round(item.level),
+          item.lot == null ? "" : Number(item.lot).toFixed(3),
+          {source:item.source,rowId:item.rowId,meta:item.meta}
+        ));
+      }
+
+      let stop = null;
+      if(pos){
+        stop = await findStopForPosition(pos,snapshot);
+      }
+      if(pos && stop != null){
         q("calcModuleStopLevel").value = Math.round(stop);
         lastStopEdit = "level";
         syncStopFromLevel(pos.entry);
       }
       calculate();
-      setStatus(stop != null ? "" : "No stop found.");
+      if(!pos){
+        setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
+      }else if(diag.openOrdersReadStatus === "error"){
+        setStatus("Position loaded. Open orders read failed.");
+      }else{
+        setStatus(stop != null ? "" : "No stop found.");
+      }
+      publishReadDiagnostic(diag);
     }catch(e){
       console.warn(MODULE + " Binance read failed",e);
       setStatus("Read failed.");
+      diag.openOrdersReadStatus = "error";
+      publishReadDiagnostic(diag);
     }
   }
 
@@ -18226,7 +18444,23 @@ If there is NO open position, use this Section 2 instead:
     addRow("calcModuleEntryRows");
     addRow("calcModuleExitRows");
     installContextMenu();
-    window.CALCULATOR_MODULE = {version:MODULE,open:showCalculator,hide:hideCalculator,calculate,priceFromCanvasY};
+    window.CALCULATOR_MODULE = {
+      version:MODULE,
+      open:showCalculator,
+      hide:hideCalculator,
+      calculate,
+      priceFromCanvasY,
+      getBinanceLimitRowMeta(rowOrId){
+        const rowId = typeof rowOrId === "string"
+          ? rowOrId
+          : rowOrId && rowOrId.dataset
+            ? rowOrId.dataset.calcRowId
+            : "";
+        return rowId ? binanceLimitRowMetaByRowId.get(rowId) || null : null;
+      },
+      getBinanceLimitRowMetaMap(){ return new Map(binanceLimitRowMetaByRowId); },
+      getLastReadDiagnostic(){ return lastReadDiagnostic; }
+    };
   }
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",bindCalculator,{once:true});
