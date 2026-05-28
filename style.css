@@ -247,7 +247,7 @@ button:hover{filter:brightness(1.04)}
 
 .metric .v{
   color:var(--text);
-  font-size:13px;
+  font-size:14px;
   font-weight:700;
   white-space:nowrap;
   overflow:visible;
