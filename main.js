@@ -11050,6 +11050,65 @@ startTradeAuto();
   const sortMarker15 = (a,b) => (n15(a.time)-n15(b.time)) || String(a.id||'').localeCompare(String(b.id||''));
   const isoOn15 = () => typeof isIsolateActive === 'function' && isIsolateActive();
 
+  function localDayEndSec15(sec){
+    const d = new Date(n15(sec) * 1000);
+    return Math.floor(new Date(d.getFullYear(),d.getMonth(),d.getDate() + 1,0,0,0,0).getTime() / 1000);
+  }
+
+  function drawMode2Marker15(m,vis,mapX,mapY,slot){
+    if(!m || !inTime(m.time,vis)) return;
+    const x = markerTimeX(m,vis,mapX,slot);
+    if(x === null || x < -50 || x > canvas.clientWidth + 50) return;
+    const y = mapY(n15(m.price));
+    let col = m.side === 'SHORT' || m.letter === 'S' || m.letter === 'ES' ? '#f6465d' : '#0ecb81';
+    if(m.role === 'close') col = m.unresolved ? '#f59e0b' : (m.side === 'SHORT' ? '#f6465d' : '#0ecb81');
+    ctx.save();
+    ctx.fillStyle = col;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.arc(ix(x),ix(y),5,0,Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    overlayHitItems.push({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:5,qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''});
+  }
+
+  function drawMode2DailyNetBoxes15(records,vis,mapX,slot,clip){
+    const byDay = new Map();
+    for(const rec of records || []){
+      const ex = rec && rec.finalExit && rec.finalExit.marker;
+      if(!ex) continue;
+      const dayEnd = localDayEndSec15(ex.time);
+      byDay.set(dayEnd,(byDay.get(dayEnd) || 0) + n15(rec.netTotal));
+    }
+    ctx.save();
+    ctx.font = 'bold 13px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for(const [dayEnd,total] of byDay.entries()){
+      if(Math.abs(total) <= 1e-12) continue;
+      const xRight = typeof timeX === 'function' ? timeX(dayEnd,vis,mapX,slot) : null;
+      if(xRight === null || xRight < clip.left - 80 || xRight > clip.left + clip.width + 80) continue;
+      const txt = typeof fmPnlBox === 'function' ? fmPnlBox(total) : fm(total).replace(/[+-]/,'');
+      const col = total >= 0 ? '#1e88e5' : '#f6465d';
+      const bg = total >= 0 ? '#eaf3ff' : '#ffe8ec';
+      const pad = 7;
+      const h = 22;
+      const w = Math.ceil(ctx.measureText(txt).width + pad * 2);
+      const x = xRight - w;
+      const y = total > 0 ? clip.top + 2 : clip.top + clip.height - h - 2;
+      ctx.fillStyle = bg;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = typeof hairline === 'function' ? hairline() : 1;
+      ctx.fillRect(ix(x),ix(y),w,h);
+      ctx.strokeRect(px(x),px(y),w,h);
+      ctx.fillStyle = col;
+      ctx.fillText(txt,x + w/2,y + h/2 + .5);
+    }
+    ctx.restore();
+  }
+
   function normalizeTimeSec15(t){
     const v = n15(t);
     return v > 1e12 ? Math.floor(v/1000) : v;
@@ -11403,7 +11462,8 @@ startTradeAuto();
 
   function drawSimplifiedTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
     const activeOpenChains = activeOpenChainIds15(cfg().symbol);
-    for(const rec of allParentTrades15()){
+    const records = allParentTrades15();
+    for(const rec of records){
       if(!visibleByIsoRecord15(rec)) continue;
       if(activeOpenChains.has(rec.parentId)) continue;
       const first = rec.firstEntry;
@@ -11427,9 +11487,10 @@ startTradeAuto();
       const my = (s.y1 + s.y2) / 2;
       reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.netTotal):fm(rec.netTotal).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId}});
       if(showLots) reserveLabel15(fq(rec.totalLots),mx,my + 18,col,clip,placedLabels,{fixedX:true,offsets:[0,16,32,-16,-32,48,-48]});
-      if(inTime(first.time,vis)) drawMarker15(first,vis,mapX,mapY,slot);
-      if(inTime(ex.time,vis)) drawMarker15(ex,vis,mapX,mapY,slot);
+      if(inTime(first.time,vis)) drawMode2Marker15(first,vis,mapX,mapY,slot);
+      if(inTime(ex.time,vis)) drawMode2Marker15(ex,vis,mapX,mapY,slot);
     }
+    drawMode2DailyNetBoxes15(records.filter(rec => visibleByIsoRecord15(rec) && !activeOpenChains.has(rec.parentId)),vis,mapX,slot,clip);
   }
 
   function drawFullTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
@@ -14641,10 +14702,10 @@ If there is NO open position, use this Section 2 instead:
     const sel=$id('reportWeeks'); if(!sel) return;
     const specs=[['yesterday','Yesterday'],['today','Today'],['1w','1W'],['2w','2W'],['3w','3W'],['1mth','1M'],['custom','Custom']];
     const saved=localStorage.getItem(K('reportPeriod'));
-    const current=(sel.value&&specs.some(x=>x[0]===sel.value)&&sel.value!=='1d')?sel.value:(saved||'yesterday');
+    const current=(sel.value&&specs.some(x=>x[0]===sel.value)&&sel.value!=='1d')?sel.value:(saved||'1w');
     sel.innerHTML='';
     specs.forEach(([v,t])=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); });
-    sel.value=specs.some(x=>x[0]===current)?current:'yesterday';
+    sel.value=specs.some(x=>x[0]===current)?current:'1w';
     localStorage.setItem(K('reportPeriod'),sel.value);
   }
   function startOfLocalDay(d=new Date()){ return new Date(d.getFullYear(),d.getMonth(),d.getDate(),0,0,0,0).getTime(); }
@@ -16998,18 +17059,18 @@ If there is NO open position, use this Section 2 instead:
     ctx.lineTo(px(boxLeft),px(priceY));
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = "#fff";
-    ctx.strokeStyle = "#111";
+    ctx.fillStyle = "rgba(255,255,255,.98)";
+    ctx.strokeStyle = "#c7cdd6";
     ctx.lineWidth = 1;
     ctx.fillRect(x,y,boxW,boxH);
     ctx.strokeRect(x,y,boxW,boxH);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.font = priceFont;
-    ctx.fillStyle = "#111827";
+    ctx.fillStyle = "#1f2937";
     ctx.fillText(priceText,x + boxW / 2,y + 4);
     ctx.font = timerFont;
-    ctx.fillStyle = "#374151";
+    ctx.fillStyle = "#4b5563";
     ctx.fillText(timeText,x + boxW / 2,y + 4 + 11 + gap);
     ctx.restore();
   }
