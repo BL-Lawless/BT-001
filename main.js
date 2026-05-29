@@ -17655,6 +17655,7 @@ If there is NO open position, use this Section 2 instead:
   const MODULE = "CALCULATOR_MODULE";
   const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
   const OPEN_ALGO_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
+  const ORDER_WRITE_URL = "https://fapi.binance.com/fapi/v1/order";
   const STORE = "btc_futures_chart_v13_calculator_";
   const LEVELS_VISIBLE_KEY = STORE + "levels_visible";
   let zTop = 82;
@@ -17666,9 +17667,13 @@ If there is NO open position, use this Section 2 instead:
   const binanceLimitRowMetaByRowId = new Map();
   let lastReadDiagnostic = null;
   let lastOverlayDiagnostic = null;
+  let lastSendDiagnostic = null;
   let overlayLevelBoxes = [];
   let overlayDrag = {active:false,row:null};
   let suppressNextOverlayClick = false;
+  let lastReadStateSnapshot = null;
+  let sendPlanState = null;
+  let sendPlanSeq = 0;
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -17831,9 +17836,10 @@ If there is NO open position, use this Section 2 instead:
               <input id="calcModuleLevelsToggle" type="checkbox" checked>
               <span>Levels</span>
             </label>
-            <button id="calcModuleSend" type="button" disabled title="No order action in calculator module">Send</button>
+            <button id="calcModuleSend" type="button" title="Prepare Binance order send plan">Send</button>
           </div>
           <div class="calc-module-status" id="calcModuleStatus"></div>
+          <div class="calc-module-send-plan hidden" id="calcModuleSendPlan"></div>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -18057,8 +18063,12 @@ If there is NO open position, use this Section 2 instead:
     applyRowSourceAndMeta(row,opts);
     setOpenPositionRow(row,!!opts.openPosition);
     setRowLocked(row,!!opts.locked,{keepRemoveEnabled:!!opts.keepRemoveEnabled});
-    row.querySelectorAll("input").forEach(input => input.addEventListener("input",calculate,false));
+    row.querySelectorAll("input").forEach(input => input.addEventListener("input",() => {
+      clearSendPlan();
+      calculate();
+    },false));
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
+      clearSendPlan();
       clearBinanceMetaOnRow(row);
       row.remove();
       calculate();
@@ -18087,6 +18097,7 @@ If there is NO open position, use this Section 2 instead:
     });
   }
   function clearCalculatorLocal(){
+    clearSendPlan();
     clearMappedLimitRows("calcModuleEntryRows");
     clearMappedLimitRows("calcModuleExitRows");
     binanceLimitRowMetaByRowId.clear();
@@ -18135,7 +18146,13 @@ If there is NO open position, use this Section 2 instead:
     const qty = Math.abs(Number(row.positionAmt));
     const entry = Number(row.entryPrice);
     if(!(qty > 0) || !(entry > 0)) return null;
-    return {side:sideFromPosition(row),qty,entry,source:"positionRisk"};
+    return {
+      side:sideFromPosition(row),
+      qty,
+      entry,
+      source:"positionRisk",
+      positionSide:toUpper(row.positionSide || "") || null
+    };
   }
   function unwrapOrders(rows){
     if(Array.isArray(rows)) return rows;
@@ -18201,6 +18218,230 @@ If there is NO open position, use this Section 2 instead:
     lastOverlayDiagnostic = diag || null;
     window.__calculatorOverlayDiagnostic = lastOverlayDiagnostic;
   }
+  function publishSendDiagnostic(diag){
+    lastSendDiagnostic = diag || null;
+    window.__calculatorSendDiagnostic = lastSendDiagnostic;
+  }
+  function hEsc(value){
+    return String(value == null ? "" : value)
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#39;");
+  }
+  function approxEqual(a,b,eps){
+    const av = Number(a);
+    const bv = Number(b);
+    if(!Number.isFinite(av) || !Number.isFinite(bv)) return false;
+    return Math.abs(av - bv) <= (eps == null ? 1e-10 : eps);
+  }
+  function normalizeOrderId(v){
+    if(v == null) return "";
+    const s = String(v).trim();
+    return s;
+  }
+  function orderKeyFromMeta(meta){
+    if(!meta) return "";
+    const id = normalizeOrderId(meta.orderId);
+    if(id) return "id:" + id;
+    const cid = String(meta.clientOrderId || "").trim();
+    if(cid) return "cid:" + cid;
+    return "";
+  }
+  function orderKeyFromOrder(order){
+    if(!order) return "";
+    const id = normalizeOrderId(order.orderId);
+    if(id) return "id:" + id;
+    const cid = String(order.clientOrderId || "").trim();
+    if(cid) return "cid:" + cid;
+    return "";
+  }
+  function snapshotOrder(order){
+    if(!order || typeof order !== "object") return null;
+    return {
+      orderId:order.orderId != null ? String(order.orderId) : "",
+      clientOrderId:order.clientOrderId != null ? String(order.clientOrderId) : "",
+      symbol:String(order.symbol || ""),
+      side:toUpper(order.side),
+      positionSide:toUpper(order.positionSide || "BOTH"),
+      type:toUpper(order.type),
+      status:toUpper(order.status || order.orderStatus || ""),
+      price:num(order.price),
+      origQty:num(order.origQty),
+      executedQty:num(order.executedQty),
+      timeInForce:toUpper(order.timeInForce || ""),
+      reduceOnly:isReduceOnly(order),
+      updateTime:num(order.updateTime),
+      raw:safeCloneOrder(order)
+    };
+  }
+  function buildReadStateSnapshot(position,snapshot,mapped){
+    const sym = currentSymbol();
+    const dir = position && position.side ? position.side : direction;
+    const limitOrderMap = new Map();
+    const mappedRows = []
+      .concat(mapped && Array.isArray(mapped.entryRows) ? mapped.entryRows : [])
+      .concat(mapped && Array.isArray(mapped.exitRows) ? mapped.exitRows : []);
+    mappedRows.forEach(item => {
+      const meta = item && item.meta ? item.meta : null;
+      const raw = meta && meta.rawOrder ? meta.rawOrder : null;
+      const key = orderKeyFromMeta(meta);
+      if(!key || !raw) return;
+      limitOrderMap.set(key,snapshotOrder(raw));
+    });
+    return {
+      at:new Date().toISOString(),
+      symbol:sym,
+      direction:dir === "SHORT" ? "SHORT" : "LONG",
+      openPosition:position
+        ? {
+            side:position.side === "SHORT" ? "SHORT" : "LONG",
+            qty:num(position.qty),
+            entry:num(position.entry),
+            positionSide:toUpper(position.positionSide || "")
+          }
+        : null,
+      mappedLimitOrderMap:limitOrderMap,
+      ignoredAlgoCount:num(mapped && mapped.diagnostic && mapped.diagnostic.ignoredAlgoOrders) || 0
+    };
+  }
+  function collectLiveLimitOrdersByKey(snapshot){
+    const map = new Map();
+    const sym = toUpper(snapshot && snapshot.symbol);
+    const rows = (snapshot && snapshot.normalOrders || [])
+      .filter(o => o && toUpper(o.symbol) === sym)
+      .filter(isLiveOrder)
+      .filter(isLimitOrder);
+    rows.forEach(order => {
+      const key = orderKeyFromOrder(order);
+      if(!key) return;
+      map.set(key,snapshotOrder(order));
+    });
+    return map;
+  }
+  function inferDirectionForSend(livePosition){
+    if(livePosition && (livePosition.side === "LONG" || livePosition.side === "SHORT")) return livePosition.side;
+    if(lastReadStateSnapshot && (lastReadStateSnapshot.direction === "LONG" || lastReadStateSnapshot.direction === "SHORT")){
+      return lastReadStateSnapshot.direction;
+    }
+    return direction === "SHORT" ? "SHORT" : "LONG";
+  }
+  function inferPositionSideForNewOrder(contextDirection){
+    const dir = contextDirection === "SHORT" ? "SHORT" : "LONG";
+    const fromSnapshot = lastReadStateSnapshot && lastReadStateSnapshot.openPosition
+      ? toUpper(lastReadStateSnapshot.openPosition.positionSide || "")
+      : "";
+    if(fromSnapshot === "LONG" || fromSnapshot === "SHORT" || fromSnapshot === "BOTH") return fromSnapshot;
+    for(const row of rows("calcModuleEntryRows").concat(rows("calcModuleExitRows"))){
+      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
+      const ps = toUpper(meta && meta.positionSide || "");
+      if(ps === "LONG" || ps === "SHORT" || ps === "BOTH") return ps;
+    }
+    return dir;
+  }
+  function sideForNewRow(rowType,contextDirection){
+    const dir = contextDirection === "SHORT" ? "SHORT" : "LONG";
+    if(dir === "LONG") return rowType === "entry" ? "BUY" : "SELL";
+    return rowType === "entry" ? "SELL" : "BUY";
+  }
+  function currentOpenPositionRowSnapshot(){
+    const entryRows = rows("calcModuleEntryRows");
+    const row = entryRows.find(isOpenPositionRow);
+    if(!row) return null;
+    return {
+      side:direction === "SHORT" ? "SHORT" : "LONG",
+      qty:num(lotInput(row)?.value),
+      entry:num(levelInput(row)?.value)
+    };
+  }
+  function formatPlanValue(v,kind){
+    const n = num(v);
+    if(n == null) return "-";
+    if(kind === "qty") return Number(n.toFixed(3)).toFixed(3);
+    if(kind === "price") return String(Number(n.toFixed(8)));
+    return String(n);
+  }
+  function clearSendPlan(){
+    sendPlanState = null;
+    const box = q("calcModuleSendPlan");
+    if(box){
+      box.innerHTML = "";
+      box.classList.add("hidden");
+    }
+  }
+  function updateSendButtonState(state){
+    const btn = q("calcModuleSend");
+    if(!btn) return;
+    btn.disabled = !!state;
+    btn.textContent = state ? "Preparing..." : "Send";
+  }
+  function renderSendPlanTable(){
+    const box = q("calcModuleSendPlan");
+    if(!box) return;
+    if(!sendPlanState || !Array.isArray(sendPlanState.rows)){
+      box.innerHTML = "";
+      box.classList.add("hidden");
+      return;
+    }
+    const blockedCount = sendPlanState.rows.filter(r => r && r.action === "Blocked").length;
+    const writableCount = sendPlanState.rows.filter(r => r && !!r.writable).length;
+    const canConfirm = !!(sendPlanState.canConfirm && !sendPlanState.executing && writableCount > 0 && blockedCount === 0);
+    const summary = [
+      "Writable: " + writableCount,
+      "Blocked: " + blockedCount,
+      "Ignored: " + sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
+      "Skipped: " + sendPlanState.rows.filter(r => r && r.action === "Skip").length
+    ].join(" | ");
+    const rowsHtml = sendPlanState.rows.map((row,idx) => {
+      const cls = row.action === "Blocked" ? "is-blocked" : row.action === "Ignored" ? "is-ignored" : row.action === "Modify" || row.action === "New" ? "is-writable" : "";
+      return `<tr class="${cls}">
+        <td>${hEsc(row.action)}</td>
+        <td>${hEsc(row.type)}</td>
+        <td>${hEsc(row.side || "-")}</td>
+        <td>${hEsc(row.oldPrice || "-")}</td>
+        <td>${hEsc(row.newPrice || "-")}</td>
+        <td>${hEsc(row.oldQty || "-")}</td>
+        <td>${hEsc(row.newQty || "-")}</td>
+        <td>${hEsc(row.orderId || "-")}</td>
+        <td>${hEsc(row.status || "-")}</td>
+        <td>${hEsc(row.response || "-")}</td>
+      </tr>`;
+    }).join("");
+    const confirmControl = (canConfirm || sendPlanState.executing)
+      ? `<button id="calcModuleConfirmSend" type="button"${canConfirm ? "" : " disabled"}>${sendPlanState.executing ? "Sending..." : "Confirm Send"}</button>`
+      : "";
+    box.classList.remove("hidden");
+    box.innerHTML = `
+      <div class="calc-module-send-head">
+        <div class="calc-module-send-title">Send Plan #${sendPlanState.planId}</div>
+        ${confirmControl}
+      </div>
+      <div class="calc-module-send-summary">${hEsc(summary)}</div>
+      <div class="calc-module-send-wrap">
+        <table class="calc-module-send-table">
+          <thead>
+            <tr>
+              <th>Action</th>
+              <th>Type</th>
+              <th>Side</th>
+              <th>Old Price</th>
+              <th>New Price</th>
+              <th>Old Qty</th>
+              <th>New Qty</th>
+              <th>Order ID</th>
+              <th>Status</th>
+              <th>Binance Response</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml || `<tr><td colspan="10">No rows.</td></tr>`}</tbody>
+        </table>
+      </div>`;
+    const confirmBtn = q("calcModuleConfirmSend");
+    if(confirmBtn){
+      confirmBtn.onclick = () => confirmSendPlan(sendPlanState.planId);
+    }
+  }
   function usableOverlayRows(containerId){
     return rows(containerId).map((row,index) => ({
       index,
@@ -18262,7 +18503,10 @@ If there is NO open position, use this Section 2 instead:
     if(price == null) return;
     const input = levelInput(row);
     if(!input || input.disabled || input.readOnly) return;
-    input.value = String(Math.round(price));
+    const next = String(Math.round(price));
+    if(input.value === next) return;
+    input.value = next;
+    clearSendPlan();
     calculate();
   }
   function drawCalculatorLevelsOverlay(){
@@ -18520,6 +18764,585 @@ If there is NO open position, use this Section 2 instead:
     const snapshot = await readOpenOrdersSnapshot();
     return [].concat(snapshot.normalOrders || [], snapshot.algoOrders || []);
   }
+  function compareOpenPositionSnapshot(referencePos,livePos){
+    const ref = referencePos || null;
+    const live = livePos || null;
+    if(!ref && !live) return null;
+    if(!ref && live) return "Open position changed since last Read (was flat, now open).";
+    if(ref && !live) return "Open position changed since last Read (position is now flat).";
+    const refQty = num(ref && ref.qty);
+    const liveQty = num(live && live.qty);
+    if(refQty == null || liveQty == null || !approxEqual(refQty,liveQty,1e-9)){
+      return "Open position size changed since last Read.";
+    }
+    const refEntry = num(ref && ref.entry);
+    const liveEntry = num(live && live.entry);
+    if(refEntry == null || liveEntry == null || !approxEqual(refEntry,liveEntry,1e-8)){
+      return "Open position entry level changed since last Read.";
+    }
+    return null;
+  }
+  function buildExternalChangeReason(baseOrder,liveOrder){
+    if(!baseOrder) return "Missing baseline metadata from last Read.";
+    if(!liveOrder) return "Existing Binance LIMIT order disappeared from live open orders.";
+    if(!isLiveOrder(liveOrder.raw || liveOrder)) return "Existing Binance LIMIT order is no longer open.";
+    if(toUpper(liveOrder.type) !== "LIMIT") return "Existing Binance LIMIT order type changed externally.";
+    if(toUpper(baseOrder.side) !== toUpper(liveOrder.side)) return "Existing Binance LIMIT order side changed externally.";
+    if(toUpper(baseOrder.positionSide || "BOTH") !== toUpper(liveOrder.positionSide || "BOTH")) return "Existing Binance LIMIT order positionSide changed externally.";
+    if(!approxEqual(baseOrder.price,liveOrder.price,1e-8)) return "Existing Binance LIMIT order price changed externally.";
+    if(!approxEqual(baseOrder.origQty,liveOrder.origQty,1e-10)) return "Existing Binance LIMIT order quantity changed externally.";
+    return null;
+  }
+  function addPlanRow(plan,row){
+    plan.rows.push(row);
+    return row;
+  }
+  function prepareManualRowPlan(plan,row,rowType,contextDirection){
+    const level = num(levelInput(row)?.value);
+    const lot = num(lotInput(row)?.value);
+    const base = {
+      action:"New",
+      type:rowType === "entry" ? "Entry" : "Exit",
+      side:sideForNewRow(rowType,contextDirection),
+      oldPrice:"-",
+      newPrice:formatPlanValue(level,"price"),
+      oldQty:"-",
+      newQty:formatPlanValue(lot,"qty"),
+      orderId:"-",
+      status:"Planned",
+      response:"",
+      writable:true,
+      mode:"new",
+      rowRef:row,
+      payload:{
+        rowType,
+        level,
+        quantity:lot,
+        side:sideForNewRow(rowType,contextDirection)
+      }
+    };
+    if(level == null || level <= 0 || lot == null || lot <= 0){
+      base.action = "Blocked";
+      base.status = "Blocked";
+      base.response = "Any writable row has invalid price or quantity.";
+      base.writable = false;
+      base.mode = "blocked";
+      plan.blocked = true;
+    }
+    addPlanRow(plan,base);
+  }
+  function prepareExistingRowPlan(plan,row,rowType,meta,baseOrder,liveOrder){
+    const level = num(levelInput(row)?.value);
+    const lot = num(lotInput(row)?.value);
+    const key = orderKeyFromMeta(meta);
+    const oldPrice = num(baseOrder && baseOrder.price);
+    const oldQty = num(baseOrder && baseOrder.origQty);
+    const side = toUpper((baseOrder && baseOrder.side) || (meta && meta.side) || "");
+    const rowPlan = {
+      action:"Skip",
+      type:rowType === "entry" ? "Entry" : "Exit",
+      side:side || "-",
+      oldPrice:formatPlanValue(oldPrice,"price"),
+      newPrice:formatPlanValue(level,"price"),
+      oldQty:formatPlanValue(oldQty,"qty"),
+      newQty:formatPlanValue(lot,"qty"),
+      orderId:(meta && meta.orderId != null) ? String(meta.orderId) : (meta && meta.clientOrderId ? String(meta.clientOrderId) : "-"),
+      status:"Skipped",
+      response:"",
+      writable:false,
+      mode:"skip",
+      rowRef:row,
+      orderKey:key
+    };
+    const externalChange = buildExternalChangeReason(baseOrder,liveOrder);
+    if(externalChange){
+      rowPlan.action = "Blocked";
+      rowPlan.status = "Blocked";
+      rowPlan.response = externalChange;
+      rowPlan.mode = "blocked";
+      rowPlan.writable = false;
+      plan.blocked = true;
+      addPlanRow(plan,rowPlan);
+      return;
+    }
+    if(level == null || level <= 0 || lot == null || lot <= 0){
+      rowPlan.action = "Blocked";
+      rowPlan.status = "Blocked";
+      rowPlan.response = "Any writable row has invalid price or quantity.";
+      rowPlan.mode = "blocked";
+      rowPlan.writable = false;
+      plan.blocked = true;
+      addPlanRow(plan,rowPlan);
+      return;
+    }
+    const changed = !approxEqual(level,oldPrice,1e-8) || !approxEqual(lot,oldQty,1e-10);
+    if(changed){
+      rowPlan.action = "Modify";
+      rowPlan.status = "Planned";
+      rowPlan.writable = true;
+      rowPlan.mode = "modify";
+      rowPlan.payload = {
+        symbol:(meta && meta.symbol) || (baseOrder && baseOrder.symbol) || currentSymbol(),
+        orderId:meta && meta.orderId != null ? meta.orderId : null,
+        origClientOrderId:meta && meta.clientOrderId ? meta.clientOrderId : null,
+        side:(meta && meta.side) || (baseOrder && baseOrder.side) || side,
+        positionSide:(meta && meta.positionSide) || (baseOrder && baseOrder.positionSide) || "",
+        timeInForce:(meta && meta.timeInForce) || (baseOrder && baseOrder.timeInForce) || "GTC",
+        reduceOnly:meta && meta.reduceOnly != null ? meta.reduceOnly : (baseOrder && baseOrder.reduceOnly),
+        price:level,
+        quantity:lot,
+        meta
+      };
+    }
+    addPlanRow(plan,rowPlan);
+  }
+  function buildIgnoredRemovedRows(plan,presentKeys){
+    const baselineMap = lastReadStateSnapshot && lastReadStateSnapshot.mappedLimitOrderMap;
+    if(!(baselineMap instanceof Map)) return;
+    baselineMap.forEach((baseOrder,key) => {
+      if(presentKeys.has(key)) return;
+      addPlanRow(plan,{
+        action:"Ignored",
+        type:"LIMIT",
+        side:toUpper(baseOrder && baseOrder.side) || "-",
+        oldPrice:formatPlanValue(baseOrder && baseOrder.price,"price"),
+        newPrice:"-",
+        oldQty:formatPlanValue(baseOrder && baseOrder.origQty,"qty"),
+        newQty:"-",
+        orderId:baseOrder && baseOrder.orderId ? String(baseOrder.orderId) : (baseOrder && baseOrder.clientOrderId ? String(baseOrder.clientOrderId) : "-"),
+        status:"Ignored",
+        response:"Removed locally only. Cancellation is not part of this stage.",
+        writable:false,
+        mode:"ignored"
+      });
+    });
+  }
+  function buildPlanFromCurrentRows(livePos,liveSnapshot){
+    const plan = {
+      planId:++sendPlanSeq,
+      at:new Date().toISOString(),
+      symbol:currentSymbol(),
+      rows:[],
+      blocked:false,
+      canConfirm:false,
+      executing:false,
+      liveSnapshot:null
+    };
+    const contextDirection = inferDirectionForSend(livePos);
+    const liveLimitMap = collectLiveLimitOrdersByKey(liveSnapshot);
+    const baseMap = lastReadStateSnapshot && lastReadStateSnapshot.mappedLimitOrderMap instanceof Map
+      ? lastReadStateSnapshot.mappedLimitOrderMap
+      : new Map();
+    const entryRows = rows("calcModuleEntryRows");
+    const exitRows = rows("calcModuleExitRows");
+    const presentBinanceKeys = new Set();
+
+    entryRows.forEach(row => {
+      if(isRowEmpty(row)) return;
+      if(isOpenPositionRow(row)){
+        addPlanRow(plan,{
+          action:"Ignored",
+          type:"Open Position",
+          side:contextDirection === "SHORT" ? "SELL" : "BUY",
+          oldPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+          newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+          oldQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+          newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+          orderId:"-",
+          status:"Ignored",
+          response:"Open Position row is calculator-local and never written.",
+          writable:false,
+          mode:"ignored",
+          rowRef:row
+        });
+        return;
+      }
+      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
+      if(meta && row.dataset && row.dataset.source === "binance-limit"){
+        const key = orderKeyFromMeta(meta);
+        if(!key){
+          addPlanRow(plan,{
+            action:"Blocked",
+            type:"Entry",
+            side:"-",
+            oldPrice:"-",
+            newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+            oldQty:"-",
+            newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+            orderId:"-",
+            status:"Blocked",
+            response:"Calculator row is missing required metadata for modifying an existing Binance order.",
+            writable:false,
+            mode:"blocked",
+            rowRef:row
+          });
+          plan.blocked = true;
+          return;
+        }
+        presentBinanceKeys.add(key);
+        prepareExistingRowPlan(plan,row,"entry",meta,baseMap.get(key),liveLimitMap.get(key));
+        return;
+      }
+      prepareManualRowPlan(plan,row,"entry",contextDirection);
+    });
+
+    exitRows.forEach(row => {
+      if(isRowEmpty(row)) return;
+      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
+      if(meta && row.dataset && row.dataset.source === "binance-limit"){
+        const key = orderKeyFromMeta(meta);
+        if(!key){
+          addPlanRow(plan,{
+            action:"Blocked",
+            type:"Exit",
+            side:"-",
+            oldPrice:"-",
+            newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+            oldQty:"-",
+            newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+            orderId:"-",
+            status:"Blocked",
+            response:"Calculator row is missing required metadata for modifying an existing Binance order.",
+            writable:false,
+            mode:"blocked",
+            rowRef:row
+          });
+          plan.blocked = true;
+          return;
+        }
+        presentBinanceKeys.add(key);
+        prepareExistingRowPlan(plan,row,"exit",meta,baseMap.get(key),liveLimitMap.get(key));
+        return;
+      }
+      prepareManualRowPlan(plan,row,"exit",contextDirection);
+    });
+
+    buildIgnoredRemovedRows(plan,presentBinanceKeys);
+
+    const algoRows = (liveSnapshot && liveSnapshot.algoOrders || [])
+      .filter(o => o && toUpper(o.symbol) === toUpper(plan.symbol))
+      .filter(isLiveOrder);
+    if(algoRows.length){
+      addPlanRow(plan,{
+        action:"Ignored",
+        type:"Algo/SL",
+        side:"-",
+        oldPrice:"-",
+        newPrice:"-",
+        oldQty:"-",
+        newQty:"-",
+        orderId:"-",
+        status:"Ignored",
+        response:"Ignored " + algoRows.length + " open algo/SL order(s).",
+        writable:false,
+        mode:"ignored"
+      });
+    }
+
+    if(!lastReadStateSnapshot){
+      plan.blocked = true;
+      addPlanRow(plan,{
+        action:"Blocked",
+        type:"Preflight",
+        side:"-",
+        oldPrice:"-",
+        newPrice:"-",
+        oldQty:"-",
+        newQty:"-",
+        orderId:"-",
+        status:"Blocked",
+        response:"Calculator Read snapshot is missing. Click Read first.",
+        writable:false,
+        mode:"blocked"
+      });
+    }
+
+    const positionMismatch = compareOpenPositionSnapshot(
+      lastReadStateSnapshot ? lastReadStateSnapshot.openPosition : currentOpenPositionRowSnapshot(),
+      livePos
+    );
+    if(positionMismatch){
+      plan.blocked = true;
+      addPlanRow(plan,{
+        action:"Blocked",
+        type:"Open Position",
+        side:"-",
+        oldPrice:"-",
+        newPrice:"-",
+        oldQty:"-",
+        newQty:"-",
+        orderId:"-",
+        status:"Blocked",
+        response:positionMismatch,
+        writable:false,
+        mode:"blocked"
+      });
+    }
+
+    if(liveSnapshot && (liveSnapshot.normalFetchError || liveSnapshot.algoFetchError)){
+      plan.blocked = true;
+      addPlanRow(plan,{
+        action:"Blocked",
+        type:"Preflight",
+        side:"-",
+        oldPrice:"-",
+        newPrice:"-",
+        oldQty:"-",
+        newQty:"-",
+        orderId:"-",
+        status:"Blocked",
+        response:"Preflight live open-orders read failed.",
+        writable:false,
+        mode:"blocked"
+      });
+    }
+
+    plan.canConfirm = !plan.blocked && plan.rows.some(r => r && !!r.writable);
+    plan.liveSnapshot = liveSnapshot;
+    return plan;
+  }
+  async function signedOrderWrite(method,params){
+    if(typeof hasKeys !== "function" || !hasKeys()) throw new Error("API keys are required.");
+    const key = apiKeyEl.value.trim();
+    const sec = apiSecretEl.value.trim();
+    const off = typeof timeOffset === "function" ? await timeOffset() : 0;
+    const q = new URLSearchParams({
+      ...params,
+      recvWindow:"5000",
+      timestamp:String(Date.now() + off)
+    }).toString();
+    const sig = await hmac(sec,q);
+    const res = await API.fetch(ORDER_WRITE_URL + "?" + q + "&signature=" + sig,{
+      method:method,
+      cache:"no-store",
+      headers:{"X-MBX-APIKEY":key}
+    });
+    const data = await res.json().catch(() => null);
+    if(!res.ok){
+      const err = new Error(data && data.msg ? data.msg : ("HTTP " + res.status));
+      err.code = data && data.code != null ? data.code : null;
+      err.data = data;
+      throw err;
+    }
+    return data || {};
+  }
+  function applyWriteSuccessToRow(row,response,fallback){
+    if(!row) return;
+    const base = fallback && typeof fallback === "object" ? fallback : {};
+    const merged = Object.assign({},base,response || {});
+    if(response && response.orderId != null) merged.orderId = response.orderId;
+    if(response && response.clientOrderId != null) merged.clientOrderId = response.clientOrderId;
+    if(response && response.origQty != null) merged.origQty = response.origQty;
+    if(response && response.price != null) merged.price = response.price;
+    if(!merged.symbol) merged.symbol = currentSymbol();
+    if(!merged.type) merged.type = "LIMIT";
+    const meta = buildLimitOrderMeta(merged);
+    applyRowSourceAndMeta(row,{
+      source:"binance-limit",
+      meta,
+      rowId:row.dataset && row.dataset.calcRowId ? row.dataset.calcRowId : null
+    });
+  }
+  function binanceResponseText(resp){
+    if(!resp) return "";
+    if(resp.code != null && resp.msg) return String(resp.code) + " " + String(resp.msg);
+    if(resp.msg) return String(resp.msg);
+    if(resp.orderId != null) return "orderId=" + String(resp.orderId);
+    try{ return JSON.stringify(resp); }catch(_e){ return String(resp); }
+  }
+  async function runPlanWriteRow(rowPlan,contextDirection){
+    if(!rowPlan || !rowPlan.writable) return {ok:true,skip:true};
+    if(rowPlan.mode === "modify"){
+      const p = rowPlan.payload || {};
+      const send = {
+        symbol:String(p.symbol || currentSymbol()),
+        side:String(p.side || rowPlan.side || ""),
+        type:"LIMIT",
+        quantity:String(Number(p.quantity)),
+        price:String(Number(p.price)),
+        timeInForce:String(p.timeInForce || "GTC")
+      };
+      if(p.orderId != null && String(p.orderId).trim() !== "") send.orderId = String(p.orderId);
+      else if(p.origClientOrderId) send.origClientOrderId = String(p.origClientOrderId);
+      else throw new Error("Missing orderId/origClientOrderId for modify.");
+      const ps = toUpper(p.positionSide || "");
+      if(ps) send.positionSide = ps;
+      if(p.reduceOnly === true || String(p.reduceOnly).toLowerCase() === "true") send.reduceOnly = "true";
+      const resp = await signedOrderWrite("PUT",send);
+      applyWriteSuccessToRow(rowPlan.rowRef,resp,p.meta && p.meta.rawOrder ? p.meta.rawOrder : p.meta);
+      return {ok:true,response:resp};
+    }
+    if(rowPlan.mode === "new"){
+      const p = rowPlan.payload || {};
+      const ps = inferPositionSideForNewOrder(contextDirection);
+      const send = {
+        symbol:String(currentSymbol()),
+        side:String(p.side || rowPlan.side || sideForNewRow(p.rowType || "entry",contextDirection)),
+        type:"LIMIT",
+        quantity:String(Number(p.quantity)),
+        price:String(Number(p.level)),
+        timeInForce:"GTC"
+      };
+      if(ps && ps !== "BOTH") send.positionSide = ps;
+      const resp = await signedOrderWrite("POST",send);
+      applyWriteSuccessToRow(rowPlan.rowRef,resp,{
+        symbol:currentSymbol(),
+        side:send.side,
+        positionSide:send.positionSide || "BOTH",
+        type:"LIMIT",
+        price:send.price,
+        origQty:send.quantity,
+        timeInForce:send.timeInForce
+      });
+      return {ok:true,response:resp};
+    }
+    return {ok:true,skip:true};
+  }
+  async function prepareSendPlan(){
+    clearSendPlan();
+    if(typeof hasKeys !== "function" || !hasKeys()){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Preflight",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"API keys are required before Send preflight.",
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false
+      };
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"preflight",
+        blocked:true,
+        writable:0
+      });
+      renderSendPlanTable();
+      setStatus("Send blocked. API keys required.");
+      return;
+    }
+    updateSendButtonState(true);
+    setStatus("Send preflight: reading live Binance state...");
+    try{
+      const livePos = await signedPosition();
+      const liveSnapshot = await readOpenOrdersSnapshot();
+      sendPlanState = buildPlanFromCurrentRows(livePos,liveSnapshot);
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"preflight",
+        blocked:!sendPlanState.canConfirm,
+        writable:sendPlanState.rows.filter(r => r && r.writable).length,
+        blockedRows:sendPlanState.rows.filter(r => r && r.action === "Blocked").length,
+        ignoredRows:sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
+        skippedRows:sendPlanState.rows.filter(r => r && r.action === "Skip").length
+      });
+      renderSendPlanTable();
+      if(sendPlanState.canConfirm) setStatus("Preflight ready. Review table and click Confirm Send.");
+      else setStatus("Preflight completed with blocked/ignored rows.");
+    }catch(e){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Preflight",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"Preflight failed: " + (e && e.message ? e.message : String(e)),
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false
+      };
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"preflight",
+        blocked:true,
+        error:e && e.message ? e.message : String(e),
+        writable:0
+      });
+      renderSendPlanTable();
+      setStatus("Send preflight failed.");
+    }finally{
+      updateSendButtonState(false);
+    }
+  }
+  async function confirmSendPlan(planId){
+    if(!sendPlanState || sendPlanState.planId !== planId || sendPlanState.executing) return;
+    if(!sendPlanState.canConfirm){
+      setStatus("Confirm Send blocked. Run Send preflight again.");
+      renderSendPlanTable();
+      return;
+    }
+    const contextDirection = inferDirectionForSend(lastReadStateSnapshot && lastReadStateSnapshot.openPosition);
+    sendPlanState.executing = true;
+    renderSendPlanTable();
+    setStatus("Confirm Send in progress...");
+    const writable = sendPlanState.rows.filter(r => r && r.writable);
+    for(const rowPlan of sendPlanState.rows){
+      if(!rowPlan) continue;
+      if(!rowPlan.writable){
+        if(rowPlan.action === "Skip") rowPlan.status = "Skipped";
+        else if(rowPlan.action === "Ignored") rowPlan.status = "Ignored";
+        else if(rowPlan.action === "Blocked") rowPlan.status = "Blocked";
+        renderSendPlanTable();
+        continue;
+      }
+      rowPlan.status = "Pending";
+      rowPlan.response = "";
+      renderSendPlanTable();
+      try{
+        const out = await runPlanWriteRow(rowPlan,contextDirection);
+        if(out && out.skip){
+          rowPlan.status = "Skipped";
+        }else{
+          rowPlan.status = "Confirmed";
+          rowPlan.response = binanceResponseText(out && out.response);
+        }
+      }catch(e){
+        rowPlan.status = "Failed";
+        const code = e && e.code != null ? String(e.code) + " " : "";
+        rowPlan.response = code + (e && e.message ? e.message : String(e));
+      }
+      renderSendPlanTable();
+    }
+    sendPlanState.executing = false;
+    sendPlanState.canConfirm = false;
+    try{
+      await readBinance({preserveSendPlan:true});
+    }catch(_e){}
+    renderSendPlanTable();
+    const failed = writable.filter(r => r && r.status === "Failed").length;
+    publishSendDiagnostic({
+      at:new Date().toISOString(),
+      phase:"confirm",
+      failed,
+      totalWritable:writable.length,
+      confirmed:writable.filter(r => r && r.status === "Confirmed").length,
+      skipped:writable.filter(r => r && r.status === "Skipped").length
+    });
+    setStatus(failed ? ("Confirm Send completed with " + failed + " failed row(s).") : "Confirm Send completed.");
+  }
   function orderStopPrice(order){
     for(const key of ["stopPrice","triggerPrice","activatePrice","price"]){
       const n = num(order && order[key]);
@@ -18560,7 +19383,10 @@ If there is NO open position, use this Section 2 instead:
     pool.sort((a,b) => pos.side === "LONG" ? b.price - a.price : a.price - b.price);
     return pool[0].price;
   }
-  async function readBinance(){
+  async function readBinance(options){
+    const opts = options || {};
+    if(!opts.preserveSendPlan) clearSendPlan();
+    lastReadStateSnapshot = null;
     setStatus("Reading current open position...");
     const diag = {
       at:new Date().toISOString(),
@@ -18596,6 +19422,7 @@ If there is NO open position, use this Section 2 instead:
       binanceLimitRowMetaByRowId.clear();
 
       let snapshot = null;
+      let mapped = null;
       try{
         snapshot = await readOpenOrdersSnapshot();
         const normalErr = !!snapshot.normalFetchError;
@@ -18606,7 +19433,7 @@ If there is NO open position, use this Section 2 instead:
       }
 
       if(snapshot){
-        const mapped = mapLimitOrdersForCalculator(snapshot,pos ? pos.side : direction);
+        mapped = mapLimitOrdersForCalculator(snapshot,pos ? pos.side : direction);
         diag.normalLimitOrdersFound = mapped.diagnostic.normalLimitOrdersFound;
         diag.mappedEntries = mapped.diagnostic.mappedEntries;
         diag.mappedExits = mapped.diagnostic.mappedExits;
@@ -18626,6 +19453,11 @@ If there is NO open position, use this Section 2 instead:
         lastStopEdit = "level";
         syncStopFromLevel(pos.entry);
       }
+      if(snapshot){
+        lastReadStateSnapshot = buildReadStateSnapshot(pos,snapshot,mapped || {entryRows:[],exitRows:[],diagnostic:{}});
+      }else{
+        lastReadStateSnapshot = buildReadStateSnapshot(pos,{symbol:currentSymbol(),normalOrders:[],algoOrders:[]},{entryRows:[],exitRows:[],diagnostic:{}});
+      }
       calculate();
       if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
@@ -18638,6 +19470,7 @@ If there is NO open position, use this Section 2 instead:
     }catch(e){
       console.warn(MODULE + " Binance read failed",e);
       setStatus("Read failed.");
+      lastReadStateSnapshot = null;
       diag.openOrdersReadStatus = "error";
       publishReadDiagnostic(diag);
     }
@@ -18797,13 +19630,20 @@ If there is NO open position, use this Section 2 instead:
     },false);
     q("calcModuleClose").addEventListener("click",hideCalculator,false);
     q("calcModuleDir").addEventListener("click",() => {
+      clearSendPlan();
       setDirection(direction === "LONG" ? "SHORT" : "LONG");
       lastStopEdit = "distance";
       syncStopFromDistance(readEntry().avg);
       calculate();
     },false);
-    q("calcModuleAddEntry").addEventListener("click",() => addRow("calcModuleEntryRows"),false);
-    q("calcModuleAddExit").addEventListener("click",() => addRow("calcModuleExitRows"),false);
+    q("calcModuleAddEntry").addEventListener("click",() => {
+      clearSendPlan();
+      addRow("calcModuleEntryRows");
+    },false);
+    q("calcModuleAddExit").addEventListener("click",() => {
+      clearSendPlan();
+      addRow("calcModuleExitRows");
+    },false);
     q("calcModuleStopLevel").addEventListener("input",() => {
       lastStopEdit = "level";
       syncStopFromLevel(readEntry().avg);
@@ -18826,6 +19666,7 @@ If there is NO open position, use this Section 2 instead:
     },false);
     q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
     q("calcModuleRead").addEventListener("click",readBinance,false);
+    q("calcModuleSend").addEventListener("click",prepareSendPlan,false);
     q("calcModuleLevelsToggle").addEventListener("change",e => {
       saveLevelsVisible(!!(e.target && e.target.checked));
     },false);
@@ -18852,6 +19693,7 @@ If there is NO open position, use this Section 2 instead:
       getBinanceLimitRowMetaMap(){ return new Map(binanceLimitRowMetaByRowId); },
       getLastReadDiagnostic(){ return lastReadDiagnostic; },
       getLastOverlayDiagnostic(){ return lastOverlayDiagnostic; },
+      getLastSendDiagnostic(){ return lastSendDiagnostic; },
       setLevelsVisible(next){ saveLevelsVisible(!!next); },
       getLevelsVisible(){ return !!levelsVisible; }
     };
