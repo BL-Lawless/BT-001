@@ -1513,7 +1513,8 @@ button:hover{filter:brightness(1.04)}
   position:fixed;
   left:36px;
   top:58px;
-  width:560px;
+  width:395px;
+  height:600px;
   min-width:395px;
   min-height:320px;
   max-width:calc(100vw - 12px);
@@ -1636,7 +1637,7 @@ button:hover{filter:brightness(1.04)}
   font-size:12px;
 }
 .calc-module-row .calc-module-lot.calc-module-lot-binance-limit{
-  background:rgba(240,185,11,.20);
+  background:#f9dc0543;
 }
 .calc-module-row.calc-module-row-locked{
   opacity:.94;
