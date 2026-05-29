@@ -16920,34 +16920,112 @@ If there is NO open position, use this Section 2 instead:
   function drawPriceLevels(){
     if(!ctx || !canvas || !Array.isArray(candles) || candles.length < 2) return;
     const levels = parseLevels();
-    if(!levels.length || !(lastYMax > lastYMin)) return;
+    if(!levels.length) return;
     const w = canvas.clientWidth;
-    const left = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
-    const right = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
-    const top = 18;
-    const priceH = lastAreaH || Math.floor((canvas.clientHeight - top - 30) * .78);
-    const chartW = w - left - right;
-    const mapY = price => top + ((lastYMax - price) / (lastYMax - lastYMin)) * priceH;
+    const state = currentPriceLineState || null;
+    const rightAxisW = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
+    const fallbackLeft = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
+    const left = Number.isFinite(Number(state && state.left)) ? Number(state.left) : fallbackLeft;
+    const chartRight = Number.isFinite(Number(state && state.chartRight))
+      ? Number(state.chartRight)
+      : (w - rightAxisW);
+    const top = Number.isFinite(Number(state && state.top)) ? Number(state.top) : 18;
+    const priceH = Number.isFinite(Number(state && state.priceH))
+      ? Number(state.priceH)
+      : (lastAreaH || Math.floor((canvas.clientHeight - top - 30) * .78));
+    const minP = Number.isFinite(Number(state && state.minP)) ? Number(state.minP) : lastYMin;
+    const maxP = Number.isFinite(Number(state && state.maxP)) ? Number(state.maxP) : lastYMax;
+    if(!(maxP > minP) || !(priceH > 0) || !(chartRight > left)) return;
+    const chartW = chartRight - left;
+    const mapY = price => top + ((maxP - price) / (maxP - minP)) * priceH;
+    const axisLeft = chartRight + 2;
+    const axisRight = w - 2;
+    const axisW = Math.max(22,axisRight - axisLeft);
+    const priceYRef = Number.isFinite(Number(state && state.priceY)) ? Number(state.priceY) : null;
+    const crossYRef = (typeof mouse === "object" && mouse && Number.isFinite(Number(mouse.y))) ? Number(mouse.y) : null;
+    const labelColor = rgba(color(),Math.max(40,alpha()));
+    const textColor = rgba(color(),Math.min(100,alpha() + 15));
+    const visible = [];
+    for(const level of levels){
+      const y = mapY(level);
+      if(y < top || y > top + priceH) continue;
+      visible.push({level,y});
+    }
+    if(!visible.length) return;
+
     ctx.save();
     ctx.beginPath();
     ctx.rect(left,top,chartW,priceH);
     ctx.clip();
-    ctx.strokeStyle = rgba(color(),alpha());
+    ctx.strokeStyle = labelColor;
     ctx.lineWidth = width();
     ctx.setLineDash([]);
-    ctx.font = "bold 11px Arial";
-    ctx.textAlign = "right";
-    ctx.textBaseline = "middle";
-    for(const level of levels){
-      const y = mapY(level);
-      if(y < top || y > top + priceH) continue;
+    for(const item of visible){
+      const level = item.level;
+      const y = item.y;
       const yy = typeof px === "function" ? px(y) : y;
       ctx.beginPath();
       ctx.moveTo(typeof px === "function" ? px(left) : left,yy);
-      ctx.lineTo(typeof px === "function" ? px(left + chartW) : left + chartW,yy);
+      ctx.lineTo(typeof px === "function" ? px(chartRight) : chartRight,yy);
       ctx.stroke();
-      ctx.fillStyle = rgba(color(),Math.min(100,alpha() + 10));
-      ctx.fillText(Math.round(level).toLocaleString("en-US"),left + chartW - 6,y - 7);
+    }
+    ctx.restore();
+
+    const placed = [];
+    const labelH = 14;
+    const labelGap = 2;
+    const sorted = visible.slice().sort((a,b) => a.y - b.y);
+    for(const item of sorted){
+      let cy = clamp(item.y,top + labelH / 2,top + priceH - labelH / 2);
+      if(priceYRef != null && Math.abs(cy - priceYRef) < 18){
+        cy += (cy <= priceYRef ? -1 : 1) * 18;
+      }
+      if(crossYRef != null && Math.abs(cy - crossYRef) < 14){
+        cy += (cy <= crossYRef ? -1 : 1) * 14;
+      }
+      if(placed.length){
+        const prev = placed[placed.length - 1];
+        const minCy = prev.cy + labelH + labelGap;
+        if(cy < minCy) cy = minCy;
+      }
+      placed.push({item,cy});
+    }
+    for(let i=placed.length - 1;i>=0;i--){
+      const lim = top + priceH - labelH / 2 - (placed.length - 1 - i) * (labelH + labelGap);
+      placed[i].cy = Math.min(placed[i].cy,lim);
+      if(i > 0){
+        const prev = placed[i - 1];
+        if(prev.cy > placed[i].cy - (labelH + labelGap)) prev.cy = placed[i].cy - (labelH + labelGap);
+      }
+    }
+
+    ctx.save();
+    ctx.font = "bold 11px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for(const p of placed){
+      const level = p.item.level;
+      const y = p.item.y;
+      const text = Number(level).toLocaleString("en-US",{maximumFractionDigits:8});
+      const textW = ctx.measureText(text).width;
+      const boxW = Math.max(34,Math.min(axisW - 2,textW + 10));
+      const x = axisLeft + Math.max(0,(axisW - boxW) / 2);
+      const yTop = clamp(p.cy - labelH / 2,top,top + priceH - labelH);
+      ctx.strokeStyle = labelColor;
+      ctx.fillStyle = "rgba(255,255,255,.93)";
+      ctx.lineWidth = 1;
+      ctx.fillRect(x,yTop,boxW,labelH);
+      ctx.strokeRect(x,yTop,boxW,labelH);
+      ctx.fillStyle = textColor;
+      ctx.fillText(text,x + boxW / 2,yTop + labelH / 2 + 0.5);
+      ctx.strokeStyle = labelColor;
+      ctx.lineWidth = typeof hairline === "function" ? hairline() : 1;
+      ctx.setLineDash([3,2]);
+      ctx.beginPath();
+      ctx.moveTo(typeof px === "function" ? px(chartRight) : chartRight,typeof px === "function" ? px(y) : y);
+      ctx.lineTo(typeof px === "function" ? px(x) : x,typeof px === "function" ? px(y) : y);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
     ctx.restore();
   }
@@ -17671,6 +17749,7 @@ If there is NO open position, use this Section 2 instead:
   let overlayLevelBoxes = [];
   let overlayDrag = {active:false,row:null};
   let suppressNextOverlayClick = false;
+  let sendPopupDrag = null;
   let lastReadStateSnapshot = null;
   let sendPlanState = null;
   let sendPlanSeq = 0;
@@ -17839,7 +17918,6 @@ If there is NO open position, use this Section 2 instead:
             <button id="calcModuleSend" type="button" title="Prepare Binance order send plan">Send</button>
           </div>
           <div class="calc-module-status" id="calcModuleStatus"></div>
-          <div class="calc-module-send-plan hidden" id="calcModuleSendPlan"></div>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -18064,11 +18142,11 @@ If there is NO open position, use this Section 2 instead:
     setOpenPositionRow(row,!!opts.openPosition);
     setRowLocked(row,!!opts.locked,{keepRemoveEnabled:!!opts.keepRemoveEnabled});
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",() => {
-      clearSendPlan();
+      markSendPlanStale("Row edited after preflight.");
       calculate();
     },false));
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
-      clearSendPlan();
+      markSendPlanStale("Row removed after preflight.");
       clearBinanceMetaOnRow(row);
       row.remove();
       calculate();
@@ -18097,7 +18175,7 @@ If there is NO open position, use this Section 2 instead:
     });
   }
   function clearCalculatorLocal(){
-    clearSendPlan();
+    markSendPlanStale("Calculator cleared after preflight.");
     clearMappedLimitRows("calcModuleEntryRows");
     clearMappedLimitRows("calcModuleExitRows");
     binanceLimitRowMetaByRowId.clear();
@@ -18362,62 +18440,18 @@ If there is NO open position, use this Section 2 instead:
     if(kind === "price") return String(Number(n.toFixed(8)));
     return String(n);
   }
-  function clearSendPlan(){
-    sendPlanState = null;
-    const box = q("calcModuleSendPlan");
-    if(box){
-      box.innerHTML = "";
-      box.classList.add("hidden");
-    }
-  }
-  function updateSendButtonState(state){
-    const btn = q("calcModuleSend");
-    if(!btn) return;
-    btn.disabled = !!state;
-    btn.textContent = state ? "Preparing..." : "Send";
-  }
-  function renderSendPlanTable(){
-    const box = q("calcModuleSendPlan");
-    if(!box) return;
-    if(!sendPlanState || !Array.isArray(sendPlanState.rows)){
-      box.innerHTML = "";
-      box.classList.add("hidden");
-      return;
-    }
-    const blockedCount = sendPlanState.rows.filter(r => r && r.action === "Blocked").length;
-    const writableCount = sendPlanState.rows.filter(r => r && !!r.writable).length;
-    const canConfirm = !!(sendPlanState.canConfirm && !sendPlanState.executing && writableCount > 0 && blockedCount === 0);
-    const summary = [
-      "Writable: " + writableCount,
-      "Blocked: " + blockedCount,
-      "Ignored: " + sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
-      "Skipped: " + sendPlanState.rows.filter(r => r && r.action === "Skip").length
-    ].join(" | ");
-    const rowsHtml = sendPlanState.rows.map((row,idx) => {
-      const cls = row.action === "Blocked" ? "is-blocked" : row.action === "Ignored" ? "is-ignored" : row.action === "Modify" || row.action === "New" ? "is-writable" : "";
-      return `<tr class="${cls}">
-        <td>${hEsc(row.action)}</td>
-        <td>${hEsc(row.type)}</td>
-        <td>${hEsc(row.side || "-")}</td>
-        <td>${hEsc(row.oldPrice || "-")}</td>
-        <td>${hEsc(row.newPrice || "-")}</td>
-        <td>${hEsc(row.oldQty || "-")}</td>
-        <td>${hEsc(row.newQty || "-")}</td>
-        <td>${hEsc(row.orderId || "-")}</td>
-        <td>${hEsc(row.status || "-")}</td>
-        <td>${hEsc(row.response || "-")}</td>
-      </tr>`;
-    }).join("");
-    const confirmControl = (canConfirm || sendPlanState.executing)
-      ? `<button id="calcModuleConfirmSend" type="button"${canConfirm ? "" : " disabled"}>${sendPlanState.executing ? "Sending..." : "Confirm Send"}</button>`
-      : "";
-    box.classList.remove("hidden");
-    box.innerHTML = `
-      <div class="calc-module-send-head">
-        <div class="calc-module-send-title">Send Plan #${sendPlanState.planId}</div>
-        ${confirmControl}
+  function ensureSendPopup(){
+    let popup = q("calcModuleSendPopup");
+    if(popup) return popup;
+    popup = document.createElement("div");
+    popup.id = "calcModuleSendPopup";
+    popup.className = "calc-module-send-popup hidden";
+    popup.innerHTML = `
+      <div class="calc-module-send-popup-head" id="calcModuleSendPopupHead">
+        <div class="calc-module-send-popup-title" id="calcModuleSendPopupTitle">Send Plan</div>
+        <button id="calcModuleSendPopupClose" type="button" title="Close">x</button>
       </div>
-      <div class="calc-module-send-summary">${hEsc(summary)}</div>
+      <div class="calc-module-send-summary" id="calcModuleSendSummary"></div>
       <div class="calc-module-send-wrap">
         <table class="calc-module-send-table">
           <thead>
@@ -18434,11 +18468,136 @@ If there is NO open position, use this Section 2 instead:
               <th>Binance Response</th>
             </tr>
           </thead>
-          <tbody>${rowsHtml || `<tr><td colspan="10">No rows.</td></tr>`}</tbody>
+          <tbody id="calcModuleSendBody"></tbody>
         </table>
+      </div>
+      <div class="calc-module-send-popup-actions">
+        <button id="calcModuleConfirmSend" type="button">Confirm Send</button>
       </div>`;
+    document.body.appendChild(popup);
+    const closeBtn = q("calcModuleSendPopupClose");
+    if(closeBtn){
+      closeBtn.addEventListener("click",() => popup.classList.add("hidden"),false);
+    }
+    const head = q("calcModuleSendPopupHead");
+    if(head && !head.__calcSendPopupDragBound){
+      head.__calcSendPopupDragBound = true;
+      head.addEventListener("pointerdown",e => {
+        if(e.target.closest("button")) return;
+        const r = popup.getBoundingClientRect();
+        sendPopupDrag = {x:e.clientX,y:e.clientY,left:r.left,top:r.top};
+        popup.style.zIndex = String(++zTop);
+        try{ head.setPointerCapture(e.pointerId); }catch(_e){}
+        e.preventDefault();
+      },false);
+      head.addEventListener("pointermove",e => {
+        if(!sendPopupDrag) return;
+        popup.style.left = clamp(sendPopupDrag.left + e.clientX - sendPopupDrag.x,6,window.innerWidth - 80) + "px";
+        popup.style.top = clamp(sendPopupDrag.top + e.clientY - sendPopupDrag.y,6,window.innerHeight - 60) + "px";
+      },false);
+      const endDrag = e => {
+        if(!sendPopupDrag) return;
+        sendPopupDrag = null;
+        try{ head.releasePointerCapture(e.pointerId); }catch(_e){}
+      };
+      head.addEventListener("pointerup",endDrag,false);
+      head.addEventListener("pointercancel",endDrag,false);
+    }
+    return popup;
+  }
+  function markSendPlanStale(reason){
+    if(!sendPlanState || !Array.isArray(sendPlanState.rows)) return;
+    if(sendPlanState.executing) return;
+    sendPlanState.stale = true;
+    sendPlanState.staleReason = reason || "Calculator state changed after preflight.";
+    sendPlanState.canConfirm = false;
+    renderSendPlanTable();
+  }
+  function clearSendPlan(){
+    sendPlanState = null;
+    const popup = q("calcModuleSendPopup");
+    if(popup) popup.classList.add("hidden");
+  }
+  function updateSendButtonState(state){
+    const btn = q("calcModuleSend");
+    if(!btn) return;
+    btn.disabled = !!state;
+    btn.textContent = state ? "Preparing..." : "Send";
+  }
+  function renderSendPlanTable(){
+    const box = ensureSendPopup();
+    if(!box) return;
+    if(!sendPlanState || !Array.isArray(sendPlanState.rows)){
+      box.classList.add("hidden");
+      return;
+    }
+    const liveSym = currentSymbol();
+    if(!sendPlanState.stale && sendPlanState.symbol && liveSym && toUpper(sendPlanState.symbol) !== toUpper(liveSym)){
+      sendPlanState.stale = true;
+      sendPlanState.staleReason = "Symbol changed after preflight.";
+      sendPlanState.canConfirm = false;
+    }
+    box.classList.remove("hidden");
+    box.style.zIndex = String(++zTop);
+    const blockedCount = sendPlanState.rows.filter(r => r && r.action === "Blocked").length;
+    const writableCount = sendPlanState.rows.filter(r => r && !!r.writable).length;
+    const stale = !!sendPlanState.stale;
+    const canConfirm = !!(sendPlanState.canConfirm && !sendPlanState.executing && writableCount > 0 && blockedCount === 0 && !stale);
+    const hasResult = sendPlanState.rows.some(r => r && (r.status === "Confirmed" || r.status === "Failed"));
+    const title = hasResult ? "Send Results" : "Send Plan";
+    const summary = [
+      "Writable: " + writableCount,
+      "Blocked: " + blockedCount,
+      "Ignored: " + sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
+      "Skipped: " + sendPlanState.rows.filter(r => r && r.action === "Skip").length
+    ].join(" | ");
+    const rowsHtml = sendPlanState.rows.map((row) => {
+      const isError = row && (
+        row.action === "Blocked" ||
+        row.status === "Blocked" ||
+        row.status === "Failed" ||
+        !!row.unexpectedResponse
+      );
+      const cls = isError
+        ? "is-error"
+        : row.action === "Ignored"
+          ? "is-ignored"
+          : row.action === "Modify" || row.action === "New"
+            ? "is-writable"
+            : "";
+      return `<tr class="${cls}">
+        <td>${hEsc(row.action)}</td>
+        <td>${hEsc(row.type)}</td>
+        <td>${hEsc(row.side || "-")}</td>
+        <td>${hEsc(row.oldPrice || "-")}</td>
+        <td>${hEsc(row.newPrice || "-")}</td>
+        <td>${hEsc(row.oldQty || "-")}</td>
+        <td>${hEsc(row.newQty || "-")}</td>
+        <td>${hEsc(row.orderId || "-")}</td>
+        <td>${hEsc(row.status || "-")}</td>
+        <td>${hEsc(row.response || "-")}</td>
+      </tr>`;
+    }).join("");
+    const titleEl = q("calcModuleSendPopupTitle");
+    if(titleEl) titleEl.textContent = title;
+    const summaryEl = q("calcModuleSendSummary");
+    if(summaryEl){
+      const staleText = stale ? " | STALE: " + (sendPlanState.staleReason || "Calculator changed after preflight.") : "";
+      summaryEl.textContent = summary + staleText;
+      summaryEl.classList.toggle("is-stale",stale);
+    }
+    const bodyEl = q("calcModuleSendBody");
+    if(bodyEl){
+      bodyEl.innerHTML = rowsHtml || `<tr><td colspan="10">No rows.</td></tr>`;
+    }
     const confirmBtn = q("calcModuleConfirmSend");
+    const actionsWrap = confirmBtn ? confirmBtn.parentElement : null;
+    if(actionsWrap){
+      actionsWrap.style.display = (canConfirm || sendPlanState.executing) ? "flex" : "none";
+    }
     if(confirmBtn){
+      confirmBtn.textContent = sendPlanState.executing ? "Sending..." : "Confirm Send";
+      confirmBtn.disabled = !canConfirm;
       confirmBtn.onclick = () => confirmSendPlan(sendPlanState.planId);
     }
   }
@@ -18506,7 +18665,7 @@ If there is NO open position, use this Section 2 instead:
     const next = String(Math.round(price));
     if(input.value === next) return;
     input.value = next;
-    clearSendPlan();
+    markSendPlanStale("Chart drag changed a row level after preflight.");
     calculate();
   }
   function drawCalculatorLevelsOverlay(){
@@ -18926,6 +19085,8 @@ If there is NO open position, use this Section 2 instead:
       blocked:false,
       canConfirm:false,
       executing:false,
+      stale:false,
+      staleReason:"",
       liveSnapshot:null
     };
     const contextDirection = inferDirectionForSend(livePos);
@@ -19221,7 +19382,8 @@ If there is NO open position, use this Section 2 instead:
         }],
         blocked:true,
         canConfirm:false,
-        executing:false
+        executing:false,
+        stale:false
       };
       publishSendDiagnostic({
         at:new Date().toISOString(),
@@ -19239,6 +19401,8 @@ If there is NO open position, use this Section 2 instead:
       const livePos = await signedPosition();
       const liveSnapshot = await readOpenOrdersSnapshot();
       sendPlanState = buildPlanFromCurrentRows(livePos,liveSnapshot);
+      sendPlanState.stale = false;
+      sendPlanState.staleReason = "";
       publishSendDiagnostic({
         at:new Date().toISOString(),
         phase:"preflight",
@@ -19272,7 +19436,8 @@ If there is NO open position, use this Section 2 instead:
         }],
         blocked:true,
         canConfirm:false,
-        executing:false
+        executing:false,
+        stale:false
       };
       publishSendDiagnostic({
         at:new Date().toISOString(),
@@ -19316,12 +19481,28 @@ If there is NO open position, use this Section 2 instead:
         if(out && out.skip){
           rowPlan.status = "Skipped";
         }else{
-          rowPlan.status = "Confirmed";
-          rowPlan.response = binanceResponseText(out && out.response);
+          const resp = out && out.response ? out.response : null;
+          const okResp = !!(resp && (
+            resp.orderId != null ||
+            resp.clientOrderId != null ||
+            resp.origClientOrderId != null ||
+            toUpper(resp.status) === "NEW" ||
+            toUpper(resp.status) === "PARTIALLY_FILLED"
+          ));
+          if(okResp){
+            rowPlan.status = "Confirmed";
+            rowPlan.unexpectedResponse = false;
+            rowPlan.response = binanceResponseText(resp);
+          }else{
+            rowPlan.status = "Failed";
+            rowPlan.unexpectedResponse = true;
+            rowPlan.response = "Unexpected Binance response: " + binanceResponseText(resp);
+          }
         }
       }catch(e){
         rowPlan.status = "Failed";
         const code = e && e.code != null ? String(e.code) + " " : "";
+        rowPlan.unexpectedResponse = false;
         rowPlan.response = code + (e && e.message ? e.message : String(e));
       }
       renderSendPlanTable();
@@ -19385,7 +19566,7 @@ If there is NO open position, use this Section 2 instead:
   }
   async function readBinance(options){
     const opts = options || {};
-    if(!opts.preserveSendPlan) clearSendPlan();
+    if(!opts.preserveSendPlan) markSendPlanStale("Read clicked after preflight.");
     lastReadStateSnapshot = null;
     setStatus("Reading current open position...");
     const diag = {
@@ -19630,18 +19811,18 @@ If there is NO open position, use this Section 2 instead:
     },false);
     q("calcModuleClose").addEventListener("click",hideCalculator,false);
     q("calcModuleDir").addEventListener("click",() => {
-      clearSendPlan();
+      markSendPlanStale("Direction changed after preflight.");
       setDirection(direction === "LONG" ? "SHORT" : "LONG");
       lastStopEdit = "distance";
       syncStopFromDistance(readEntry().avg);
       calculate();
     },false);
     q("calcModuleAddEntry").addEventListener("click",() => {
-      clearSendPlan();
+      markSendPlanStale("Entry row list changed after preflight.");
       addRow("calcModuleEntryRows");
     },false);
     q("calcModuleAddExit").addEventListener("click",() => {
-      clearSendPlan();
+      markSendPlanStale("Exit row list changed after preflight.");
       addRow("calcModuleExitRows");
     },false);
     q("calcModuleStopLevel").addEventListener("input",() => {
@@ -19672,6 +19853,12 @@ If there is NO open position, use this Section 2 instead:
     },false);
 
     installDragResize(win);
+    if(marketEl && !marketEl.__calcSendStaleBound){
+      marketEl.__calcSendStaleBound = true;
+      marketEl.addEventListener("change",() => {
+        markSendPlanStale("Symbol changed after preflight.");
+      },false);
+    }
     setDirection("LONG");
     addRow("calcModuleEntryRows");
     addRow("calcModuleExitRows");
