@@ -1641,6 +1641,10 @@ button:hover{filter:brightness(1.04)}
 .calc-module-row.calc-module-row-locked{
   opacity:.94;
 }
+.calc-module-row.calc-module-row-open-position{
+  border-left:2px solid rgba(224,187,64,.55);
+  padding-left:4px;
+}
 .calc-module-row .calc-module-input-locked{
   background:#f4f6f8;
   color:#58606b;
@@ -1737,7 +1741,7 @@ button:hover{filter:brightness(1.04)}
 .calc-module-binance-flat{
   margin-top:6px;
 }
-.calc-module-binance-actions{display:grid;grid-template-columns:1fr auto 1fr;gap:6px;align-items:center}
+.calc-module-binance-actions{display:grid;grid-template-columns:1fr 1fr auto 1fr;gap:6px;align-items:center}
 .calc-module-binance-actions button{
   height:30px;
   margin:0;

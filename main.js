@@ -17666,6 +17666,9 @@ If there is NO open position, use this Section 2 instead:
   const binanceLimitRowMetaByRowId = new Map();
   let lastReadDiagnostic = null;
   let lastOverlayDiagnostic = null;
+  let overlayLevelBoxes = [];
+  let overlayDrag = {active:false,row:null};
+  let suppressNextOverlayClick = false;
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -17822,6 +17825,7 @@ If there is NO open position, use this Section 2 instead:
         </div>
         <div class="calc-module-binance-flat">
           <div class="calc-module-binance-actions">
+            <button id="calcModuleClear" type="button">Clear</button>
             <button id="calcModuleRead" type="button">Read</button>
             <label class="calc-module-levels-toggle" id="calcModuleLevelsToggleWrap" title="Show/hide Calculator levels on chart">
               <input id="calcModuleLevelsToggle" type="checkbox" checked>
@@ -17944,9 +17948,29 @@ If there is NO open position, use this Section 2 instead:
     delete row.dataset.calcRowId;
     delete row.dataset.source;
     row.classList.remove("calc-module-row-binance-limit");
+    row.classList.remove("calc-module-row-open-position");
     row.removeAttribute("title");
+    row.dataset.openPosition = "0";
     row.__binanceLimitOrderMeta = null;
     lotInput(row)?.classList.remove("calc-module-lot-binance-limit");
+    const lvl = levelInput(row);
+    const lot = lotInput(row);
+    if(lvl) lvl.title = "";
+    if(lot) lot.title = "";
+  }
+  function isOpenPositionRow(row){
+    return !!(row && row.dataset && row.dataset.openPosition === "1");
+  }
+  function setOpenPositionRow(row,isOpenPosition){
+    if(!row) return;
+    const on = !!isOpenPosition;
+    row.dataset.openPosition = on ? "1" : "0";
+    row.classList.toggle("calc-module-row-open-position",on);
+    row.title = on ? "Open Position" : (row.title || "");
+    const lvl = levelInput(row);
+    const lot = lotInput(row);
+    if(lvl) lvl.title = on ? "Open Position" : "";
+    if(lot) lot.title = on ? "Open Position" : "";
   }
   function applyRowSourceAndMeta(row,opts){
     if(!row) return row;
@@ -17968,16 +17992,19 @@ If there is NO open position, use this Section 2 instead:
     }
     return row;
   }
-  function setRowLocked(row,locked){
+  function setRowLocked(row,locked,options){
     if(!row) return;
+    const opts = options || {};
     const isLocked = !!locked;
     row.dataset.locked = isLocked ? "1" : "0";
     row.classList.toggle("calc-module-row-locked",isLocked);
     const removeBtn = row.querySelector(".calc-module-remove");
     if(removeBtn){
-      removeBtn.disabled = isLocked;
-      removeBtn.classList.toggle("calc-module-remove-locked",isLocked);
-      removeBtn.title = isLocked ? "Open position row is locked" : "Remove";
+      const keepRemoveEnabled = !!opts.keepRemoveEnabled;
+      const disabled = isLocked && !keepRemoveEnabled;
+      removeBtn.disabled = disabled;
+      removeBtn.classList.toggle("calc-module-remove-locked",disabled);
+      removeBtn.title = isLocked ? "Open position row is locked (remove is local only)" : "Remove";
     }
     const lvl = levelInput(row);
     const lot = lotInput(row);
@@ -18006,6 +18033,7 @@ If there is NO open position, use this Section 2 instead:
       const lot = lotInput(reusable);
       if(lvl) lvl.value = item.level == null ? "" : Math.round(item.level);
       if(lot) lot.value = item.lot == null ? "" : Number(item.lot).toFixed(3);
+      setOpenPositionRow(reusable,false);
       applyRowSourceAndMeta(reusable,item);
       return reusable;
     }
@@ -18027,7 +18055,8 @@ If there is NO open position, use this Section 2 instead:
       <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" placeholder="Lot" value="${lot}">
       <button class="calc-module-remove" type="button" title="Remove">x</button>`;
     applyRowSourceAndMeta(row,opts);
-    setRowLocked(row,!!opts.locked);
+    setOpenPositionRow(row,!!opts.openPosition);
+    setRowLocked(row,!!opts.locked,{keepRemoveEnabled:!!opts.keepRemoveEnabled});
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",calculate,false));
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
       clearBinanceMetaOnRow(row);
@@ -18049,9 +18078,26 @@ If there is NO open position, use this Section 2 instead:
         containerId,
         item.level == null ? "" : Math.round(item.level),
         item.lot == null ? "" : Number(item.lot).toFixed(3),
-        {locked:!!(opts.lockFirstRow && index === 0)}
+        {
+          locked:!!(opts.lockFirstRow && index === 0),
+          openPosition:!!(opts.openPositionFirstRow && index === 0),
+          keepRemoveEnabled:!!(opts.keepRemoveEnabledFirstRow && index === 0)
+        }
       );
     });
+  }
+  function clearCalculatorLocal(){
+    clearMappedLimitRows("calcModuleEntryRows");
+    clearMappedLimitRows("calcModuleExitRows");
+    binanceLimitRowMetaByRowId.clear();
+    setRows("calcModuleEntryRows",[{}]);
+    setRows("calcModuleExitRows",[{}]);
+    const stopLevel = q("calcModuleStopLevel");
+    const stopDistance = q("calcModuleStopDistance");
+    if(stopLevel) stopLevel.value = "";
+    if(stopDistance) stopDistance.value = "";
+    setStatus("Calculator cleared locally.");
+    calculate();
   }
 
   function currentSymbol(){
@@ -18174,7 +18220,9 @@ If there is NO open position, use this Section 2 instead:
       type:"entry",
       level:item.level,
       lot:item.lot,
-      text:"Entry | " + Number(item.lot).toFixed(3)
+      row:item.row,
+      openPosition:isOpenPositionRow(item.row),
+      text:(isOpenPositionRow(item.row) ? "Open Position" : "Entry") + " | " + Number(item.lot).toFixed(3)
     }));
     const exitRows = exits.map((item,index) => {
       const pl = entryAvg == null
@@ -18182,16 +18230,43 @@ If there is NO open position, use this Section 2 instead:
         : direction === "LONG"
           ? (item.level - entryAvg) * item.lot
           : (entryAvg - item.level) * item.lot;
+      const plText = pl == null
+        ? "$-"
+        : (pl < 0 ? "-$" + Math.abs(pl).toFixed(2) : "$" + Math.abs(pl).toFixed(2));
       return {
         type:"exit",
         level:item.level,
         lot:item.lot,
-        text:"Ex " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | PL @ Ex: " + fmtMoney(pl)
+        row:item.row,
+        openPosition:false,
+        text:"Ex " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + plText
       };
     });
     return {entries:entryRows, exits:exitRows, entryAvg, entryQty};
   }
+  function overlayBoxAtClient(clientX,clientY){
+    if(!canvas || !overlayLevelBoxes.length) return null;
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    for(let i=overlayLevelBoxes.length-1;i>=0;i--){
+      const box = overlayLevelBoxes[i];
+      if(x >= box.x1 && x <= box.x2 && y >= box.y1 && y <= box.y2) return box;
+    }
+    return null;
+  }
+  function setRowLevelFromClientY(row,clientY){
+    const rect = canvas.getBoundingClientRect();
+    const y = clientY - rect.top;
+    const price = priceFromCanvasY(y);
+    if(price == null) return;
+    const input = levelInput(row);
+    if(!input || input.disabled || input.readOnly) return;
+    input.value = String(Math.round(price));
+    calculate();
+  }
   function drawCalculatorLevelsOverlay(){
+    overlayLevelBoxes = [];
     if(!levelsVisible) return;
     if(!canvas || !ctx) return;
     const state = currentPriceLineState || {};
@@ -18215,7 +18290,9 @@ If there is NO open position, use this Section 2 instead:
       visible:levelsVisible,
       entries:overlayRows.entries.length,
       exits:overlayRows.exits.length,
-      drawn:items.length
+      drawn:items.length,
+      boxes:overlayLevelBoxes.length,
+      dragActive:!!overlayDrag.active
     });
     if(!items.length) return;
 
@@ -18229,11 +18306,11 @@ If there is NO open position, use this Section 2 instead:
     ctx.clip();
     ctx.font = "11px Arial";
     ctx.textBaseline = "middle";
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 1;
     ctx.setLineDash([5,2]);
     items.forEach(item => {
       const y = px(item.y);
-      ctx.strokeStyle = item.type === "entry" ? "rgba(15,132,92,0.70)" : "rgba(212,107,8,0.70)";
+      ctx.strokeStyle = "rgba(112,122,138,0.70)";
       ctx.beginPath();
       ctx.moveTo(px(left),y);
       ctx.lineTo(px(chartRight),y);
@@ -18272,14 +18349,33 @@ If there is NO open position, use this Section 2 instead:
     placed.forEach(p => {
       const x = chartRight - p.w - 8;
       const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
-      ctx.fillStyle = "rgba(255,255,255,0.94)";
-      ctx.strokeStyle = p.item.type === "entry" ? "rgba(15,132,92,0.70)" : "rgba(212,107,8,0.70)";
+      const isOpenPos = !!p.item.openPosition;
+      ctx.fillStyle = isOpenPos ? "rgba(255,247,204,0.95)" : "rgba(255,255,255,0.94)";
+      ctx.strokeStyle = "rgba(112,122,138,0.70)";
       ctx.lineWidth = 1;
       ctx.fillRect(ix(x),ix(y),p.w,p.h);
       ctx.strokeRect(px(x),px(y),p.w,p.h);
-      ctx.fillStyle = p.item.type === "entry" ? "#0b7d4d" : "#9a4a05";
+      ctx.fillStyle = "#39414a";
       ctx.textAlign = "left";
       ctx.fillText(p.item.text,x + padX,y + p.h / 2 + 0.5);
+      overlayLevelBoxes.push({
+        x1:x,
+        y1:y,
+        x2:x + p.w,
+        y2:y + p.h,
+        row:p.item.row,
+        openPosition:isOpenPos,
+        draggable:!isOpenPos
+      });
+    });
+    publishOverlayDiagnostic({
+      at:new Date().toISOString(),
+      visible:levelsVisible,
+      entries:overlayRows.entries.length,
+      exits:overlayRows.exits.length,
+      drawn:items.length,
+      boxes:overlayLevelBoxes.length,
+      dragActive:!!overlayDrag.active
     });
     ctx.restore();
   }
@@ -18293,6 +18389,47 @@ If there is NO open position, use this Section 2 instead:
       try{ drawCalculatorLevelsOverlay(); }catch(e){ console.warn(MODULE + " levels overlay draw failed",e); }
       return result;
     };
+  }
+  function installOverlayDragHooks(){
+    if(!canvas || canvas.__calculatorOverlayDragHooks) return;
+    canvas.__calculatorOverlayDragHooks = true;
+    canvas.addEventListener("mousedown",e => {
+      if(!levelsVisible) return;
+      const hit = overlayBoxAtClient(e.clientX,e.clientY);
+      if(!hit || !hit.draggable || !hit.row) return;
+      overlayDrag.active = true;
+      overlayDrag.row = hit.row;
+      setRowLevelFromClientY(hit.row,e.clientY);
+      canvas.style.cursor = "pointer";
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },true);
+    canvas.addEventListener("mousemove",e => {
+      if(overlayDrag.active){
+        setRowLevelFromClientY(overlayDrag.row,e.clientY);
+        canvas.style.cursor = "pointer";
+        return;
+      }
+      if(dragChart || dragAxis) return;
+      if(!levelsVisible) return;
+      const hit = overlayBoxAtClient(e.clientX,e.clientY);
+      if(hit && hit.draggable) canvas.style.cursor = "pointer";
+    },false);
+    window.addEventListener("mouseup",e => {
+      if(!overlayDrag.active) return;
+      overlayDrag.active = false;
+      overlayDrag.row = null;
+      suppressNextOverlayClick = true;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if(canvas) canvas.style.cursor = "crosshair";
+    },true);
+    canvas.addEventListener("click",e => {
+      if(!suppressNextOverlayClick) return;
+      suppressNextOverlayClick = false;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },true);
   }
   async function readOpenOrdersSnapshot(){
     const sym = currentSymbol();
@@ -18445,7 +18582,11 @@ If there is NO open position, use this Section 2 instead:
         diag.positionSource = pos.source || null;
         diag.positionSide = pos.side || null;
         setDirection(pos.side);
-        setRows("calcModuleEntryRows",[{level:pos.entry,lot:pos.qty}],{lockFirstRow:true});
+        setRows(
+          "calcModuleEntryRows",
+          [{level:pos.entry,lot:pos.qty}],
+          {lockFirstRow:true,openPositionFirstRow:true,keepRemoveEnabledFirstRow:true}
+        );
       }else{
         unlockEntryRows();
       }
@@ -18636,6 +18777,7 @@ If there is NO open position, use this Section 2 instead:
     levelsVisible = loadLevelsVisible();
     saveLevelsVisible(levelsVisible);
     installDrawOverlayHook();
+    installOverlayDragHooks();
 
     function showCalculator(){
       win.classList.remove("hidden");
@@ -18682,6 +18824,7 @@ If there is NO open position, use this Section 2 instead:
       const closed = body.classList.toggle("calc-module-collapsed");
       q("calcModuleSummaryCaret").textContent = closed ? ">" : "v";
     },false);
+    q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
     q("calcModuleRead").addEventListener("click",readBinance,false);
     q("calcModuleLevelsToggle").addEventListener("change",e => {
       saveLevelsVisible(!!(e.target && e.target.checked));
