@@ -17656,13 +17656,16 @@ If there is NO open position, use this Section 2 instead:
   const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
   const OPEN_ALGO_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
   const STORE = "btc_futures_chart_v13_calculator_";
+  const LEVELS_VISIBLE_KEY = STORE + "levels_visible";
   let zTop = 82;
   let direction = "LONG";
   let syncingStop = false;
   let lastStopEdit = "level";
+  let levelsVisible = true;
   let binanceLimitRowSeq = 0;
   const binanceLimitRowMetaByRowId = new Map();
   let lastReadDiagnostic = null;
+  let lastOverlayDiagnostic = null;
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -17695,6 +17698,34 @@ If there is NO open position, use this Section 2 instead:
   function setStatus(text){
     const el = q("calcModuleStatus");
     if(el) el.textContent = text || "";
+  }
+  function loadLevelsVisible(){
+    try{
+      const raw = localStorage.getItem(LEVELS_VISIBLE_KEY);
+      if(raw == null) return true;
+      return raw !== "0";
+    }catch(_e){
+      return true;
+    }
+  }
+  function saveLevelsVisible(next){
+    levelsVisible = !!next;
+    try{ localStorage.setItem(LEVELS_VISIBLE_KEY,levelsVisible ? "1" : "0"); }catch(_e){}
+    const tgl = q("calcModuleLevelsToggle");
+    if(tgl) tgl.checked = levelsVisible;
+    const box = q("calcModuleLevelsToggleWrap");
+    if(box){
+      box.classList.toggle("is-on",levelsVisible);
+      box.classList.toggle("is-off",!levelsVisible);
+    }
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+  }
+  function levelInput(row){ return row ? row.querySelector(".calc-module-level") : null; }
+  function lotInput(row){ return row ? row.querySelector(".calc-module-lot") : null; }
+  function isRowEmpty(row){
+    const levelVal = String(levelInput(row)?.value || "").trim();
+    const lotVal = String(lotInput(row)?.value || "").trim();
+    return !levelVal && !lotVal;
   }
 
   function ensureButton(){
@@ -17792,6 +17823,10 @@ If there is NO open position, use this Section 2 instead:
         <div class="calc-module-binance-flat">
           <div class="calc-module-binance-actions">
             <button id="calcModuleRead" type="button">Read</button>
+            <label class="calc-module-levels-toggle" id="calcModuleLevelsToggleWrap" title="Show/hide Calculator levels on chart">
+              <input id="calcModuleLevelsToggle" type="checkbox" checked>
+              <span>Levels</span>
+            </label>
             <button id="calcModuleSend" type="button" disabled title="No order action in calculator module">Send</button>
           </div>
           <div class="calc-module-status" id="calcModuleStatus"></div>
@@ -17900,6 +17935,86 @@ If there is NO open position, use this Section 2 instead:
     q("calcModuleAvgEntry").textContent = entry.avg != null ? fmtPrice(entry.avg) : "-";
     setMoney(q("calcModuleRisk"),risk);
     setMoney(q("calcModuleReward"),exits.length ? reward : null);
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+  }
+  function clearBinanceMetaOnRow(row){
+    if(!row) return;
+    const rowId = row.dataset.calcRowId;
+    if(rowId) binanceLimitRowMetaByRowId.delete(rowId);
+    delete row.dataset.calcRowId;
+    delete row.dataset.source;
+    row.classList.remove("calc-module-row-binance-limit");
+    row.removeAttribute("title");
+    row.__binanceLimitOrderMeta = null;
+    lotInput(row)?.classList.remove("calc-module-lot-binance-limit");
+  }
+  function applyRowSourceAndMeta(row,opts){
+    if(!row) return row;
+    const source = opts && opts.source ? String(opts.source) : "";
+    if(source === "binance-limit"){
+      row.dataset.source = source;
+      row.classList.add("calc-module-row-binance-limit");
+      row.title = "Binance LIMIT order";
+      lotInput(row)?.classList.add("calc-module-lot-binance-limit");
+    }else{
+      clearBinanceMetaOnRow(row);
+    }
+    const meta = opts && opts.meta;
+    if(meta){
+      const rowId = (opts && opts.rowId ? String(opts.rowId) : "") || ("calc_row_" + (++binanceLimitRowSeq));
+      row.dataset.calcRowId = rowId;
+      row.__binanceLimitOrderMeta = meta;
+      binanceLimitRowMetaByRowId.set(rowId,meta);
+    }
+    return row;
+  }
+  function setRowLocked(row,locked){
+    if(!row) return;
+    const isLocked = !!locked;
+    row.dataset.locked = isLocked ? "1" : "0";
+    row.classList.toggle("calc-module-row-locked",isLocked);
+    const removeBtn = row.querySelector(".calc-module-remove");
+    if(removeBtn){
+      removeBtn.disabled = isLocked;
+      removeBtn.classList.toggle("calc-module-remove-locked",isLocked);
+      removeBtn.title = isLocked ? "Open position row is locked" : "Remove";
+    }
+    const lvl = levelInput(row);
+    const lot = lotInput(row);
+    if(lvl){
+      lvl.disabled = isLocked;
+      lvl.readOnly = isLocked;
+      lvl.classList.toggle("calc-module-input-locked",isLocked);
+    }
+    if(lot){
+      lot.disabled = isLocked;
+      lot.readOnly = isLocked;
+      lot.classList.toggle("calc-module-input-locked",isLocked);
+    }
+  }
+  function unlockEntryRows(){
+    rows("calcModuleEntryRows").forEach(row => setRowLocked(row,false));
+  }
+  function applyMappedRow(containerId,item){
+    const container = q(containerId);
+    if(!container || !item) return null;
+    const allRows = rows(containerId);
+    const reusable = allRows.find(row => isRowEmpty(row));
+    if(reusable){
+      clearBinanceMetaOnRow(reusable);
+      const lvl = levelInput(reusable);
+      const lot = lotInput(reusable);
+      if(lvl) lvl.value = item.level == null ? "" : Math.round(item.level);
+      if(lot) lot.value = item.lot == null ? "" : Number(item.lot).toFixed(3);
+      applyRowSourceAndMeta(reusable,item);
+      return reusable;
+    }
+    return addRow(
+      containerId,
+      item.level == null ? "" : Math.round(item.level),
+      item.lot == null ? "" : Number(item.lot).toFixed(3),
+      item
+    );
   }
   function addRow(containerId,level="",lot="",options){
     const container = q(containerId);
@@ -17911,26 +18026,11 @@ If there is NO open position, use this Section 2 instead:
       <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
       <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" placeholder="Lot" value="${lot}">
       <button class="calc-module-remove" type="button" title="Remove">x</button>`;
-    if(opts.source){
-      row.dataset.source = String(opts.source);
-      if(opts.source === "binance-limit"){
-        row.classList.add("calc-module-row-binance-limit");
-        row.title = "Binance LIMIT order";
-      }
-    }
-    if(opts.rowId){
-      row.dataset.calcRowId = String(opts.rowId);
-    }
-    if(opts.meta){
-      const rowId = row.dataset.calcRowId || ("calc_row_" + (++binanceLimitRowSeq));
-      row.dataset.calcRowId = rowId;
-      row.__binanceLimitOrderMeta = opts.meta;
-      binanceLimitRowMetaByRowId.set(rowId,opts.meta);
-    }
+    applyRowSourceAndMeta(row,opts);
+    setRowLocked(row,!!opts.locked);
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",calculate,false));
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
-      const rowId = row.dataset.calcRowId;
-      if(rowId) binanceLimitRowMetaByRowId.delete(rowId);
+      clearBinanceMetaOnRow(row);
       row.remove();
       calculate();
     },false);
@@ -17938,12 +18038,19 @@ If there is NO open position, use this Section 2 instead:
     calculate();
     return row;
   }
-  function setRows(containerId,data){
+  function setRows(containerId,data,options){
     const container = q(containerId);
     if(!container) return;
+    const opts = options || {};
     container.innerHTML = "";
-    (data && data.length ? data : [{}]).forEach(item => {
-      addRow(containerId,item.level == null ? "" : Math.round(item.level),item.lot == null ? "" : Number(item.lot).toFixed(3));
+    const list = data && data.length ? data : [{}];
+    list.forEach((item,index) => {
+      addRow(
+        containerId,
+        item.level == null ? "" : Math.round(item.level),
+        item.lot == null ? "" : Number(item.lot).toFixed(3),
+        {locked:!!(opts.lockFirstRow && index === 0)}
+      );
     });
   }
 
@@ -18035,8 +18142,7 @@ If there is NO open position, use this Section 2 instead:
   function clearMappedLimitRows(containerId){
     rows(containerId).forEach(row => {
       if(row.dataset.source !== "binance-limit") return;
-      const rowId = row.dataset.calcRowId;
-      if(rowId) binanceLimitRowMetaByRowId.delete(rowId);
+      clearBinanceMetaOnRow(row);
       row.remove();
     });
   }
@@ -18044,6 +18150,149 @@ If there is NO open position, use this Section 2 instead:
     lastReadDiagnostic = diag || null;
     window.__calculatorReadDiagnostic = lastReadDiagnostic;
     try{ console.info(MODULE + " read diagnostic",lastReadDiagnostic); }catch(_e){}
+  }
+  function publishOverlayDiagnostic(diag){
+    lastOverlayDiagnostic = diag || null;
+    window.__calculatorOverlayDiagnostic = lastOverlayDiagnostic;
+  }
+  function usableOverlayRows(containerId){
+    return rows(containerId).map((row,index) => ({
+      index,
+      row,
+      level:num(levelInput(row)?.value),
+      lot:num(lotInput(row)?.value)
+    })).filter(item => item.level != null && item.lot != null && item.lot > 0);
+  }
+  function currentOverlayRows(){
+    const entries = usableOverlayRows("calcModuleEntryRows");
+    const exits = usableOverlayRows("calcModuleExitRows");
+    const entryQty = entries.reduce((sum,row) => sum + row.lot,0);
+    const entryAvg = entryQty > 0
+      ? entries.reduce((sum,row) => sum + row.level * row.lot,0) / entryQty
+      : null;
+    const entryRows = entries.map(item => ({
+      type:"entry",
+      level:item.level,
+      lot:item.lot,
+      text:"Entry | " + Number(item.lot).toFixed(3)
+    }));
+    const exitRows = exits.map((item,index) => {
+      const pl = entryAvg == null
+        ? null
+        : direction === "LONG"
+          ? (item.level - entryAvg) * item.lot
+          : (entryAvg - item.level) * item.lot;
+      return {
+        type:"exit",
+        level:item.level,
+        lot:item.lot,
+        text:"Ex " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | PL @ Ex: " + fmtMoney(pl)
+      };
+    });
+    return {entries:entryRows, exits:exitRows, entryAvg, entryQty};
+  }
+  function drawCalculatorLevelsOverlay(){
+    if(!levelsVisible) return;
+    if(!canvas || !ctx) return;
+    const state = currentPriceLineState || {};
+    const top = num(state.top);
+    const priceH = num(state.priceH);
+    const minP = num(state.minP);
+    const maxP = num(state.maxP);
+    const left = num(state.left);
+    const chartRight = num(state.chartRight);
+    if(top == null || priceH == null || minP == null || maxP == null || left == null || chartRight == null) return;
+    if(!(priceH > 0) || !(maxP > minP) || !(chartRight > left)) return;
+    const overlayRows = currentOverlayRows();
+    const items = overlayRows.entries.concat(overlayRows.exits)
+      .map(item => {
+        const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
+        return { ...item, y };
+      })
+      .filter(item => item.y >= top - 2 && item.y <= top + priceH + 2);
+    publishOverlayDiagnostic({
+      at:new Date().toISOString(),
+      visible:levelsVisible,
+      entries:overlayRows.entries.length,
+      exits:overlayRows.exits.length,
+      drawn:items.length
+    });
+    if(!items.length) return;
+
+    const padX = 6;
+    const labelH = 16;
+    const gap = 2;
+    const chartBottom = top + priceH;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left,top,chartRight - left,priceH);
+    ctx.clip();
+    ctx.font = "11px Arial";
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5,2]);
+    items.forEach(item => {
+      const y = px(item.y);
+      ctx.strokeStyle = item.type === "entry" ? "rgba(15,132,92,0.70)" : "rgba(212,107,8,0.70)";
+      ctx.beginPath();
+      ctx.moveTo(px(left),y);
+      ctx.lineTo(px(chartRight),y);
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+
+    const placed = [];
+    const sorted = items.slice().sort((a,b) => a.y - b.y);
+    sorted.forEach(item => {
+      const textW = Math.ceil(ctx.measureText(item.text).width) + padX * 2;
+      const minY = top + labelH / 2;
+      const maxY = chartBottom - labelH / 2;
+      let cy = clamp(item.y,minY,maxY);
+      if(placed.length){
+        const prev = placed[placed.length - 1];
+        const minCy = prev.cy + labelH + gap;
+        if(cy < minCy) cy = minCy;
+      }
+      placed.push({
+        item,
+        w:Math.min(textW,Math.max(56,chartRight - left - 8)),
+        h:labelH,
+        cy
+      });
+    });
+    for(let i=placed.length - 1;i>=0;i--){
+      const cur = placed[i];
+      const maxCy = chartBottom - labelH / 2 - (placed.length - 1 - i) * (labelH + gap);
+      cur.cy = Math.min(cur.cy,maxCy);
+      if(i > 0){
+        const prev = placed[i - 1];
+        if(prev.cy > cur.cy - (labelH + gap)) prev.cy = cur.cy - (labelH + gap);
+      }
+    }
+    placed.forEach(p => {
+      const x = chartRight - p.w - 8;
+      const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
+      ctx.fillStyle = "rgba(255,255,255,0.94)";
+      ctx.strokeStyle = p.item.type === "entry" ? "rgba(15,132,92,0.70)" : "rgba(212,107,8,0.70)";
+      ctx.lineWidth = 1;
+      ctx.fillRect(ix(x),ix(y),p.w,p.h);
+      ctx.strokeRect(px(x),px(y),p.w,p.h);
+      ctx.fillStyle = p.item.type === "entry" ? "#0b7d4d" : "#9a4a05";
+      ctx.textAlign = "left";
+      ctx.fillText(p.item.text,x + padX,y + p.h / 2 + 0.5);
+    });
+    ctx.restore();
+  }
+  function installDrawOverlayHook(){
+    if(window.__calcLevelsDrawWrapped) return;
+    if(typeof draw !== "function") return;
+    window.__calcLevelsDrawWrapped = true;
+    const prevDraw = draw;
+    window.draw = draw = function(){
+      const result = prevDraw.apply(this,arguments);
+      try{ drawCalculatorLevelsOverlay(); }catch(e){ console.warn(MODULE + " levels overlay draw failed",e); }
+      return result;
+    };
   }
   async function readOpenOrdersSnapshot(){
     const sym = currentSymbol();
@@ -18191,11 +18440,14 @@ If there is NO open position, use this Section 2 instead:
     };
     try{
       const pos = await signedPosition() || openBoxPosition();
+      unlockEntryRows();
       if(pos){
         diag.positionSource = pos.source || null;
         diag.positionSide = pos.side || null;
         setDirection(pos.side);
-        setRows("calcModuleEntryRows",[{level:pos.entry,lot:pos.qty}]);
+        setRows("calcModuleEntryRows",[{level:pos.entry,lot:pos.qty}],{lockFirstRow:true});
+      }else{
+        unlockEntryRows();
       }
 
       clearMappedLimitRows("calcModuleEntryRows");
@@ -18220,18 +18472,8 @@ If there is NO open position, use this Section 2 instead:
         diag.ignoredAlgoOrders = mapped.diagnostic.ignoredAlgoOrders;
         diag.ignoredNonLimitOrders = mapped.diagnostic.ignoredNonLimitOrders;
         diag.ignoredByPositionSide = mapped.diagnostic.ignoredByPositionSide;
-        mapped.entryRows.forEach(item => addRow(
-          "calcModuleEntryRows",
-          Math.round(item.level),
-          item.lot == null ? "" : Number(item.lot).toFixed(3),
-          {source:item.source,rowId:item.rowId,meta:item.meta}
-        ));
-        mapped.exitRows.forEach(item => addRow(
-          "calcModuleExitRows",
-          Math.round(item.level),
-          item.lot == null ? "" : Number(item.lot).toFixed(3),
-          {source:item.source,rowId:item.rowId,meta:item.meta}
-        ));
+        mapped.entryRows.forEach(item => applyMappedRow("calcModuleEntryRows",item));
+        mapped.exitRows.forEach(item => applyMappedRow("calcModuleExitRows",item));
       }
 
       let stop = null;
@@ -18391,6 +18633,9 @@ If there is NO open position, use this Section 2 instead:
     const openBtn = ensureButton();
     if(win.__calculatorModuleBound) return;
     win.__calculatorModuleBound = true;
+    levelsVisible = loadLevelsVisible();
+    saveLevelsVisible(levelsVisible);
+    installDrawOverlayHook();
 
     function showCalculator(){
       win.classList.remove("hidden");
@@ -18438,6 +18683,9 @@ If there is NO open position, use this Section 2 instead:
       q("calcModuleSummaryCaret").textContent = closed ? ">" : "v";
     },false);
     q("calcModuleRead").addEventListener("click",readBinance,false);
+    q("calcModuleLevelsToggle").addEventListener("change",e => {
+      saveLevelsVisible(!!(e.target && e.target.checked));
+    },false);
 
     installDragResize(win);
     setDirection("LONG");
@@ -18459,7 +18707,10 @@ If there is NO open position, use this Section 2 instead:
         return rowId ? binanceLimitRowMetaByRowId.get(rowId) || null : null;
       },
       getBinanceLimitRowMetaMap(){ return new Map(binanceLimitRowMetaByRowId); },
-      getLastReadDiagnostic(){ return lastReadDiagnostic; }
+      getLastReadDiagnostic(){ return lastReadDiagnostic; },
+      getLastOverlayDiagnostic(){ return lastOverlayDiagnostic; },
+      setLevelsVisible(next){ saveLevelsVisible(!!next); },
+      getLevelsVisible(){ return !!levelsVisible; }
     };
   }
 

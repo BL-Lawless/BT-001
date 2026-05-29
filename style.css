@@ -1635,6 +1635,17 @@ button:hover{filter:brightness(1.04)}
   padding:5px 6px;
   font-size:12px;
 }
+.calc-module-row .calc-module-lot.calc-module-lot-binance-limit{
+  background:rgba(240,185,11,.20);
+}
+.calc-module-row.calc-module-row-locked{
+  opacity:.94;
+}
+.calc-module-row .calc-module-input-locked{
+  background:#f4f6f8;
+  color:#58606b;
+  cursor:not-allowed;
+}
 .calc-module-remove{
   width:22px;
   height:24px;
@@ -1644,6 +1655,10 @@ button:hover{filter:brightness(1.04)}
   border:1px solid #d9dce1;
   color:#707a8a;
   font-weight:700;
+}
+.calc-module-remove.calc-module-remove-locked{
+  opacity:.45;
+  cursor:not-allowed;
 }
 .calc-module-stop{
   margin-top:6px;
@@ -1722,7 +1737,7 @@ button:hover{filter:brightness(1.04)}
 .calc-module-binance-flat{
   margin-top:6px;
 }
-.calc-module-binance-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.calc-module-binance-actions{display:grid;grid-template-columns:1fr auto 1fr;gap:6px;align-items:center}
 .calc-module-binance-actions button{
   height:30px;
   margin:0;
@@ -1734,6 +1749,36 @@ button:hover{filter:brightness(1.04)}
 .calc-module-binance-actions button:disabled{
   opacity:.55;
   cursor:not-allowed;
+}
+.calc-module-levels-toggle{
+  height:30px;
+  min-width:76px;
+  margin:0;
+  padding:0 8px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  background:#eef0f2;
+  border:1px solid #d9dce1;
+  color:#111;
+  border-radius:6px;
+  font-size:12px;
+  font-weight:700;
+  user-select:none;
+  cursor:pointer;
+}
+.calc-module-levels-toggle input{
+  margin:0;
+  width:13px;
+  height:13px;
+  accent-color:#f0b90b;
+}
+.calc-module-levels-toggle.is-off{
+  opacity:.72;
+}
+.calc-module-levels-toggle.is-on{
+  box-shadow:inset 0 0 0 1px rgba(240,185,11,.45);
 }
 .calc-module-status{
   min-height:15px;
