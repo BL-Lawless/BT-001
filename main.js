@@ -16941,8 +16941,6 @@ If there is NO open position, use this Section 2 instead:
     const axisLeft = chartRight + 2;
     const axisRight = w - 2;
     const axisW = Math.max(22,axisRight - axisLeft);
-    const priceYRef = Number.isFinite(Number(state && state.priceY)) ? Number(state.priceY) : null;
-    const crossYRef = (typeof mouse === "object" && mouse && Number.isFinite(Number(mouse.y))) ? Number(mouse.y) : null;
     const labelColor = rgba(color(),Math.max(40,alpha()));
     const textColor = rgba(color(),Math.min(100,alpha() + 15));
     const visible = [];
@@ -16977,12 +16975,6 @@ If there is NO open position, use this Section 2 instead:
     const sorted = visible.slice().sort((a,b) => a.y - b.y);
     for(const item of sorted){
       let cy = clamp(item.y,top + labelH / 2,top + priceH - labelH / 2);
-      if(priceYRef != null && Math.abs(cy - priceYRef) < 18){
-        cy += (cy <= priceYRef ? -1 : 1) * 18;
-      }
-      if(crossYRef != null && Math.abs(cy - crossYRef) < 14){
-        cy += (cy <= crossYRef ? -1 : 1) * 14;
-      }
       if(placed.length){
         const prev = placed[placed.length - 1];
         const minCy = prev.cy + labelH + labelGap;
@@ -18477,7 +18469,13 @@ If there is NO open position, use this Section 2 instead:
     document.body.appendChild(popup);
     const closeBtn = q("calcModuleSendPopupClose");
     if(closeBtn){
-      closeBtn.addEventListener("click",() => popup.classList.add("hidden"),false);
+      closeBtn.addEventListener("click",() => {
+        if(sendPlanState && sendPlanState.executing){
+          setStatus("Confirm Send is in progress.");
+          return;
+        }
+        clearSendPlan();
+      },false);
     }
     const head = q("calcModuleSendPopupHead");
     if(head && !head.__calcSendPopupDragBound){
@@ -18515,8 +18513,25 @@ If there is NO open position, use this Section 2 instead:
   }
   function clearSendPlan(){
     sendPlanState = null;
+    sendPopupDrag = null;
     const popup = q("calcModuleSendPopup");
     if(popup) popup.classList.add("hidden");
+    const titleEl = q("calcModuleSendPopupTitle");
+    if(titleEl) titleEl.textContent = "Send Plan";
+    const summaryEl = q("calcModuleSendSummary");
+    if(summaryEl){
+      summaryEl.textContent = "";
+      summaryEl.classList.remove("is-stale");
+    }
+    const bodyEl = q("calcModuleSendBody");
+    if(bodyEl) bodyEl.innerHTML = "";
+    const confirmBtn = q("calcModuleConfirmSend");
+    if(confirmBtn){
+      confirmBtn.disabled = true;
+      confirmBtn.onclick = null;
+    }
+    const actionsWrap = confirmBtn ? confirmBtn.parentElement : null;
+    if(actionsWrap) actionsWrap.style.display = "none";
   }
   function updateSendButtonState(state){
     const btn = q("calcModuleSend");
