@@ -17799,6 +17799,14 @@ If there is NO open position, use this Section 2 instead:
     }
     try{ if(typeof draw === "function") draw(); }catch(_e){}
   }
+
+  function calcLevelsInteractive(){
+    try{
+      const win = q("calcModuleWindow");
+      const winVisible = win ? !win.classList.contains("hidden") : false;
+      return !!(levelsVisible && winVisible);
+    }catch(_e){ return !!levelsVisible; }
+  }
   function levelInput(row){ return row ? row.querySelector(".calc-module-level") : null; }
   function lotInput(row){ return row ? row.querySelector(".calc-module-lot") : null; }
   function isRowEmpty(row){
@@ -18783,7 +18791,7 @@ If there is NO open position, use this Section 2 instead:
         y2:y + p.h,
         row:p.item.row,
         openPosition:isOpenPos,
-        draggable:!isOpenPos
+        draggable:!isOpenPos && calcLevelsInteractive()
       });
     });
     publishOverlayDiagnostic({
@@ -18812,7 +18820,7 @@ If there is NO open position, use this Section 2 instead:
     if(!canvas || canvas.__calculatorOverlayDragHooks) return;
     canvas.__calculatorOverlayDragHooks = true;
     canvas.addEventListener("mousedown",e => {
-      if(!levelsVisible) return;
+      if(!calcLevelsInteractive()) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
       if(!hit || !hit.draggable || !hit.row) return;
       overlayDrag.active = true;
@@ -18829,7 +18837,7 @@ If there is NO open position, use this Section 2 instead:
         return;
       }
       if(dragChart || dragAxis) return;
-      if(!levelsVisible) return;
+      if(!calcLevelsInteractive()) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
       if(hit && hit.draggable) canvas.style.cursor = "pointer";
     },false);
