@@ -1794,8 +1794,8 @@ button:hover{filter:brightness(1.04)}
 }
 .calc-module-send-popup{
   position:fixed;
-  top:84px;
-  right:18px;
+  top:240px;
+  right:160px;
   width:min(860px,calc(100vw - 26px));
   max-height:min(72vh,620px);
   z-index:95;
