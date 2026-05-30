@@ -127,6 +127,11 @@ const SR = STORE + "remember_keys";
 const SE1 = STORE + "ema_period_1";
 const SE2 = STORE + "ema_period_2";
 const SE3 = STORE + "ema_period_3";
+const SET1 = STORE + "ema_toggle_1";
+const SET2 = STORE + "ema_toggle_2";
+const SET3 = STORE + "ema_toggle_3";
+const SET4 = STORE + "ema_toggle_4";
+const SET5 = STORE + "ema_toggle_5";
 
 
 /* =========================================================
@@ -323,22 +328,46 @@ function emaPeriod(input,fallback){
 }
 
 function updateEmaLabels(){
-  if(lblEMA20) lblEMA20.textContent = "EMA" + emaPeriod(emaPeriod1El,20);
-  if(lblEMA50) lblEMA50.textContent = "EMA" + emaPeriod(emaPeriod2El,50);
-  if(lblEMA3) lblEMA3.textContent = "EMA" + emaPeriod(emaPeriod3El,100);
+  if(lblEMA20) lblEMA20.textContent = "EMA" + emaPeriod(emaPeriod1El,9);
+  if(lblEMA50) lblEMA50.textContent = "EMA" + emaPeriod(emaPeriod2El,21);
+  if(lblEMA3) lblEMA3.textContent = "EMA" + emaPeriod(emaPeriod3El,55);
+}
+
+function emaToggleStoreKey(n){
+  return ({1:SET1,2:SET2,3:SET3,4:SET4,5:SET5}[Number(n)] || "");
+}
+
+function persistEmaToggle(n,checked){
+  const key = emaToggleStoreKey(n);
+  if(!key) return;
+  try{ localStorage.setItem(key,checked ? "1" : "0"); }catch(_e){}
+}
+
+function restoreEmaToggle(n,el){
+  if(!el) return;
+  const key = emaToggleStoreKey(n);
+  if(!key) return;
+  try{
+    const raw = localStorage.getItem(key);
+    if(raw == null) return;
+    el.checked = raw === "1";
+  }catch(_e){}
 }
 
 function restoreEmaSettings(){
-  if(emaPeriod1El) emaPeriod1El.value = localStorage.getItem(SE1) || "20";
-  if(emaPeriod2El) emaPeriod2El.value = localStorage.getItem(SE2) || "50";
-  if(emaPeriod3El) emaPeriod3El.value = localStorage.getItem(SE3) || "100";
+  if(emaPeriod1El) emaPeriod1El.value = localStorage.getItem(SE1) || "9";
+  if(emaPeriod2El) emaPeriod2El.value = localStorage.getItem(SE2) || "21";
+  if(emaPeriod3El) emaPeriod3El.value = localStorage.getItem(SE3) || "55";
+  restoreEmaToggle(1,tglEMA20);
+  restoreEmaToggle(2,tglEMA50);
+  restoreEmaToggle(3,tglEMA3);
   updateEmaLabels();
 }
 
 function saveEmaSettings(){
-  if(emaPeriod1El) localStorage.setItem(SE1,String(emaPeriod(emaPeriod1El,20)));
-  if(emaPeriod2El) localStorage.setItem(SE2,String(emaPeriod(emaPeriod2El,50)));
-  if(emaPeriod3El) localStorage.setItem(SE3,String(emaPeriod(emaPeriod3El,100)));
+  if(emaPeriod1El) localStorage.setItem(SE1,String(emaPeriod(emaPeriod1El,9)));
+  if(emaPeriod2El) localStorage.setItem(SE2,String(emaPeriod(emaPeriod2El,21)));
+  if(emaPeriod3El) localStorage.setItem(SE3,String(emaPeriod(emaPeriod3El,55)));
   updateEmaLabels();
   indicators();
   draw();
@@ -797,7 +826,10 @@ function canonicalMAWidth(n){
 
 function canonicalMAEnabled(n){
   const el = document.getElementById("tglEMA" + n);
-  return !!(el && el.checked);
+  if(el) return !!el.checked;
+  const key = emaToggleStoreKey(n);
+  if(!key) return false;
+  try{ return localStorage.getItem(key) === "1"; }catch(_e){ return false; }
 }
 
 function rebuildCanonicalMASeries(){
@@ -828,15 +860,15 @@ function chartIndicatorPeriodValue(n,fallback){
 
 function longestEnabledChartIndicatorPeriod(){
   const defs = [
-    [tglEMA20,1,20],
-    [tglEMA50,2,50],
-    [tglEMA3,3,100],
+    [tglEMA20,1,9],
+    [tglEMA50,2,21],
+    [tglEMA3,3,55],
     [document.getElementById("tglEMA4"),4,100],
     [document.getElementById("tglEMA5"),5,200]
   ];
   let longest = 0;
-  for(const [toggle,n,fallback] of defs){
-    if(toggle && toggle.checked) longest = Math.max(longest, chartIndicatorPeriodValue(n,fallback));
+  for(const [_toggle,n,fallback] of defs){
+    if(canonicalMAEnabled(n)) longest = Math.max(longest, chartIndicatorPeriodValue(n,fallback));
   }
   return longest;
 }
@@ -899,9 +931,9 @@ function VWAP(src){
 }
 
 function indicators(){
-  ema20 = EMA(candles,emaPeriod(emaPeriod1El,20));
-  ema50 = EMA(candles,emaPeriod(emaPeriod2El,50));
-  ema3 = EMA(candles,emaPeriod(emaPeriod3El,100));
+  ema20 = EMA(candles,emaPeriod(emaPeriod1El,9));
+  ema50 = EMA(candles,emaPeriod(emaPeriod2El,21));
+  ema3 = EMA(candles,emaPeriod(emaPeriod3El,55));
   window.ema20 = ema20;
   window.ema50 = ema50;
   window.ema3 = ema3;
@@ -4004,11 +4036,22 @@ function draw(){
 
   const im = idxMap(vis);
 
-  if(tglEMA20.checked) drawInd(ema20,vis,im,mapX,mapY,getIndicatorStroke("ema1","#3b82f6"),2);
-  if(tglEMA50.checked) drawInd(ema50,vis,im,mapX,mapY,getIndicatorStroke("ema2","#a855f7"),2);
-  if(tglEMA3 && tglEMA3.checked) drawInd(ema3,vis,im,mapX,mapY,getIndicatorStroke("ema3","#14b8a6"),2);
-  if(canonicalMAEnabled(4)) drawInd(ema4,vis,im,mapX,mapY,canonicalMAStroke(4),canonicalMAWidth(4));
-  if(canonicalMAEnabled(5)) drawInd(ema5,vis,im,mapX,mapY,canonicalMAStroke(5),canonicalMAWidth(5));
+  const emaOverlayApi = window.EMA_CHART_OVERLAY_MODULE || null;
+  const emaSeriesByIndex = {1:ema20,2:ema50,3:ema3,4:ema4,5:ema5};
+  [1,2,3,4,5].forEach(n => {
+    const on = emaOverlayApi && typeof emaOverlayApi.enabled === "function"
+      ? emaOverlayApi.enabled(n)
+      : canonicalMAEnabled(n);
+    if(!on) return;
+    const series = emaSeriesByIndex[n];
+    const stroke = emaOverlayApi && typeof emaOverlayApi.strokeFor === "function"
+      ? emaOverlayApi.strokeFor(n)
+      : (n <= 3 ? getIndicatorStroke("ema" + n,["#ff7900","#0000ff","#d600a9"][n-1]) : canonicalMAStroke(n));
+    const lineWidth = emaOverlayApi && typeof emaOverlayApi.width === "function"
+      ? emaOverlayApi.width(n)
+      : canonicalMAWidth(n);
+    drawInd(series,vis,im,mapX,mapY,stroke,lineWidth);
+  });
   if(tglVWAP.checked) drawInd(vwap,vis,im,mapX,mapY,getIndicatorStroke("vwap","#f59e0b"),2);
 
   tradeOverlays(vis,mapX,mapY,slot,clip);
@@ -4398,12 +4441,33 @@ rememberKeysEl.addEventListener("change",() => {
   tglResults,
   tglDollarValues,
   tglLots
-].forEach(el => el && el.addEventListener("change",draw));
+].forEach(el => el && el.addEventListener("change",() => {
+  try{
+    if(window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.handleToggleChange === "function"){
+      window.EMA_CHART_OVERLAY_MODULE.handleToggleChange(el);
+    }
+  }catch(_e){}
+  draw();
+}));
 
 [emaPeriod1El,emaPeriod2El,emaPeriod3El].forEach(el => {
   if(!el) return;
-  el.addEventListener("change",saveEmaSettings);
-  el.addEventListener("input",saveEmaSettings);
+  const bind = () => {
+    const prev = Number(el.dataset.prevPeriod || el.value || "0");
+    saveEmaSettings();
+    const next = Number(el.value || "0");
+    el.dataset.prevPeriod = String(next);
+    if(next > prev){
+      try{
+        if(window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState === "function"){
+          window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState();
+        }
+      }catch(_e){}
+    }
+  };
+  el.dataset.prevPeriod = String(Number(el.value || "0"));
+  el.addEventListener("change",bind);
+  el.addEventListener("input",bind);
 });
 
 window.addEventListener("resize",resizeCanvas);
@@ -7489,9 +7553,9 @@ startTradeAuto();
       <div class="settings-card-desc">Set period, color, and transparency in one row per indicator.</div>
       <div class="patch8-indicator-grid">
         <div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div>
-        ${p8Row('EMA 1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','ema1Color','ema1Alpha',p8Val('emaPeriod1','20'))}
-        ${p8Row('EMA 2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','ema2Color','ema2Alpha',p8Val('emaPeriod2','50'))}
-        ${p8Row('EMA 3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','ema3Color','ema3Alpha',p8Val('emaPeriod3','100'))}
+        ${p8Row('EMA 1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','ema1Color','ema1Alpha',p8Val('emaPeriod1','9'))}
+        ${p8Row('EMA 2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','ema2Color','ema2Alpha',p8Val('emaPeriod2','21'))}
+        ${p8Row('EMA 3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','ema3Color','ema3Alpha',p8Val('emaPeriod3','55'))}
         ${p8Row('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','vwapColor','vwapAlpha','')}
       </div>`;
 
@@ -8811,11 +8875,22 @@ startTradeAuto();
     }
 
     const im = idxMap(vis);
-    if(tglEMA20.checked) drawInd(ema20,vis,im,mapX,mapY,getIndicatorStroke('ema1','#3b82f6'),2);
-    if(tglEMA50.checked) drawInd(ema50,vis,im,mapX,mapY,getIndicatorStroke('ema2','#a855f7'),2);
-    if(tglEMA3 && tglEMA3.checked) drawInd(ema3,vis,im,mapX,mapY,getIndicatorStroke('ema3','#14b8a6'),2);
-    if(canonicalMAEnabled(4)) drawInd(ema4,vis,im,mapX,mapY,canonicalMAStroke(4),canonicalMAWidth(4));
-    if(canonicalMAEnabled(5)) drawInd(ema5,vis,im,mapX,mapY,canonicalMAStroke(5),canonicalMAWidth(5));
+    const emaOverlayApi = window.EMA_CHART_OVERLAY_MODULE || null;
+    const emaSeriesByIndex = {1:ema20,2:ema50,3:ema3,4:ema4,5:ema5};
+    [1,2,3,4,5].forEach(n => {
+      const on = emaOverlayApi && typeof emaOverlayApi.enabled === 'function'
+        ? emaOverlayApi.enabled(n)
+        : canonicalMAEnabled(n);
+      if(!on) return;
+      const series = emaSeriesByIndex[n];
+      const stroke = emaOverlayApi && typeof emaOverlayApi.strokeFor === 'function'
+        ? emaOverlayApi.strokeFor(n)
+        : (n <= 3 ? getIndicatorStroke('ema'+n,['#ff7900','#0000ff','#d600a9'][n-1]) : canonicalMAStroke(n));
+      const lineWidth = emaOverlayApi && typeof emaOverlayApi.width === 'function'
+        ? emaOverlayApi.width(n)
+        : canonicalMAWidth(n);
+      drawInd(series,vis,im,mapX,mapY,stroke,lineWidth);
+    });
     if(tglVWAP.checked) drawInd(vwap,vis,im,mapX,mapY,getIndicatorStroke('vwap','#f59e0b'),2);
 
     tradeOverlays(vis,mapX,mapY,slot,clip);
@@ -11932,9 +12007,9 @@ startTradeAuto();
     if(!grid) return;
     grid.innerHTML = `
       <div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>
-      ${row18('EMA 1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width','ema1',v18('emaPeriod1','20'))}
-      ${row18('EMA 2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width','ema2',v18('emaPeriod2','50'))}
-      ${row18('EMA 3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width','ema3',v18('emaPeriod3','100'))}
+      ${row18('EMA 1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width','ema1',v18('emaPeriod1','9'))}
+      ${row18('EMA 2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width','ema2',v18('emaPeriod2','21'))}
+      ${row18('EMA 3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width','ema3',v18('emaPeriod3','55'))}
       ${row18('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','patch18VWAPWidth','vwap','')}`;
 
     const periodMap = [
@@ -16499,11 +16574,12 @@ If there is NO open position, use this Section 2 instead:
 
 (() => {
   "use strict";
-  const MODULE = "V13_UI_V2_PATCH_33_CLEAN_BASE_MASTACK_FIX_R5_MA_VWAP_ISOLATION";
+  const MODULE = "EMA_CHART_OVERLAY_MODULE";
   const $id = id => document.getElementById(id);
   const STYLE = "btc_futures_chart_v13_05_";
   const WIDTH = "btc_futures_chart_v13_18_";
   const EXTRA = "btc_futures_chart_v13_32r1_";
+  const TOGGLE = "btc_futures_chart_v12_ema_toggle_";
   const CORE_PERIOD_KEYS = [null,"ema_period_1","ema_period_2","ema_period_3"];
   const STORE = (typeof window.STORE === "string" ? window.STORE : "btc_futures_chart_v12_");
   const defaults = {
@@ -16520,6 +16596,7 @@ If there is NO open position, use this Section 2 instead:
   const set = (k,v) => localStorage.setItem(k,String(v));
   const corePeriodKey = n => STORE + CORE_PERIOD_KEYS[n];
   const periodKey = n => n <= 3 ? corePeriodKey(n) : EXTRA + "ma" + n + "Period";
+  const toggleKey = n => TOGGLE + n;
   const colorKey = n => n <= 3 ? STYLE + "ema" + n + "_color" : EXTRA + "ma" + n + "Color";
   const alphaKey = n => n <= 3 ? STYLE + "ema" + n + "_alpha" : EXTRA + "ma" + n + "Alpha";
   const widthKey = n => n <= 3 ? WIDTH + "ema" + n + "_width" : EXTRA + "ma" + n + "Width";
@@ -16542,7 +16619,16 @@ If there is NO open position, use this Section 2 instead:
   }
   function strokeFor(n){ return rgba(color(n),alpha(n)); }
   function vwapStroke(){ return rgba(vwapColor(),vwapAlpha()); }
-  function enabled(n){ const el=$id(defaults[n].toggle); return !!(el && el.checked); }
+  function enabled(n){
+    const el=$id(defaults[n].toggle);
+    if(el) return !!el.checked;
+    try{
+      const raw = localStorage.getItem(toggleKey(n));
+      return raw === "1";
+    }catch(_e){
+      return false;
+    }
+  }
   function tooltipEnabled(n){
     const state = window.__maisoTooltipToggleState;
     if(state && typeof state[n] === "boolean") return state[n];
@@ -16578,9 +16664,20 @@ If there is NO open position, use this Section 2 instead:
       }
     }
     el = $id(defaults[n].toggle);
+    if(el){
+      try{
+        const raw = localStorage.getItem(toggleKey(n));
+        if(raw != null) el.checked = raw === "1";
+      }catch(_e){}
+    }
     if(el && !el.__maisoClean){
       el.__maisoClean = true;
-      el.addEventListener("change",()=>{ try{ if(typeof indicators==='function') indicators(); }catch(_e){} try{ draw(); }catch(_e){} },false);
+      el.addEventListener("change",()=>{ 
+        try{ localStorage.setItem(toggleKey(n),el.checked ? "1" : "0"); }catch(_e){}
+        try{ if(window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState === "function"){ window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState(); } }catch(_e){}
+        try{ if(typeof indicators==='function') indicators(); }catch(_e){}
+        try{ draw(); }catch(_e){}
+      },false);
     }
   }
   function ensureToggles(){ [4,5].forEach(ensureToggle); updateLabels(); }
@@ -16595,6 +16692,34 @@ If there is NO open position, use this Section 2 instead:
       if(typeof VWAP === "function") window.vwap = vwap = VWAP(candles);
     }catch(e){ console.error(MODULE + " rebuildSeries failed", e); }
     updateLabels();
+  }
+  async function ensureDepthForCurrentState(){
+    if(!Array.isArray(candles) || !candles.length) return;
+    if(typeof chartDesiredClosedDepth !== "function" || typeof olderIfNeeded !== "function" || typeof range !== "function") return;
+    const need = chartDesiredClosedDepth(visibleCount || DEF_VISIBLE);
+    if(candles.length >= need) return;
+    const prevVisible = visibleCount;
+    const prevRight = rightOffset;
+    const prevManualY = manualY;
+    const prevYMin = yMin;
+    const prevYMax = yMax;
+    try{
+      olderFetchArmed = true;
+      olderFetchTargetVisible = Math.max(Number(olderFetchTargetVisible) || 0,Number(prevVisible) || 0);
+      await olderIfNeeded(range());
+    }catch(_e){}
+    if(Number.isFinite(prevVisible) && prevVisible > 0) visibleCount = prevVisible;
+    if(Number.isFinite(prevRight) && prevRight >= 0) rightOffset = prevRight;
+    manualY = !!prevManualY;
+    if(prevManualY){
+      yMin = prevYMin;
+      yMax = prevYMax;
+    }
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+  }
+  function handlePeriodMaybeIncrease(n,oldVal,newVal){
+    if(!(newVal > oldVal)) return;
+    ensureDepthForCurrentState();
   }
   const prevIndicators = typeof indicators === "function" ? indicators : null;
   indicators = window.indicators = function(){
@@ -16613,7 +16738,16 @@ If there is NO open position, use this Section 2 instead:
     grid.innerHTML = `<div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>${[1,2,3,4,5].map(row).join("")}<div>VWAP</div><div><span style="color:var(--muted)">—</span></div><input id="maisoVWAPColor" type="color" value="${vwapColor()}"><input id="maisoVWAPAlpha" type="range" min="0" max="100" step="1" value="${vwapAlpha()}"><input id="maisoVWAPWidth" type="range" min="1" max="10" step="0.5" value="${vwapWidth()}">`;
     [1,2,3,4,5].forEach(n=>{
       const p=$id(`maisoMA${n}Period`), c=$id(`maisoMA${n}Color`), a=$id(`maisoMA${n}Alpha`), w=$id(`maisoMA${n}Width`);
-      const syncPeriod=()=>{ set(periodKey(n), clamp(Math.round(num(p.value,defaults[n].period)),1,999)); syncHiddenPeriodInputs(); rebuildSeries(); try{ if(window.MA_STACK_STRIP) window.MA_STACK_STRIP.refreshSoon(); }catch(_e){} try{ draw(); }catch(_e){} };
+      const syncPeriod=()=>{ 
+        const oldPeriod = period(n);
+        const nextPeriod = clamp(Math.round(num(p.value,defaults[n].period)),1,999);
+        set(periodKey(n), nextPeriod);
+        syncHiddenPeriodInputs();
+        rebuildSeries();
+        handlePeriodMaybeIncrease(n,oldPeriod,nextPeriod);
+        try{ if(window.MA_STACK_STRIP) window.MA_STACK_STRIP.refreshSoon(); }catch(_e){}
+        try{ draw(); }catch(_e){}
+      };
       const syncColor=()=>{ set(colorKey(n), c.value); try{ draw(); }catch(_e){} };
       const syncAlpha=()=>{ set(alphaKey(n), clamp(num(a.value,defaults[n].alpha),0,100)); try{ draw(); }catch(_e){} };
       const syncWidth=()=>{ set(widthKey(n), clamp(num(w.value,defaults[n].width),1,10)); try{ draw(); }catch(_e){} };
@@ -16641,6 +16775,25 @@ If there is NO open position, use this Section 2 instead:
   }
   function install(){ ensureToggles(); syncHiddenPeriodInputs(); rebuildSeries(); rebuildSettings(); updateLabels(); try{ draw(); }catch(_e){} }
   window.MA_VWAP_ISOLATION_R5 = {version:MODULE,install,period,color,alpha,width,vwapColor,vwapAlpha,vwapWidth};
+  window.EMA_CHART_OVERLAY_MODULE = {
+    version:MODULE,
+    install,
+    period,
+    color,
+    alpha,
+    width,
+    strokeFor,
+    enabled,
+    ensureDepthForCurrentState,
+    handleToggleChange(el){
+      if(!el || !el.id) return;
+      const byId = {tglEMA20:1,tglEMA50:2,tglEMA3:3,tglEMA4:4,tglEMA5:5};
+      const n = byId[el.id];
+      if(!n) return;
+      try{ localStorage.setItem(toggleKey(n),el.checked ? "1" : "0"); }catch(_e){}
+      if(el.checked) ensureDepthForCurrentState();
+    }
+  };
   install(); setTimeout(install,100); setTimeout(install,700); window.addEventListener("load",()=>setTimeout(install,0),{once:true});
 })();
 
