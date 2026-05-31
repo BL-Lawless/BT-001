@@ -17878,21 +17878,27 @@ If there is NO open position, use this Section 2 instead:
   const MODULE = "CALCULATOR_MODULE";
   const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
   const OPEN_ALGO_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
+  const ALGO_ORDER_WRITE_URL = "https://fapi.binance.com/fapi/v1/algoOrder";
   const ORDER_WRITE_URL = "https://fapi.binance.com/fapi/v1/order";
   const STORE = "btc_futures_chart_v13_calculator_";
   const LEVELS_VISIBLE_KEY = STORE + "levels_visible";
+  const SL_SEND_ENABLED_KEY = STORE + "sl_send_enabled";
+  const CBS_ENABLED_KEY = STORE + "cbs_enabled";
   let zTop = 82;
   let direction = "LONG";
   let syncingStop = false;
   let lastStopEdit = "level";
   let levelsVisible = true;
+  let slSendEnabled = false;
+  let cbsEnabled = false;
   let binanceLimitRowSeq = 0;
   const binanceLimitRowMetaByRowId = new Map();
+  let currentStopAlgoMeta = null;
   let lastReadDiagnostic = null;
   let lastOverlayDiagnostic = null;
   let lastSendDiagnostic = null;
   let overlayLevelBoxes = [];
-  let overlayDrag = {active:false,row:null};
+  let overlayDrag = {active:false,row:null,target:"row"};
   let suppressNextOverlayClick = false;
   let sendPopupDrag = null;
   let lastReadStateSnapshot = null;
@@ -17940,6 +17946,20 @@ If there is NO open position, use this Section 2 instead:
       return true;
     }
   }
+  function loadSlSendEnabled(){
+    try{
+      return localStorage.getItem(SL_SEND_ENABLED_KEY) === "1";
+    }catch(_e){
+      return false;
+    }
+  }
+  function loadCbsEnabled(){
+    try{
+      return localStorage.getItem(CBS_ENABLED_KEY) === "1";
+    }catch(_e){
+      return false;
+    }
+  }
   function saveLevelsVisible(next){
     levelsVisible = !!next;
     try{ localStorage.setItem(LEVELS_VISIBLE_KEY,levelsVisible ? "1" : "0"); }catch(_e){}
@@ -17952,6 +17972,29 @@ If there is NO open position, use this Section 2 instead:
     }
     try{ if(typeof draw === "function") draw(); }catch(_e){}
   }
+  function saveSlSendEnabled(next){
+    slSendEnabled = !!next;
+    try{ localStorage.setItem(SL_SEND_ENABLED_KEY,slSendEnabled ? "1" : "0"); }catch(_e){}
+    const tgl = q("calcModuleSlToggle");
+    if(tgl) tgl.checked = slSendEnabled;
+    const wrap = q("calcModuleSlToggleWrap");
+    if(wrap){
+      wrap.classList.toggle("is-on",slSendEnabled);
+      wrap.classList.toggle("is-off",!slSendEnabled);
+    }
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+  }
+  function saveCbsEnabled(next){
+    cbsEnabled = !!next;
+    try{ localStorage.setItem(CBS_ENABLED_KEY,cbsEnabled ? "1" : "0"); }catch(_e){}
+    const tgl = q("calcModuleCbsToggle");
+    if(tgl) tgl.checked = cbsEnabled;
+    const wrap = q("calcModuleCbsToggleWrap");
+    if(wrap){
+      wrap.classList.toggle("is-on",cbsEnabled);
+      wrap.classList.toggle("is-off",!cbsEnabled);
+    }
+  }
 
   function calcLevelsInteractive(){
     try{
@@ -17959,6 +18002,9 @@ If there is NO open position, use this Section 2 instead:
       const winVisible = win ? !win.classList.contains("hidden") : false;
       return !!(levelsVisible && winVisible);
     }catch(_e){ return !!levelsVisible; }
+  }
+  function calcSlInteractive(){
+    return calcLevelsInteractive() && slSendEnabled;
   }
   function levelInput(row){ return row ? row.querySelector(".calc-module-level") : null; }
   function lotInput(row){ return row ? row.querySelector(".calc-module-lot") : null; }
@@ -18044,7 +18090,10 @@ If there is NO open position, use this Section 2 instead:
           </div>
         </div>
         <div class="calc-module-stop">
-          <label for="calcModuleStopLevel">Stop Level</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" placeholder="Level">
+          <label class="calc-module-mini-toggle calc-module-sl-line-toggle" id="calcModuleSlToggleWrap" title="Include SL cancel/recreate in Confirm Send and allow SL drag">
+            <input id="calcModuleSlToggle" type="checkbox" aria-label="Enable SL send and SL drag">
+          </label>
+          <label for="calcModuleStopLevel">Stop loss</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" placeholder="Level">
           <label for="calcModuleStopDistance">SL Distance</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" placeholder="Distance">
         </div>
         <div class="calc-module-panel">
@@ -18069,6 +18118,10 @@ If there is NO open position, use this Section 2 instead:
               <span>Levels</span>
             </label>
             <button id="calcModuleSend" type="button" title="Prepare Binance order send plan">Send</button>
+            <label class="calc-module-mini-toggle" id="calcModuleCbsToggleWrap" title="Cancel Binance-read LIMIT orders before placing fresh LIMIT orders">
+              <input id="calcModuleCbsToggle" type="checkbox">
+              <span>CBS</span>
+            </label>
           </div>
           <div class="calc-module-status" id="calcModuleStatus"></div>
         </div>
@@ -18338,6 +18391,7 @@ If there is NO open position, use this Section 2 instead:
     const stopDistance = q("calcModuleStopDistance");
     if(stopLevel) stopLevel.value = "";
     if(stopDistance) stopDistance.value = "";
+    currentStopAlgoMeta = null;
     setStatus("Calculator cleared locally.");
     calculate();
   }
@@ -18428,6 +18482,21 @@ If there is NO open position, use this Section 2 instead:
       executedQty:order && order.executedQty != null ? order.executedQty : null,
       timeInForce:order && order.timeInForce != null ? order.timeInForce : null,
       reduceOnly:order && order.reduceOnly != null ? order.reduceOnly : null,
+      workingType:order && order.workingType != null ? order.workingType : null,
+      updateTime:order && order.updateTime != null ? order.updateTime : null,
+      rawOrder:safeCloneOrder(order)
+    };
+  }
+  function buildAlgoOrderMeta(order){
+    return {
+      algoId:order && order.algoId != null ? order.algoId : null,
+      clientAlgoId:order && order.clientAlgoId != null ? order.clientAlgoId : null,
+      symbol:order && order.symbol != null ? order.symbol : null,
+      side:order && order.side != null ? order.side : null,
+      positionSide:order && order.positionSide != null ? order.positionSide : null,
+      type:order && (order.type != null ? order.type : order.algoType != null ? order.algoType : null),
+      status:order && (order.status != null ? order.status : order.orderStatus != null ? order.orderStatus : null),
+      triggerPrice:orderStopPrice(order),
       workingType:order && order.workingType != null ? order.workingType : null,
       updateTime:order && order.updateTime != null ? order.updateTime : null,
       rawOrder:safeCloneOrder(order)
@@ -18607,6 +18676,18 @@ If there is NO open position, use this Section 2 instead:
       <div class="calc-module-send-summary" id="calcModuleSendSummary"></div>
       <div class="calc-module-send-wrap">
         <table class="calc-module-send-table">
+          <colgroup>
+            <col class="calc-col-action">
+            <col class="calc-col-type">
+            <col class="calc-col-side">
+            <col class="calc-col-old-price">
+            <col class="calc-col-new-price">
+            <col class="calc-col-old-qty">
+            <col class="calc-col-new-qty">
+            <col class="calc-col-order-id">
+            <col class="calc-col-status">
+            <col class="calc-col-response">
+          </colgroup>
           <thead>
             <tr>
               <th>Action</th>
@@ -18722,11 +18803,14 @@ If there is NO open position, use this Section 2 instead:
     const hasResult = sendPlanState.rows.some(r => r && (r.status === "Confirmed" || r.status === "Failed"));
     const title = hasResult ? "Send Results" : "Send Plan";
     const summary = [
+      "CBS: " + (sendPlanState.cbsEnabled ? "ON" : "OFF"),
+      "SL Send: " + (sendPlanState.slSendEnabled ? "ON" : "OFF"),
       "Writable: " + writableCount,
       "Blocked: " + blockedCount,
       "Ignored: " + sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
       "Skipped: " + sendPlanState.rows.filter(r => r && r.action === "Skip").length
     ].join(" | ");
+    let lastSection = "";
     const rowsHtml = sendPlanState.rows.map((row) => {
       const isError = row && (
         row.action === "Blocked" ||
@@ -18738,10 +18822,15 @@ If there is NO open position, use this Section 2 instead:
         ? "is-error"
         : row.action === "Ignored"
           ? "is-ignored"
-          : row.action === "Modify" || row.action === "New"
+          : row.writable
             ? "is-writable"
             : "";
-      return `<tr class="${cls}">
+      const section = row && row.section ? String(row.section) : "LIMIT Orders";
+      const sectionHtml = section !== lastSection
+        ? `<tr class="calc-module-send-section"><td colspan="10">${hEsc(section)}</td></tr>`
+        : "";
+      lastSection = section;
+      return `${sectionHtml}<tr class="${cls}">
         <td>${hEsc(row.action)}</td>
         <td>${hEsc(row.type)}</td>
         <td>${hEsc(row.side || "-")}</td>
@@ -18751,7 +18840,7 @@ If there is NO open position, use this Section 2 instead:
         <td>${hEsc(row.newQty || "-")}</td>
         <td>${hEsc(row.orderId || "-")}</td>
         <td>${hEsc(row.status || "-")}</td>
-        <td>${hEsc(row.response || "-")}</td>
+        <td class="calc-module-send-response">${hEsc(row.response || "-")}</td>
       </tr>`;
     }).join("");
     const titleEl = q("calcModuleSendPopupTitle");
@@ -18788,6 +18877,7 @@ If there is NO open position, use this Section 2 instead:
   function currentOverlayRows(){
     const entries = usableOverlayRows("calcModuleEntryRows");
     const exits = usableOverlayRows("calcModuleExitRows");
+    const slLevel = num(q("calcModuleStopLevel")?.value);
     const entryQty = entries.reduce((sum,row) => sum + row.lot,0);
     const entryAvg = entryQty > 0
       ? entries.reduce((sum,row) => sum + row.level * row.lot,0) / entryQty
@@ -18818,7 +18908,21 @@ If there is NO open position, use this Section 2 instead:
         text:"Ex " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + plText
       };
     });
-    return {entries:entryRows, exits:exitRows, entryAvg, entryQty};
+    const stopRow = slLevel != null && slLevel > 0 ? {
+      type:"sl",
+      level:slLevel,
+      row:null,
+      openPosition:false,
+      text:"SL | " + (entryAvg == null || entryQty <= 0
+        ? "$-"
+        : (() => {
+            const pl = direction === "LONG"
+              ? (slLevel - entryAvg) * entryQty
+              : (entryAvg - slLevel) * entryQty;
+            return pl < 0 ? "-$" + Math.abs(pl).toFixed(2) : "$" + Math.abs(pl).toFixed(2);
+          })())
+    } : null;
+    return {entries:entryRows, exits:exitRows, stop:stopRow, entryAvg, entryQty};
   }
   function overlayBoxAtClient(clientX,clientY){
     if(!canvas || !overlayLevelBoxes.length) return null;
@@ -18844,6 +18948,21 @@ If there is NO open position, use this Section 2 instead:
     markSendPlanStale("Chart drag changed a row level after preflight.");
     calculate();
   }
+  function setStopLevelFromClientY(clientY){
+    const rect = canvas.getBoundingClientRect();
+    const y = clientY - rect.top;
+    const price = priceFromCanvasY(y);
+    if(price == null) return;
+    const input = q("calcModuleStopLevel");
+    if(!input || input.disabled || input.readOnly) return;
+    const next = String(Math.round(price));
+    if(input.value === next) return;
+    input.value = next;
+    lastStopEdit = "level";
+    markSendPlanStale("Chart drag changed SL level after preflight.");
+    syncStopFromLevel(readEntry().avg);
+    calculate();
+  }
   function drawCalculatorLevelsOverlay(){
     overlayLevelBoxes = [];
     if(!levelsVisible) return;
@@ -18858,7 +18977,7 @@ If there is NO open position, use this Section 2 instead:
     if(top == null || priceH == null || minP == null || maxP == null || left == null || chartRight == null) return;
     if(!(priceH > 0) || !(maxP > minP) || !(chartRight > left)) return;
     const overlayRows = currentOverlayRows();
-    const items = overlayRows.entries.concat(overlayRows.exits)
+    const items = overlayRows.entries.concat(overlayRows.exits,overlayRows.stop ? [overlayRows.stop] : [])
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
         return { ...item, y };
@@ -18869,6 +18988,7 @@ If there is NO open position, use this Section 2 instead:
       visible:levelsVisible,
       entries:overlayRows.entries.length,
       exits:overlayRows.exits.length,
+      stop:overlayRows.stop ? 1 : 0,
       drawn:items.length,
       boxes:overlayLevelBoxes.length,
       dragActive:!!overlayDrag.active
@@ -18889,7 +19009,7 @@ If there is NO open position, use this Section 2 instead:
     ctx.setLineDash([5,2]);
     items.forEach(item => {
       const y = px(item.y);
-      ctx.strokeStyle = "rgba(112,122,138,0.70)";
+      ctx.strokeStyle = item.type === "sl" ? "rgba(180,126,38,0.70)" : "rgba(112,122,138,0.70)";
       ctx.beginPath();
       ctx.moveTo(px(left),y);
       ctx.lineTo(px(chartRight),y);
@@ -18929,12 +19049,17 @@ If there is NO open position, use this Section 2 instead:
       const x = chartRight - p.w - 8;
       const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
       const isOpenPos = !!p.item.openPosition;
-      ctx.fillStyle = isOpenPos ? "rgba(255,247,204,0.95)" : "rgba(255,255,255,0.94)";
-      ctx.strokeStyle = "rgba(112,122,138,0.70)";
+      const isSl = p.item.type === "sl";
+      ctx.fillStyle = isOpenPos
+        ? "rgba(255,247,204,0.95)"
+        : isSl
+          ? "rgba(255,243,214,0.96)"
+          : "rgba(255,255,255,0.94)";
+      ctx.strokeStyle = isSl ? "rgba(180,126,38,0.70)" : "rgba(112,122,138,0.70)";
       ctx.lineWidth = 1;
       ctx.fillRect(ix(x),ix(y),p.w,p.h);
       ctx.strokeRect(px(x),px(y),p.w,p.h);
-      ctx.fillStyle = "#39414a";
+      ctx.fillStyle = isSl ? "#8b5e14" : "#39414a";
       ctx.textAlign = "left";
       ctx.fillText(p.item.text,x + padX,y + p.h / 2 + 0.5);
       overlayLevelBoxes.push({
@@ -18943,8 +19068,9 @@ If there is NO open position, use this Section 2 instead:
         x2:x + p.w,
         y2:y + p.h,
         row:p.item.row,
+        type:p.item.type,
         openPosition:isOpenPos,
-        draggable:!isOpenPos && calcLevelsInteractive()
+        draggable:(!isOpenPos && p.item.type !== "sl" && calcLevelsInteractive()) || (p.item.type === "sl" && calcSlInteractive())
       });
     });
     publishOverlayDiagnostic({
@@ -18952,6 +19078,7 @@ If there is NO open position, use this Section 2 instead:
       visible:levelsVisible,
       entries:overlayRows.entries.length,
       exits:overlayRows.exits.length,
+      stop:overlayRows.stop ? 1 : 0,
       drawn:items.length,
       boxes:overlayLevelBoxes.length,
       dragActive:!!overlayDrag.active
@@ -18975,17 +19102,21 @@ If there is NO open position, use this Section 2 instead:
     canvas.addEventListener("mousedown",e => {
       if(!calcLevelsInteractive()) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if(!hit || !hit.draggable || !hit.row) return;
+      if(!hit || !hit.draggable) return;
+      if(hit.type !== "sl" && !hit.row) return;
       overlayDrag.active = true;
-      overlayDrag.row = hit.row;
-      setRowLevelFromClientY(hit.row,e.clientY);
+      overlayDrag.row = hit.row || null;
+      overlayDrag.target = hit.type === "sl" ? "sl" : "row";
+      if(overlayDrag.target === "sl") setStopLevelFromClientY(e.clientY);
+      else setRowLevelFromClientY(hit.row,e.clientY);
       canvas.style.cursor = "pointer";
       e.preventDefault();
       e.stopImmediatePropagation();
     },true);
     canvas.addEventListener("mousemove",e => {
       if(overlayDrag.active){
-        setRowLevelFromClientY(overlayDrag.row,e.clientY);
+        if(overlayDrag.target === "sl") setStopLevelFromClientY(e.clientY);
+        else setRowLevelFromClientY(overlayDrag.row,e.clientY);
         canvas.style.cursor = "pointer";
         return;
       }
@@ -18998,6 +19129,7 @@ If there is NO open position, use this Section 2 instead:
       if(!overlayDrag.active) return;
       overlayDrag.active = false;
       overlayDrag.row = null;
+      overlayDrag.target = "row";
       suppressNextOverlayClick = true;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -19129,6 +19261,7 @@ If there is NO open position, use this Section 2 instead:
     return null;
   }
   function addPlanRow(plan,row){
+    if(row && !row.section) row.section = "LIMIT Orders";
     plan.rows.push(row);
     return row;
   }
@@ -19263,7 +19396,9 @@ If there is NO open position, use this Section 2 instead:
       executing:false,
       stale:false,
       staleReason:"",
-      liveSnapshot:null
+      liveSnapshot:null,
+      cbsEnabled:!!cbsEnabled,
+      slSendEnabled:!!slSendEnabled
     };
     const contextDirection = inferDirectionForSend(livePos);
     const liveLimitMap = collectLiveLimitOrdersByKey(liveSnapshot);
@@ -19273,11 +19408,13 @@ If there is NO open position, use this Section 2 instead:
     const entryRows = rows("calcModuleEntryRows");
     const exitRows = rows("calcModuleExitRows");
     const presentBinanceKeys = new Set();
+    const limitRowRecords = [];
 
     entryRows.forEach(row => {
       if(isRowEmpty(row)) return;
       if(isOpenPositionRow(row)){
         addPlanRow(plan,{
+          section:"LIMIT Orders",
           action:"Ignored",
           type:"Open Position",
           side:contextDirection === "SHORT" ? "SELL" : "BUY",
@@ -19295,64 +19432,256 @@ If there is NO open position, use this Section 2 instead:
         return;
       }
       const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
-      if(meta && row.dataset && row.dataset.source === "binance-limit"){
-        const key = orderKeyFromMeta(meta);
-        if(!key){
-          addPlanRow(plan,{
-            action:"Blocked",
-            type:"Entry",
-            side:"-",
-            oldPrice:"-",
-            newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
-            oldQty:"-",
-            newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
-            orderId:"-",
-            status:"Blocked",
-            response:"Calculator row is missing required metadata for modifying an existing Binance order.",
-            writable:false,
-            mode:"blocked",
-            rowRef:row
-          });
-          plan.blocked = true;
-          return;
-        }
-        presentBinanceKeys.add(key);
-        prepareExistingRowPlan(plan,row,"entry",meta,baseMap.get(key),liveLimitMap.get(key));
-        return;
-      }
-      prepareManualRowPlan(plan,row,"entry",contextDirection);
+      limitRowRecords.push({row,rowType:"entry",meta});
     });
-
     exitRows.forEach(row => {
       if(isRowEmpty(row)) return;
       const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
-      if(meta && row.dataset && row.dataset.source === "binance-limit"){
-        const key = orderKeyFromMeta(meta);
-        if(!key){
+      limitRowRecords.push({row,rowType:"exit",meta});
+    });
+
+    if(slSendEnabled){
+      const stopLevel = num(q("calcModuleStopLevel")?.value);
+      if(!livePos){
+        plan.blocked = true;
+        addPlanRow(plan,{
+          section:"SL Operation",
+          action:"Blocked",
+          type:"SL",
+          side:"-",
+          oldPrice:"-",
+          newPrice:formatPlanValue(stopLevel,"price"),
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"No live open position. SL send requires an open position.",
+          writable:false,
+          mode:"blocked"
+        });
+      }else if(stopLevel == null || stopLevel <= 0){
+        plan.blocked = true;
+        addPlanRow(plan,{
+          section:"SL Operation",
+          action:"Blocked",
+          type:"SL",
+          side:livePos.side === "SHORT" ? "BUY" : "SELL",
+          oldPrice:"-",
+          newPrice:formatPlanValue(stopLevel,"price"),
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"SL level is invalid.",
+          writable:false,
+          mode:"blocked"
+        });
+      }else{
+        const liveAlgoStop = findStopOrderForPosition(livePos,liveSnapshot,true);
+        const stopMeta = liveAlgoStop && liveAlgoStop.order
+          ? buildAlgoOrderMeta(liveAlgoStop.order)
+          : currentStopAlgoMeta;
+        if(stopMeta && (stopMeta.algoId != null || String(stopMeta.clientAlgoId || "").trim() !== "")){
           addPlanRow(plan,{
-            action:"Blocked",
-            type:"Exit",
-            side:"-",
-            oldPrice:"-",
-            newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+            section:"SL Operation",
+            action:"Cancel",
+            type:"SL",
+            side:toUpper(stopMeta.side) || (livePos.side === "SHORT" ? "BUY" : "SELL"),
+            oldPrice:formatPlanValue(stopMeta.triggerPrice,"price"),
+            newPrice:"-",
             oldQty:"-",
-            newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
-            orderId:"-",
-            status:"Blocked",
-            response:"Calculator row is missing required metadata for modifying an existing Binance order.",
-            writable:false,
-            mode:"blocked",
-            rowRef:row
+            newQty:"-",
+            orderId:stopMeta.algoId != null ? String(stopMeta.algoId) : String(stopMeta.clientAlgoId || "-"),
+            status:"Planned",
+            response:"",
+            writable:true,
+            mode:"sl-cancel",
+            payload:{
+              symbol:plan.symbol,
+              algoId:stopMeta.algoId != null ? stopMeta.algoId : null,
+              clientAlgoId:stopMeta.clientAlgoId ? String(stopMeta.clientAlgoId) : "",
+              meta:stopMeta
+            }
           });
-          plan.blocked = true;
+        }else{
+          addPlanRow(plan,{
+            section:"SL Operation",
+            action:"Skip",
+            type:"SL",
+            side:livePos.side === "SHORT" ? "BUY" : "SELL",
+            oldPrice:"-",
+            newPrice:formatPlanValue(stopLevel,"price"),
+            oldQty:"-",
+            newQty:"-",
+            orderId:"-",
+            status:"Skipped",
+            response:"No active SL algo order to cancel.",
+            writable:false,
+            mode:"skip"
+          });
+        }
+        const slSide = livePos.side === "SHORT" ? "BUY" : "SELL";
+        const slPositionSide = toUpper(livePos.positionSide || "");
+        addPlanRow(plan,{
+          section:"SL Operation",
+          action:"New",
+          type:"SL",
+          side:slSide,
+          oldPrice:"-",
+          newPrice:formatPlanValue(stopLevel,"price"),
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Planned",
+          response:"",
+          writable:true,
+          mode:"sl-create",
+          payload:{
+            symbol:plan.symbol,
+            side:slSide,
+            triggerPrice:stopLevel,
+            positionSide:slPositionSide,
+            workingType:stopMeta && stopMeta.workingType ? stopMeta.workingType : null
+          }
+        });
+      }
+    }else{
+      addPlanRow(plan,{
+        section:"SL Operation",
+        action:"Ignored",
+        type:"SL",
+        side:"-",
+        oldPrice:"-",
+        newPrice:formatPlanValue(num(q("calcModuleStopLevel")?.value),"price"),
+        oldQty:"-",
+        newQty:"-",
+        orderId:"-",
+        status:"Ignored",
+        response:"SL toggle is OFF.",
+        writable:false,
+        mode:"ignored"
+      });
+    }
+
+    if(cbsEnabled){
+      const cancelAdded = new Set();
+      const cbsBlockedRows = new Set();
+      limitRowRecords.forEach(record => {
+        const row = record.row;
+        const rowType = record.rowType;
+        const meta = record.meta;
+        if(meta && row.dataset && row.dataset.source === "binance-limit"){
+          const key = orderKeyFromMeta(meta);
+          if(!key){
+            addPlanRow(plan,{
+              section:"LIMIT Orders",
+              action:"Blocked",
+              type:rowType === "entry" ? "Entry" : "Exit",
+              side:"-",
+              oldPrice:"-",
+              newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+              oldQty:"-",
+              newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+              orderId:"-",
+              status:"Blocked",
+              response:"Calculator row is missing required metadata for modifying an existing Binance order.",
+              writable:false,
+              mode:"blocked",
+              rowRef:row
+            });
+            plan.blocked = true;
+            cbsBlockedRows.add(row);
+            return;
+          }
+          presentBinanceKeys.add(key);
+          const baseOrder = baseMap.get(key);
+          const liveOrder = liveLimitMap.get(key);
+          const externalChange = buildExternalChangeReason(baseOrder,liveOrder);
+          if(externalChange){
+            addPlanRow(plan,{
+              section:"LIMIT Orders",
+              action:"Blocked",
+              type:rowType === "entry" ? "Entry" : "Exit",
+              side:toUpper((baseOrder && baseOrder.side) || (meta && meta.side) || "-"),
+              oldPrice:formatPlanValue(num(baseOrder && baseOrder.price),"price"),
+              newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+              oldQty:formatPlanValue(num(baseOrder && baseOrder.origQty),"qty"),
+              newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+              orderId:(meta && meta.orderId != null) ? String(meta.orderId) : (meta && meta.clientOrderId ? String(meta.clientOrderId) : "-"),
+              status:"Blocked",
+              response:externalChange,
+              writable:false,
+              mode:"blocked",
+              rowRef:row
+            });
+            plan.blocked = true;
+            cbsBlockedRows.add(row);
+            return;
+          }
+          if(!cancelAdded.has(key)){
+            cancelAdded.add(key);
+            addPlanRow(plan,{
+              section:"LIMIT Orders",
+              action:"Cancel",
+              type:"LIMIT",
+              side:toUpper((baseOrder && baseOrder.side) || (meta && meta.side) || "-"),
+              oldPrice:formatPlanValue(num(baseOrder && baseOrder.price),"price"),
+              newPrice:"-",
+              oldQty:formatPlanValue(num(baseOrder && baseOrder.origQty),"qty"),
+              newQty:"-",
+              orderId:(meta && meta.orderId != null) ? String(meta.orderId) : (meta && meta.clientOrderId ? String(meta.clientOrderId) : "-"),
+              status:"Planned",
+              response:"",
+              writable:true,
+              mode:"limit-cancel-cbs",
+              payload:{
+                symbol:(meta && meta.symbol) || (baseOrder && baseOrder.symbol) || plan.symbol,
+                orderId:meta && meta.orderId != null ? meta.orderId : null,
+                origClientOrderId:meta && meta.clientOrderId ? String(meta.clientOrderId) : "",
+                meta
+              }
+            });
+          }
+        }
+      });
+      limitRowRecords.forEach(record => {
+        if(cbsBlockedRows.has(record.row)) return;
+        prepareManualRowPlan(plan,record.row,record.rowType,contextDirection);
+      });
+    }else{
+      limitRowRecords.forEach(record => {
+        const row = record.row;
+        const rowType = record.rowType;
+        const meta = record.meta;
+        if(meta && row.dataset && row.dataset.source === "binance-limit"){
+          const key = orderKeyFromMeta(meta);
+          if(!key){
+            addPlanRow(plan,{
+              section:"LIMIT Orders",
+              action:"Blocked",
+              type:rowType === "entry" ? "Entry" : "Exit",
+              side:"-",
+              oldPrice:"-",
+              newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+              oldQty:"-",
+              newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+              orderId:"-",
+              status:"Blocked",
+              response:"Calculator row is missing required metadata for modifying an existing Binance order.",
+              writable:false,
+              mode:"blocked",
+              rowRef:row
+            });
+            plan.blocked = true;
+            return;
+          }
+          presentBinanceKeys.add(key);
+          prepareExistingRowPlan(plan,row,rowType,meta,baseMap.get(key),liveLimitMap.get(key));
           return;
         }
-        presentBinanceKeys.add(key);
-        prepareExistingRowPlan(plan,row,"exit",meta,baseMap.get(key),liveLimitMap.get(key));
-        return;
-      }
-      prepareManualRowPlan(plan,row,"exit",contextDirection);
-    });
+        prepareManualRowPlan(plan,row,rowType,contextDirection);
+      });
+    }
 
     buildIgnoredRemovedRows(plan,presentBinanceKeys);
 
@@ -19361,6 +19690,7 @@ If there is NO open position, use this Section 2 instead:
       .filter(isLiveOrder);
     if(algoRows.length){
       addPlanRow(plan,{
+        section:"SL Operation",
         action:"Ignored",
         type:"Algo/SL",
         side:"-",
@@ -19379,6 +19709,7 @@ If there is NO open position, use this Section 2 instead:
     if(!lastReadStateSnapshot){
       plan.blocked = true;
       addPlanRow(plan,{
+        section:"LIMIT Orders",
         action:"Blocked",
         type:"Preflight",
         side:"-",
@@ -19401,6 +19732,7 @@ If there is NO open position, use this Section 2 instead:
     if(positionMismatch){
       plan.blocked = true;
       addPlanRow(plan,{
+        section:"LIMIT Orders",
         action:"Blocked",
         type:"Open Position",
         side:"-",
@@ -19419,6 +19751,7 @@ If there is NO open position, use this Section 2 instead:
     if(liveSnapshot && (liveSnapshot.normalFetchError || liveSnapshot.algoFetchError)){
       plan.blocked = true;
       addPlanRow(plan,{
+        section:"LIMIT Orders",
         action:"Blocked",
         type:"Preflight",
         side:"-",
@@ -19438,7 +19771,7 @@ If there is NO open position, use this Section 2 instead:
     plan.liveSnapshot = liveSnapshot;
     return plan;
   }
-  async function signedOrderWrite(method,params){
+  async function signedBinanceWrite(url,method,params){
     if(typeof hasKeys !== "function" || !hasKeys()) throw new Error("API keys are required.");
     const key = apiKeyEl.value.trim();
     const sec = apiSecretEl.value.trim();
@@ -19449,7 +19782,7 @@ If there is NO open position, use this Section 2 instead:
       timestamp:String(Date.now() + off)
     }).toString();
     const sig = await hmac(sec,q);
-    const res = await API.fetch(ORDER_WRITE_URL + "?" + q + "&signature=" + sig,{
+    const res = await API.fetch(url + "?" + q + "&signature=" + sig,{
       method:method,
       cache:"no-store",
       headers:{"X-MBX-APIKEY":key}
@@ -19462,6 +19795,12 @@ If there is NO open position, use this Section 2 instead:
       throw err;
     }
     return data || {};
+  }
+  async function signedOrderWrite(method,params){
+    return signedBinanceWrite(ORDER_WRITE_URL,method,params);
+  }
+  async function signedAlgoOrderWrite(method,params){
+    return signedBinanceWrite(ALGO_ORDER_WRITE_URL,method,params);
   }
   function applyWriteSuccessToRow(row,response,fallback){
     if(!row) return;
@@ -19485,10 +19824,50 @@ If there is NO open position, use this Section 2 instead:
     if(resp.code != null && resp.msg) return String(resp.code) + " " + String(resp.msg);
     if(resp.msg) return String(resp.msg);
     if(resp.orderId != null) return "orderId=" + String(resp.orderId);
+    if(resp.algoId != null) return "algoId=" + String(resp.algoId);
+    if(resp.clientAlgoId != null) return "clientAlgoId=" + String(resp.clientAlgoId);
     try{ return JSON.stringify(resp); }catch(_e){ return String(resp); }
   }
   async function runPlanWriteRow(rowPlan,contextDirection){
     if(!rowPlan || !rowPlan.writable) return {ok:true,skip:true};
+    if(rowPlan.mode === "sl-cancel"){
+      const p = rowPlan.payload || {};
+      const send = {
+        symbol:String(p.symbol || currentSymbol())
+      };
+      if(p.algoId != null && String(p.algoId).trim() !== "") send.algoId = String(p.algoId);
+      else if(p.clientAlgoId) send.clientAlgoId = String(p.clientAlgoId);
+      else throw new Error("Missing algoId/clientAlgoId for SL cancel.");
+      const resp = await signedAlgoOrderWrite("DELETE",send);
+      return {ok:true,response:resp};
+    }
+    if(rowPlan.mode === "sl-create"){
+      const p = rowPlan.payload || {};
+      const send = {
+        symbol:String(p.symbol || currentSymbol()),
+        side:String(p.side || ""),
+        algoType:"CONDITIONAL",
+        type:"STOP_MARKET",
+        closePosition:"true",
+        triggerPrice:String(Number(p.triggerPrice)),
+        workingType:String(p.workingType || "CONTRACT_PRICE")
+      };
+      const ps = toUpper(p.positionSide || "");
+      if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
+      const resp = await signedAlgoOrderWrite("POST",send);
+      return {ok:true,response:resp};
+    }
+    if(rowPlan.mode === "limit-cancel-cbs"){
+      const p = rowPlan.payload || {};
+      const send = {
+        symbol:String(p.symbol || currentSymbol())
+      };
+      if(p.orderId != null && String(p.orderId).trim() !== "") send.orderId = String(p.orderId);
+      else if(p.origClientOrderId) send.origClientOrderId = String(p.origClientOrderId);
+      else throw new Error("Missing orderId/origClientOrderId for LIMIT cancel.");
+      const resp = await signedOrderWrite("DELETE",send);
+      return {ok:true,response:resp};
+    }
     if(rowPlan.mode === "modify"){
       const p = rowPlan.payload || {};
       const send = {
@@ -19559,7 +19938,9 @@ If there is NO open position, use this Section 2 instead:
         blocked:true,
         canConfirm:false,
         executing:false,
-        stale:false
+        stale:false,
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled
       };
       publishSendDiagnostic({
         at:new Date().toISOString(),
@@ -19582,6 +19963,8 @@ If there is NO open position, use this Section 2 instead:
       publishSendDiagnostic({
         at:new Date().toISOString(),
         phase:"preflight",
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
         blocked:!sendPlanState.canConfirm,
         writable:sendPlanState.rows.filter(r => r && r.writable).length,
         blockedRows:sendPlanState.rows.filter(r => r && r.action === "Blocked").length,
@@ -19613,11 +19996,15 @@ If there is NO open position, use this Section 2 instead:
         blocked:true,
         canConfirm:false,
         executing:false,
-        stale:false
+        stale:false,
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled
       };
       publishSendDiagnostic({
         at:new Date().toISOString(),
         phase:"preflight",
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
         blocked:true,
         error:e && e.message ? e.message : String(e),
         writable:0
@@ -19640,12 +20027,21 @@ If there is NO open position, use this Section 2 instead:
     renderSendPlanTable();
     setStatus("Confirm Send in progress...");
     const writable = sendPlanState.rows.filter(r => r && r.writable);
+    let haltAfterSlFailure = false;
+    let haltReason = "";
     for(const rowPlan of sendPlanState.rows){
       if(!rowPlan) continue;
       if(!rowPlan.writable){
         if(rowPlan.action === "Skip") rowPlan.status = "Skipped";
         else if(rowPlan.action === "Ignored") rowPlan.status = "Ignored";
         else if(rowPlan.action === "Blocked") rowPlan.status = "Blocked";
+        renderSendPlanTable();
+        continue;
+      }
+      if(haltAfterSlFailure){
+        rowPlan.status = "Blocked";
+        rowPlan.response = haltReason || "Blocked because SL operation failed.";
+        rowPlan.unexpectedResponse = false;
         renderSendPlanTable();
         continue;
       }
@@ -19662,8 +20058,14 @@ If there is NO open position, use this Section 2 instead:
             resp.orderId != null ||
             resp.clientOrderId != null ||
             resp.origClientOrderId != null ||
+            resp.algoId != null ||
+            resp.clientAlgoId != null ||
+            resp.success === true ||
+            resp.code === 0 ||
             toUpper(resp.status) === "NEW" ||
-            toUpper(resp.status) === "PARTIALLY_FILLED"
+            toUpper(resp.status) === "PARTIALLY_FILLED" ||
+            toUpper(resp.status) === "CANCELED" ||
+            toUpper(resp.status) === "CANCELLED"
           ));
           if(okResp){
             rowPlan.status = "Confirmed";
@@ -19681,6 +20083,18 @@ If there is NO open position, use this Section 2 instead:
         rowPlan.unexpectedResponse = false;
         rowPlan.response = code + (e && e.message ? e.message : String(e));
       }
+      if(rowPlan.section === "SL Operation" && rowPlan.status === "Failed"){
+        if(rowPlan.mode === "sl-create"){
+          haltReason = "SL placement failed; position may be unprotected. LIMIT order actions were stopped.";
+          rowPlan.response = (rowPlan.response ? rowPlan.response + " | " : "") + "SL placement failed; position may be unprotected.";
+          try{
+            await readOpenOrdersSnapshot();
+          }catch(_e){}
+        }else{
+          haltReason = "SL cancel failed. LIMIT order actions were stopped.";
+        }
+        haltAfterSlFailure = true;
+      }
       renderSendPlanTable();
     }
     sendPlanState.executing = false;
@@ -19693,6 +20107,8 @@ If there is NO open position, use this Section 2 instead:
     publishSendDiagnostic({
       at:new Date().toISOString(),
       phase:"confirm",
+      cbsEnabled:!!(sendPlanState && sendPlanState.cbsEnabled),
+      slSendEnabled:!!(sendPlanState && sendPlanState.slSendEnabled),
       failed,
       totalWritable:writable.length,
       confirmed:writable.filter(r => r && r.status === "Confirmed").length,
@@ -19717,12 +20133,12 @@ If there is NO open position, use this Section 2 instead:
       .join(" ");
     return text.includes("STOP") && !text.includes("TAKE_PROFIT") && !text.includes("TRAILING") && orderStopPrice(order) != null;
   }
-  async function findStopForPosition(pos,snapshot){
+  function findStopOrderForPosition(pos,snapshot,algoOnly){
     const sym = currentSymbol();
     const opposite = pos.side === "SHORT" ? "BUY" : "SELL";
     const orders = snapshot
-      ? [].concat(snapshot.normalOrders || [], snapshot.algoOrders || [])
-      : await readOpenOrders();
+      ? (algoOnly ? [].concat(snapshot.algoOrders || []) : [].concat(snapshot.normalOrders || [], snapshot.algoOrders || []))
+      : [];
     const candidates = orders
       .filter(o => o && String(o.symbol || "") === sym)
       .filter(isLiveOrder)
@@ -19738,7 +20154,19 @@ If there is NO open position, use this Section 2 instead:
     const directional = candidates.filter(x => pos.side === "LONG" ? x.price < pos.entry : x.price > pos.entry);
     const pool = directional.length ? directional : candidates;
     pool.sort((a,b) => pos.side === "LONG" ? b.price - a.price : a.price - b.price);
-    return pool[0].price;
+    return pool[0] || null;
+  }
+  async function findStopForPosition(pos,snapshot){
+    let localSnapshot = snapshot;
+    if(!localSnapshot){
+      try{
+        localSnapshot = await readOpenOrdersSnapshot();
+      }catch(_e){
+        localSnapshot = {symbol:currentSymbol(),normalOrders:[],algoOrders:[]};
+      }
+    }
+    const best = findStopOrderForPosition(pos,localSnapshot,false);
+    return best ? best.price : null;
   }
   async function readBinance(options){
     const opts = options || {};
@@ -19802,8 +20230,12 @@ If there is NO open position, use this Section 2 instead:
       }
 
       let stop = null;
+      currentStopAlgoMeta = null;
       if(pos){
-        stop = await findStopForPosition(pos,snapshot);
+        const bestStop = snapshot ? findStopOrderForPosition(pos,snapshot,false) : null;
+        const algoStop = snapshot ? findStopOrderForPosition(pos,snapshot,true) : null;
+        stop = bestStop ? bestStop.price : await findStopForPosition(pos,snapshot);
+        currentStopAlgoMeta = algoStop && algoStop.order ? buildAlgoOrderMeta(algoStop.order) : null;
       }
       if(pos && stop != null){
         q("calcModuleStopLevel").value = Math.round(stop);
@@ -19965,7 +20397,11 @@ If there is NO open position, use this Section 2 instead:
     if(win.__calculatorModuleBound) return;
     win.__calculatorModuleBound = true;
     levelsVisible = loadLevelsVisible();
+    slSendEnabled = loadSlSendEnabled();
+    cbsEnabled = loadCbsEnabled();
     saveLevelsVisible(levelsVisible);
+    saveSlSendEnabled(slSendEnabled);
+    saveCbsEnabled(cbsEnabled);
     installDrawOverlayHook();
     installOverlayDragHooks();
 
@@ -20002,11 +20438,13 @@ If there is NO open position, use this Section 2 instead:
       addRow("calcModuleExitRows");
     },false);
     q("calcModuleStopLevel").addEventListener("input",() => {
+      markSendPlanStale("SL level changed after preflight.");
       lastStopEdit = "level";
       syncStopFromLevel(readEntry().avg);
       calculate();
     },false);
     q("calcModuleStopDistance").addEventListener("input",() => {
+      markSendPlanStale("SL distance changed after preflight.");
       lastStopEdit = "distance";
       syncStopFromDistance(readEntry().avg);
       calculate();
@@ -20026,6 +20464,14 @@ If there is NO open position, use this Section 2 instead:
     q("calcModuleSend").addEventListener("click",prepareSendPlan,false);
     q("calcModuleLevelsToggle").addEventListener("change",e => {
       saveLevelsVisible(!!(e.target && e.target.checked));
+    },false);
+    q("calcModuleCbsToggle").addEventListener("change",e => {
+      markSendPlanStale("CBS toggle changed after preflight.");
+      saveCbsEnabled(!!(e.target && e.target.checked));
+    },false);
+    q("calcModuleSlToggle").addEventListener("change",e => {
+      markSendPlanStale("SL toggle changed after preflight.");
+      saveSlSendEnabled(!!(e.target && e.target.checked));
     },false);
 
     installDragResize(win);
@@ -20058,7 +20504,11 @@ If there is NO open position, use this Section 2 instead:
       getLastOverlayDiagnostic(){ return lastOverlayDiagnostic; },
       getLastSendDiagnostic(){ return lastSendDiagnostic; },
       setLevelsVisible(next){ saveLevelsVisible(!!next); },
-      getLevelsVisible(){ return !!levelsVisible; }
+      getLevelsVisible(){ return !!levelsVisible; },
+      setSlSendEnabled(next){ saveSlSendEnabled(!!next); },
+      getSlSendEnabled(){ return !!slSendEnabled; },
+      setCbsEnabled(next){ saveCbsEnabled(!!next); },
+      getCbsEnabled(){ return !!cbsEnabled; }
     };
   }
 
