@@ -1214,12 +1214,26 @@ button:hover{filter:brightness(1.04)}
   width:100%;
   align-items:center;
   justify-content:center;
-  gap:2px;
+  gap:3px;
   min-height:10px;
 }
 .v33-ma-stack-box .v33-tf-label{display:inline-block;line-height:1}
-.v33-ma-stack-box .v33-stack-icon{display:inline-flex;align-items:center;justify-content:center;line-height:1;transform:translateY(-0.5px);font-size:9px}
-.v33-ma-stack-box .v33-stack-icon-alt{font-size:10px;font-weight:900;transform:translateY(-0.5px)}
+.v33-ma-stack-box .v33-stack-icon{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:10px;
+  min-width:10px;
+  height:10px;
+  line-height:1;
+  font-size:9px;
+  transform:none;
+}
+.v33-ma-stack-box .v33-stack-icon-alt{
+  font-size:10px;
+  font-weight:800;
+  transform:none;
+}
 .v33-ma-rank-leds{
   display:grid;
   grid-template-columns:repeat(5,1fr);
@@ -1307,6 +1321,32 @@ button:hover{filter:brightness(1.04)}
   margin:0;
 }
 .price-levels-style-row input[type="range"]{
+  width:100%;
+  margin:0;
+}
+.dsma-levels-card{
+  grid-column:1 / -1;
+}
+.dsma-levels-style-grid{
+  display:grid;
+  grid-template-columns:96px 96px minmax(120px,1fr) 38px minmax(120px,1fr) 38px;
+  gap:10px;
+  align-items:center;
+  margin-top:10px;
+  font-size:12px;
+}
+.dsma-levels-style-grid .dsma-head{
+  font-weight:700;
+  color:var(--muted);
+}
+.dsma-levels-style-grid input[type="color"]{
+  width:96px;
+  min-width:96px;
+  height:28px;
+  padding:1px;
+  margin:0;
+}
+.dsma-levels-style-grid input[type="range"]{
   width:100%;
   margin:0;
 }

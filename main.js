@@ -15712,10 +15712,10 @@ If there is NO open position, use this Section 2 instead:
       const nearCross = vals.slice(0,-1).some((v,i)=> latest && Math.abs(v-vals[i+1])/latest < 0.0005);
       const setup = setupDir(upPairs,downPairs,upSlope,downSlope);
       let state="mixed", icon="~", stateLabel="Mixed";
-      if(upPairs){ state="up"; icon="▲"; stateLabel="Up stack"; }
-      else if(downPairs){ state="down"; icon="▼"; stateLabel="Down stack"; }
-      else if(tight){ state="compression"; icon="≋"; stateLabel="Compression"; }
-      else if(nearCross){ state="transition"; icon="×"; stateLabel="Transition"; }
+      if(upPairs){ state="up"; icon="\u25B2"; stateLabel="Up stack"; }
+      else if(downPairs){ state="down"; icon="\u25BC"; stateLabel="Down stack"; }
+      else if(tight){ state="compression"; icon="\u224B"; stateLabel="Compression"; }
+      else if(nearCross){ state="transition"; icon="\u00D7"; stateLabel="Transition"; }
       let phase="Chop / Mixed";
       if(tight && spreadDelta > 0.01) phase="Compression Release";
       else if(tight && spreadDelta < -0.01) phase="Flattening Compression";
@@ -15724,23 +15724,29 @@ If there is NO open position, use this Section 2 instead:
       else if((upPairs||downPairs) && spreadDelta > 0 && slopeAgree >= 4) phase="Clean Expanding Trend";
       else if(upPairs || downPairs) phase="Ordered but Late/Flattening";
       const rank = buildStackRank(vals,state,setup);
-      const fastStack = rank.fastStack || "mixed";
-      const slowStack = rank.slowStack || "mixed";
-      const fastWeight = fastStack === "bullish" ? 0.60 : fastStack === "bearish" ? -0.60 : 0;
-      const slowWeight = slowStack === "bullish" ? 0.40 : slowStack === "bearish" ? -0.40 : 0;
-      const weightedBias = fastWeight + slowWeight;
+      const fastStack = rank.fastPairState || rank.fastStack || "mixed";
+      const slowStack = rank.slowPairState || rank.slowStack || "mixed";
+      const selectedBias = rank.selectedRegime || rank.selectedSide || "mixed";
       if(!tight){
-        if(fastStack === "bullish" && slowStack === "bullish"){
+        if(rank.summary === "Bullish stack"){
           state = "up";
-          icon = "▲";
+          icon = "\u25B2";
           stateLabel = "Bullish stack";
-        }else if(fastStack === "bearish" && slowStack === "bearish"){
+        }else if(rank.summary === "Bearish stack"){
           state = "down";
-          icon = "▼";
+          icon = "\u25BC";
           stateLabel = "Bearish stack";
-        }else if(nearCross || weightedBias !== 0){
+        }else if(selectedBias === "bullish"){
           state = "transition";
-          icon = "×";
+          icon = "\u00D7";
+          stateLabel = rank.summary || "Bullish regime / pullback";
+        }else if(selectedBias === "bearish"){
+          state = "transition";
+          icon = "\u00D7";
+          stateLabel = rank.summary || "Bearish regime / pullback";
+        }else if(nearCross){
+          state = "transition";
+          icon = "\u00D7";
           stateLabel = "Transition";
         }else{
           state = "mixed";
@@ -15749,10 +15755,13 @@ If there is NO open position, use this Section 2 instead:
         }
       }
       if(!tight){
-        if(fastStack === "bullish" && slowStack === "bearish") phase = "Transition / Compression";
-        else if(fastStack === "bearish" && slowStack === "bullish") phase = "Pullback / Weakening";
-        else if((state === "up" || state === "down") && spreadDelta > 0 && slopeAgree >= 4) phase = "Clean Expanding Trend";
-        else if(state === "up" || state === "down") phase = "Ordered but Late/Flattening";
+        if(rank.summary === "Bullish stack"){
+          phase = spreadDelta > 0 && slopeAgree >= 4 ? "Clean Expanding Trend" : "Bullish stack";
+        }else if(rank.summary === "Bearish stack"){
+          phase = spreadDelta > 0 && slopeAgree >= 4 ? "Clean Expanding Trend" : "Bearish stack";
+        }else{
+          phase = rank.summary || "Transition / Compression";
+        }
       }
       const spreadScore = clamp100(spreadPct/0.55*100);
       const expansionScore = clamp100((spreadDelta+0.04)/0.12*100);
@@ -15800,7 +15809,7 @@ If there is NO open position, use this Section 2 instead:
         sel.dispatchEvent(new Event("change",{bubbles:true}));
       }
     }
-    function iconClass(icon){ return (icon === "▲" || icon === "▼") ? "v33-stack-icon" : "v33-stack-icon v33-stack-icon-alt"; }
+    function iconClass(icon){ return (icon === "\u25B2" || icon === "\u25BC") ? "v33-stack-icon" : "v33-stack-icon v33-stack-icon-alt"; }
     function titleLine(title,label,fallback="-"){
       const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + ":\\s*(.*)$","m"));
       return m ? m[1] : fallback;
@@ -15817,77 +15826,168 @@ If there is NO open position, use this Section 2 instead:
     }
     function buildStackRank(vals,state,setup){
       const labels = ["EMA9","EMA21","EMA55","EMA100","EMA200"];
+      const off = [false,false,false,false,false];
       const empty = {
-        side:"none",
-        selectedSide:"none",
-        okByEma:[false,false,false,false,false],
+        side:"mixed",
+        selectedSide:"mixed",
+        selectedRegime:"mixed",
+        okByEma:off.slice(),
         okCount:0,
-        summary:"Stack Rank: 0/5 unavailable",
+        summary:"Transition / Compression",
         labels,
-        bullishMatch:0,
-        bearishMatch:0,
-        bullishOkByEma:[false,false,false,false,false],
-        bearishOkByEma:[false,false,false,false,false],
         fastStack:"mixed",
-        slowStack:"mixed"
+        slowStack:"mixed",
+        fastPairState:"mixed",
+        slowPairState:"mixed",
+        hingeStatus:"mixed",
+        hingeText:"mixed",
+        fastMatch:0,
+        slowMatch:0,
+        hingeMatch:0,
+        diagnostics:{
+          selectedRegime:"mixed",
+          fastPairState:"mixed",
+          slowPairState:"mixed",
+          hingeStatus:"mixed",
+          hingeText:"mixed",
+          ledMatch:0,
+          ledStates:{EMA9:false,EMA21:false,EMA55:false,EMA100:false,EMA200:false},
+          summary:"Transition / Compression"
+        }
       };
       if(!Array.isArray(vals) || vals.length !== 5 || vals.some(v => !Number.isFinite(v))) return empty;
-      const hasTie = (() => {
-        for(let i=0;i<vals.length-1;i++){
-          for(let j=i+1;j<vals.length;j++){
-            if(Math.abs(vals[i] - vals[j]) < 1e-12) return true;
-          }
+      const [ema9,ema21,ema55,ema100,ema200] = vals;
+      const base = Math.max(Math.abs(ema100),Math.abs(ema200),1);
+      const tol = base * 0.0001;
+      const zoneLo = Math.min(ema100,ema200) - tol;
+      const zoneHi = Math.max(ema100,ema200) + tol;
+      const inSlowZone = ema55 >= zoneLo && ema55 <= zoneHi;
+
+      const slowPairState = Math.abs(ema100 - ema200) <= tol
+        ? "mixed"
+        : (ema100 > ema200 ? "bullish" : "bearish");
+      const selectedRegime = slowPairState === "bullish" || slowPairState === "bearish" ? slowPairState : "mixed";
+      const fastPairState = Math.abs(ema9 - ema21) <= tol
+        ? "mixed"
+        : (ema9 > ema21 ? "bullish" : "bearish");
+
+      let hingeStatus = "mixed";
+      let hingeText = "mixed";
+      if(selectedRegime === "bullish"){
+        if(inSlowZone || Math.abs(ema55 - ema100) <= tol){
+          hingeStatus = "contested";
+          hingeText = "contested";
+        }else if(ema55 > ema100 + tol){
+          hingeStatus = "supports_bullish";
+          hingeText = "supports bullish regime";
+        }else{
+          hingeStatus = "lost";
+          hingeText = "lost / under attack";
         }
-        return false;
-      })();
-      const rankMap = (direction) => {
-        const sorted = vals.map((value,index) => ({value,index}))
-          .sort((a,b) => direction === "bullish" ? b.value - a.value : a.value - b.value);
-        const posByIndex = Array(5).fill(-1);
-        sorted.forEach((item,pos) => { posByIndex[item.index] = pos; });
-        const ok = Array(5).fill(false);
-        for(let i=0;i<5;i++) ok[i] = !hasTie && posByIndex[i] === i;
-        return ok;
-      };
-      const bullishOkByEma = rankMap("bullish");
-      const bearishOkByEma = rankMap("bearish");
-      const bullishMatch = bullishOkByEma.filter(Boolean).length;
-      const bearishMatch = bearishOkByEma.filter(Boolean).length;
-      const fastStack = vals[0] > vals[1] && vals[1] > vals[2] ? "bullish" : vals[0] < vals[1] && vals[1] < vals[2] ? "bearish" : "mixed";
-      const slowStack = vals[2] > vals[3] && vals[3] > vals[4] ? "bullish" : vals[2] < vals[3] && vals[3] < vals[4] ? "bearish" : "mixed";
-      const fastBias = fastStack === "bullish" ? 0.60 : fastStack === "bearish" ? -0.60 : 0;
-      const slowBias = slowStack === "bullish" ? 0.40 : slowStack === "bearish" ? -0.40 : 0;
-      const rankDelta = bullishMatch - bearishMatch;
-      const weightedScore = rankDelta + fastBias + slowBias;
-      let side = "none";
-      if(weightedScore >= 1) side = "bullish";
-      else if(weightedScore <= -1) side = "bearish";
-      else if(rankDelta >= 2) side = "bullish";
-      else if(rankDelta <= -2) side = "bearish";
-      let selectedSide = side;
-      if(selectedSide === "none"){
-        if(bullishMatch > bearishMatch) selectedSide = "bullish";
-        else if(bearishMatch > bullishMatch) selectedSide = "bearish";
-        else if(slowStack !== "mixed") selectedSide = slowStack;
-        else if(fastStack !== "mixed") selectedSide = fastStack;
+      }else if(selectedRegime === "bearish"){
+        if(inSlowZone || Math.abs(ema55 - ema100) <= tol){
+          hingeStatus = "contested";
+          hingeText = "contested";
+        }else if(ema55 < ema100 - tol){
+          hingeStatus = "supports_bearish";
+          hingeText = "supports bearish regime";
+        }else{
+          hingeStatus = "reclaimed";
+          hingeText = "reclaimed / under attack";
+        }
       }
-      const okByEma = selectedSide === "bullish" ? bullishOkByEma : selectedSide === "bearish" ? bearishOkByEma : [false,false,false,false,false];
+
+      const ledStates = {
+        EMA9:false,
+        EMA21:false,
+        EMA55:false,
+        EMA100:false,
+        EMA200:false
+      };
+      let fastMatch = 0;
+      let slowMatch = 0;
+      let hingeMatch = 0;
+      if(selectedRegime === "bullish"){
+        ledStates.EMA100 = true;
+        ledStates.EMA200 = true;
+        slowMatch = 2;
+        if(fastPairState === "bullish"){
+          ledStates.EMA9 = true;
+          ledStates.EMA21 = true;
+          fastMatch = 2;
+        }
+        if(hingeStatus === "supports_bullish"){
+          ledStates.EMA55 = true;
+          hingeMatch = 1;
+        }
+      }else if(selectedRegime === "bearish"){
+        ledStates.EMA100 = true;
+        ledStates.EMA200 = true;
+        slowMatch = 2;
+        if(fastPairState === "bearish"){
+          ledStates.EMA9 = true;
+          ledStates.EMA21 = true;
+          fastMatch = 2;
+        }
+        if(hingeStatus === "supports_bearish"){
+          ledStates.EMA55 = true;
+          hingeMatch = 1;
+        }
+      }
+
+      const okByEma = [ledStates.EMA9,ledStates.EMA21,ledStates.EMA55,ledStates.EMA100,ledStates.EMA200];
       const okCount = okByEma.filter(Boolean).length;
-      let summary = "Stack Rank: Mixed / Compression";
-      if(fastStack === "bullish" && slowStack === "bullish") summary = `Stack Rank: ${bullishMatch}/5 bullish`;
-      else if(fastStack === "bearish" && slowStack === "bearish") summary = `Stack Rank: ${bearishMatch}/5 bearish`;
-      else if(fastStack === "bullish" && slowStack === "bearish") summary = "Stack Rank: Transition / Compression";
-      else if(fastStack === "bearish" && slowStack === "bullish") summary = "Stack Rank: Pullback / Weakening";
-      else if(side === "bullish") summary = `Stack Rank: Mixed bullish (${bullishMatch}/5 vs ${bearishMatch}/5)`;
-      else if(side === "bearish") summary = `Stack Rank: Mixed bearish (${bearishMatch}/5 vs ${bullishMatch}/5)`;
-      return {side,selectedSide,okByEma,okCount,summary,labels,bullishMatch,bearishMatch,bullishOkByEma,bearishOkByEma,fastStack,slowStack};
+      let summary = "Transition / Compression";
+      if(selectedRegime === "bullish"){
+        if(fastPairState === "bullish" && hingeStatus === "supports_bullish") summary = "Bullish stack";
+        else if(hingeStatus === "supports_bullish" && fastPairState === "bearish") summary = "Bullish regime / pullback";
+        else if((hingeStatus === "lost" || hingeStatus === "contested") && fastPairState === "bearish") summary = "Bullish regime under bearish breakdown";
+        else if(hingeStatus === "lost") summary = "Bullish regime under bearish breakdown";
+        else summary = "Bullish regime / pullback";
+      }else if(selectedRegime === "bearish"){
+        if(fastPairState === "bearish" && hingeStatus === "supports_bearish") summary = "Bearish stack";
+        else if(hingeStatus === "supports_bearish" && fastPairState === "bullish") summary = "Bearish regime / pullback";
+        else if((hingeStatus === "reclaimed" || hingeStatus === "contested") && fastPairState === "bullish") summary = "Bearish regime under bullish reclaim";
+        else if(hingeStatus === "reclaimed") summary = "Bearish regime under bullish reclaim";
+        else summary = "Bearish regime / pullback";
+      }
+
+      const diagnostics = {
+        selectedRegime,
+        fastPairState,
+        slowPairState,
+        hingeStatus,
+        hingeText,
+        ledMatch:okCount,
+        ledStates:{...ledStates},
+        summary
+      };
+      return {
+        side:selectedRegime,
+        selectedSide:selectedRegime,
+        selectedRegime,
+        okByEma,
+        okCount,
+        summary,
+        labels,
+        fastStack:fastPairState,
+        slowStack:slowPairState,
+        fastPairState,
+        slowPairState,
+        hingeStatus,
+        hingeText,
+        fastMatch,
+        slowMatch,
+        hingeMatch,
+        diagnostics
+      };
     }
     function escHtml(v){ return String(v == null ? "" : v).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch])); }
     function compactTooltipHtml(tf,r){
       const alignment = Math.max(0,Math.min(5,Math.round((Number(r.alignment)||0)/20)));
       const rows = [
         `State: ${stateText(r)}`,
-        `Alignment: ${alignment}/5`,
+        `MA Stack Alignment: ${alignment}/5`,
         `Strength: ${Number.isFinite(r.strength) ? r.strength : 0}%`,
         `Quality: ${Number.isFinite(r.quality) ? r.quality : 0}%`,
         `Spread: ${titleLine(r.title,"Spread")}`
@@ -15901,18 +16001,31 @@ If there is NO open position, use this Section 2 instead:
     }
     function compactRankTooltipHtml(tf,r){
       const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
-      const side = rank.selectedSide === "bullish" || rank.selectedSide === "bearish" ? rank.selectedSide : rank.side;
-      const okSource = side === "bullish" ? rank.bullishOkByEma : side === "bearish" ? rank.bearishOkByEma : [false,false,false,false,false];
-      const sideLabel = side === "bullish" ? "selected side: bullish" : side === "bearish" ? "selected side: bearish" : "selected side: mixed";
-      const rankRows = (rank.labels || ["EMA9","EMA21","EMA55","EMA100","EMA200"])
-        .map((label,idx) => `${label}: ${okSource && okSource[idx] ? "OK" : "out"}`);
+      const diag = rank && rank.diagnostics ? rank.diagnostics : null;
+      const side = rank.selectedRegime === "bullish" || rank.selectedRegime === "bearish" ? rank.selectedRegime : "mixed";
+      const ledStates = diag && diag.ledStates ? diag.ledStates : {
+        EMA9:!!(rank.okByEma && rank.okByEma[0]),
+        EMA21:!!(rank.okByEma && rank.okByEma[1]),
+        EMA55:!!(rank.okByEma && rank.okByEma[2]),
+        EMA100:!!(rank.okByEma && rank.okByEma[3]),
+        EMA200:!!(rank.okByEma && rank.okByEma[4])
+      };
+      const sideLabel = side === "bullish" ? "Selected regime: bullish" : side === "bearish" ? "Selected regime: bearish" : "Selected regime: transition/compression";
+      const fastState = rank.fastPairState || rank.fastStack || "mixed";
+      const slowState = rank.slowPairState || rank.slowStack || "mixed";
+      const fastScore = Number.isFinite(Number(rank.fastMatch)) ? Number(rank.fastMatch) : 0;
+      const slowScore = Number.isFinite(Number(rank.slowMatch)) ? Number(rank.slowMatch) : 0;
+      const hingeText = rank.hingeText || "mixed";
+      const fastText = fastState === "mixed" ? "Fast pair: mixed 0/2" : `Fast pair: ${fastState} ${fastScore}/2`;
+      const slowText = slowState === "mixed" ? "Slow pair: mixed 0/2" : `Slow pair: ${slowState} ${slowScore}/2`;
+      const rankRows = ["EMA9","EMA21","EMA55","EMA100","EMA200"].map(label => `${label}: ${ledStates[label] ? "OK" : "out"}`);
       return `<div style="font-weight:800;font-size:13px;line-height:1.1;margin-bottom:8px">${escHtml(tf.key)} Stack Rank</div>`+
-        `<div>${escHtml(rank.summary || "Stack Rank: Mixed / Compression")}</div>`+
-        `<div>${escHtml(`Bullish rank match: ${Number(rank.bullishMatch)||0}/5`)}</div>`+
-        `<div>${escHtml(`Bearish rank match: ${Number(rank.bearishMatch)||0}/5`)}</div>`+
-        `<div>${escHtml(`Fast stack: ${rank.fastStack || "mixed"}`)}</div>`+
-        `<div>${escHtml(`Slow stack: ${rank.slowStack || "mixed"}`)}</div>`+
         `<div>${escHtml(sideLabel)}</div>`+
+        `<div>${escHtml(`LED Bias Match: ${Number(rank.okCount)||0}/5`)}</div>`+
+        `<div>${escHtml(fastText)}</div>`+
+        `<div>${escHtml(`Hinge EMA55: ${hingeText}`)}</div>`+
+        `<div>${escHtml(slowText)}</div>`+
+        `<div>${escHtml(`Summary: ${rank.summary || "Transition / Compression"}`)}</div>`+
         `<div style="height:6px"></div>`+
         rankRows.map(line=>`<div>${escHtml(line)}</div>`).join("");
     }
@@ -16010,8 +16123,8 @@ If there is NO open position, use this Section 2 instead:
         const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
         const leds = ["EMA9","EMA21","EMA55","EMA100","EMA200"].map((label,idx) => {
           const on = !!(rank.okByEma && rank.okByEma[idx]);
-          const side = rank.side === "bullish" ? "bull" : rank.side === "bearish" ? "bear" : "off";
-          const cls = on ? `v33-rank-led is-on ${side}` : "v33-rank-led";
+          const side = rank.selectedSide === "bullish" ? "bull" : rank.selectedSide === "bearish" ? "bear" : "off";
+          const cls = on && side !== "off" ? `v33-rank-led is-on ${side}` : "v33-rank-led";
           return `<span class="${cls}" data-ema="${label}" aria-hidden="true"></span>`;
         }).join("");
         summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
@@ -17413,6 +17526,364 @@ If there is NO open position, use this Section 2 instead:
   installSettings();
   setTimeout(installSettings,300);
   window.PRICE_LEVELS_OVERLAY = {version:MODULE,parseLevels,installSettings};
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "V13_DSMA_LEVELS_OVERLAY";
+  const PREFIX = "btc_futures_chart_v13_dsma_";
+  const KEYS = {
+    enabled: PREFIX + "enabled",
+    color100: PREFIX + "100_color",
+    alpha100: PREFIX + "100_alpha",
+    width100: PREFIX + "100_width",
+    color200: PREFIX + "200_color",
+    alpha200: PREFIX + "200_alpha",
+    width200: PREFIX + "200_width"
+  };
+  const DEFAULTS = {
+    enabled: "0",
+    color100: "#2563eb",
+    alpha100: "75",
+    width100: "1.5",
+    color200: "#0f766e",
+    alpha200: "75",
+    width200: "1.5"
+  };
+  const $id = id => document.getElementById(id);
+  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+  const num = (v,d) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  };
+  const get = (key,def) => {
+    try{
+      const v = localStorage.getItem(key);
+      return v == null ? def : v;
+    }catch(_e){
+      return def;
+    }
+  };
+  const set = (key,value) => {
+    try{ localStorage.setItem(key,String(value)); }catch(_e){}
+  };
+  const bool = (key,def=false) => get(key,def ? "1" : "0") === "1";
+  function rgba(hex,alphaPct){
+    let h = String(hex || "#000000").replace("#","");
+    if(h.length === 3) h = h.split("").map(ch => ch + ch).join("");
+    h = (h + "000000").slice(0,6);
+    const a = clamp(num(alphaPct,75),0,100) / 100;
+    return `rgba(${parseInt(h.slice(0,2),16)||0},${parseInt(h.slice(2,4),16)||0},${parseInt(h.slice(4,6),16)||0},${a})`;
+  }
+  function escapeHtml(value){
+    return String(value || "").replace(/[&<>"']/g, ch => ({
+      "&":"&amp;",
+      "<":"&lt;",
+      ">":"&gt;",
+      '"':"&quot;",
+      "'":"&#39;"
+    }[ch]));
+  }
+  function enabled(){ return bool(KEYS.enabled, false); }
+  function styleFor(period){
+    const is100 = Number(period) === 100;
+    const colorKey = is100 ? KEYS.color100 : KEYS.color200;
+    const alphaKey = is100 ? KEYS.alpha100 : KEYS.alpha200;
+    const widthKey = is100 ? KEYS.width100 : KEYS.width200;
+    const colorDef = is100 ? DEFAULTS.color100 : DEFAULTS.color200;
+    const alphaDef = is100 ? DEFAULTS.alpha100 : DEFAULTS.alpha200;
+    const widthDef = is100 ? DEFAULTS.width100 : DEFAULTS.width200;
+    const color = get(colorKey,colorDef);
+    const alpha = clamp(num(get(alphaKey,alphaDef),num(alphaDef,75)),0,100);
+    const width = clamp(num(get(widthKey,widthDef),num(widthDef,1.5)),0.5,10);
+    return {color,alpha,width};
+  }
+  function ensureToggle(){
+    const box = document.querySelector(".indicator-toggles");
+    if(!box) return null;
+    let input = $id("tglDSMA");
+    if(!input){
+      const label = document.createElement("label");
+      label.className = "toggle";
+      label.id = "tglDSMALabel";
+      label.innerHTML = `<input id="tglDSMA" type="checkbox"><span id="lblDSMA">DSMA</span>`;
+      const before = $id("tglVWAP") && $id("tglVWAP").closest("label");
+      box.insertBefore(label,before || null);
+      input = $id("tglDSMA");
+    }
+    if(input){
+      input.checked = enabled();
+      if(!input.__dsmaBound){
+        input.__dsmaBound = true;
+        input.addEventListener("change",() => {
+          set(KEYS.enabled,input.checked ? "1" : "0");
+          if(input.checked) ensureDailyDepth();
+          try{ draw(); }catch(_e){}
+        },false);
+      }
+    }
+    return input;
+  }
+  function levelStyleRow(label,colorId,alphaId,alphaValId,widthId,widthValId,color,alpha,width){
+    return `
+      <div>${label}</div>
+      <input id="${colorId}" type="color" value="${escapeHtml(color)}">
+      <input id="${alphaId}" type="range" min="0" max="100" step="1" value="${alpha}">
+      <span id="${alphaValId}">${alpha}</span>
+      <input id="${widthId}" type="range" min="0.5" max="10" step="0.5" value="${width}">
+      <span id="${widthValId}">${width}</span>`;
+  }
+  function bindStyleControl(id,key,normalizer,outId){
+    const el = $id(id);
+    if(!el || el.__dsmaBound) return;
+    el.__dsmaBound = true;
+    const sync = () => {
+      const value = normalizer ? normalizer(el.value) : el.value;
+      if(normalizer) el.value = value;
+      set(key,value);
+      if(outId){
+        const out = $id(outId);
+        if(out) out.textContent = String(value);
+      }
+      try{ draw(); }catch(_e){}
+    };
+    el.addEventListener("input",sync,false);
+    el.addEventListener("change",sync,false);
+  }
+  function installSettings(){
+    const panel = $id("priceLevelsSettingsPanel");
+    if(!panel) return;
+    const root = panel.querySelector(".v24-settings-panel-grid");
+    if(!root) return;
+    const s100 = styleFor(100);
+    const s200 = styleFor(200);
+    let card = $id("dsmaSettingsCard");
+    if(!card){
+      card = document.createElement("div");
+      card.id = "dsmaSettingsCard";
+      card.className = "settings-card dsma-levels-card";
+      root.appendChild(card);
+    }
+    card.innerHTML = `
+      <div class="settings-card-title">DSMA levels</div>
+      <div class="settings-card-desc">Daily 100/200 SMA shown as horizontal price levels (not curves).</div>
+      <div class="dsma-levels-style-grid">
+        <div class="dsma-head">Level</div>
+        <div class="dsma-head">Color</div>
+        <div class="dsma-head">Transparency</div>
+        <div></div>
+        <div class="dsma-head">Thickness</div>
+        <div></div>
+        ${levelStyleRow("100 DSMA","dsma100Color","dsma100Alpha","dsma100AlphaVal","dsma100Width","dsma100WidthVal",s100.color,s100.alpha,s100.width)}
+        ${levelStyleRow("200 DSMA","dsma200Color","dsma200Alpha","dsma200AlphaVal","dsma200Width","dsma200WidthVal",s200.color,s200.alpha,s200.width)}
+      </div>`;
+
+    bindStyleControl("dsma100Color",KEYS.color100);
+    bindStyleControl("dsma100Alpha",KEYS.alpha100,v => clamp(Math.round(num(v,75)),0,100),"dsma100AlphaVal");
+    bindStyleControl("dsma100Width",KEYS.width100,v => clamp(num(v,1.5),0.5,10),"dsma100WidthVal");
+    bindStyleControl("dsma200Color",KEYS.color200);
+    bindStyleControl("dsma200Alpha",KEYS.alpha200,v => clamp(Math.round(num(v,75)),0,100),"dsma200AlphaVal");
+    bindStyleControl("dsma200Width",KEYS.width200,v => clamp(num(v,1.5),0.5,10),"dsma200WidthVal");
+  }
+  function dailyCloseRows(){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    let rows = [];
+    if(hub && typeof hub.getChartBuffer === "function") rows = hub.getChartBuffer("1d") || [];
+    if((!Array.isArray(rows) || !rows.length) && typeof iv === "function" && iv() === "1d" && Array.isArray(candles)) rows = candles;
+    if((!Array.isArray(rows) || !rows.length) && hub && typeof hub.getClosedBuffer === "function") rows = hub.getClosedBuffer("1d") || [];
+    const normalized = [];
+    for(const row of (Array.isArray(rows) ? rows : [])){
+      let t = NaN;
+      let c = NaN;
+      if(row && typeof row === "object" && !Array.isArray(row)){
+        t = Number(row.time);
+        if(!Number.isFinite(t) && Number.isFinite(Number(row.openTime))) t = Math.floor(Number(row.openTime) / 1000);
+        c = Number(row.close);
+      }else if(Array.isArray(row)){
+        t = Number(row[0]);
+        if(Number.isFinite(t) && t > 1e12) t = Math.floor(t / 1000);
+        c = Number(row[4]);
+      }
+      if(!Number.isFinite(t) || !Number.isFinite(c)) continue;
+      normalized.push({time:t,close:c});
+    }
+    normalized.sort((a,b) => a.time - b.time);
+    const deduped = [];
+    for(const row of normalized){
+      const prev = deduped[deduped.length - 1];
+      if(prev && prev.time === row.time) prev.close = row.close;
+      else deduped.push(row);
+    }
+    return deduped;
+  }
+  function smaFromDaily(period){
+    const rows = dailyCloseRows();
+    if(rows.length < period) return null;
+    const closes = rows.slice(-period).map(r => Number(r.close)).filter(Number.isFinite);
+    if(closes.length < period) return null;
+    const sum = closes.reduce((acc,v) => acc + v,0);
+    return sum / period;
+  }
+  function ensureDailyDepth(){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    if(!hub || typeof hub.ensureMaStackBuffers !== "function") return;
+    hub.ensureMaStackBuffers(false).catch(() => {});
+  }
+  function dsmaLevels(){
+    const s100 = styleFor(100);
+    const s200 = styleFor(200);
+    return [
+      {name:"100 DSMA",price:smaFromDaily(100),color:s100.color,alpha:s100.alpha,width:s100.width},
+      {name:"200 DSMA",price:smaFromDaily(200),color:s200.color,alpha:s200.alpha,width:s200.width}
+    ].filter(x => Number.isFinite(Number(x.price)));
+  }
+  function drawDsma(){
+    if(!enabled()) return;
+    if(!ctx || !canvas || !Array.isArray(candles) || candles.length < 2) return;
+    const levels = dsmaLevels();
+    if(!levels.length) return;
+    const w = canvas.clientWidth;
+    const state = currentPriceLineState || null;
+    const rightAxisW = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
+    const fallbackLeft = typeof LEFT_PAD === "number" ? LEFT_PAD : 14;
+    const left = Number.isFinite(Number(state && state.left)) ? Number(state.left) : fallbackLeft;
+    const chartRight = Number.isFinite(Number(state && state.chartRight))
+      ? Number(state && state.chartRight)
+      : (w - rightAxisW);
+    const top = Number.isFinite(Number(state && state.top)) ? Number(state && state.top) : 18;
+    const priceH = Number.isFinite(Number(state && state.priceH))
+      ? Number(state && state.priceH)
+      : (lastAreaH || Math.floor((canvas.clientHeight - top - 30) * 0.78));
+    const minP = Number.isFinite(Number(state && state.minP)) ? Number(state && state.minP) : lastYMin;
+    const maxP = Number.isFinite(Number(state && state.maxP)) ? Number(state && state.maxP) : lastYMax;
+    if(!(maxP > minP) || !(priceH > 0) || !(chartRight > left)) return;
+    const mapY = price => top + ((maxP - price) / (maxP - minP)) * priceH;
+    const axisLeft = chartRight + 2;
+    const axisRight = w - 2;
+    const axisW = Math.max(24,axisRight - axisLeft);
+    const inChartX = axisLeft - 3;
+    const lineItems = [];
+    for(const level of levels){
+      const y = mapY(level.price);
+      if(y < top || y > top + priceH) continue;
+      lineItems.push({...level,y});
+    }
+    if(!lineItems.length) return;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left,top,chartRight - left,priceH);
+    ctx.clip();
+    for(const item of lineItems){
+      ctx.strokeStyle = rgba(item.color,item.alpha);
+      ctx.lineWidth = item.width;
+      ctx.setLineDash([]);
+      const yy = typeof px === "function" ? px(item.y) : item.y;
+      ctx.beginPath();
+      ctx.moveTo(typeof px === "function" ? px(left) : left,yy);
+      ctx.lineTo(typeof px === "function" ? px(chartRight) : chartRight,yy);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    const labelH = 14;
+    const labelGap = 2;
+    const minCy = top + labelH / 2;
+    const maxCy = top + priceH - labelH / 2;
+    const currentPriceY = Number(state && state.priceY);
+    const reserved = [];
+    if(Number.isFinite(currentPriceY)) reserved.push(currentPriceY);
+    const placed = [];
+    for(const item of lineItems.slice().sort((a,b) => a.y - b.y)){
+      let cy = clamp(item.y,minCy,maxCy);
+      let tries = 0;
+      while(reserved.some(r => Math.abs(r - cy) < (labelH + labelGap)) && tries < 30){
+        cy = clamp(cy + (labelH + labelGap),minCy,maxCy);
+        tries++;
+      }
+      if(reserved.some(r => Math.abs(r - cy) < (labelH + labelGap))){
+        cy = clamp(item.y - (labelH + labelGap),minCy,maxCy);
+      }
+      reserved.push(cy);
+      placed.push({item,cy});
+    }
+
+    ctx.save();
+    ctx.font = "bold 11px Arial";
+    ctx.textBaseline = "middle";
+    for(const row of placed){
+      const item = row.item;
+      const priceText = Number(item.price).toLocaleString("en-US",{maximumFractionDigits:0});
+      const axisTextColor = rgba(item.color,Math.max(60,item.alpha));
+      const textW = ctx.measureText(priceText).width;
+      const boxW = Math.max(34,Math.min(axisW - 2,textW + 10));
+      const x = axisLeft + Math.max(0,(axisW - boxW) / 2);
+      const yTop = clamp(row.cy - labelH / 2,top,top + priceH - labelH);
+
+      ctx.strokeStyle = axisTextColor;
+      ctx.fillStyle = "rgba(255,255,255,.93)";
+      ctx.lineWidth = 1;
+      ctx.fillRect(x,yTop,boxW,labelH);
+      ctx.strokeRect(x,yTop,boxW,labelH);
+      ctx.textAlign = "center";
+      ctx.fillStyle = axisTextColor;
+      ctx.fillText(priceText,x + boxW / 2,yTop + labelH / 2 + 0.5);
+
+      const lineY = typeof px === "function" ? px(item.y) : item.y;
+      ctx.strokeStyle = axisTextColor;
+      ctx.lineWidth = typeof hairline === "function" ? hairline() : 1;
+      ctx.setLineDash([3,2]);
+      ctx.beginPath();
+      ctx.moveTo(typeof px === "function" ? px(chartRight) : chartRight,lineY);
+      ctx.lineTo(typeof px === "function" ? px(x) : x,lineY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.textAlign = "right";
+      ctx.fillStyle = axisTextColor;
+      ctx.fillText(item.name,inChartX,row.cy + 0.5);
+    }
+    ctx.restore();
+  }
+  function install(){
+    ensureToggle();
+    installSettings();
+    if(enabled()) ensureDailyDepth();
+    try{ draw(); }catch(_e){}
+  }
+  if(typeof draw === "function" && !window.__dsmaLevelsDrawWrapped){
+    const prevDraw = draw;
+    window.__dsmaLevelsDrawWrapped = true;
+    draw = window.draw = function(){
+      const result = prevDraw.apply(this,arguments);
+      try{ drawDsma(); }catch(e){ console.warn(MODULE + " draw failed",e); }
+      return result;
+    };
+  }
+  if(typeof openSettings === "function" && !window.__dsmaLevelsOpenSettingsWrapped){
+    const prevOpenSettings = openSettings;
+    window.__dsmaLevelsOpenSettingsWrapped = true;
+    openSettings = window.openSettings = function(){
+      const result = prevOpenSettings.apply(this,arguments);
+      setTimeout(installSettings,0);
+      setTimeout(installSettings,150);
+      return result;
+    };
+  }
+  ["market","interval"].forEach(id => {
+    const el = $id(id);
+    if(!el || el.__dsmaRefreshBound) return;
+    el.__dsmaRefreshBound = true;
+    el.addEventListener("change",() => {
+      if(enabled()) ensureDailyDepth();
+      try{ draw(); }catch(_e){}
+    },false);
+  });
+  install();
+  setTimeout(install,120);
+  setTimeout(install,700);
+  window.addEventListener("load",() => setTimeout(install,0),{once:true});
+  window.DSMA_LEVELS_OVERLAY = {version:MODULE,draw:drawDsma,install};
 })();
 
 (() => {
