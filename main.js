@@ -17257,9 +17257,11 @@ If there is NO open position, use this Section 2 instead:
   const MODULE = "V13_MANUAL_PRICE_LEVELS";
   const STORE = "btc_futures_chart_v13_price_levels_";
   const KEY_TEXT = STORE + "text";
+  const KEY_ENABLED = STORE + "enabled";
   const KEY_COLOR = STORE + "color";
   const KEY_ALPHA = STORE + "alpha";
   const KEY_WIDTH = STORE + "width";
+  const IND_VIS_KEY = "btc_futures_chart_v13_21_indicators_visible";
   const DEFAULT_COLOR = "#111827";
   const $id = id => document.getElementById(id);
   const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
@@ -17278,6 +17280,8 @@ If there is NO open position, use this Section 2 instead:
   const set = (key,value) => {
     try{ localStorage.setItem(key,String(value)); }catch(_e){}
   };
+  function levelsEnabled(){ return get(KEY_ENABLED,"1") !== "0"; }
+  function indicatorVisibilityOn(){ return get(IND_VIS_KEY,"1") !== "0"; }
   function levelsText(){ return get(KEY_TEXT,""); }
   function color(){ return get(KEY_COLOR,DEFAULT_COLOR); }
   function alpha(){ return clamp(num(get(KEY_ALPHA,"85"),85),0,100); }
@@ -17311,6 +17315,34 @@ If there is NO open position, use this Section 2 instead:
       out.push(value);
     }
     return out.sort((a,b) => b - a);
+  }
+  function ensureKeyLevelsToggle(){
+    const box = document.querySelector(".indicator-toggles");
+    if(!box) return null;
+    let input = $id("tglKeyLevels");
+    if(!input){
+      const label = document.createElement("label");
+      label.className = "toggle";
+      label.id = "tglKeyLevelsLabel";
+      label.innerHTML = `<input id="tglKeyLevels" type="checkbox"><span id="lblKeyLevels">Key levels</span>`;
+      const before =
+        ($id("tglDSMA") && $id("tglDSMA").closest("label")) ||
+        ($id("tglVWAP") && $id("tglVWAP").closest("label")) ||
+        null;
+      box.insertBefore(label,before);
+      input = $id("tglKeyLevels");
+    }
+    if(input){
+      input.checked = levelsEnabled();
+      if(!input.__keyLevelsBound){
+        input.__keyLevelsBound = true;
+        input.addEventListener("change",() => {
+          set(KEY_ENABLED,input.checked ? "1" : "0");
+          try{ draw(); }catch(_e){}
+        },false);
+      }
+    }
+    return input;
   }
   function setPriceLevelsTabActive(){
     const root = document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid");
@@ -17394,6 +17426,7 @@ If there is NO open position, use this Section 2 instead:
     }catch(_e){}
   }
   function drawPriceLevels(){
+    if(!levelsEnabled() || !indicatorVisibilityOn()) return;
     if(!ctx || !canvas || !Array.isArray(candles) || candles.length < 2) return;
     const levels = parseLevels();
     if(!levels.length) return;
@@ -17523,9 +17556,12 @@ If there is NO open position, use this Section 2 instead:
       return result;
     };
   }
+  ensureKeyLevelsToggle();
   installSettings();
+  setTimeout(ensureKeyLevelsToggle,120);
+  setTimeout(ensureKeyLevelsToggle,700);
   setTimeout(installSettings,300);
-  window.PRICE_LEVELS_OVERLAY = {version:MODULE,parseLevels,installSettings};
+  window.PRICE_LEVELS_OVERLAY = {version:MODULE,parseLevels,installSettings,ensureKeyLevelsToggle};
 })();
 
 (() => {
@@ -17550,6 +17586,7 @@ If there is NO open position, use this Section 2 instead:
     alpha200: "75",
     width200: "1.5"
   };
+  const IND_VIS_KEY = "btc_futures_chart_v13_21_indicators_visible";
   const $id = id => document.getElementById(id);
   const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
   const num = (v,d) => {
@@ -17568,6 +17605,7 @@ If there is NO open position, use this Section 2 instead:
     try{ localStorage.setItem(key,String(value)); }catch(_e){}
   };
   const bool = (key,def=false) => get(key,def ? "1" : "0") === "1";
+  function indicatorVisibilityOn(){ return get(IND_VIS_KEY,"1") !== "0"; }
   function rgba(hex,alphaPct){
     let h = String(hex || "#000000").replace("#","");
     if(h.length === 3) h = h.split("").map(ch => ch + ch).join("");
@@ -17738,7 +17776,7 @@ If there is NO open position, use this Section 2 instead:
     ].filter(x => Number.isFinite(Number(x.price)));
   }
   function drawDsma(){
-    if(!enabled()) return;
+    if(!enabled() || !indicatorVisibilityOn()) return;
     if(!ctx || !canvas || !Array.isArray(candles) || candles.length < 2) return;
     const levels = dsmaLevels();
     if(!levels.length) return;
