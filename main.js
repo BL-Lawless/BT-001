@@ -3865,7 +3865,7 @@ function tradeOverlays(vis,mapX,mapY,slot,clip){
 ========================================================= */
 
 function dprValue(){ return window.devicePixelRatio || 1; }
-function hairline(){ return Math.max(1 / dprValue(), .5); }
+function hairline(){ return 1 / dprValue(); }
 function px(v){
   const d = dprValue();
   return (Math.round(Number(v) * d) + 0.5) / d;
@@ -3875,26 +3875,44 @@ function ix(v){
   return Math.round(Number(v) * d) / d;
 }
 
-function resizeCanvas(){
-  const dpr = window.devicePixelRatio || 1;
-  const bw = Math.max(1,Math.floor(canvas.clientWidth * dpr));
-  const bh = Math.max(1,Math.floor(canvas.clientHeight * dpr));
-
-  if(canvas.width !== bw) canvas.width = bw;
-  if(canvas.height !== bh) canvas.height = bh;
-
+function syncCanvasRenderSurface(force=false){
+  const dpr = dprValue();
+  const cssW = Math.max(1,canvas.clientWidth || 1);
+  const cssH = Math.max(1,canvas.clientHeight || 1);
+  const bw = Math.max(1,Math.round(cssW * dpr));
+  const bh = Math.max(1,Math.round(cssH * dpr));
+  const resized = force || canvas.width !== bw || canvas.height !== bh;
+  if(resized){
+    canvas.width = bw;
+    canvas.height = bh;
+  }
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.imageSmoothingEnabled = false;
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.setLineDash([]);
+  return {
+    w:cssW,
+    h:cssH,
+    clearW:canvas.width / dpr,
+    clearH:canvas.height / dpr,
+    dpr,
+    resized
+  };
+}
+
+function resizeCanvas(){
+  syncCanvasRenderSurface(true);
   draw();
 }
 
 function draw(){
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
+  const surface = syncCanvasRenderSurface(false);
+  const w = surface.w;
+  const h = surface.h;
 
   overlayHitItems = [];
-  ctx.imageSmoothingEnabled = false;
-  ctx.clearRect(0,0,w,h);
+  ctx.clearRect(0,0,surface.clearW,surface.clearH);
 
   const r = range();
   const vis = candles.slice(r.start,r.end);
@@ -4101,16 +4119,16 @@ function draw(){
 
   if(mouse){
     ctx.strokeStyle = "rgba(112,122,138,.38)";
-    ctx.lineWidth = 1;
+    ctx.lineWidth = hairline();
 
     ctx.beginPath();
-    ctx.moveTo(mouse.x,top);
-    ctx.lineTo(mouse.x,h-bottom);
+    ctx.moveTo(px(mouse.x),px(top));
+    ctx.lineTo(px(mouse.x),px(h-bottom));
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.moveTo(left,mouse.y);
-    ctx.lineTo(w-right,mouse.y);
+    ctx.moveTo(px(left),px(mouse.y));
+    ctx.lineTo(px(w-right),px(mouse.y));
     ctx.stroke();
 
     if(mouse.x >= left && mouse.x <= w-right && mouse.y >= top && mouse.y <= top+priceH){
@@ -4471,6 +4489,21 @@ rememberKeysEl.addEventListener("change",() => {
 });
 
 window.addEventListener("resize",resizeCanvas);
+if(typeof ResizeObserver === "function" && !window.__chartCanvasResizeObserverInstalled){
+  window.__chartCanvasResizeObserverInstalled = true;
+  let rafToken = 0;
+  const ro = new ResizeObserver(() => {
+    if(rafToken) cancelAnimationFrame(rafToken);
+    rafToken = requestAnimationFrame(() => {
+      rafToken = 0;
+      try{ resizeCanvas(); }catch(_e){}
+    });
+  });
+  try{
+    ro.observe(canvas);
+    window.__chartCanvasResizeObserver = ro;
+  }catch(_e){}
+}
 
 
 /* =========================================================
@@ -8792,11 +8825,11 @@ startTradeAuto();
 
   draw = function(){
     const handle = p10InstallVolumeHandle();
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
+    const surface = syncCanvasRenderSurface(false);
+    const w = surface.w;
+    const h = surface.h;
     overlayHitItems = [];
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0,0,w,h);
+    ctx.clearRect(0,0,surface.clearW,surface.clearH);
     const r = range();
     const vis = candles.slice(r.start,r.end);
     const future = r.futureBars;
@@ -8922,9 +8955,9 @@ startTradeAuto();
     }
 
     if(mouse){
-      ctx.strokeStyle = 'rgba(112,122,138,.38)'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(mouse.x,top); ctx.lineTo(mouse.x,h-bottom); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(left,mouse.y); ctx.lineTo(w-right,mouse.y); ctx.stroke();
+      ctx.strokeStyle = 'rgba(112,122,138,.38)'; ctx.lineWidth = hairline();
+      ctx.beginPath(); ctx.moveTo(px(mouse.x),px(top)); ctx.lineTo(px(mouse.x),px(h-bottom)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(px(left),px(mouse.y)); ctx.lineTo(px(w-right),px(mouse.y)); ctx.stroke();
       if(mouse.x >= left && mouse.x <= w-right && mouse.y >= top && mouse.y <= top+priceH){
         const cursorPrice = maxP - ((mouse.y-top)/priceH) * (maxP-minP);
         const txt = ip(cursorPrice); const tw = ctx.measureText(txt).width + 10; const tx = w-right-tw-4; const ty = mouse.y-10;
