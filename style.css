@@ -257,9 +257,10 @@ button:hover{filter:brightness(1.04)}
 
 #chart{
   display:block;
-  width:100vw;
-  flex:1;
-  min-height:320px;
+  width:100%;
+  height:100%;
+  flex:1 1 auto;
+  min-height:0;
   background:var(--bg);
   cursor:crosshair;
 }
@@ -332,7 +333,8 @@ button:hover{filter:brightness(1.04)}
   body{overflow:auto}
   .metrics{flex-wrap:wrap}
   .metric.metric-account-start{margin-left:0}
-  #chart{height:680px;flex:none}
+  .chart-wrap{height:680px;flex:none}
+  #chart{height:100%;flex:none}
   .modal-row{align-items:stretch;flex-direction:column;gap:5px}
   .modal-row label{width:auto}
 }
@@ -603,11 +605,21 @@ button:hover{filter:brightness(1.04)}
 ========================================================= */
 .chart-wrap{
   position:relative;
+  display:flex;
+  flex:1 1 auto;
+  min-height:320px;
+  width:100%;
+  overflow:hidden;
+}
+.chart-wrap > #chart{
+  width:100%;
+  height:100%;
+  min-height:0;
 }
 .chart-indicator-toggles{
   position:absolute;
   left:12px;
-  top:26px;
+  top:1px;
   z-index:7;
   display:flex;
   gap:8px;
@@ -1158,38 +1170,85 @@ button:hover{filter:brightness(1.04)}
   line-height:1;
 }
 .v33-ma-stack-strip{
-  display:flex;
-  align-items:center;
-  justify-content:center;
+  display:grid;
+  grid-template-columns:repeat(8,minmax(0,1fr));
+  align-items:start;
   gap:4px;
-  flex-wrap:nowrap;
-  min-height:22px;
+  min-height:30px;
   width:100%;
+}
+.v33-ma-stack-group{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:flex-start;
+  gap:4px;
+  padding:1px 0;
+  min-width:0;
 }
 .v33-ma-stack-box{
   appearance:none;
   -webkit-appearance:none;
-  display:inline-flex;
+  display:flex;
   align-items:center;
   justify-content:center;
-  min-width:32px;
-  height:20px;
+  width:100%;
+  min-width:0;
+  max-width:none;
+  height:18px;
   border:1px solid rgba(31,41,55,.16);
   border-radius:0;
-  padding:0 4px;
-  font-size:10px;
-  font-weight:800;
+  padding:1px 3px;
+  font-size:11px;
+  font-weight:400;
   letter-spacing:.01em;
   color:#111827;
   cursor:pointer;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.78);
   line-height:1;
 }
-.v33-ma-stack-box{gap:3px;position:relative;overflow:visible}
+.v33-ma-stack-box{gap:1px;position:relative;overflow:visible}
 .v33-ma-stack-box:hover{filter:brightness(1.03)}
+.v33-ma-stack-box .v33-ma-head{
+  display:flex;
+  width:100%;
+  align-items:center;
+  justify-content:center;
+  gap:2px;
+  min-height:10px;
+}
 .v33-ma-stack-box .v33-tf-label{display:inline-block;line-height:1}
-.v33-ma-stack-box .v33-stack-icon{display:inline-flex;align-items:center;justify-content:center;line-height:1;transform:translateY(-0.5px)}
-.v33-ma-stack-box .v33-stack-icon-alt{font-size:1.18em;font-weight:900;transform:translateY(-0.5px)}
+.v33-ma-stack-box .v33-stack-icon{display:inline-flex;align-items:center;justify-content:center;line-height:1;transform:translateY(-0.5px);font-size:9px}
+.v33-ma-stack-box .v33-stack-icon-alt{font-size:10px;font-weight:900;transform:translateY(-0.5px)}
+.v33-ma-rank-leds{
+  display:grid;
+  grid-template-columns:repeat(5,1fr);
+  gap:1px;
+  width:100%;
+  align-items:center;
+  padding:0 1px;
+  cursor:help;
+}
+.v33-rank-led{
+  height:4px;
+  border-radius:1px;
+  border:1px solid rgba(31,41,55,.22);
+  background:linear-gradient(180deg,rgba(255,255,255,.5),rgba(148,163,184,.26));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.38), inset 0 -1px 0 rgba(30,41,59,.20);
+  opacity:.45;
+}
+.v33-rank-led.is-on.bull{
+  border-color:rgba(22,163,74,.72);
+  background:linear-gradient(180deg,rgba(187,247,208,.98),rgba(22,163,74,.92));
+  box-shadow:0 0 4px rgba(34,197,94,.65),0 0 9px rgba(34,197,94,.35),inset 0 1px 0 rgba(240,253,244,.9),inset 0 -1px 0 rgba(21,128,61,.55);
+  opacity:1;
+}
+.v33-rank-led.is-on.bear{
+  border-color:rgba(220,38,38,.72);
+  background:linear-gradient(180deg,rgba(254,202,202,.98),rgba(220,38,38,.92));
+  box-shadow:0 0 4px rgba(248,113,113,.68),0 0 9px rgba(248,113,113,.36),inset 0 1px 0 rgba(254,242,242,.9),inset 0 -1px 0 rgba(153,27,27,.55);
+  opacity:1;
+}
 .v33-ma-stack-box[data-state="mixed"]{background:rgba(203,213,225,.70)}
 .v33-ma-stack-box[data-state="compression"]{background:rgba(203,213,225,.78)}
 .v33-ma-stack-box[data-state="transition"]{background:rgba(148,163,184,.62)}

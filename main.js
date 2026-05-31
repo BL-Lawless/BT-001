@@ -15723,6 +15723,37 @@ If there is NO open position, use this Section 2 instead:
       else if(nearCross) phase="Stack Transition";
       else if((upPairs||downPairs) && spreadDelta > 0 && slopeAgree >= 4) phase="Clean Expanding Trend";
       else if(upPairs || downPairs) phase="Ordered but Late/Flattening";
+      const rank = buildStackRank(vals,state,setup);
+      const fastStack = rank.fastStack || "mixed";
+      const slowStack = rank.slowStack || "mixed";
+      const fastWeight = fastStack === "bullish" ? 0.60 : fastStack === "bearish" ? -0.60 : 0;
+      const slowWeight = slowStack === "bullish" ? 0.40 : slowStack === "bearish" ? -0.40 : 0;
+      const weightedBias = fastWeight + slowWeight;
+      if(!tight){
+        if(fastStack === "bullish" && slowStack === "bullish"){
+          state = "up";
+          icon = "▲";
+          stateLabel = "Bullish stack";
+        }else if(fastStack === "bearish" && slowStack === "bearish"){
+          state = "down";
+          icon = "▼";
+          stateLabel = "Bearish stack";
+        }else if(nearCross || weightedBias !== 0){
+          state = "transition";
+          icon = "×";
+          stateLabel = "Transition";
+        }else{
+          state = "mixed";
+          icon = "~";
+          stateLabel = "Mixed";
+        }
+      }
+      if(!tight){
+        if(fastStack === "bullish" && slowStack === "bearish") phase = "Transition / Compression";
+        else if(fastStack === "bearish" && slowStack === "bullish") phase = "Pullback / Weakening";
+        else if((state === "up" || state === "down") && spreadDelta > 0 && slopeAgree >= 4) phase = "Clean Expanding Trend";
+        else if(state === "up" || state === "down") phase = "Ordered but Late/Flattening";
+      }
       const spreadScore = clamp100(spreadPct/0.55*100);
       const expansionScore = clamp100((spreadDelta+0.04)/0.12*100);
       const slopeScore = clamp100(slopeMagPct/0.08*100);
@@ -15751,7 +15782,9 @@ If there is NO open position, use this Section 2 instead:
       const priceMa = eventText(priceEvent,false);
       const spreadCondition = tight ? "compression" : spreadDelta > 0.01 ? "expanding" : spreadDelta < -0.01 ? "contracting" : "balanced";
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
-      return {state,icon,strength,alignment,quality,title,phase,setup,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display};
+      rank.state = state;
+      rank.summaryState = phase;
+      return {state,icon,strength,alignment,quality,title,phase,setup,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
     }
     function bg(state,strength){
       const a = 0.25 + Math.max(0,Math.min(100,strength))/100*0.32;
@@ -15782,6 +15815,73 @@ If there is NO open position, use this Section 2 instead:
     function eventLine(r){
       return r && r.eventDisplay ? r.eventDisplay : "Event — none";
     }
+    function buildStackRank(vals,state,setup){
+      const labels = ["EMA9","EMA21","EMA55","EMA100","EMA200"];
+      const empty = {
+        side:"none",
+        selectedSide:"none",
+        okByEma:[false,false,false,false,false],
+        okCount:0,
+        summary:"Stack Rank: 0/5 unavailable",
+        labels,
+        bullishMatch:0,
+        bearishMatch:0,
+        bullishOkByEma:[false,false,false,false,false],
+        bearishOkByEma:[false,false,false,false,false],
+        fastStack:"mixed",
+        slowStack:"mixed"
+      };
+      if(!Array.isArray(vals) || vals.length !== 5 || vals.some(v => !Number.isFinite(v))) return empty;
+      const hasTie = (() => {
+        for(let i=0;i<vals.length-1;i++){
+          for(let j=i+1;j<vals.length;j++){
+            if(Math.abs(vals[i] - vals[j]) < 1e-12) return true;
+          }
+        }
+        return false;
+      })();
+      const rankMap = (direction) => {
+        const sorted = vals.map((value,index) => ({value,index}))
+          .sort((a,b) => direction === "bullish" ? b.value - a.value : a.value - b.value);
+        const posByIndex = Array(5).fill(-1);
+        sorted.forEach((item,pos) => { posByIndex[item.index] = pos; });
+        const ok = Array(5).fill(false);
+        for(let i=0;i<5;i++) ok[i] = !hasTie && posByIndex[i] === i;
+        return ok;
+      };
+      const bullishOkByEma = rankMap("bullish");
+      const bearishOkByEma = rankMap("bearish");
+      const bullishMatch = bullishOkByEma.filter(Boolean).length;
+      const bearishMatch = bearishOkByEma.filter(Boolean).length;
+      const fastStack = vals[0] > vals[1] && vals[1] > vals[2] ? "bullish" : vals[0] < vals[1] && vals[1] < vals[2] ? "bearish" : "mixed";
+      const slowStack = vals[2] > vals[3] && vals[3] > vals[4] ? "bullish" : vals[2] < vals[3] && vals[3] < vals[4] ? "bearish" : "mixed";
+      const fastBias = fastStack === "bullish" ? 0.60 : fastStack === "bearish" ? -0.60 : 0;
+      const slowBias = slowStack === "bullish" ? 0.40 : slowStack === "bearish" ? -0.40 : 0;
+      const rankDelta = bullishMatch - bearishMatch;
+      const weightedScore = rankDelta + fastBias + slowBias;
+      let side = "none";
+      if(weightedScore >= 1) side = "bullish";
+      else if(weightedScore <= -1) side = "bearish";
+      else if(rankDelta >= 2) side = "bullish";
+      else if(rankDelta <= -2) side = "bearish";
+      let selectedSide = side;
+      if(selectedSide === "none"){
+        if(bullishMatch > bearishMatch) selectedSide = "bullish";
+        else if(bearishMatch > bullishMatch) selectedSide = "bearish";
+        else if(slowStack !== "mixed") selectedSide = slowStack;
+        else if(fastStack !== "mixed") selectedSide = fastStack;
+      }
+      const okByEma = selectedSide === "bullish" ? bullishOkByEma : selectedSide === "bearish" ? bearishOkByEma : [false,false,false,false,false];
+      const okCount = okByEma.filter(Boolean).length;
+      let summary = "Stack Rank: Mixed / Compression";
+      if(fastStack === "bullish" && slowStack === "bullish") summary = `Stack Rank: ${bullishMatch}/5 bullish`;
+      else if(fastStack === "bearish" && slowStack === "bearish") summary = `Stack Rank: ${bearishMatch}/5 bearish`;
+      else if(fastStack === "bullish" && slowStack === "bearish") summary = "Stack Rank: Transition / Compression";
+      else if(fastStack === "bearish" && slowStack === "bullish") summary = "Stack Rank: Pullback / Weakening";
+      else if(side === "bullish") summary = `Stack Rank: Mixed bullish (${bullishMatch}/5 vs ${bearishMatch}/5)`;
+      else if(side === "bearish") summary = `Stack Rank: Mixed bearish (${bearishMatch}/5 vs ${bullishMatch}/5)`;
+      return {side,selectedSide,okByEma,okCount,summary,labels,bullishMatch,bearishMatch,bullishOkByEma,bearishOkByEma,fastStack,slowStack};
+    }
     function escHtml(v){ return String(v == null ? "" : v).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch])); }
     function compactTooltipHtml(tf,r){
       const alignment = Math.max(0,Math.min(5,Math.round((Number(r.alignment)||0)/20)));
@@ -15798,6 +15898,23 @@ If there is NO open position, use this Section 2 instead:
         `<div>${escHtml("MA Pair: " + compactEventText(r.maPair || "No fresh event"))}</div>`+
         `<div style="height:8px"></div>`+
         `<div>${escHtml(eventLine(r))}</div>`;
+    }
+    function compactRankTooltipHtml(tf,r){
+      const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
+      const side = rank.selectedSide === "bullish" || rank.selectedSide === "bearish" ? rank.selectedSide : rank.side;
+      const okSource = side === "bullish" ? rank.bullishOkByEma : side === "bearish" ? rank.bearishOkByEma : [false,false,false,false,false];
+      const sideLabel = side === "bullish" ? "selected side: bullish" : side === "bearish" ? "selected side: bearish" : "selected side: mixed";
+      const rankRows = (rank.labels || ["EMA9","EMA21","EMA55","EMA100","EMA200"])
+        .map((label,idx) => `${label}: ${okSource && okSource[idx] ? "OK" : "out"}`);
+      return `<div style="font-weight:800;font-size:13px;line-height:1.1;margin-bottom:8px">${escHtml(tf.key)} Stack Rank</div>`+
+        `<div>${escHtml(rank.summary || "Stack Rank: Mixed / Compression")}</div>`+
+        `<div>${escHtml(`Bullish rank match: ${Number(rank.bullishMatch)||0}/5`)}</div>`+
+        `<div>${escHtml(`Bearish rank match: ${Number(rank.bearishMatch)||0}/5`)}</div>`+
+        `<div>${escHtml(`Fast stack: ${rank.fastStack || "mixed"}`)}</div>`+
+        `<div>${escHtml(`Slow stack: ${rank.slowStack || "mixed"}`)}</div>`+
+        `<div>${escHtml(sideLabel)}</div>`+
+        `<div style="height:6px"></div>`+
+        rankRows.map(line=>`<div>${escHtml(line)}</div>`).join("");
     }
     function ensureMaStackTooltip(){
       let tip = document.getElementById("v33MAStackTooltip");
@@ -15881,6 +15998,66 @@ If there is NO open position, use this Section 2 instead:
         btn.addEventListener("blur",hideMaStackTooltip,false);
       });
     }
+    function renderEnhanced(results){
+      ensureDom(); const strip=$id("v33MAStackStrip"); if(!strip) return;
+      const summaryTooltipHtmlByTf = new Map();
+      const rankTooltipHtmlByTf = new Map();
+      const html = TFs.map(tf=>{
+        const r=results[tf.key] || unavailable("Unavailable");
+        const style = bg(r.state,r.strength) ? ` style="background:${bg(r.state,r.strength)}"` : "";
+        const ev = r.blinkIntent === "green" ? "green" : r.blinkIntent === "red" ? "red" : "";
+        const eventKey = eventIdentity(tf,r);
+        const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
+        const leds = ["EMA9","EMA21","EMA55","EMA100","EMA200"].map((label,idx) => {
+          const on = !!(rank.okByEma && rank.okByEma[idx]);
+          const side = rank.side === "bullish" ? "bull" : rank.side === "bearish" ? "bear" : "off";
+          const cls = on ? `v33-rank-led is-on ${side}` : "v33-rank-led";
+          return `<span class="${cls}" data-ema="${label}" aria-hidden="true"></span>`;
+        }).join("");
+        summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
+        rankTooltipHtmlByTf.set(tf.key,compactRankTooltipHtml(tf,r));
+        return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" aria-label="${tf.key} MA Stack"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span><span class="${iconClass(r.icon)}">${r.icon}</span></span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
+      }).join("");
+      if(strip.__v33LastHtml !== html){
+        strip.innerHTML = html;
+        strip.__v33LastHtml = html;
+      }
+      strip.querySelectorAll(".v33-ma-stack-box").forEach(btn=>{
+        const tf = btn.dataset.tf || "";
+        const ev = btn.dataset.event || "";
+        const evKey = btn.dataset.eventKey || "";
+        btn.__v33SummaryTipHtml = summaryTooltipHtmlByTf.get(tf) || "";
+        btn.__v33RankTipHtml = rankTooltipHtmlByTf.get(tf) || "";
+        const head = btn.querySelector(".v33-ma-head");
+        const group = btn.closest(".v33-ma-stack-group");
+        const ledRow = group ? group.querySelector(".v33-ma-rank-leds") : null;
+        if(ev && evKey && lastEventKeyByTf.get(tf) !== evKey){
+          lastEventKeyByTf.set(tf,evKey);
+          lastBlinkEventByTf.set(tf, ev);
+          btn.classList.remove("v33-flash-cross","v33-flash-bounce");
+          void btn.offsetWidth;
+          btn.classList.add(ev === "red" ? "v33-flash-cross" : "v33-flash-bounce");
+          setTimeout(()=>btn.classList.remove("v33-flash-cross","v33-flash-bounce"),1100);
+        }
+        if(btn.__v33ClickBound) return;
+        btn.__v33ClickBound = true;
+        btn.addEventListener("click",()=>switchTf(btn.dataset.interval),false);
+        if(head){
+          head.addEventListener("mouseenter",()=>{ btn.__v33TipHtml = btn.__v33SummaryTipHtml || ""; showMaStackTooltip(btn); },false);
+          head.addEventListener("mousemove",()=>positionMaStackTooltip(btn),false);
+        }
+        if(ledRow){
+          ledRow.addEventListener("mouseenter",()=>{ btn.__v33TipHtml = btn.__v33RankTipHtml || ""; showMaStackTooltip(btn); },false);
+          ledRow.addEventListener("mousemove",()=>positionMaStackTooltip(btn),false);
+          ledRow.addEventListener("mouseleave",hideMaStackTooltip,false);
+          ledRow.addEventListener("click",()=>switchTf(btn.dataset.interval),false);
+        }
+        if(group) group.addEventListener("mouseleave",hideMaStackTooltip,false);
+        else btn.addEventListener("mouseleave",hideMaStackTooltip,false);
+        btn.addEventListener("focus",()=>{ btn.__v33TipHtml = btn.__v33SummaryTipHtml || ""; showMaStackTooltip(btn); },false);
+        btn.addEventListener("blur",hideMaStackTooltip,false);
+      });
+    }
     async function fetchTf(tf){
       const h = hub();
       if(!h) return null;
@@ -15911,7 +16088,7 @@ If there is NO open position, use this Section 2 instead:
         }
         await Promise.all(TFs.map(async tf=>{ try{ const rows=await fetchTf(tf); out[tf.key]=rows?classify(rows):unavailable("Unavailable"); }catch(e){ out[tf.key]=unavailable("Fetch failed: "+(e&&e.message?e.message:String(e))); } }));
         applyHigherTfAgreement(out);
-        render(out); lastRefresh=Date.now();
+        renderEnhanced(out); lastRefresh=Date.now();
       }finally{
         pending=false;
       }
