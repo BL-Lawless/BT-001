@@ -1677,6 +1677,129 @@ const marketDataHub = (() => {
     closed.push(forming);
     return closed;
   }
+  function canonicalTfKey(tf){
+    const raw = String(tf || "").trim();
+    if(!raw) return "";
+    const map = {
+      "1m":"1m","1M":"1m",
+      "3m":"3m","3M":"3m",
+      "5m":"5m","5M":"5m",
+      "15m":"15m","15M":"15m",
+      "30m":"30m","30M":"30m",
+      "1h":"1h","1H":"1h",
+      "4h":"4h","4H":"4h",
+      "1d":"1d","1D":"1d"
+    };
+    return map[raw] || map[raw.toLowerCase()] || "";
+  }
+  function normalizeMaPeriods(periods){
+    const seen = new Set();
+    const out = [];
+    const src = Array.isArray(periods) && periods.length
+      ? periods
+      : [
+          chartIndicatorPeriodValue(1,9),
+          chartIndicatorPeriodValue(2,21),
+          chartIndicatorPeriodValue(3,55),
+          chartIndicatorPeriodValue(4,100),
+          chartIndicatorPeriodValue(5,200)
+        ];
+    for(const raw of src){
+      const p = Math.max(1,Math.min(999,Math.round(Number(raw) || 0)));
+      if(!p || seen.has(p)) continue;
+      seen.add(p);
+      out.push(p);
+    }
+    return out.length ? out : [9,21,55,100,200];
+  }
+  function buildAlignedEmaSeries(rows,period){
+    const points = EMA(rows,period);
+    const aligned = new Array(rows.length).fill(NaN);
+    let cursor = 0;
+    let lastValue = NaN;
+    for(let i=0;i<rows.length;i++){
+      const t = Number(rows[i] && rows[i].time);
+      while(cursor < points.length && Number(points[cursor] && points[cursor].time) <= t){
+        const next = Number(points[cursor] && points[cursor].value);
+        if(Number.isFinite(next)) lastValue = next;
+        cursor++;
+      }
+      aligned[i] = lastValue;
+    }
+    return {points,aligned,lastValue};
+  }
+  function getAuthoritativeMaSnapshot(tf,options={}){
+    ensureBufferSymbol();
+    const interval = canonicalTfKey(tf || iv());
+    if(!interval){
+      return {
+        requestedTf:String(tf || ""),
+        interval:"",
+        sourceType:"unavailable",
+        sourcePath:"PUBLIC_MARKET_DATA_HUB.getAuthoritativeMaSnapshot",
+        sourceIndex:null,
+        candleTime:null,
+        rows:[],
+        periods:[],
+        seriesByPeriod:{},
+        alignedByPeriod:{},
+        valuesByPeriod:{},
+        valuesValid:false,
+        warmupCount:0,
+        requiredRows:0,
+        reliable:false,
+        reason:"invalid-timeframe"
+      };
+    }
+    const includeForming = options.includeForming !== false;
+    const sourceType = includeForming ? "getChartBuffer" : "getClosedBuffer";
+    const sourceRows = includeForming ? getChartBuffer(interval) : getClosedBuffer(interval);
+    const rows = (Array.isArray(sourceRows) ? sourceRows : [])
+      .filter(row => row && Number.isFinite(Number(row.time)) && Number.isFinite(Number(row.close)))
+      .map(cloneRow)
+      .sort((a,b) => Number(a.time) - Number(b.time));
+    const periods = normalizeMaPeriods(options.periods);
+    const maxPeriod = periods.length ? Math.max(...periods) : 0;
+    const requiredRows = Math.max(
+      Number.isFinite(Number(options.requiredRows)) ? Math.max(1,Math.round(Number(options.requiredRows))) : 0,
+      maxPeriod + 10
+    );
+    const seriesByPeriod = {};
+    const alignedByPeriod = {};
+    const valuesByPeriod = {};
+    for(const period of periods){
+      const built = buildAlignedEmaSeries(rows,period);
+      seriesByPeriod[period] = built.points;
+      alignedByPeriod[period] = built.aligned;
+      valuesByPeriod[period] = Number.isFinite(built.lastValue) ? built.lastValue : null;
+    }
+    const valuesValid = periods.every(period => Number.isFinite(Number(valuesByPeriod[period])));
+    const sourceIndex = rows.length ? rows.length - 1 : null;
+    const candleTime = rows.length ? Number(rows[rows.length-1].time) : null;
+    const warmupCount = rows.length;
+    const reliable = valuesValid && warmupCount >= requiredRows;
+    const reason = !rows.length
+      ? "no-candles"
+      : (!valuesValid ? "insufficient-ma-data" : (!reliable ? "warmup-limited" : ""));
+    return {
+      requestedTf:String(tf || interval),
+      interval,
+      sourceType,
+      sourcePath:`PUBLIC_MARKET_DATA_HUB.${sourceType}(${interval}) -> EMA`,
+      sourceIndex,
+      candleTime,
+      rows,
+      periods,
+      seriesByPeriod,
+      alignedByPeriod,
+      valuesByPeriod,
+      valuesValid,
+      warmupCount,
+      requiredRows,
+      reliable,
+      reason
+    };
+  }
   function validateActiveChartSync(tf,source){
     if(tf !== iv() || !Array.isArray(candles)) return;
     const t = now();
@@ -2207,6 +2330,8 @@ const marketDataHub = (() => {
     getClosedBuffer,
     getFormingCandle,
     getChartBuffer,
+    canonicalTfKey,
+    getAuthoritativeMaSnapshot,
     prependClosedBuffer,
     ingestRestRows,
     isSsscVisible: () => state.ssscVisible
@@ -15660,7 +15785,7 @@ If there is NO open position, use this Section 2 instead:
     function unavailable(reason){
       return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
-    function classify(rows){
+    function classify(rows,debugCtx,snapshot){
       const periods = stackPeriods();
       const maxPeriod = Math.max(...periods);
       const candles = (Array.isArray(rows)?rows:[]).filter(r=>r && Number.isFinite(Number(r[4])));
@@ -15668,8 +15793,19 @@ If there is NO open position, use this Section 2 instead:
       const times = candles.map(r=>Number(r[0]) || 0);
       if(closes.length < maxPeriod + 10) return unavailable("Insufficient data");
       const latest = closes[closes.length-1];
-      const series = periods.map(p=>emaSeries(closes,p));
-      const vals = series.map(s=>s[s.length-1]);
+      let series = periods.map(p=>emaSeries(closes,p));
+      let vals = series.map(s=>s[s.length-1]);
+      if(
+        snapshot &&
+        Array.isArray(snapshot.periods) &&
+        snapshot.periods.length === periods.length &&
+        snapshot.periods.every((p,idx) => Number(p) === Number(periods[idx])) &&
+        snapshot.alignedByPeriod &&
+        periods.every(p => Array.isArray(snapshot.alignedByPeriod[p]) && snapshot.alignedByPeriod[p].length === candles.length)
+      ){
+        series = periods.map(p => snapshot.alignedByPeriod[p].slice());
+        vals = periods.map(p => Number(snapshot.valuesByPeriod && snapshot.valuesByPeriod[p]));
+      }
       const prevIdx = Math.max(0, closes.length-6);
       const prev2Idx = Math.max(0, closes.length-12);
       const prev = series.map(s=>s[prevIdx]);
@@ -15723,7 +15859,15 @@ If there is NO open position, use this Section 2 instead:
       else if(nearCross) phase="Stack Transition";
       else if((upPairs||downPairs) && spreadDelta > 0 && slopeAgree >= 4) phase="Clean Expanding Trend";
       else if(upPairs || downPairs) phase="Ordered but Late/Flattening";
-      const rank = buildStackRank(vals,state,setup);
+      const rank = buildStackRank(vals,state,setup,periods,{
+        tfKey:debugCtx && debugCtx.tfKey ? debugCtx.tfKey : null,
+        tfInterval:debugCtx && debugCtx.tfInterval ? debugCtx.tfInterval : null,
+        sourceType:debugCtx && debugCtx.sourceType ? debugCtx.sourceType : "unknown",
+        sourcePath:debugCtx && debugCtx.sourcePath ? debugCtx.sourcePath : "MA_STACK_STRIP.fetchTf -> emaSeries(closes,p)",
+        sourceIndex:Number.isFinite(Number(debugCtx && debugCtx.sourceIndex))
+          ? Number(debugCtx.sourceIndex)
+          : Math.max(0,closes.length - 1)
+      });
       const fastStack = rank.fastPairState || rank.fastStack || "mixed";
       const slowStack = rank.slowPairState || rank.slowStack || "mixed";
       const selectedBias = rank.selectedRegime || rank.selectedSide || "mixed";
@@ -15824,7 +15968,7 @@ If there is NO open position, use this Section 2 instead:
     function eventLine(r){
       return r && r.eventDisplay ? r.eventDisplay : "Event — none";
     }
-    function buildStackRank(vals,state,setup){
+    function buildStackRank(vals,state,setup,periods,debugCtx){
       const labels = ["EMA9","EMA21","EMA55","EMA100","EMA200"];
       const off = [false,false,false,false,false];
       const empty = {
@@ -15852,24 +15996,67 @@ If there is NO open position, use this Section 2 instead:
           hingeText:"mixed",
           ledMatch:0,
           ledStates:{EMA9:false,EMA21:false,EMA55:false,EMA100:false,EMA200:false},
-          summary:"Transition / Compression"
+          summary:"Transition / Compression",
+          debug:{
+            tfKey:debugCtx && debugCtx.tfKey ? debugCtx.tfKey : null,
+            tfInterval:debugCtx && debugCtx.tfInterval ? debugCtx.tfInterval : null,
+            sourceType:debugCtx && debugCtx.sourceType ? debugCtx.sourceType : "unknown",
+            sourcePath:debugCtx && debugCtx.sourcePath ? debugCtx.sourcePath : "unknown",
+            sourceIndex:Number.isFinite(Number(debugCtx && debugCtx.sourceIndex)) ? Number(debugCtx.sourceIndex) : null,
+            tolerance:null,
+            values:{EMA9:null,EMA21:null,EMA55:null,EMA100:null,EMA200:null},
+            valid:{EMA9:false,EMA21:false,EMA55:false,EMA100:false,EMA200:false},
+            bearishComparisons:{
+              "EMA9<EMA21":false,
+              "EMA21<EMA55":false,
+              "EMA55<EMA100":false,
+              "EMA100<EMA200":false
+            },
+            bullishComparisons:{
+              "EMA9>EMA21":false,
+              "EMA21>EMA55":false,
+              "EMA55>EMA100":false,
+              "EMA100>EMA200":false
+            },
+            deltas:{
+              "EMA9-EMA21":null,
+              "EMA21-EMA55":null,
+              "EMA55-EMA100":null,
+              "EMA100-EMA200":null
+            }
+          }
         }
       };
       if(!Array.isArray(vals) || vals.length !== 5 || vals.some(v => !Number.isFinite(v))) return empty;
-      const [ema9,ema21,ema55,ema100,ema200] = vals;
+      const pArr = Array.isArray(periods) ? periods.slice() : [];
+      const idxByPeriod = p => pArr.indexOf(p);
+      const idx9 = idxByPeriod(9);
+      const idx21 = idxByPeriod(21);
+      const idx55 = idxByPeriod(55);
+      const idx100 = idxByPeriod(100);
+      const idx200 = idxByPeriod(200);
+      const ema9 = Number(vals[idx9 >= 0 ? idx9 : 0]);
+      const ema21 = Number(vals[idx21 >= 0 ? idx21 : 1]);
+      const ema55 = Number(vals[idx55 >= 0 ? idx55 : 2]);
+      const ema100 = Number(vals[idx100 >= 0 ? idx100 : 3]);
+      const ema200 = Number(vals[idx200 >= 0 ? idx200 : 4]);
+      if(![ema9,ema21,ema55,ema100,ema200].every(Number.isFinite)) return empty;
       const base = Math.max(Math.abs(ema100),Math.abs(ema200),1);
       const tol = base * 0.0001;
+      const cmp = (a,b) => (a > b + tol ? 1 : a < b - tol ? -1 : 0);
+      const c9_21 = cmp(ema9,ema21);
+      const c21_55 = cmp(ema21,ema55);
+      const c55_100 = cmp(ema55,ema100);
+      const c100_200 = cmp(ema100,ema200);
+      const fullBull = c9_21 > 0 && c21_55 > 0 && c55_100 > 0 && c100_200 > 0;
+      const fullBear = c9_21 < 0 && c21_55 < 0 && c55_100 < 0 && c100_200 < 0;
       const zoneLo = Math.min(ema100,ema200) - tol;
       const zoneHi = Math.max(ema100,ema200) + tol;
       const inSlowZone = ema55 >= zoneLo && ema55 <= zoneHi;
 
-      const slowPairState = Math.abs(ema100 - ema200) <= tol
-        ? "mixed"
-        : (ema100 > ema200 ? "bullish" : "bearish");
+      const slowPairState = c100_200 === 0 ? "mixed" : (c100_200 > 0 ? "bullish" : "bearish");
       const selectedRegime = slowPairState === "bullish" || slowPairState === "bearish" ? slowPairState : "mixed";
-      const fastPairState = Math.abs(ema9 - ema21) <= tol
-        ? "mixed"
-        : (ema9 > ema21 ? "bullish" : "bearish");
+      const fastPairState = c9_21 === 0 ? "mixed" : (c9_21 > 0 ? "bullish" : "bearish");
 
       let hingeStatus = "mixed";
       let hingeText = "mixed";
@@ -15907,7 +16094,25 @@ If there is NO open position, use this Section 2 instead:
       let fastMatch = 0;
       let slowMatch = 0;
       let hingeMatch = 0;
-      if(selectedRegime === "bullish"){
+      if(fullBull){
+        ledStates.EMA9 = true;
+        ledStates.EMA21 = true;
+        ledStates.EMA55 = true;
+        ledStates.EMA100 = true;
+        ledStates.EMA200 = true;
+        fastMatch = 2;
+        slowMatch = 2;
+        hingeMatch = 1;
+      }else if(fullBear){
+        ledStates.EMA9 = true;
+        ledStates.EMA21 = true;
+        ledStates.EMA55 = true;
+        ledStates.EMA100 = true;
+        ledStates.EMA200 = true;
+        fastMatch = 2;
+        slowMatch = 2;
+        hingeMatch = 1;
+      }else if(selectedRegime === "bullish"){
         ledStates.EMA100 = true;
         ledStates.EMA200 = true;
         slowMatch = 2;
@@ -15938,7 +16143,11 @@ If there is NO open position, use this Section 2 instead:
       const okByEma = [ledStates.EMA9,ledStates.EMA21,ledStates.EMA55,ledStates.EMA100,ledStates.EMA200];
       const okCount = okByEma.filter(Boolean).length;
       let summary = "Transition / Compression";
-      if(selectedRegime === "bullish"){
+      if(fullBull){
+        summary = "Bullish stack";
+      }else if(fullBear){
+        summary = "Bearish stack";
+      }else if(selectedRegime === "bullish"){
         if(fastPairState === "bullish" && hingeStatus === "supports_bullish") summary = "Bullish stack";
         else if(hingeStatus === "supports_bullish" && fastPairState === "bearish") summary = "Bullish regime / pullback";
         else if((hingeStatus === "lost" || hingeStatus === "contested") && fastPairState === "bearish") summary = "Bullish regime under bearish breakdown";
@@ -15960,7 +16169,41 @@ If there is NO open position, use this Section 2 instead:
         hingeText,
         ledMatch:okCount,
         ledStates:{...ledStates},
-        summary
+        summary,
+        debug:{
+          tfKey:debugCtx && debugCtx.tfKey ? debugCtx.tfKey : null,
+          tfInterval:debugCtx && debugCtx.tfInterval ? debugCtx.tfInterval : null,
+          sourceType:debugCtx && debugCtx.sourceType ? debugCtx.sourceType : "unknown",
+          sourcePath:debugCtx && debugCtx.sourcePath ? debugCtx.sourcePath : "MA_STACK_STRIP.fetchTf -> emaSeries(closes,p)",
+          sourceIndex:Number.isFinite(Number(debugCtx && debugCtx.sourceIndex)) ? Number(debugCtx.sourceIndex) : null,
+          tolerance:tol,
+          values:{EMA9:ema9,EMA21:ema21,EMA55:ema55,EMA100:ema100,EMA200:ema200},
+          valid:{
+            EMA9:Number.isFinite(ema9),
+            EMA21:Number.isFinite(ema21),
+            EMA55:Number.isFinite(ema55),
+            EMA100:Number.isFinite(ema100),
+            EMA200:Number.isFinite(ema200)
+          },
+          bearishComparisons:{
+            "EMA9<EMA21":c9_21 < 0,
+            "EMA21<EMA55":c21_55 < 0,
+            "EMA55<EMA100":c55_100 < 0,
+            "EMA100<EMA200":c100_200 < 0
+          },
+          bullishComparisons:{
+            "EMA9>EMA21":c9_21 > 0,
+            "EMA21>EMA55":c21_55 > 0,
+            "EMA55>EMA100":c55_100 > 0,
+            "EMA100>EMA200":c100_200 > 0
+          },
+          deltas:{
+            "EMA9-EMA21":ema9 - ema21,
+            "EMA21-EMA55":ema21 - ema55,
+            "EMA55-EMA100":ema55 - ema100,
+            "EMA100-EMA200":ema100 - ema200
+          }
+        }
       };
       return {
         side:selectedRegime,
@@ -16002,6 +16245,7 @@ If there is NO open position, use this Section 2 instead:
     function compactRankTooltipHtml(tf,r){
       const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
       const diag = rank && rank.diagnostics ? rank.diagnostics : null;
+      const dbg = diag && diag.debug ? diag.debug : null;
       const side = rank.selectedRegime === "bullish" || rank.selectedRegime === "bearish" ? rank.selectedRegime : "mixed";
       const ledStates = diag && diag.ledStates ? diag.ledStates : {
         EMA9:!!(rank.okByEma && rank.okByEma[0]),
@@ -16019,6 +16263,36 @@ If there is NO open position, use this Section 2 instead:
       const fastText = fastState === "mixed" ? "Fast pair: mixed 0/2" : `Fast pair: ${fastState} ${fastScore}/2`;
       const slowText = slowState === "mixed" ? "Slow pair: mixed 0/2" : `Slow pair: ${slowState} ${slowScore}/2`;
       const rankRows = ["EMA9","EMA21","EMA55","EMA100","EMA200"].map(label => `${label}: ${ledStates[label] ? "OK" : "out"}`);
+      const fmtDbg = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-US",{maximumFractionDigits:8}) : String(v);
+      const showDebug = !!window.MA_SOURCE_DEBUG;
+      const dbgLines = !showDebug
+        ? []
+        : (dbg ? [
+        "DEBUG",
+        `TF used: ${dbg.tfKey || tf.key || "-"}`,
+        `TF interval: ${dbg.tfInterval || "-"}`,
+        `source index: ${Number.isFinite(Number(dbg.sourceIndex)) ? Number(dbg.sourceIndex) : "-"}`,
+        `source type: ${dbg.sourceType || "-"}`,
+        `source path: ${dbg.sourcePath || "-"}`,
+        `EMA9: ${fmtDbg(dbg.values && dbg.values.EMA9)} (valid: ${!!(dbg.valid && dbg.valid.EMA9)})`,
+        `EMA21: ${fmtDbg(dbg.values && dbg.values.EMA21)} (valid: ${!!(dbg.valid && dbg.valid.EMA21)})`,
+        `EMA55: ${fmtDbg(dbg.values && dbg.values.EMA55)} (valid: ${!!(dbg.valid && dbg.valid.EMA55)})`,
+        `EMA100: ${fmtDbg(dbg.values && dbg.values.EMA100)} (valid: ${!!(dbg.valid && dbg.valid.EMA100)})`,
+        `EMA200: ${fmtDbg(dbg.values && dbg.values.EMA200)} (valid: ${!!(dbg.valid && dbg.valid.EMA200)})`,
+        `tol: ${fmtDbg(dbg.tolerance)}`,
+        `EMA9 < EMA21: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA9<EMA21"])}`,
+        `EMA21 < EMA55: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA21<EMA55"])}`,
+        `EMA55 < EMA100: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA55<EMA100"])}`,
+        `EMA100 < EMA200: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA100<EMA200"])}`,
+        `EMA9 > EMA21: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA9>EMA21"])}`,
+        `EMA21 > EMA55: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA21>EMA55"])}`,
+        `EMA55 > EMA100: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA55>EMA100"])}`,
+        `EMA100 > EMA200: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA100>EMA200"])}`,
+        `EMA9 - EMA21: ${fmtDbg(dbg.deltas && dbg.deltas["EMA9-EMA21"])}`,
+        `EMA21 - EMA55: ${fmtDbg(dbg.deltas && dbg.deltas["EMA21-EMA55"])}`,
+        `EMA55 - EMA100: ${fmtDbg(dbg.deltas && dbg.deltas["EMA55-EMA100"])}`,
+        `EMA100 - EMA200: ${fmtDbg(dbg.deltas && dbg.deltas["EMA100-EMA200"])}`
+      ] : ["DEBUG: unavailable"]);
       return `<div style="font-weight:800;font-size:13px;line-height:1.1;margin-bottom:8px">${escHtml(tf.key)} Stack Rank</div>`+
         `<div>${escHtml(sideLabel)}</div>`+
         `<div>${escHtml(`LED Bias Match: ${Number(rank.okCount)||0}/5`)}</div>`+
@@ -16027,7 +16301,9 @@ If there is NO open position, use this Section 2 instead:
         `<div>${escHtml(slowText)}</div>`+
         `<div>${escHtml(`Summary: ${rank.summary || "Transition / Compression"}`)}</div>`+
         `<div style="height:6px"></div>`+
-        rankRows.map(line=>`<div>${escHtml(line)}</div>`).join("");
+        rankRows.map(line=>`<div>${escHtml(line)}</div>`).join("")+
+        (showDebug ? `<div style="height:8px"></div>` : "")+
+        dbgLines.map(line=>`<div>${escHtml(line)}</div>`).join("");
     }
     function ensureMaStackTooltip(){
       let tip = document.getElementById("v33MAStackTooltip");
@@ -16199,9 +16475,69 @@ If there is NO open position, use this Section 2 instead:
         if(h && typeof h.ensureMaStackBuffers === "function"){
           await h.ensureMaStackBuffers(false).catch(() => {});
         }
-        await Promise.all(TFs.map(async tf=>{ try{ const rows=await fetchTf(tf); out[tf.key]=rows?classify(rows):unavailable("Unavailable"); }catch(e){ out[tf.key]=unavailable("Fetch failed: "+(e&&e.message?e.message:String(e))); } }));
+        await Promise.all(TFs.map(async tf=>{
+          try{
+            const periods = stackPeriods();
+            const includeForming = LIVE_TFS.has(tf.interval);
+            let snapshot = null;
+            if(h && typeof h.getAuthoritativeMaSnapshot === "function"){
+              snapshot = h.getAuthoritativeMaSnapshot(tf.interval,{
+                periods,
+                includeForming,
+                requiredRows:Math.max(...periods) + 10
+              });
+            }
+            const sourceRows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : await fetchTf(tf);
+            const rows = Array.isArray(sourceRows)
+              ? sourceRows
+                  .map(row => Array.isArray(row) ? row : hubRowToKline(row))
+                  .filter(row => row && row.every((v,idx) => idx > 5 || Number.isFinite(v)))
+              : null;
+            if(snapshot && !snapshot.reliable){
+              out[tf.key] = unavailable(`Warmup: ${snapshot.warmupCount}/${snapshot.requiredRows}`);
+              return;
+            }
+            out[tf.key] = rows && rows.length ? classify(rows,{
+              tfKey:tf.key,
+              tfInterval:tf.interval,
+              sourceType:snapshot ? snapshot.sourceType : (includeForming ? "hub.getChartBuffer" : "hub.getClosedBuffer"),
+              sourcePath:snapshot ? snapshot.sourcePath : `PUBLIC_MARKET_DATA_HUB.${includeForming ? "getChartBuffer" : "getClosedBuffer"}(${tf.interval}) -> hubRowToKline -> emaSeries`,
+              sourceIndex:snapshot && Number.isFinite(Number(snapshot.sourceIndex)) ? Number(snapshot.sourceIndex) : null
+            },snapshot) : unavailable("Unavailable");
+          }catch(e){
+            out[tf.key]=unavailable("Fetch failed: "+(e&&e.message?e.message:String(e)));
+          }
+        }));
         applyHigherTfAgreement(out);
         renderEnhanced(out); lastRefresh=Date.now();
+        if(window.MA_SOURCE_DEBUG){
+          try{
+            const htf = TFs.find(x => x.interval === (typeof iv === "function" ? iv() : "")) || TFs[0];
+            const selected = htf ? out[htf.key] : null;
+            const rankDbg = selected && selected.rank && selected.rank.diagnostics ? selected.rank.diagnostics.debug : null;
+            const sssc = window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3 && typeof window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3.getDiagnosticForTf === "function"
+              ? window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3.getDiagnosticForTf(htf ? htf.key : "")
+              : null;
+            console.info("MA_SOURCE_DEBUG parity",{
+              tfKey:htf ? htf.key : null,
+              tfInterval:htf ? htf.interval : null,
+              chartSnapshot:rankDbg && rankDbg.values ? rankDbg.values : null,
+              maStack:rankDbg && rankDbg.values ? rankDbg.values : null,
+              sssc:sssc && Array.isArray(sssc.emaVals) ? {
+                EMA9:sssc.emaVals[0],
+                EMA21:sssc.emaVals[1],
+                EMA55:sssc.emaVals[2],
+                EMA100:sssc.emaVals[3],
+                EMA200:sssc.emaVals[4]
+              } : null,
+              source:rankDbg ? {
+                sourcePath:rankDbg.sourcePath,
+                sourceIndex:rankDbg.sourceIndex,
+                sourceType:rankDbg.sourceType
+              } : null
+            });
+          }catch(_debugErr){}
+        }
       }finally{
         pending=false;
       }
@@ -18479,6 +18815,16 @@ If there is NO open position, use this Section 2 instead:
   let data={}, lastFullFetch=0, lastRender=0, currentSymbol='';
   let previousMomentumByTf={}, lastRenderedMomentumByTf={}, previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
   function hub(){ return window.PUBLIC_MARKET_DATA_HUB || null; }
+  function tfLabelToInterval(label){
+    const key = String(label || "").trim().toUpperCase();
+    const map = {"1M":"1m","3M":"3m","5M":"5m","15M":"15m","1H":"1h","4H":"4h","1D":"1d"};
+    return map[key] || "";
+  }
+  function intervalToTfLabel(interval){
+    const key = String(interval || "").trim().toLowerCase();
+    const map = {"1m":"1M","3m":"3M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"};
+    return map[key] || String(interval || "").toUpperCase();
+  }
 
   function sym(){ try{return cfg().symbol}catch(_e){return (document.getElementById('market')?.value||'BTCUSDC').toUpperCase()} }
   function fmt(v,d=0){ const n=num(v); return n==null?'-':n.toFixed(d); }
@@ -18505,10 +18851,134 @@ If there is NO open position, use this Section 2 instead:
   function crossState(fast,slow){ const len=Math.min(fast.length,slow.length); if(len<3)return {label:'None',age:null,dir:0,quality:0,forming:false}; const fa=fast[fast.length-1].value, sa=slow[slow.length-1].value, fp=fast[fast.length-2].value, sp=slow[slow.length-2].value; const dist=(fa-sa); let lastCross=null; for(let i=1;i<len;i++){const a0=fast[fast.length-len+i-1].value-slow[slow.length-len+i-1].value; const a1=fast[fast.length-len+i].value-slow[slow.length-len+i].value; if(a0<=0&&a1>0)lastCross={age:len-i-1,dir:1}; if(a0>=0&&a1<0)lastCross={age:len-i-1,dir:-1};} if(fp<=sp&&fa>sa)return {label:'Bull X Fresh',age:0,dir:1,quality:85}; if(fp>=sp&&fa<sa)return {label:'Bear X Fresh',age:0,dir:-1,quality:85}; if(Math.abs(dist/((sa||1)))<0.00035)return {label:(dist>=0?'Bull':'Bear')+' forming',age:null,dir:dist>=0?1:-1,quality:35,forming:true}; if(lastCross){const stale=lastCross.age>24;return {label:(lastCross.dir>0?'Bull X ':'Bear X ')+(stale?'Old':'Confirmed'),age:lastCross.age,dir:lastCross.dir,quality:stale?25:60};} return {label:'None',age:null,dir:0,quality:0}; }
   function eventForLevel(price,emaVal,dir){ if(price==null||emaVal==null)return 'n/a'; const d=(price-emaVal)/price*10000; if(Math.abs(d)<8)return 'Retest'; if(dir>=0&&price>emaVal)return 'Hold'; if(dir<0&&price<emaVal)return 'Reject'; return dir>=0?'Loss':'Reclaim'; }
   function clusterState(vals,price){ const spread=(Math.max(...vals)-Math.min(...vals))/(price||vals[0])*10000; if(spread<18)return 'Chop'; if(spread<42)return 'Compressing'; return 'Expanded'; }
-  function diagnose(label,tf,rows){ if(!rows||!rows.length)return {tf:label,interval:tf,available:false,reason:'Unavailable'}; if(rows.length<SSSC_MIN_CLOSED_CANDLES)return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true}; const price=rows[rows.length-1].close; const emas={}; PERIODS.forEach(p=>emas[p]=ema(rows,p)); const vals=PERIODS.map(p=>last(emas[p])); if(vals.some(v=>v==null))return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true}; const stackDir=stackDirection(vals); const clean=stackClean(vals,price); const slopeDir=0.45*slopeScore(emas[21],price)+0.35*slopeScore(emas[55],price)+0.20*slopeScore(emas[100],price); const sprDir=spreadDir(vals,price); const c921=crossState(emas[9],emas[21]); const c2155=crossState(emas[21],emas[55]); const c55100=crossState(emas[55],emas[100]); const c100200=crossState(emas[100],emas[200]); const direction=clamp(stackDir*0.44+slopeDir*0.30+sprDir*0.20+c921.dir*6,-100,100); const slopePow=0.55*slopePower(emas[21],price)+0.30*slopePower(emas[55],price)+0.15*slopePower(emas[100],price); const sprPow=spreadPower(emas,price); const magnitude=clamp(slopePow*0.52+sprPow*0.42+(clean<20?-18:0),-100,100); const state=direction>55?'Bullish':direction>18?'Mixed Bullish':direction<-55?'Bearish':direction<-18?'Mixed Bearish':'Mixed'; const phase=clean<18?'Compression / Chop': magnitude>35?(direction>=0?'Bullish Markup / Trend':'Bearish Transition'):magnitude<-25?(direction>=0?'Bullish Fading':'Bearish Fading'):Math.abs(direction)<25?'Compression / Chop':'Pullback / Retest'; const magState=magnitude>35?'Expanding':magnitude>10?'Strengthening':magnitude<-35?'Fading':magnitude<-10?'Weakening':'Neutral'; const vw=vwapCalc(rows); const vwapEvent=vw==null?'Unavailable':price>vw?(direction>=0?'Hold':'Reclaim'):(direction>=0?'Loss':'Below'); const events={x921:c921.label,x2155:c2155.label,x55100:c55100.label,x100200:c100200.label,ema9:eventForLevel(price,vals[0],direction),ema21:eventForLevel(price,vals[1],direction),ema55:eventForLevel(price,vals[2],direction),vwap:vwapEvent,cluster:clusterState(vals,price),earlyWarning:'None'}; return {tf:label,interval:tf,available:true,rows:rows.length,price,vwap:vw,emas,emaVals:vals,direction,magnitude,state,phase,magState,stackDir,clean,slopeDir,sprDir,slopePow,sprPow,crosses:{c921,c2155,c55100,c100200},events,earlyWarning:null,reliability:rows.length>=SSSC_TARGET_CLOSED_CANDLES?'full-warmup':'minimum-warmup',warmupLimited:false}; }
+  function diagnose(label,tf,rows,snapshot){
+    if(!rows||!rows.length) return {tf:label,interval:tf,available:false,reason:'Unavailable'};
+    if(rows.length<SSSC_MIN_CLOSED_CANDLES){
+      return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true};
+    }
+    if(snapshot && !snapshot.reliable){
+      return {
+        tf:label,
+        interval:tf,
+        available:false,
+        reason:'warmup-limited',
+        rows:rows.length,
+        reliability:'insufficient-warmup',
+        warmupLimited:true
+      };
+    }
+    const price=rows[rows.length-1].close;
+    const emas={};
+    if(snapshot && snapshot.alignedByPeriod && snapshot.periods && snapshot.periods.length){
+      PERIODS.forEach(p=>{
+        const aligned = Array.isArray(snapshot.alignedByPeriod[p]) ? snapshot.alignedByPeriod[p] : [];
+        const built = [];
+        for(let i=0;i<rows.length;i++){
+          const v = Number(aligned[i]);
+          if(Number.isFinite(v)){
+            built.push({time:rows[i].time,value:v});
+          }
+        }
+        emas[p] = built;
+      });
+    }else{
+      PERIODS.forEach(p=>{ emas[p]=ema(rows,p); });
+    }
+    const vals = PERIODS.map(p=>{
+      if(snapshot && snapshot.valuesByPeriod && Number.isFinite(Number(snapshot.valuesByPeriod[p]))){
+        return Number(snapshot.valuesByPeriod[p]);
+      }
+      return last(emas[p]);
+    });
+    if(vals.some(v=>v==null || !Number.isFinite(Number(v)))){
+      return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true};
+    }
+    const stackDir=stackDirection(vals);
+    const clean=stackClean(vals,price);
+    const slopeDir=0.45*slopeScore(emas[21],price)+0.35*slopeScore(emas[55],price)+0.20*slopeScore(emas[100],price);
+    const sprDir=spreadDir(vals,price);
+    const c921=crossState(emas[9],emas[21]);
+    const c2155=crossState(emas[21],emas[55]);
+    const c55100=crossState(emas[55],emas[100]);
+    const c100200=crossState(emas[100],emas[200]);
+    const direction=clamp(stackDir*0.44+slopeDir*0.30+sprDir*0.20+c921.dir*6,-100,100);
+    const slopePow=0.55*slopePower(emas[21],price)+0.30*slopePower(emas[55],price)+0.15*slopePower(emas[100],price);
+    const sprPow=spreadPower(emas,price);
+    const magnitude=clamp(slopePow*0.52+sprPow*0.42+(clean<20?-18:0),-100,100);
+    const state=direction>55?'Bullish':direction>18?'Mixed Bullish':direction<-55?'Bearish':direction<-18?'Mixed Bearish':'Mixed';
+    const phase=clean<18?'Compression / Chop': magnitude>35?(direction>=0?'Bullish Markup / Trend':'Bearish Transition'):magnitude<-25?(direction>=0?'Bullish Fading':'Bearish Fading'):Math.abs(direction)<25?'Compression / Chop':'Pullback / Retest';
+    const magState=magnitude>35?'Expanding':magnitude>10?'Strengthening':magnitude<-35?'Fading':magnitude<-10?'Weakening':'Neutral';
+    const vw=vwapCalc(rows);
+    const vwapEvent=vw==null?'Unavailable':price>vw?(direction>=0?'Hold':'Reclaim'):(direction>=0?'Loss':'Below');
+    const events={x921:c921.label,x2155:c2155.label,x55100:c55100.label,x100200:c100200.label,ema9:eventForLevel(price,vals[0],direction),ema21:eventForLevel(price,vals[1],direction),ema55:eventForLevel(price,vals[2],direction),vwap:vwapEvent,cluster:clusterState(vals,price),earlyWarning:'None'};
+    return {
+      tf:label,
+      interval:tf,
+      available:true,
+      rows:rows.length,
+      price,
+      vwap:vw,
+      emas,
+      emaVals:vals,
+      direction,
+      magnitude,
+      state,
+      phase,
+      magState,
+      stackDir,
+      clean,
+      slopeDir,
+      sprDir,
+      slopePow,
+      sprPow,
+      crosses:{c921,c2155,c55100,c100200},
+      events,
+      earlyWarning:null,
+      reliability:rows.length>=SSSC_TARGET_CLOSED_CANDLES?'full-warmup':'minimum-warmup',
+      warmupLimited:false,
+      maSource:snapshot ? {
+        sourceType:snapshot.sourceType,
+        sourcePath:snapshot.sourcePath,
+        sourceIndex:snapshot.sourceIndex,
+        candleTime:snapshot.candleTime
+      } : null
+    };
+  }
   function deriveEarlyWarning(label,tf,closedRows,formingRow,confirmed){ if(!formingRow||!confirmed||!confirmed.available||!closedRows||!closedRows.length) return null; const trialRows=closedRows.concat([{...formingRow}]); const trial=diagnose(label,tf,trialRows); if(!trial||!trial.available) return null; const hints=[]; if(trial.crosses.c921.forming||trial.crosses.c2155.forming||trial.crosses.c55100.forming||trial.crosses.c100200.forming) hints.push('Unconfirmed cross forming'); if(trial.events.vwap!==confirmed.events.vwap) hints.push('Unconfirmed VWAP '+trial.events.vwap); if(trial.clean>=18&&confirmed.clean<18) hints.push('Unconfirmed compression break'); if(trial.phase!==confirmed.phase) hints.push('Unconfirmed '+trial.phase); if(trial.magnitude<confirmed.magnitude-10) hints.push('Unconfirmed momentum weakening'); if(!hints.length&&Math.sign(trial.direction)!==Math.sign(confirmed.direction)) hints.push('Unconfirmed transition'); if(!hints.length) return null; return {label:hints[0],trial}; }
   function liveRows(closedRows,formingRow){ if(!Array.isArray(closedRows)||!closedRows.length) return []; if(!formingRow||!Number.isFinite(Number(formingRow.time))) return closedRows.slice(); const out=closedRows.slice(); const last=out[out.length-1]; if(last&&Number(formingRow.time)<=Number(last.time)) return out; out.push({...formingRow}); return out; }
-  function buildDiagnosticSet(label,tf,count,h){ const closedRows=(h?h.getClosedBuffer(tf):[]).slice(-Math.max(count,SSSC_MIN_CLOSED_CANDLES)); if(!closedRows.length) return null; const forming=h?h.getFormingCandle(tf):null; const confirmedDiagnostic=diagnose(label,tf,closedRows); const liveRowsForTf=LIVE_DIAG_TFS.has(tf) ? liveRows(closedRows,forming) : closedRows.slice(); const liveDiagnostic=diagnose(label,tf,liveRowsForTf); const warning=deriveEarlyWarning(label,tf,closedRows,forming,confirmedDiagnostic); const mode=LIVE_DIAG_TFS.has(tf)&&liveRowsForTf.length>closedRows.length?'live':'confirmed'; const active=(LIVE_DIAG_TFS.has(tf)&&liveDiagnostic&&liveDiagnostic.available)?liveDiagnostic:confirmedDiagnostic; if(active&&active.available){ active.mode=LIVE_DIAG_TFS.has(tf)?mode:'confirmed'; active.confirmedDiagnostic=confirmedDiagnostic; active.liveDiagnostic=liveDiagnostic; active.earlyWarning=warning; active.events.earlyWarning=warning?warning.label:'None'; } return active; }
+  function buildDiagnosticSet(label,tf,count,h){
+    const requested = Math.max(count || 0,SSSC_MIN_CLOSED_CANDLES);
+    const useSnapshot = h && typeof h.getAuthoritativeMaSnapshot === "function";
+    const confirmedSnapshot = useSnapshot
+      ? h.getAuthoritativeMaSnapshot(tf,{periods:PERIODS,includeForming:false,requiredRows:requested})
+      : null;
+    const closedRows = confirmedSnapshot && Array.isArray(confirmedSnapshot.rows)
+      ? confirmedSnapshot.rows.slice(-requested)
+      : (h ? h.getClosedBuffer(tf) : []).slice(-requested);
+    if(!closedRows.length) return null;
+
+    const liveSnapshot = LIVE_DIAG_TFS.has(tf) && useSnapshot
+      ? h.getAuthoritativeMaSnapshot(tf,{periods:PERIODS,includeForming:true,requiredRows:requested})
+      : null;
+    const forming = h ? h.getFormingCandle(tf) : null;
+    const liveRowsForTf = LIVE_DIAG_TFS.has(tf)
+      ? (liveSnapshot && Array.isArray(liveSnapshot.rows) ? liveSnapshot.rows.slice(-requested) : liveRows(closedRows,forming))
+      : closedRows.slice();
+
+    const confirmedDiagnostic = diagnose(label,tf,closedRows,confirmedSnapshot);
+    const liveDiagnostic = diagnose(label,tf,liveRowsForTf,liveSnapshot || confirmedSnapshot);
+    const warning = deriveEarlyWarning(label,tf,closedRows,forming,confirmedDiagnostic);
+    const mode = LIVE_DIAG_TFS.has(tf) && liveRowsForTf.length > closedRows.length ? 'live' : 'confirmed';
+    const active = (LIVE_DIAG_TFS.has(tf) && liveDiagnostic && liveDiagnostic.available) ? liveDiagnostic : confirmedDiagnostic;
+    if(active && active.available){
+      active.mode = LIVE_DIAG_TFS.has(tf) ? mode : 'confirmed';
+      active.confirmedDiagnostic = confirmedDiagnostic;
+      active.liveDiagnostic = liveDiagnostic;
+      active.earlyWarning = warning;
+      active.events.earlyWarning = warning ? warning.label : 'None';
+    }
+    return active;
+  }
   function action(dir,pow,clarity,risk){ let hasOpen=false, side=''; try{hasOpen=Array.isArray(openPositionBoxes)&&openPositionBoxes.length>0; side=openPositionBoxes[0]?.side||'';}catch(_e){} if(hasOpen){ if(side==='SHORT'){ if(dir>30)return 'EXIT SHORT'; if(dir>8)return 'TRIM SHORT'; if(dir< -35 && pow>20)return 'ADD SHORT'; return 'HOLD SHORT'; } else { if(dir<-30)return 'EXIT LONG'; if(dir<-8)return 'TRIM LONG'; if(dir>35&&pow>20)return 'ADD LONG'; return 'HOLD LONG'; }} if(clarity<52||risk>72)return 'WAIT'; if(dir>45&&pow>5)return 'FRESH LONG'; if(dir<-45&&pow>5)return 'FRESH SHORT'; return 'WAIT'; }
   function scorePos(score,c){ score=clamp(score,0,100); if(c==='red')return 50-score/2; if(c==='blue')return 50+score/2; return 50; }
   function segStrength(d){ const ratio=Math.min(1,d/32); if(ratio<.25)return 's1'; if(ratio<.50)return 's2'; if(ratio<.80)return 's3'; return 's4'; }
@@ -18588,7 +19058,18 @@ If there is NO open position, use this Section 2 instead:
 
   if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(installSsscSettingsPlaceholder,0); return r; }; }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
-  window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={version:MODULE,show,hide,refresh:()=>seedFromHub(true),diagnose};
+  window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={
+    version:MODULE,
+    show,
+    hide,
+    refresh:()=>seedFromHub(true),
+    diagnose,
+    getDiagnosticForTf(tfKey){
+      const label = intervalToTfLabel(tfLabelToInterval(tfKey) || String(tfKey || "").toLowerCase());
+      return data[label] || null;
+    },
+    getAllDiagnostics(){ return {...data}; }
+  };
 })();
 
 (() => {
