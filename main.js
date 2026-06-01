@@ -328,9 +328,9 @@ function emaPeriod(input,fallback){
 }
 
 function updateEmaLabels(){
-  if(lblEMA20) lblEMA20.textContent = "EMA" + emaPeriod(emaPeriod1El,9);
-  if(lblEMA50) lblEMA50.textContent = "EMA" + emaPeriod(emaPeriod2El,21);
-  if(lblEMA3) lblEMA3.textContent = "EMA" + emaPeriod(emaPeriod3El,55);
+  if(lblEMA20) lblEMA20.textContent = "MA1 EMA" + emaPeriod(emaPeriod1El,9);
+  if(lblEMA50) lblEMA50.textContent = "MA2 EMA" + emaPeriod(emaPeriod2El,21);
+  if(lblEMA3) lblEMA3.textContent = "MA3 EMA" + emaPeriod(emaPeriod3El,55);
 }
 
 function emaToggleStoreKey(n){
@@ -1692,25 +1692,54 @@ const marketDataHub = (() => {
     };
     return map[raw] || map[raw.toLowerCase()] || "";
   }
-  function normalizeMaPeriods(periods){
-    const seen = new Set();
-    const out = [];
-    const src = Array.isArray(periods) && periods.length
-      ? periods
-      : [
-          chartIndicatorPeriodValue(1,9),
-          chartIndicatorPeriodValue(2,21),
-          chartIndicatorPeriodValue(3,55),
-          chartIndicatorPeriodValue(4,100),
-          chartIndicatorPeriodValue(5,200)
-        ];
-    for(const raw of src){
-      const p = Math.max(1,Math.min(999,Math.round(Number(raw) || 0)));
-      if(!p || seen.has(p)) continue;
-      seen.add(p);
-      out.push(p);
-    }
-    return out.length ? out : [9,21,55,100,200];
+  function normalizeMaSlots(options={}){
+    const defaults = [9,21,55,100,200];
+    const clampPeriod = (v,fallback) => {
+      const n = Math.round(Number(v));
+      if(Number.isFinite(n) && n > 0) return Math.max(1,Math.min(999,n));
+      return fallback;
+    };
+    const fromCanonical = () => {
+      try{
+        const provider =
+          (window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots === "function")
+            ? window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots
+            : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+        const slots = provider ? provider() : null;
+        if(!Array.isArray(slots) || slots.length !== 5) return null;
+        return slots.map((slot,i) => ({
+          slot:i + 1,
+          slotId:"MA" + (i + 1),
+          period:clampPeriod(slot && slot.period,defaults[i])
+        }));
+      }catch(_e){
+        return null;
+      }
+    };
+    const fromSlotsOption = () => {
+      const src = Array.isArray(options.slots) ? options.slots : null;
+      if(!src || src.length !== 5) return null;
+      return src.map((slot,i) => ({
+        slot:i + 1,
+        slotId:"MA" + (i + 1),
+        period:clampPeriod(slot && slot.period,defaults[i])
+      }));
+    };
+    const fromPeriodsOption = () => {
+      const src = Array.isArray(options.periods) ? options.periods : null;
+      if(!src || src.length !== 5) return null;
+      return src.map((periodValue,i) => ({
+        slot:i + 1,
+        slotId:"MA" + (i + 1),
+        period:clampPeriod(periodValue,defaults[i])
+      }));
+    };
+    const fallback = () => [1,2,3,4,5].map((slot,i) => ({
+      slot,
+      slotId:"MA" + slot,
+      period:clampPeriod(chartIndicatorPeriodValue(slot,defaults[i]),defaults[i])
+    }));
+    return fromSlotsOption() || fromPeriodsOption() || fromCanonical() || fallback();
   }
   function buildAlignedEmaSeries(rows,period){
     const points = EMA(rows,period);
@@ -1740,7 +1769,11 @@ const marketDataHub = (() => {
         sourceIndex:null,
         candleTime:null,
         rows:[],
+        slots:[],
         periods:[],
+        seriesBySlot:{},
+        alignedBySlot:{},
+        valuesBySlot:{},
         seriesByPeriod:{},
         alignedByPeriod:{},
         valuesByPeriod:{},
@@ -1758,22 +1791,30 @@ const marketDataHub = (() => {
       .filter(row => row && Number.isFinite(Number(row.time)) && Number.isFinite(Number(row.close)))
       .map(cloneRow)
       .sort((a,b) => Number(a.time) - Number(b.time));
-    const periods = normalizeMaPeriods(options.periods);
+    const slots = normalizeMaSlots(options);
+    const periods = slots.map(slot => slot.period);
     const maxPeriod = periods.length ? Math.max(...periods) : 0;
     const requiredRows = Math.max(
       Number.isFinite(Number(options.requiredRows)) ? Math.max(1,Math.round(Number(options.requiredRows))) : 0,
       maxPeriod + 10
     );
+    const seriesBySlot = {};
+    const alignedBySlot = {};
+    const valuesBySlot = {};
     const seriesByPeriod = {};
     const alignedByPeriod = {};
     const valuesByPeriod = {};
-    for(const period of periods){
-      const built = buildAlignedEmaSeries(rows,period);
-      seriesByPeriod[period] = built.points;
-      alignedByPeriod[period] = built.aligned;
-      valuesByPeriod[period] = Number.isFinite(built.lastValue) ? built.lastValue : null;
+    for(const slot of slots){
+      const built = buildAlignedEmaSeries(rows,slot.period);
+      const slotId = slot.slotId;
+      seriesBySlot[slotId] = built.points;
+      alignedBySlot[slotId] = built.aligned;
+      valuesBySlot[slotId] = Number.isFinite(built.lastValue) ? built.lastValue : null;
+      if(!Array.isArray(seriesByPeriod[slot.period])) seriesByPeriod[slot.period] = built.points;
+      if(!Array.isArray(alignedByPeriod[slot.period])) alignedByPeriod[slot.period] = built.aligned;
+      if(!Number.isFinite(Number(valuesByPeriod[slot.period]))) valuesByPeriod[slot.period] = valuesBySlot[slotId];
     }
-    const valuesValid = periods.every(period => Number.isFinite(Number(valuesByPeriod[period])));
+    const valuesValid = slots.every(slot => Number.isFinite(Number(valuesBySlot[slot.slotId])));
     const sourceIndex = rows.length ? rows.length - 1 : null;
     const candleTime = rows.length ? Number(rows[rows.length-1].time) : null;
     const warmupCount = rows.length;
@@ -1789,7 +1830,11 @@ const marketDataHub = (() => {
       sourceIndex,
       candleTime,
       rows,
+      slots,
       periods,
+      seriesBySlot,
+      alignedBySlot,
+      valuesBySlot,
       seriesByPeriod,
       alignedByPeriod,
       valuesByPeriod,
@@ -3907,7 +3952,7 @@ function tradeOverlays(vis,mapX,mapY,slot,clip){
 
     const boxText = b.side === "SHORT" ? "SHORT" : "LONG";
     const topText = fq(b.qty) + " | " + fm(floating) + " | " + (pctMargin == null ? "--" : pct(pctMargin));
-    const bottomText = "Δ " + fd(distance) + " | " + (per100 == null ? "--" : fm(per100));
+    const bottomText = "Delta " + fd(distance) + " | " + (per100 == null ? "--" : fm(per100));
 
     ctx.save();
     ctx.font = "12px Arial";
@@ -5158,7 +5203,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.stale ? 'STALE' : (b.side === 'SHORT' ? 'SHORT' : 'LONG');
       const topText = (b.stale ? 'STALE | ' : '') + fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -5928,30 +5973,30 @@ startTradeAuto();
 
     const lines = [];
 
-    lines.push("DATA READINESS PREVIEW — V13_04");
+    lines.push("DATA READINESS PREVIEW - V13_04");
     lines.push("");
     lines.push("Symbol:");
     lines.push("- " + (typeof cfg === "function" ? cfg().symbol : "{{SYMBOL}}"));
     lines.push("");
     lines.push("Required timeframes:");
     for(const t of tfs){
-      lines.push("- " + t.tf + " — required " + t.count + " candles — role: " + t.role);
+      lines.push("- " + t.tf + " - required " + t.count + " candles - role: " + t.role);
     }
 
     lines.push("");
     lines.push("Required indicators:");
-    lines.push("- EMA20 — locally calculable from OHLC");
-    lines.push("- EMA50 — locally calculable from OHLC");
-    lines.push("- RSI14 — locally calculable from close prices");
-    lines.push("- ATR14 — locally calculable from OHLC");
-    lines.push("- VWAP — locally calculable from OHLCV");
-    lines.push("- Volume — included in Binance OHLCV");
+    lines.push("- EMA20 - locally calculable from OHLC");
+    lines.push("- EMA50 - locally calculable from OHLC");
+    lines.push("- RSI14 - locally calculable from close prices");
+    lines.push("- ATR14 - locally calculable from OHLC");
+    lines.push("- VWAP - locally calculable from OHLCV");
+    lines.push("- Volume - included in Binance OHLCV");
 
     lines.push("");
     lines.push("Optional external data:");
-    lines.push("- Open Interest — available from Binance Futures endpoint, not mandatory");
-    lines.push("- Funding Rate — available from Binance Futures endpoint, not mandatory");
-    lines.push("- Liquidation zones — not available from simple kline feed");
+    lines.push("- Open Interest - available from Binance Futures endpoint, not mandatory");
+    lines.push("- Funding Rate - available from Binance Futures endpoint, not mandatory");
+    lines.push("- Liquidation zones - not available from simple kline feed");
 
     lines.push("");
     lines.push("Local candle cache:");
@@ -6788,11 +6833,11 @@ startTradeAuto();
         const ci = tf.cacheInfo || {};
         preview.push(
           tf.timeframe +
-          " — " +
+          " - " +
           tf.receivedCandles +
-          " candles — " +
+          " candles - " +
           tf.status +
-          " — last: " +
+          " - last: " +
           tf.lastTime
         );
         preview.push(
@@ -7142,7 +7187,7 @@ startTradeAuto();
   if(!panel || !head) return;
 
   if(title){
-    title.innerHTML = "Strategy Lab — V13_UI_V2 <span class='v13-drag-note'>drag header to move</span>";
+    title.innerHTML = "Strategy Lab - V13_UI_V2 <span class='v13-drag-note'>drag header to move</span>";
   }
 
   let dragging = false;
@@ -7315,10 +7360,10 @@ startTradeAuto();
     emaCard.id = 'patch5EmaCard';
     emaCard.innerHTML = `
       <div class="settings-card-title">Indicator styles</div>
-      <div class="settings-card-desc">EMA and VWAP color and transparency.</div>
-      <div class="patch5-row"><span>EMA 1</span>${settingInput('patch5Ema1Color','color', localStorage.getItem(KEYS.ema1Color)||defaults.ema1Color)} ${settingInput('patch5Ema1Alpha','range', localStorage.getItem(KEYS.ema1Alpha)||defaults.ema1Alpha,'min="0" max="100" step="1"')}</div>
-      <div class="patch5-row"><span>EMA 2</span>${settingInput('patch5Ema2Color','color', localStorage.getItem(KEYS.ema2Color)||defaults.ema2Color)} ${settingInput('patch5Ema2Alpha','range', localStorage.getItem(KEYS.ema2Alpha)||defaults.ema2Alpha,'min="0" max="100" step="1"')}</div>
-      <div class="patch5-row"><span>EMA 3</span>${settingInput('patch5Ema3Color','color', localStorage.getItem(KEYS.ema3Color)||defaults.ema3Color)} ${settingInput('patch5Ema3Alpha','range', localStorage.getItem(KEYS.ema3Alpha)||defaults.ema3Alpha,'min="0" max="100" step="1"')}</div>
+      <div class="settings-card-desc">MA and VWAP color and transparency.</div>
+      <div class="patch5-row"><span>MA1</span>${settingInput('patch5Ema1Color','color', localStorage.getItem(KEYS.ema1Color)||defaults.ema1Color)} ${settingInput('patch5Ema1Alpha','range', localStorage.getItem(KEYS.ema1Alpha)||defaults.ema1Alpha,'min="0" max="100" step="1"')}</div>
+      <div class="patch5-row"><span>MA2</span>${settingInput('patch5Ema2Color','color', localStorage.getItem(KEYS.ema2Color)||defaults.ema2Color)} ${settingInput('patch5Ema2Alpha','range', localStorage.getItem(KEYS.ema2Alpha)||defaults.ema2Alpha,'min="0" max="100" step="1"')}</div>
+      <div class="patch5-row"><span>MA3</span>${settingInput('patch5Ema3Color','color', localStorage.getItem(KEYS.ema3Color)||defaults.ema3Color)} ${settingInput('patch5Ema3Alpha','range', localStorage.getItem(KEYS.ema3Alpha)||defaults.ema3Alpha,'min="0" max="100" step="1"')}</div>
       <div class="patch5-row"><span>VWAP</span>${settingInput('patch5VWAPColor','color', localStorage.getItem(KEYS.vwapColor)||defaults.vwapColor)} ${settingInput('patch5VWAPAlpha','range', localStorage.getItem(KEYS.vwapAlpha)||defaults.vwapAlpha,'min="0" max="100" step="1"')}</div>`;
     grid.appendChild(emaCard);
 
@@ -7557,7 +7602,7 @@ startTradeAuto();
         const x = markerById(l.exitMarkerId);
         const tag = m ? m.letter : 'E';
         const exitTag = x ? x.letter : '';
-        return `${tag}${exitTag ? '→' + exitTag : ''} ${fq(l.qty)} | ${fm(l.netPnl)}`;
+        return `${tag}${exitTag ? '->' + exitTag : ''} ${fq(l.qty)} | ${fm(l.netPnl)}`;
       });
   };
   window.getOpenEntryContributionLines = function(){
@@ -7685,7 +7730,7 @@ startTradeAuto();
   function p8Row(name,periodId,colorId,alphaId,colorKey,alphaKey,periodValue){
     const period = periodId
       ? `<input id="${periodId}" type="number" min="1" max="999" step="1" value="${periodValue}">`
-      : `<span style="color:var(--muted)">—</span>`;
+      : `<span style="color:var(--muted)">-</span>`;
     return `
       <div>${name}</div>
       <div>${period}</div>
@@ -7711,9 +7756,9 @@ startTradeAuto();
       <div class="settings-card-desc">Set period, color, and transparency in one row per indicator.</div>
       <div class="patch8-indicator-grid">
         <div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div>
-        ${p8Row('EMA 1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','ema1Color','ema1Alpha',p8Val('emaPeriod1','9'))}
-        ${p8Row('EMA 2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','ema2Color','ema2Alpha',p8Val('emaPeriod2','21'))}
-        ${p8Row('EMA 3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','ema3Color','ema3Alpha',p8Val('emaPeriod3','55'))}
+        ${p8Row('MA1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','ema1Color','ema1Alpha',p8Val('emaPeriod1','9'))}
+        ${p8Row('MA2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','ema2Color','ema2Alpha',p8Val('emaPeriod2','21'))}
+        ${p8Row('MA3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','ema3Color','ema3Alpha',p8Val('emaPeriod3','55'))}
         ${p8Row('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','vwapColor','vwapAlpha','')}
       </div>`;
 
@@ -8453,7 +8498,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.side === 'SHORT' ? 'SHORT' : 'LONG';
       const topText = fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -8899,7 +8944,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.side === 'SHORT' ? 'SHORT' : 'LONG';
       const topText = fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -9474,7 +9519,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.side === 'SHORT' ? 'SHORT' : 'LONG';
       const topText = fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -10119,7 +10164,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.side === 'SHORT' ? 'SHORT' : 'LONG';
       const topText = fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -10629,7 +10674,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.side === 'SHORT' ? 'SHORT' : 'LONG';
       const topText = fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -11082,7 +11127,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.stale ? 'STALE' : (b.side === 'SHORT' ? 'SHORT' : 'LONG');
       const topText = (b.stale ? 'STALE | ' : '') + fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -11837,7 +11882,7 @@ startTradeAuto();
       const per100 = valuePer100Move(b);
       const boxText = b.stale ? 'STALE' : (b.side === 'SHORT' ? 'SHORT' : 'LONG');
       const topText = (b.stale ? 'STALE | ' : '') + fq(b.qty) + ' | ' + fm(floating) + ' | ' + (pctMargin == null ? '--' : pct(pctMargin));
-      const bottomText = 'Δ ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
+      const bottomText = 'Delta ' + fd(distance) + ' | ' + (per100 == null ? '--' : fm(per100));
       ctx.save();
       ctx.font = '12px Arial';
       const widestText = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -12147,7 +12192,7 @@ startTradeAuto();
   function row18(name,periodId,colorId,alphaId,widthId,key,periodFallback){
     const period = periodId
       ? `<input id="${periodId}" type="number" min="1" max="999" step="1" value="${v18(periodId, v18(periodId.replace('patch8Ema','emaPeriod').replace('Period',''), periodFallback))}">`
-      : `<span style="color:var(--muted)">—</span>`;
+      : `<span style="color:var(--muted)">-</span>`;
     return `
       <div>${name}</div>
       <div>${period}</div>
@@ -12165,9 +12210,9 @@ startTradeAuto();
     if(!grid) return;
     grid.innerHTML = `
       <div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>
-      ${row18('EMA 1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width','ema1',v18('emaPeriod1','9'))}
-      ${row18('EMA 2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width','ema2',v18('emaPeriod2','21'))}
-      ${row18('EMA 3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width','ema3',v18('emaPeriod3','55'))}
+      ${row18('MA1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width','ema1',v18('emaPeriod1','9'))}
+      ${row18('MA2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width','ema2',v18('emaPeriod2','21'))}
+      ${row18('MA3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width','ema3',v18('emaPeriod3','55'))}
       ${row18('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','patch18VWAPWidth','vwap','')}`;
 
     const periodMap = [
@@ -12637,7 +12682,7 @@ startTradeAuto();
     btn.title = "Show/hide enabled MA and VWAP lines";
     const sync = () => {
       const on = localStorage.getItem(IND_VIS_KEY21) !== "0";
-      btn.textContent = "👁";
+      btn.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>`;
       btn.classList.toggle("off", !on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
     };
@@ -13203,7 +13248,7 @@ startTradeAuto();
     const pctMargin = typeof pnlPctOfMargin === "function" ? pnlPctOfMargin(floating,b) : null;
     const per100 = typeof valuePer100Move === "function" ? valuePer100Move(b) : null;
     const topText = (b.stale ? "STALE | " : "") + fq(b.qty) + " | " + fm(floating) + " | " + (pctMargin == null ? "--" : pct(pctMargin));
-    const bottomText = "Δ " + fd(distance) + " | " + (per100 == null ? "--" : fm(per100));
+    const bottomText = "Delta " + fd(distance) + " | " + (per100 == null ? "--" : fm(per100));
     ctx.save();
     ctx.font = "12px Arial";
     const widest = Math.max(ctx.measureText(topText).width,ctx.measureText(bottomText).width);
@@ -13263,7 +13308,7 @@ startTradeAuto();
     const pnl = pnlAtLevel21(b,sl);
     const margin = typeof openBoxMargin === "function" ? openBoxMargin(b) : null;
     const marginPct = margin && Number.isFinite(Number(margin)) && Number(margin) !== 0 ? pnl / Number(margin) * 100 : null;
-    const details = "Δ" + fdAbs21(n21(latest.close) - sl) + " | " + fm(pnl) + " | " + (marginPct == null ? "--" : pct(marginPct));
+    const details = "Delta " + fdAbs21(n21(latest.close) - sl) + " | " + fm(pnl) + " | " + (marginPct == null ? "--" : pct(marginPct));
     const slBoxX = slBoxXNoOverlap21(anchor.boxX,entryY,y,details,clip,anchor.widest);
     const leftEdge = slBoxX - markerW/2;
     const rightEdge = slBoxX + markerW/2;
@@ -13546,7 +13591,7 @@ startTradeAuto();
     const btn = document.getElementById("v22SessionsToggle");
     if(!btn) return;
     const on = overlayEnabled22();
-    btn.textContent = "◷";
+    btn.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     btn.classList.toggle("off", !on);
     btn.setAttribute("aria-pressed", on ? "true" : "false");
     btn.title = on ? "Sessions overlay on" : "Sessions overlay off";
@@ -14724,7 +14769,7 @@ In no-position mode, Section 1 should still show immediate warnings if any, Sect
 
 Return exactly this report format when there IS an open position:
 
-[SYMBOL] — POSITION / MARKET ASSESSMENT
+[SYMBOL] - POSITION / MARKET ASSESSMENT
 Dubai Time: [YYYY-MM-DD HH:mm]
 
 ## 1. Immediate Warnings
@@ -14832,7 +14877,7 @@ If there is NO open position, use this Section 2 instead:
     const wrap=document.createElement("div");
     wrap.className="v29-assess-metric";
     wrap.id="v29AssessMetric";
-    wrap.innerHTML=`<button id="v29AssessBtn" class="v29-assess-btn" type="button" title="Assess" aria-label="Assess">🧭</button>`;
+    wrap.innerHTML=`<button id="v29AssessBtn" class="v29-assess-btn" type="button" title="Assess" aria-label="Assess"><svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><path d="M12 7.2 15.8 8.2 13.3 13.2 8.2 15.8 10.7 10.8Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13.3 13.2 15.8 8.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>`;
     account.insertAdjacentElement("beforebegin",wrap);
     const btn=q("v29AssessBtn");
     if(btn) btn.addEventListener("click",()=>onAssessClick());
@@ -14880,10 +14925,10 @@ If there is NO open position, use this Section 2 instead:
   function positionContext(entries){ const boxes=boxRows(); let totalSize=0,avgEntry=null,side="NONE"; if(boxes.length){ totalSize=boxes.reduce((a,b)=>a+Math.abs(n(b.qty)||0),0); avgEntry=weightedAvg(boxes.map(b=>({qty:Math.abs(n(b.qty)||0),price:n(b.price)}))); const sides=Array.from(new Set(boxes.map(sideOfBox).filter(x=>x&&x!=="-"))); side=sides.length===1?sides[0]:sides.length?"MIXED":"NONE"; }else if(entries.length){ totalSize=entries.reduce((a,e)=>a+Math.abs(n(e.qty)||0),0); avgEntry=weightedAvg(entries); const sides=Array.from(new Set(entries.map(e=>e.side||"").filter(Boolean))); side=sides.length===1?sides[0]:sides.length?"MIXED":"NONE"; } if(!(totalSize>0)) side="NONE"; return {boxes,totalSize,avgEntry,side}; }
   function stopPrice(o){ for(const v of [o&&o.stopPrice,o&&o.triggerPrice,o&&o.activatePrice,o&&o.price]){ const x=n(v); if(x!=null&&x>0) return x; } return null; }
   function activeSL(pos,current){ const sym=currentSymbol(); const opp=pos.side==="SHORT"?"BUY":"SELL"; let list=[]; try{ const pool=[].concat(window.v13OpenOrders21||[],window.v13OpenAlgoOrders21||[]); list=pool.filter(o=>o&&String(o.symbol||"")===sym).filter(o=>{ const st=String(o.status||o.orderStatus||"NEW").toUpperCase(); return !st||st==="NEW"||st==="PENDING"||st==="ACCEPTED"||st.includes("NEW"); }).filter(o=>{ const ps=String(o.positionSide||"").toUpperCase(); return !ps||ps==="BOTH"||ps===pos.side; }).filter(o=>String(o.side||"").toUpperCase()===opp).filter(o=>{ const types=[o&&o.type,o&&o.origType,o&&o.orderType,o&&o.algoType].map(x=>String(x||"").toUpperCase()).join(" "); return types.includes("STOP")&&!types.includes("TAKE_PROFIT")&&!types.includes("TRAILING"); }).map(o=>({price:stopPrice(o)})).filter(x=>x.price!=null); }catch(_e){list=[];} if(!list.length) return null; const directional=current==null?[]:list.filter(x=>pos.side==="LONG"?x.price<current:x.price>current); const pool=directional.length?directional:list; pool.sort((a,b)=>pos.side==="LONG"?b.price-a.price:a.price-b.price); return pool[0].price; }
-  function indicatorLines(){ const out=[]; try{ if(Array.isArray(ema20)&&ema20.length) out.push("EMA1: "+fmtPrice(ema20[ema20.length-1].value)); }catch(_e){} try{ if(Array.isArray(ema50)&&ema50.length) out.push("EMA2: "+fmtPrice(ema50[ema50.length-1].value)); }catch(_e){} try{ if(Array.isArray(ema3)&&ema3.length) out.push("EMA3: "+fmtPrice(ema3[ema3.length-1].value)); }catch(_e){} try{ if(Array.isArray(vwap)&&vwap.length) out.push("VWAP: "+fmtPrice(vwap[vwap.length-1].value)); }catch(_e){} return out; }
+  function indicatorLines(){ const out=[]; try{ if(Array.isArray(ema20)&&ema20.length) out.push("MA1: "+fmtPrice(ema20[ema20.length-1].value)); }catch(_e){} try{ if(Array.isArray(ema50)&&ema50.length) out.push("MA2: "+fmtPrice(ema50[ema50.length-1].value)); }catch(_e){} try{ if(Array.isArray(ema3)&&ema3.length) out.push("MA3: "+fmtPrice(ema3[ema3.length-1].value)); }catch(_e){} try{ if(Array.isArray(vwap)&&vwap.length) out.push("VWAP: "+fmtPrice(vwap[vwap.length-1].value)); }catch(_e){} return out; }
   function failureReport(market){ const lines=["Some Assess datasets are missing or failed.","","Missing datasets:"]; if(market.missing&&market.missing.length) market.missing.forEach(x=>lines.push("- "+x)); else lines.push("- none"); lines.push("","Details:"); Object.keys(market.tfs||{}).forEach(key=>{const b=market.tfs[key]; if(b&&b.errors&&b.errors.length) lines.push("- "+key+": "+b.errors.join(" | "));}); return lines.join("\n"); }
 
-  function buildDataPacket(market,useFallback){ const symbol=currentSymbol(); const appPrice=appCurrentPrice(); const latestFetched=market.tfs["1M"]&&market.tfs["1M"].klines&&market.tfs["1M"].klines.length?market.tfs["1M"].klines[market.tfs["1M"].klines.length-1].close:null; const entries=openEntries(); const pos=positionContext(entries); const sl=activeSL(pos,appPrice); const asset=quoteAsset(); const lines=[]; const add=s=>lines.push(s); add("PRIVATE POSITION CONTEXT INCLUDED. REVIEW BEFORE SHARING."); add("Patch: "+MODULE); add("Generated Dubai/local time: "+localTime(Date.now())); add(""); add("FIXED ASSESSMENT RULES"); add("- Use the currently selected app instrument in the report header: "+symbol+" — POSITION / MARKET ASSESSMENT"); add("- 3M and 1M are MICROSTRUCTURE / EARLY WARNING ONLY."); add("- 3M and 1M may flag immediate exit/reduce warnings, momentum exhaustion, micro sweep, failed continuation, acceptance/failure/rejection/continuation weakness."); add("- 3M and 1M must not override 15M / 1H structure unless they confirm failure or acceptance."); add("- Prioritize the existing open position first. Exit/reduce risk comes before add/no-add calls."); add("- Treat missing datasets as unavailable. Do not infer missing data."); add(""); if(market.missing&&market.missing.length){ add("WARNING: PARTIAL DATA PACKAGE"); market.missing.forEach(x=>add("- Missing: "+x)); add(""); } add("POSITION CONTEXT"); add("- Symbol: "+symbol); add("- Current price / app live: "+fmtPrice(appPrice)); add("- Latest fetched close: "+fmtPrice(latestFetched)); add("- Position side: "+pos.side); add("- Total size: "+fmtQty(pos.totalSize)+" "+asset); add("- Average entry: "+fmtPrice(pos.avgEntry)); add("- Active SL: "+(sl==null?"NO SL":fmtPrice(sl))); add("- SL source: existing app order state including normal open orders and conditional/algo orders if loaded"); add(""); add("OPEN ENTRIES"); add("- Source: existing reconstructed app state only; no new userTrades/accounting rebuild."); if(entries.length) entries.forEach(e=>add("- #"+e.sequence+" | level "+fmtPrice(e.price)+" | lot "+fmtQty(e.qty)+" "+asset+" | time "+fmtTime(e.time))); else add("- unavailable / none detected"); add(""); add("ACTIVE LEVELS — A. EXISTING / LIVE"); add("- Current price: "+fmtPrice(appPrice)); add("- Average entry: "+fmtPrice(pos.avgEntry)); add("- Active SL: "+(sl==null?"NO SL":fmtPrice(sl))); entries.forEach(e=>add("- Entry #"+e.sequence+": "+fmtPrice(e.price))); try{ if(dailyState){ add("- Day open: "+fmtPrice(dailyState.open)); add("- Day high: "+fmtPrice(dailyState.high)); add("- Day low: "+fmtPrice(dailyState.low)); } }catch(_e){} indicatorLines().forEach(x=>add("- "+x)); add(""); add("ACTIVE LEVELS — B/C. DERIVED STRUCTURE + VOLUME/PARTICIPATION"); Object.keys(market.tfs).forEach(key=>{ const b=market.tfs[key]; const sum=summarizeTF(b,appPrice||latestFetched||0); if(!sum){add("- "+key+": unavailable");return;} add("- "+key+" | role "+b.plan.role+" | range "+fmtPrice(sum.low)+"-"+fmtPrice(sum.high)+" | close position "+fmtPct(sum.pos)+" | swings "+sum.hhll+" | nearest support "+(sum.below?fmtPrice(sum.below.price):"-")+" | nearest resistance "+(sum.above?fmtPrice(sum.above.price):"-")+" | sweep/failure "+sum.sweep+" | compression "+sum.compression+" | taker buy ratio "+fmtPct(sum.takerRatio)+" | latest vol/avg "+(sum.avgVol?fmtNum((sum.latestVol||0)/sum.avgVol)+"x":"-")+" | OI change "+sum.oiContext); }); add(""); add("MULTI-TF MARKET DATA"); TF_PLAN.forEach(tf=>{ const b=market.tfs[tf.key]; const arr=b&&b.klines?b.klines:[]; const sum=summarizeTF(b,appPrice||latestFetched||0); add(""); add(tf.key+" — "+tf.role); if(!arr.length){add("- DATA MISSING");return;} add("- Fetched candles: "+arr.length); add("- Full-window high/low: "+fmtPrice(sum.low)+" / "+fmtPrice(sum.high)); add("- Latest close: "+fmtPrice(sum.latest.close)); add("- Current position in range: "+fmtPct(sum.pos)); add("- Recent swing high: "+(sum.recentHigh?fmtPrice(sum.recentHigh.price)+" @ "+fmtTime(sum.recentHigh.time):"-")); add("- Recent swing low: "+(sum.recentLow?fmtPrice(sum.recentLow.price)+" @ "+fmtTime(sum.recentLow.time):"-")); add("- Range high/low: "+fmtPrice(sum.rangeHigh)+" / "+fmtPrice(sum.rangeLow)); add("- Mark latest close: "+(sum.markLatest?fmtPrice(sum.markLatest.close):"unavailable")); add("- OI context: "+sum.oiContext); add("Raw candles: time,open,high,low,close,volume,quoteVolume,trades,takerBuyBase,takerBuyQuote"); const rawCount=useFallback?tf.fallbackRaw:tf.raw; arr.slice(-rawCount).forEach(c=>add([fmtTime(c.openTime),fmtRawPrice(c.open),fmtRawPrice(c.high),fmtRawPrice(c.low),fmtRawPrice(c.close),fmtNum(c.volume),fmtNum(c.quoteVolume),c.tradeCount==null?"-":String(c.tradeCount),fmtNum(c.takerBuyBase),fmtNum(c.takerBuyQuote)].join(","))); }); return lines.join("\n"); }
+  function buildDataPacket(market,useFallback){ const symbol=currentSymbol(); const appPrice=appCurrentPrice(); const latestFetched=market.tfs["1M"]&&market.tfs["1M"].klines&&market.tfs["1M"].klines.length?market.tfs["1M"].klines[market.tfs["1M"].klines.length-1].close:null; const entries=openEntries(); const pos=positionContext(entries); const sl=activeSL(pos,appPrice); const asset=quoteAsset(); const lines=[]; const add=s=>lines.push(s); add("PRIVATE POSITION CONTEXT INCLUDED. REVIEW BEFORE SHARING."); add("Patch: "+MODULE); add("Generated Dubai/local time: "+localTime(Date.now())); add(""); add("FIXED ASSESSMENT RULES"); add("- Use the currently selected app instrument in the report header: "+symbol+" - POSITION / MARKET ASSESSMENT"); add("- 3M and 1M are MICROSTRUCTURE / EARLY WARNING ONLY."); add("- 3M and 1M may flag immediate exit/reduce warnings, momentum exhaustion, micro sweep, failed continuation, acceptance/failure/rejection/continuation weakness."); add("- 3M and 1M must not override 15M / 1H structure unless they confirm failure or acceptance."); add("- Prioritize the existing open position first. Exit/reduce risk comes before add/no-add calls."); add("- Treat missing datasets as unavailable. Do not infer missing data."); add(""); if(market.missing&&market.missing.length){ add("WARNING: PARTIAL DATA PACKAGE"); market.missing.forEach(x=>add("- Missing: "+x)); add(""); } add("POSITION CONTEXT"); add("- Symbol: "+symbol); add("- Current price / app live: "+fmtPrice(appPrice)); add("- Latest fetched close: "+fmtPrice(latestFetched)); add("- Position side: "+pos.side); add("- Total size: "+fmtQty(pos.totalSize)+" "+asset); add("- Average entry: "+fmtPrice(pos.avgEntry)); add("- Active SL: "+(sl==null?"NO SL":fmtPrice(sl))); add("- SL source: existing app order state including normal open orders and conditional/algo orders if loaded"); add(""); add("OPEN ENTRIES"); add("- Source: existing reconstructed app state only; no new userTrades/accounting rebuild."); if(entries.length) entries.forEach(e=>add("- #"+e.sequence+" | level "+fmtPrice(e.price)+" | lot "+fmtQty(e.qty)+" "+asset+" | time "+fmtTime(e.time))); else add("- unavailable / none detected"); add(""); add("ACTIVE LEVELS - A. EXISTING / LIVE"); add("- Current price: "+fmtPrice(appPrice)); add("- Average entry: "+fmtPrice(pos.avgEntry)); add("- Active SL: "+(sl==null?"NO SL":fmtPrice(sl))); entries.forEach(e=>add("- Entry #"+e.sequence+": "+fmtPrice(e.price))); try{ if(dailyState){ add("- Day open: "+fmtPrice(dailyState.open)); add("- Day high: "+fmtPrice(dailyState.high)); add("- Day low: "+fmtPrice(dailyState.low)); } }catch(_e){} indicatorLines().forEach(x=>add("- "+x)); add(""); add("ACTIVE LEVELS - B/C. DERIVED STRUCTURE + VOLUME/PARTICIPATION"); Object.keys(market.tfs).forEach(key=>{ const b=market.tfs[key]; const sum=summarizeTF(b,appPrice||latestFetched||0); if(!sum){add("- "+key+": unavailable");return;} add("- "+key+" | role "+b.plan.role+" | range "+fmtPrice(sum.low)+"-"+fmtPrice(sum.high)+" | close position "+fmtPct(sum.pos)+" | swings "+sum.hhll+" | nearest support "+(sum.below?fmtPrice(sum.below.price):"-")+" | nearest resistance "+(sum.above?fmtPrice(sum.above.price):"-")+" | sweep/failure "+sum.sweep+" | compression "+sum.compression+" | taker buy ratio "+fmtPct(sum.takerRatio)+" | latest vol/avg "+(sum.avgVol?fmtNum((sum.latestVol||0)/sum.avgVol)+"x":"-")+" | OI change "+sum.oiContext); }); add(""); add("MULTI-TF MARKET DATA"); TF_PLAN.forEach(tf=>{ const b=market.tfs[tf.key]; const arr=b&&b.klines?b.klines:[]; const sum=summarizeTF(b,appPrice||latestFetched||0); add(""); add(tf.key+" - "+tf.role); if(!arr.length){add("- DATA MISSING");return;} add("- Fetched candles: "+arr.length); add("- Full-window high/low: "+fmtPrice(sum.low)+" / "+fmtPrice(sum.high)); add("- Latest close: "+fmtPrice(sum.latest.close)); add("- Current position in range: "+fmtPct(sum.pos)); add("- Recent swing high: "+(sum.recentHigh?fmtPrice(sum.recentHigh.price)+" @ "+fmtTime(sum.recentHigh.time):"-")); add("- Recent swing low: "+(sum.recentLow?fmtPrice(sum.recentLow.price)+" @ "+fmtTime(sum.recentLow.time):"-")); add("- Range high/low: "+fmtPrice(sum.rangeHigh)+" / "+fmtPrice(sum.rangeLow)); add("- Mark latest close: "+(sum.markLatest?fmtPrice(sum.markLatest.close):"unavailable")); add("- OI context: "+sum.oiContext); add("Raw candles: time,open,high,low,close,volume,quoteVolume,trades,takerBuyBase,takerBuyQuote"); const rawCount=useFallback?tf.fallbackRaw:tf.raw; arr.slice(-rawCount).forEach(c=>add([fmtTime(c.openTime),fmtRawPrice(c.open),fmtRawPrice(c.high),fmtRawPrice(c.low),fmtRawPrice(c.close),fmtNum(c.volume),fmtNum(c.quoteVolume),c.tradeCount==null?"-":String(c.tradeCount),fmtNum(c.takerBuyBase),fmtNum(c.takerBuyQuote)].join(","))); }); return lines.join("\n"); }
   function buildFullPackage(market,useFallback){ const symbol=currentSymbol(); const prompt=activePrompt().replaceAll("[SYMBOL]",symbol); const packet=buildDataPacket(market,useFallback); return prompt.trim()+"\n\n--- DATA PACKET ---\n"+packet; }
   async function onAssessClick(){ setBusy(true); try{ let market=await loadMarketData(TIMEOUT_MS); while(market.missing&&market.missing.length){ const choice=await showWarningModal(failureReport(market)); if(choice==="cancel") return; if(choice==="proceed") break; if(choice==="retry"||choice==="wait") market=await loadMarketData(TIMEOUT_MS); } let text=buildFullPackage(market,false); if(text.length>PACKET_FULL_LIMIT) text=buildFullPackage(market,true); try{ await copyText(text); showToast("Assessment package copied"); }catch(_e){ showPackageModal(text); } }catch(e){ showPackageModal("ASSESS FAILED\n\n"+(e&&e.stack?e.stack:String(e))); }finally{ setBusy(false); } }
 
@@ -14926,7 +14971,7 @@ If there is NO open position, use this Section 2 instead:
     return `rgba(${r},${g},${b},${a})`;
   }
   function widthFor(num){ const x=n(ls('ma'+num+'Width')); return x&&x>0?Math.max(1,Math.min(10,x)):2; }
-  function maLabel(num){ return 'EMA'+period(num); }
+  function maLabel(num){ return 'MA'+num+' EMA'+period(num); }
   function maToggle(num){ return $id('tglEMA'+num); }
   function maEnabled(num){ const el=maToggle(num); return !!(el&&el.checked); }
   function valAt(arr,t){ if(!Array.isArray(arr)) return null; for(let i=arr.length-1;i>=0;i--){ if(Number(arr[i].time)<=Number(t)) return arr[i].value; } return null; }
@@ -15057,27 +15102,11 @@ If there is NO open position, use this Section 2 instead:
   function drawExtraMAs(){
     return;
   }
-  const prevDraw=typeof draw==='function'?draw:null;
   // PATCH_38: legacy MA4/MA5 redraw wrapper disabled.
 
   const prevAutoY=typeof autoYRange==='function'?autoYRange:null;
   if(prevAutoY&&!window.__v32r1AutoYWrapped){ window.__v32r1AutoYWrapped=true; autoYRange=function(vis){
     return candleOnlyYRange(vis);
-  }; }
-
-  const prevCandleTip=typeof candleTip==='function'?candleTip:null;
-  if(prevCandleTip&&!window.__v32r1CandleTipWrapped){ window.__v32r1CandleTipWrapped=true; candleTip=function(c){
-    const lines=[formatDateTime(c.time*1000),'O : '+ip(c.open),'H : '+ip(c.high),'L : '+ip(c.low),'C : '+ip(c.close),'V : '+fv(c.volume)];
-    const maTipState = window.__maisoTooltipToggleState || null;
-    const showMA4 = maTipState && typeof maTipState[4] === 'boolean' ? maTipState[4] : maEnabled(4);
-    const showMA5 = maTipState && typeof maTipState[5] === 'boolean' ? maTipState[5] : maEnabled(5);
-    try{ if(tglEMA20&&tglEMA20.checked) lines.push((lblEMA20?lblEMA20.textContent:'EMA1')+' : '+fmtPrice(valAt(ema20,c.time))); }catch(_e){}
-    try{ if(tglEMA50&&tglEMA50.checked) lines.push((lblEMA50?lblEMA50.textContent:'EMA2')+' : '+fmtPrice(valAt(ema50,c.time))); }catch(_e){}
-    try{ if(tglEMA3&&tglEMA3.checked) lines.push((lblEMA3?lblEMA3.textContent:'EMA3')+' : '+fmtPrice(valAt(ema3,c.time))); }catch(_e){}
-    try{ if(showMA4) lines.push(maLabel(4)+' : '+fmtPrice(valAt(ema4,c.time))); }catch(_e){}
-    try{ if(showMA5) lines.push(maLabel(5)+' : '+fmtPrice(valAt(ema5,c.time))); }catch(_e){}
-    ctx.save(); ctx.font='11px Arial'; const pad=7,lh=14; const tw=Math.max(...lines.map(s=>ctx.measureText(s).width))+pad*2, th=lines.length*lh+pad*2; const x=Math.max(8,canvas.clientWidth-RIGHT_AXIS-tw-12), y=8;
-    ctx.fillStyle='rgba(255,255,255,.96)'; ctx.strokeStyle='#d9dce1'; ctx.fillRect(x,y,tw,th); ctx.strokeRect(x,y,tw,th); ctx.fillStyle='#1e2329'; ctx.textAlign='left'; ctx.textBaseline='top'; lines.forEach((s,i)=>ctx.fillText(s,x+pad,y+pad+i*lh)); ctx.restore();
   }; }
 
   function installStrictIsolateClickGuard(){
@@ -15134,7 +15163,7 @@ If there is NO open position, use this Section 2 instead:
   function oldStyle(k,suf,def){ return localStorage.getItem('btc_futures_chart_v13_05_'+k+'_'+suf) || def; }
   function fmt(v){ const x=n(v); return x==null?'-':Math.round(x).toLocaleString('en-US'); }
   function period(num){ const x=n(get('ma'+num+'Period')); return x&&x>0?Math.round(x):Number(DEF['ma'+num+'Period']); }
-  function label(num){ return 'EMA'+period(num); }
+  function label(num){ return 'MA'+num+' EMA'+period(num); }
   function maEnabled(num){ const el=$id('tglEMA'+num); return !!(el&&el.checked); }
   function hexToRgba(hex,alphaPct){
     const a=Math.max(0,Math.min(100,n(alphaPct)??100))/100;
@@ -15159,7 +15188,7 @@ If there is NO open position, use this Section 2 instead:
   }
   function updateLabels(){ [4,5].forEach(num=>{ const l=$id('lblEMA'+num); if(l) l.textContent=label(num); }); }
   function row(name,periodId,colorId,alphaId,widthId,values){
-    const periodHtml = periodId ? `<input id="${periodId}" type="number" min="1" max="999" step="1" value="${values.period}">` : `<span style="color:var(--muted)">—</span>`;
+    const periodHtml = periodId ? `<input id="${periodId}" type="number" min="1" max="999" step="1" value="${values.period}">` : `<span style="color:var(--muted)">-</span>`;
     return `<div>${name}</div><div>${periodHtml}</div><input id="${colorId}" type="color" value="${values.color}"><input id="${alphaId}" type="range" min="0" max="100" step="1" value="${values.alpha}"><input id="${widthId}" type="range" min="1" max="10" step="0.5" value="${values.width}" title="Thickness">`;
   }
   function rebuildIndicatorSettings(){
@@ -15171,11 +15200,11 @@ If there is NO open position, use this Section 2 instead:
     grid.classList.add('v32r2-full-ma-grid');
     grid.innerHTML=`
       <div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>
-      ${row('EMA 1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width',{period:($id('emaPeriod1')&&$id('emaPeriod1').value)||'9',color:oldStyle('ema1','color','#ff7900'),alpha:oldStyle('ema1','alpha','100'),width:oldWidth('ema1')})}
-      ${row('EMA 2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width',{period:($id('emaPeriod2')&&$id('emaPeriod2').value)||'21',color:oldStyle('ema2','color','#0000ff'),alpha:oldStyle('ema2','alpha','100'),width:oldWidth('ema2')})}
-      ${row('EMA 3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width',{period:($id('emaPeriod3')&&$id('emaPeriod3').value)||'55',color:oldStyle('ema3','color','#d600a9'),alpha:oldStyle('ema3','alpha','100'),width:oldWidth('ema3')})}
-      ${row('EMA 4','v32r2MA4Period','v32r2MA4Color','v32r2MA4Alpha','v32r2MA4Width',{period:get('ma4Period','100'),color:get('ma4Color','#0b7a00'),alpha:get('ma4Alpha','100'),width:get('ma4Width','2')})}
-      ${row('EMA 5','v32r2MA5Period','v32r2MA5Color','v32r2MA5Alpha','v32r2MA5Width',{period:get('ma5Period','200'),color:get('ma5Color','#008c7a'),alpha:get('ma5Alpha','100'),width:get('ma5Width','2')})}
+      ${row('MA1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width',{period:($id('emaPeriod1')&&$id('emaPeriod1').value)||'9',color:oldStyle('ema1','color','#ff7900'),alpha:oldStyle('ema1','alpha','100'),width:oldWidth('ema1')})}
+      ${row('MA2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width',{period:($id('emaPeriod2')&&$id('emaPeriod2').value)||'21',color:oldStyle('ema2','color','#0000ff'),alpha:oldStyle('ema2','alpha','100'),width:oldWidth('ema2')})}
+      ${row('MA3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width',{period:($id('emaPeriod3')&&$id('emaPeriod3').value)||'55',color:oldStyle('ema3','color','#d600a9'),alpha:oldStyle('ema3','alpha','100'),width:oldWidth('ema3')})}
+      ${row('MA4','v32r2MA4Period','v32r2MA4Color','v32r2MA4Alpha','v32r2MA4Width',{period:get('ma4Period','100'),color:get('ma4Color','#0b7a00'),alpha:get('ma4Alpha','100'),width:get('ma4Width','2')})}
+      ${row('MA5','v32r2MA5Period','v32r2MA5Color','v32r2MA5Alpha','v32r2MA5Width',{period:get('ma5Period','200'),color:get('ma5Color','#008c7a'),alpha:get('ma5Alpha','100'),width:get('ma5Width','2')})}
       ${row('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','patch18VWAPWidth',{period:'',color:oldStyle('vwap','color','#6f6658'),alpha:oldStyle('vwap','alpha','100'),width:oldWidth('vwap')})}`;
     bindBaseRows(); bindExtraRows();
   }
@@ -15210,19 +15239,6 @@ If there is NO open position, use this Section 2 instead:
   // PATCH_38: legacy MA4/MA5 redraw wrapper disabled.
   if(typeof autoYRange==='function'&&!window.__v32r2AutoYWrapped){ window.__v32r2AutoYWrapped=true; autoYRange=function(vis){
     return candleOnlyYRange(vis);
-  }; }
-  if(typeof candleTip==='function'&&!window.__v32r2CandleTipWrapped){ window.__v32r2CandleTipWrapped=true; candleTip=function(c){
-    const lines=[formatDateTime(c.time*1000),'O : '+ip(c.open),'H : '+ip(c.high),'L : '+ip(c.low),'C : '+ip(c.close),'V : '+fv(c.volume)];
-    const maTipState = window.__maisoTooltipToggleState || null;
-    const showMA4 = maTipState && typeof maTipState[4] === 'boolean' ? maTipState[4] : maEnabled(4);
-    const showMA5 = maTipState && typeof maTipState[5] === 'boolean' ? maTipState[5] : maEnabled(5);
-    try{ if(tglEMA20&&tglEMA20.checked) lines.push((lblEMA20?lblEMA20.textContent:'EMA1')+' : '+fmt(valAt(ema20,c.time))); }catch(_e){}
-    try{ if(tglEMA50&&tglEMA50.checked) lines.push((lblEMA50?lblEMA50.textContent:'EMA2')+' : '+fmt(valAt(ema50,c.time))); }catch(_e){}
-    try{ if(tglEMA3&&tglEMA3.checked) lines.push((lblEMA3?lblEMA3.textContent:'EMA3')+' : '+fmt(valAt(ema3,c.time))); }catch(_e){}
-    try{ if(showMA4) lines.push(label(4)+' : '+fmt(valAt(ema4,c.time))); }catch(_e){}
-    try{ if(showMA5) lines.push(label(5)+' : '+fmt(valAt(ema5,c.time))); }catch(_e){}
-    ctx.save(); ctx.font='11px Arial'; const pad=7,lh=14; const tw=Math.max(...lines.map(s=>ctx.measureText(s).width))+pad*2, th=lines.length*lh+pad*2; const x=Math.max(8,canvas.clientWidth-RIGHT_AXIS-tw-12), y=8;
-    ctx.fillStyle='rgba(255,255,255,.96)'; ctx.strokeStyle='#d9dce1'; ctx.fillRect(x,y,tw,th); ctx.strokeRect(x,y,tw,th); ctx.fillStyle='#1e2329'; ctx.textAlign='left'; ctx.textBaseline='top'; lines.forEach((s,i)=>ctx.fillText(s,x+pad,y+pad+i*lh)); ctx.restore();
   }; }
   function openChainIds(rec){ const ids=new Set(); (rec.openConnectors||[]).forEach(l=>{ if(l.chainId) ids.add(l.chainId); if(l.tradeChainId) ids.add(l.tradeChainId); }); (rec.openLots||[]).forEach(l=>{ if(l.chainId) ids.add(l.chainId); if(l.tradeChainId) ids.add(l.tradeChainId); }); return ids; }
   function firstEntryByChain(rec){ const m=new Map(); (rec.markers||[]).forEach(x=>{ if(x.role!=='entry') return; const cid=x.chainId||x.tradeChainId||x.parentTradeId||x.id; const t=Number(x.time)||0; if(!m.has(cid)||t<m.get(cid)) m.set(cid,t); }); return m; }
@@ -15423,7 +15439,7 @@ If there is NO open position, use this Section 2 instead:
   /* Reload / Reset UI. */
   function installReloadReset(){
     const reload = $id("reload");
-    if(reload){ reload.textContent = "↻"; reload.title = "Reload data"; reload.setAttribute("aria-label","Reload data"); reload.classList.add("v33-reload-icon"); }
+    if(reload){ reload.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M20 4v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 10a8 8 0 1 0 2.2 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`; reload.title = "Reload data"; reload.setAttribute("aria-label","Reload data"); reload.classList.add("v33-reload-icon"); }
     const reset = $id("resetView");
     if(reset) reset.remove();
   }
@@ -15487,10 +15503,10 @@ If there is NO open position, use this Section 2 instead:
   function maColor(n){ return n<=3 ? ls(STYLE_PREFIX+"ema"+n+"_color", ["#ff7900","#0000ff","#d600a9"][n-1]) : ls(EXTRA_PREFIX+"ma"+n+"Color", n===4?"#0b7a00":"#008c7a"); }
   function maAlpha(n){ return n<=3 ? ls(STYLE_PREFIX+"ema"+n+"_alpha", "100") : ls(EXTRA_PREFIX+"ma"+n+"Alpha", "100"); }
   function maWidth(n){ return n<=3 ? ls(WIDTH_PREFIX+"ema"+n+"_width", "2") : ls(EXTRA_PREFIX+"ma"+n+"Width", "2"); }
-  function maLabel(n){ return "EMA " + n; }
+  function maLabel(n){ return "MA" + n; }
   function row(n){ return `<div>${maLabel(n)}</div><div><input id="v33MA${n}Period" type="number" min="1" max="999" step="1" value="${maPeriod(n)}"></div><input id="v33MA${n}Color" type="color" value="${maColor(n)}"><input id="v33MA${n}Alpha" type="range" min="0" max="100" step="1" value="${maAlpha(n)}"><input id="v33MA${n}Width" type="range" min="1" max="10" step="0.5" value="${maWidth(n)}" title="Thickness">`; }
   function updateMaToggleLabels(){
-    [["lblEMA20",1],["lblEMA50",2],["lblEMA3",3],["lblEMA4",4],["lblEMA5",5]].forEach(([id,n])=>{ const l=$id(id); if(l) l.textContent="EMA"+maPeriod(n); });
+    [["lblEMA20",1],["lblEMA50",2],["lblEMA3",3],["lblEMA4",4],["lblEMA5",5]].forEach(([id,n])=>{ const l=$id(id); if(l) l.textContent=`MA${n} EMA${maPeriod(n)}`; });
   }
   function ensureMaToggles(){
     const box = document.querySelector(".indicator-toggles"); if(!box) return;
@@ -15498,7 +15514,7 @@ If there is NO open position, use this Section 2 instead:
     [4,5].forEach(n=>{
       if(!$id("tglEMA"+n)){
         const lab=document.createElement("label"); lab.className="toggle";
-        lab.innerHTML = `<input id="tglEMA${n}" type="checkbox"><span id="lblEMA${n}">EMA${maPeriod(n)}</span>`;
+        lab.innerHTML = `<input id="tglEMA${n}" type="checkbox"><span id="lblEMA${n}">MA${n} EMA${maPeriod(n)}</span>`;
         box.insertBefore(lab,before||null);
       }
       const el=$id("tglEMA"+n); if(el && !el.__v33Bound){ el.__v33Bound=true; el.addEventListener("change",()=>{try{draw();}catch(_e){}},false); }
@@ -15521,7 +15537,7 @@ If there is NO open position, use this Section 2 instead:
     let grid=card.querySelector(".patch8-indicator-grid");
     if(!grid){ grid=document.createElement("div"); grid.className="patch8-indicator-grid"; card.appendChild(grid); }
     grid.className="patch8-indicator-grid v33-ma-grid";
-    grid.innerHTML=`<div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>${row(1)}${row(2)}${row(3)}${row(4)}${row(5)}<div>VWAP</div><div><span style="color:var(--muted)">—</span></div><input id="v33VWAPColor" type="color" value="${ls(STYLE_PREFIX+"vwap_color","#6f6658")}"><input id="v33VWAPAlpha" type="range" min="0" max="100" step="1" value="${ls(STYLE_PREFIX+"vwap_alpha","100")}"><input id="v33VWAPWidth" type="range" min="1" max="10" step="0.5" value="${ls(WIDTH_PREFIX+"vwap_width","2")}" title="Thickness">`;
+    grid.innerHTML=`<div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>${row(1)}${row(2)}${row(3)}${row(4)}${row(5)}<div>VWAP</div><div><span style="color:var(--muted)">-</span></div><input id="v33VWAPColor" type="color" value="${ls(STYLE_PREFIX+"vwap_color","#6f6658")}"><input id="v33VWAPAlpha" type="range" min="0" max="100" step="1" value="${ls(STYLE_PREFIX+"vwap_alpha","100")}"><input id="v33VWAPWidth" type="range" min="1" max="10" step="0.5" value="${ls(WIDTH_PREFIX+"vwap_width","2")}" title="Thickness">`;
     bindMaRows();
     [["v33VWAPColor",STYLE_PREFIX+"vwap_color"],["v33VWAPAlpha",STYLE_PREFIX+"vwap_alpha"],["v33VWAPWidth",WIDTH_PREFIX+"vwap_width"]].forEach(([id,key])=>{ const el=$id(id); if(!el) return; const sync=()=>{ localStorage.setItem(key,el.value); try{draw();}catch(_e){} }; el.addEventListener("input",sync,false); el.addEventListener("change",sync,false); });
   }
@@ -15552,12 +15568,30 @@ If there is NO open position, use this Section 2 instead:
         Number(row.quoteVolume || 0)
       ];
     }
+    function stackSlots(){
+      try{
+        const provider =
+          (window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots === "function")
+            ? window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots
+            : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+        const slots = provider ? provider() : null;
+        if(!Array.isArray(slots) || slots.length !== 5) return null;
+        return slots.map((slot,i) => {
+          const period = Math.round(Number(slot && slot.period));
+          if(!Number.isFinite(period) || period <= 0) return null;
+          return {
+            slot:i + 1,
+            slotId:"MA" + (i + 1),
+            period:Math.max(1,Math.min(999,period))
+          };
+        });
+      }catch(_e){
+        return null;
+      }
+    }
     function stackPeriods(){
-      const defaults = [9,21,55,100,200];
-      return [1,2,3,4,5].map((n,i)=>{
-        const v = Math.round(num(maPeriod(n)) || defaults[i]);
-        return Math.max(1,Math.min(999,v));
-      });
+      const slots = stackSlots();
+      return Array.isArray(slots) && slots.length === 5 ? slots.map(slot => slot.period) : null;
     }
     function ensureDom(){
       const existing = $id("v33MAStackMetric");
@@ -15581,8 +15615,12 @@ If there is NO open position, use this Section 2 instead:
       for(let i=p;i<values.length;i++){ cur = values[i]*a + cur*(1-a); out[i]=cur; }
       return out;
     }
-    function pairLabel(periods,i,j){ return `EMA${periods[i]}/${periods[j]}`; }
-    function maLabelP(periods,i){ return "EMA" + periods[i]; }
+    function maLabelP(slots,i){
+      const slot = slots && slots[i];
+      if(!slot) return "MA" + (i + 1);
+      return `${slot.slotId} EMA${slot.period}`;
+    }
+    function pairLabel(slots,i,j){ return `${maLabelP(slots,i)} / ${maLabelP(slots,j)}`; }
     function spreadScoreLabel(score){
       if(score <= 20) return "Tight Compression";
       if(score <= 40) return "Mild Compression";
@@ -15627,24 +15665,24 @@ If there is NO open position, use this Section 2 instead:
       return type === "crossover" || type === "failed crossover" || type === "bounce/no-cross" || type === "compression release" || type === "deep defense";
     }
     function maPairIntent(ev,ctx){
-      if(!ev || ev.age !== 0) return {intent:"none",reason:"No current-candle MA-pair event",display:"Event — none"};
+      if(!ev || ev.age !== 0) return {intent:"none",reason:"No current-candle MA-pair event",display:"Event - none"};
       const type = String(ev.type || "").toLowerCase();
       const weakSetup = !ctx.setup || ctx.alignment < 60 || ctx.strength < 35 || ctx.quality < 40 || ctx.state === "mixed" || ctx.state === "transition" || ctx.state === "compression";
       if(type.includes("cross risk") || type.includes("compression") || type.includes("transition")){
-        return {intent:"none",reason:"MA-pair compression/cross risk",display:ev.pairClass === "adjacent" ? "Event — transition risk" : "Event — compression risk"};
+        return {intent:"none",reason:"MA-pair compression/cross risk",display:ev.pairClass === "adjacent" ? "Event - transition risk" : "Event - compression risk"};
       }
       if(weakSetup){
         if(actionableMaPair(ev)){
-          return {intent:"none",reason:"Weak or mixed stack context",display:ev.pairClass === "adjacent" ? "Event — transition risk" : "Event — deep MA defense"};
+          return {intent:"none",reason:"Weak or mixed stack context",display:ev.pairClass === "adjacent" ? "Event - transition risk" : "Event - deep MA defense"};
         }
-        return {intent:"none",reason:"Weak or mixed stack context",display:"Event — none"};
+        return {intent:"none",reason:"Weak or mixed stack context",display:"Event - none"};
       }
-      if(!ev.dir) return {intent:"none",reason:"Ambiguous MA-pair event",display:"Event — none"};
+      if(!ev.dir) return {intent:"none",reason:"Ambiguous MA-pair event",display:"Event - none"};
       const supports = ev.dir === ctx.setup;
       return {
         intent:supports ? "green" : "red",
         reason:`MA-pair event ${supports ? "supports setup" : "conflicts with setup"}`,
-        display:`Event — MA-pair event ${supports ? "supports setup" : "conflicts with setup"}`
+        display:`Event - MA-pair event ${supports ? "supports setup" : "conflicts with setup"}`
       };
     }
     function normalizeMaPairEvent(ev,ctx){
@@ -15708,7 +15746,7 @@ If there is NO open position, use this Section 2 instead:
       const postCrossFailed = curSign === crossedSign && Math.abs(diff[idx]) < Math.abs(diff[crossIdx])*.65;
       return crossedBack || postCrossFailed;
     }
-    function detectMaPair(series, periods, ctx, lookback){
+    function detectMaPair(series, slots, ctx, lookback){
       const len = series[0] ? series[0].length : 0;
       const start = Math.max(2, len - (lookback || 18));
       let best = null;
@@ -15719,11 +15757,12 @@ If there is NO open position, use this Section 2 instead:
         const bestScore = best ? pairEventRank(best) + (100 - Math.min(99,best.age || 0)) + (best.rank || 0) / 1000 : -1;
         if(!best || score > bestScore) best = ev;
       };
-      for(let a=0; a<periods.length-1; a++){
-        for(let b=a+1; b<periods.length; b++){
+      for(let a=0; a<slots.length-1; a++){
+        for(let b=a+1; b<slots.length; b++){
           const fast = series[a], slow = series[b];
           if(!fast || !slow || !fast.length || !slow.length) continue;
-          const label = pairLabel(periods,a,b);
+          const pairRef = `MA${a+1}/MA${b+1}`;
+          const pairText = pairLabel(slots,a,b);
           const pairClass = b === a + 1 ? "adjacent" : (b - a >= 3 ? "wide" : "deep");
           const pairPrefix = pairClass === "adjacent" ? "" : (pairClass === "wide" ? "wide-pair " : "deep ");
           const diff = fast.map((v,k)=>Number.isFinite(v)&&Number.isFinite(slow[k]) ? v - slow[k] : NaN);
@@ -15735,24 +15774,24 @@ If there is NO open position, use this Section 2 instead:
             const prevPct=Math.abs(prev)/ref, curPct=Math.abs(cur)/ref, olderPct=Math.abs(older)/ref;
             const eventTime = ctx.times && ctx.times[i] ? ctx.times[i] : i;
             const curSign = signOf(cur);
-            if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:label,label:`${label} ${pairPrefix}bull crossover`,age,dir:1,time:eventTime,rank:95});
-            if(prev >= 0 && cur < 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:label,label:`${label} ${pairPrefix}bear crossover`,age,dir:-1,time:eventTime,rank:95});
-            if(isFailedCross(diff,i)) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:label,label:`${label} ${pairPrefix}failed crossover`,age,dir:curSign || -signOf(diff[Math.max(0,i-1)]),time:eventTime,rank:82});
+            if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bull crossover`,age,dir:1,time:eventTime,rank:95});
+            if(prev >= 0 && cur < 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bear crossover`,age,dir:-1,time:eventTime,rank:95});
+            if(isFailedCross(diff,i)) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}failed crossover`,age,dir:curSign || -signOf(diff[Math.max(0,i-1)]),time:eventTime,rank:82});
             const sameSide = Math.sign(cur) === Math.sign(prev) && Math.sign(cur) !== 0;
             const movingTogether = sameSide && curPct < prevPct && prevPct <= olderPct;
             const deepBounceOk = pairClass === "adjacent" || (ctx.alignment >= 40 && ctx.setup && curSign === ctx.setup && ctx.spreadDelta >= -0.005);
-            if(sameSide && deepBounceOk && isConfirmedBounce(diff,fast,slow,i)) add({eventClass:"MA-pair",type:"bounce/no-cross",pairClass,ref:label,label:`${label} ${pairPrefix}bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
-            if(sameSide && olderPct <= 0.0009 && curPct > Math.max(olderPct*1.55,0.0012)) add({eventClass:"MA-pair",type:"compression release",pairClass,ref:label,label:`${label} ${pairPrefix}compression release`,age,dir:curSign,time:eventTime,rank:70});
-            if(movingTogether && curPct <= 0.0018) add({eventClass:"MA-pair",type:"cross risk",pairClass,ref:label,label:`${label} ${pairPrefix}cross risk`,age,dir:0,time:eventTime,rank:52});
-            else if(curPct <= 0.0007) add({eventClass:"MA-pair",type:"compression",pairClass,ref:label,label:`${label} ${pairPrefix}compression`,age,dir:0,time:eventTime,rank:45});
-            if(sameSide && curPct > prevPct*1.35 && ctx.spreadDelta > 0.01) add({eventClass:"MA-pair",type:"expansion",pairClass,ref:label,label:`${label} ${pairPrefix}expansion`,age,dir:curSign,time:eventTime,rank:58});
+            if(sameSide && deepBounceOk && isConfirmedBounce(diff,fast,slow,i)) add({eventClass:"MA-pair",type:"bounce/no-cross",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
+            if(sameSide && olderPct <= 0.0009 && curPct > Math.max(olderPct*1.55,0.0012)) add({eventClass:"MA-pair",type:"compression release",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression release`,age,dir:curSign,time:eventTime,rank:70});
+            if(movingTogether && curPct <= 0.0018) add({eventClass:"MA-pair",type:"cross risk",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}cross risk`,age,dir:0,time:eventTime,rank:52});
+            else if(curPct <= 0.0007) add({eventClass:"MA-pair",type:"compression",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression`,age,dir:0,time:eventTime,rank:45});
+            if(sameSide && curPct > prevPct*1.35 && ctx.spreadDelta > 0.01) add({eventClass:"MA-pair",type:"expansion",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}expansion`,age,dir:curSign,time:eventTime,rank:58});
           }
         }
       }
       if(ctx.nearCross && !best) add({eventClass:"MA-pair",type:"stack transition",ref:"stack",label:"Stack transition",age:0,dir:0,time:ctx.times && ctx.times[len-1] ? ctx.times[len-1] : len-1,rank:45});
       return best;
     }
-    function detectPriceMA(rows, series, periods, ctx, lookback){
+    function detectPriceMA(rows, series, slots, ctx, lookback){
       const len = rows.length;
       const start = Math.max(1, len - (lookback || 10));
       let best = null;
@@ -15768,7 +15807,7 @@ If there is NO open position, use this Section 2 instead:
         for(let idx=0; idx<series.length; idx++){
           const ema=series[idx]&&series[idx][i], pema=series[idx]&&series[idx][i-1];
           if(!Number.isFinite(ema)||!Number.isFinite(pema)) continue;
-          const tag=maLabelP(periods,idx);
+          const tag=maLabelP(slots,idx);
           const eventTime = Number(row[0]) || i;
           if(pc <= pema && c > ema) add({eventClass:"Price-MA",type:"price reclaim",ref:tag,label:`Price reclaim of ${tag}`,age,dir:1,time:eventTime,rank:70});
           if(pc >= pema && c < ema) add({eventClass:"Price-MA",type:"price loss",ref:tag,label:`Price loss of ${tag}`,age,dir:-1,time:eventTime,rank:70});
@@ -15786,7 +15825,9 @@ If there is NO open position, use this Section 2 instead:
       return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows,debugCtx,snapshot){
-      const periods = stackPeriods();
+      const slots = stackSlots();
+      if(!Array.isArray(slots) || slots.length !== 5) return unavailable("MA slots unavailable");
+      const periods = slots.map(slot => slot.period);
       const maxPeriod = Math.max(...periods);
       const candles = (Array.isArray(rows)?rows:[]).filter(r=>r && Number.isFinite(Number(r[4])));
       const closes = candles.map(r=>Number(r[4]));
@@ -15797,14 +15838,14 @@ If there is NO open position, use this Section 2 instead:
       let vals = series.map(s=>s[s.length-1]);
       if(
         snapshot &&
-        Array.isArray(snapshot.periods) &&
-        snapshot.periods.length === periods.length &&
-        snapshot.periods.every((p,idx) => Number(p) === Number(periods[idx])) &&
-        snapshot.alignedByPeriod &&
-        periods.every(p => Array.isArray(snapshot.alignedByPeriod[p]) && snapshot.alignedByPeriod[p].length === candles.length)
+        Array.isArray(snapshot.slots) &&
+        snapshot.slots.length === slots.length &&
+        snapshot.alignedBySlot &&
+        snapshot.valuesBySlot &&
+        slots.every(slot => Array.isArray(snapshot.alignedBySlot[slot.slotId]) && snapshot.alignedBySlot[slot.slotId].length === candles.length)
       ){
-        series = periods.map(p => snapshot.alignedByPeriod[p].slice());
-        vals = periods.map(p => Number(snapshot.valuesByPeriod && snapshot.valuesByPeriod[p]));
+        series = slots.map(slot => snapshot.alignedBySlot[slot.slotId].slice());
+        vals = slots.map(slot => Number(snapshot.valuesBySlot && snapshot.valuesBySlot[slot.slotId]));
       }
       const prevIdx = Math.max(0, closes.length-6);
       const prev2Idx = Math.max(0, closes.length-12);
@@ -15847,11 +15888,11 @@ If there is NO open position, use this Section 2 instead:
       const tight = spreadPct < 0.15;
       const nearCross = vals.slice(0,-1).some((v,i)=> latest && Math.abs(v-vals[i+1])/latest < 0.0005);
       const setup = setupDir(upPairs,downPairs,upSlope,downSlope);
-      let state="mixed", icon="~", stateLabel="Mixed";
-      if(upPairs){ state="up"; icon="\u25B2"; stateLabel="Up stack"; }
-      else if(downPairs){ state="down"; icon="\u25BC"; stateLabel="Down stack"; }
-      else if(tight){ state="compression"; icon="\u224B"; stateLabel="Compression"; }
-      else if(nearCross){ state="transition"; icon="\u00D7"; stateLabel="Transition"; }
+      let state="mixed", icon="MX", stateLabel="Mixed";
+      if(upPairs){ state="up"; icon="UP"; stateLabel="Up stack"; }
+      else if(downPairs){ state="down"; icon="DN"; stateLabel="Down stack"; }
+      else if(tight){ state="compression"; icon="CP"; stateLabel="Compression"; }
+      else if(nearCross){ state="transition"; icon="TX"; stateLabel="Transition"; }
       let phase="Chop / Mixed";
       if(tight && spreadDelta > 0.01) phase="Compression Release";
       else if(tight && spreadDelta < -0.01) phase="Flattening Compression";
@@ -15859,7 +15900,7 @@ If there is NO open position, use this Section 2 instead:
       else if(nearCross) phase="Stack Transition";
       else if((upPairs||downPairs) && spreadDelta > 0 && slopeAgree >= 4) phase="Clean Expanding Trend";
       else if(upPairs || downPairs) phase="Ordered but Late/Flattening";
-      const rank = buildStackRank(vals,state,setup,periods,{
+      const rank = buildStackRank(vals,state,setup,slots,{
         tfKey:debugCtx && debugCtx.tfKey ? debugCtx.tfKey : null,
         tfInterval:debugCtx && debugCtx.tfInterval ? debugCtx.tfInterval : null,
         sourceType:debugCtx && debugCtx.sourceType ? debugCtx.sourceType : "unknown",
@@ -15874,27 +15915,27 @@ If there is NO open position, use this Section 2 instead:
       if(!tight){
         if(rank.summary === "Bullish stack"){
           state = "up";
-          icon = "\u25B2";
+          icon = "UP";
           stateLabel = "Bullish stack";
         }else if(rank.summary === "Bearish stack"){
           state = "down";
-          icon = "\u25BC";
+          icon = "DN";
           stateLabel = "Bearish stack";
         }else if(selectedBias === "bullish"){
           state = "transition";
-          icon = "\u00D7";
+          icon = "TX";
           stateLabel = rank.summary || "Bullish regime / pullback";
         }else if(selectedBias === "bearish"){
           state = "transition";
-          icon = "\u00D7";
+          icon = "TX";
           stateLabel = rank.summary || "Bearish regime / pullback";
         }else if(nearCross){
           state = "transition";
-          icon = "\u00D7";
+          icon = "TX";
           stateLabel = "Transition";
         }else{
           state = "mixed";
-          icon = "~";
+          icon = "MX";
           stateLabel = "Mixed";
         }
       }
@@ -15920,8 +15961,8 @@ If there is NO open position, use this Section 2 instead:
       const structureFloor = alignment >= 40 ? Math.min(35,14 + alignment*.20 + slopeAgreeScore*.05) : alignment >= 20 ? Math.min(25,10 + alignment*.22) : 0;
       const strength = clamp100(Math.max(rawStrength,structureFloor));
       const ctx = {spreadDelta,nearCross,setup,times,alignment};
-      const rawMaEvent = detectMaPair(series,periods,ctx,18);
-      const priceEvent = detectPriceMA(candles,series,periods,{setup},10);
+      const rawMaEvent = detectMaPair(series,slots,ctx,18);
+      const priceEvent = detectPriceMA(candles,series,slots,{setup},10);
       const validStructure = rawMaEvent ? 70 : 35;
       const eventFreshScore = rawMaEvent ? Math.max(0,100-rawMaEvent.age*18) : 0;
       const priceConfirm = priceEvent && priceEvent.dir && setup && priceEvent.dir === setup ? 80 : priceEvent ? 45 : 35;
@@ -15953,7 +15994,15 @@ If there is NO open position, use this Section 2 instead:
         sel.dispatchEvent(new Event("change",{bubbles:true}));
       }
     }
-    function iconClass(icon){ return (icon === "\u25B2" || icon === "\u25BC") ? "v33-stack-icon" : "v33-stack-icon v33-stack-icon-alt"; }
+    function iconClass(_icon){ return "v33-stack-icon"; }
+    function stackIconHtml(icon){
+      const code = String(icon || "MX").toUpperCase();
+      if(code === "UP") return `<span class="${iconClass(code)}" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="M6 2L10 7H7.4V10H4.6V7H2z" fill="currentColor"/></svg></span>`;
+      if(code === "DN") return `<span class="${iconClass(code)}" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="M6 10L2 5h2.6V2h2.8v3H10z" fill="currentColor"/></svg></span>`;
+      if(code === "CP") return `<span class="${iconClass(code)}" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="M2 4h8M2 8h8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>`;
+      if(code === "TX") return `<span class="${iconClass(code)}" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="M2 4h6M6 2l2 2-2 2M10 8H4M6 6 4 8l2 2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+      return `<span class="${iconClass(code)}" aria-hidden="true"><svg viewBox="0 0 12 12"><circle cx="3" cy="6" r="1.2" fill="currentColor"/><circle cx="6" cy="6" r="1.2" fill="currentColor"/><circle cx="9" cy="6" r="1.2" fill="currentColor"/></svg></span>`;
+    }
     function titleLine(title,label,fallback="-"){
       const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + ":\\s*(.*)$","m"));
       return m ? m[1] : fallback;
@@ -15966,11 +16015,32 @@ If there is NO open position, use this Section 2 instead:
       return `${label} / ${r.phase || "-"}`;
     }
     function eventLine(r){
-      return r && r.eventDisplay ? r.eventDisplay : "Event — none";
+      return r && r.eventDisplay ? r.eventDisplay : "Event - none";
     }
-    function buildStackRank(vals,state,setup,periods,debugCtx){
-      const labels = ["EMA9","EMA21","EMA55","EMA100","EMA200"];
+    function buildStackRank(vals,state,setup,slots,debugCtx){
+      const safeSlots = Array.isArray(slots) && slots.length === 5
+        ? slots.map((slot,i) => ({
+            slot:i + 1,
+            slotId:"MA" + (i + 1),
+            period:Number(slot && slot.period)
+          }))
+        : [1,2,3,4,5].map(n => ({slot:n,slotId:"MA" + n,period:null}));
+      const labels = safeSlots.map((slot,i) =>
+        Number.isFinite(slot.period) && slot.period > 0
+          ? `${slot.slotId} EMA${slot.period}`
+          : `MA${i + 1}`
+      );
+      const slotIds = safeSlots.map(slot => slot.slotId);
       const off = [false,false,false,false,false];
+      const emptyLedStates = Object.fromEntries(slotIds.map(slotId => [slotId,false]));
+      const emptyValues = Object.fromEntries(slotIds.map(slotId => [slotId,null]));
+      const emptyValid = Object.fromEntries(slotIds.map(slotId => [slotId,false]));
+      const emptyComparisons = {
+        "MA1<MA2":false,
+        "MA2<MA3":false,
+        "MA3<MA4":false,
+        "MA4<MA5":false
+      };
       const empty = {
         side:"mixed",
         selectedSide:"mixed",
@@ -15985,6 +16055,7 @@ If there is NO open position, use this Section 2 instead:
         slowPairState:"mixed",
         hingeStatus:"mixed",
         hingeText:"mixed",
+        hingeSlotLabel:labels[2] || "MA3",
         fastMatch:0,
         slowMatch:0,
         hingeMatch:0,
@@ -15995,7 +16066,7 @@ If there is NO open position, use this Section 2 instead:
           hingeStatus:"mixed",
           hingeText:"mixed",
           ledMatch:0,
-          ledStates:{EMA9:false,EMA21:false,EMA55:false,EMA100:false,EMA200:false},
+          ledStates:emptyLedStates,
           summary:"Transition / Compression",
           debug:{
             tfKey:debugCtx && debugCtx.tfKey ? debugCtx.tfKey : null,
@@ -16004,67 +16075,53 @@ If there is NO open position, use this Section 2 instead:
             sourcePath:debugCtx && debugCtx.sourcePath ? debugCtx.sourcePath : "unknown",
             sourceIndex:Number.isFinite(Number(debugCtx && debugCtx.sourceIndex)) ? Number(debugCtx.sourceIndex) : null,
             tolerance:null,
-            values:{EMA9:null,EMA21:null,EMA55:null,EMA100:null,EMA200:null},
-            valid:{EMA9:false,EMA21:false,EMA55:false,EMA100:false,EMA200:false},
-            bearishComparisons:{
-              "EMA9<EMA21":false,
-              "EMA21<EMA55":false,
-              "EMA55<EMA100":false,
-              "EMA100<EMA200":false
-            },
+            values:emptyValues,
+            valid:emptyValid,
+            bearishComparisons:{...emptyComparisons},
             bullishComparisons:{
-              "EMA9>EMA21":false,
-              "EMA21>EMA55":false,
-              "EMA55>EMA100":false,
-              "EMA100>EMA200":false
+              "MA1>MA2":false,
+              "MA2>MA3":false,
+              "MA3>MA4":false,
+              "MA4>MA5":false
             },
             deltas:{
-              "EMA9-EMA21":null,
-              "EMA21-EMA55":null,
-              "EMA55-EMA100":null,
-              "EMA100-EMA200":null
-            }
+              "MA1-MA2":null,
+              "MA2-MA3":null,
+              "MA3-MA4":null,
+              "MA4-MA5":null
+            },
+            labels
           }
         }
       };
       if(!Array.isArray(vals) || vals.length !== 5 || vals.some(v => !Number.isFinite(v))) return empty;
-      const pArr = Array.isArray(periods) ? periods.slice() : [];
-      const idxByPeriod = p => pArr.indexOf(p);
-      const idx9 = idxByPeriod(9);
-      const idx21 = idxByPeriod(21);
-      const idx55 = idxByPeriod(55);
-      const idx100 = idxByPeriod(100);
-      const idx200 = idxByPeriod(200);
-      const ema9 = Number(vals[idx9 >= 0 ? idx9 : 0]);
-      const ema21 = Number(vals[idx21 >= 0 ? idx21 : 1]);
-      const ema55 = Number(vals[idx55 >= 0 ? idx55 : 2]);
-      const ema100 = Number(vals[idx100 >= 0 ? idx100 : 3]);
-      const ema200 = Number(vals[idx200 >= 0 ? idx200 : 4]);
-      if(![ema9,ema21,ema55,ema100,ema200].every(Number.isFinite)) return empty;
-      const base = Math.max(Math.abs(ema100),Math.abs(ema200),1);
+
+      const [ma1,ma2,ma3,ma4,ma5] = vals.map(Number);
+      if(![ma1,ma2,ma3,ma4,ma5].every(Number.isFinite)) return empty;
+      const base = Math.max(Math.abs(ma4),Math.abs(ma5),1);
       const tol = base * 0.0001;
       const cmp = (a,b) => (a > b + tol ? 1 : a < b - tol ? -1 : 0);
-      const c9_21 = cmp(ema9,ema21);
-      const c21_55 = cmp(ema21,ema55);
-      const c55_100 = cmp(ema55,ema100);
-      const c100_200 = cmp(ema100,ema200);
-      const fullBull = c9_21 > 0 && c21_55 > 0 && c55_100 > 0 && c100_200 > 0;
-      const fullBear = c9_21 < 0 && c21_55 < 0 && c55_100 < 0 && c100_200 < 0;
-      const zoneLo = Math.min(ema100,ema200) - tol;
-      const zoneHi = Math.max(ema100,ema200) + tol;
-      const inSlowZone = ema55 >= zoneLo && ema55 <= zoneHi;
+      const c12 = cmp(ma1,ma2);
+      const c23 = cmp(ma2,ma3);
+      const c34 = cmp(ma3,ma4);
+      const c45 = cmp(ma4,ma5);
+      const fullBull = c12 > 0 && c23 > 0 && c34 > 0 && c45 > 0;
+      const fullBear = c12 < 0 && c23 < 0 && c34 < 0 && c45 < 0;
+      const zoneLo = Math.min(ma4,ma5) - tol;
+      const zoneHi = Math.max(ma4,ma5) + tol;
+      const inSlowZone = ma3 >= zoneLo && ma3 <= zoneHi;
 
-      const slowPairState = c100_200 === 0 ? "mixed" : (c100_200 > 0 ? "bullish" : "bearish");
+      const slowPairState = c45 === 0 ? "mixed" : (c45 > 0 ? "bullish" : "bearish");
       const selectedRegime = slowPairState === "bullish" || slowPairState === "bearish" ? slowPairState : "mixed";
-      const fastPairState = c9_21 === 0 ? "mixed" : (c9_21 > 0 ? "bullish" : "bearish");
+      const fastPairState = c12 === 0 ? "mixed" : (c12 > 0 ? "bullish" : "bearish");
 
       let hingeStatus = "mixed";
       let hingeText = "mixed";
       if(selectedRegime === "bullish"){
-        if(inSlowZone || Math.abs(ema55 - ema100) <= tol){
+        if(inSlowZone || Math.abs(ma3 - ma4) <= tol){
           hingeStatus = "contested";
           hingeText = "contested";
-        }else if(ema55 > ema100 + tol){
+        }else if(ma3 > ma4 + tol){
           hingeStatus = "supports_bullish";
           hingeText = "supports bullish regime";
         }else{
@@ -16072,10 +16129,10 @@ If there is NO open position, use this Section 2 instead:
           hingeText = "lost / under attack";
         }
       }else if(selectedRegime === "bearish"){
-        if(inSlowZone || Math.abs(ema55 - ema100) <= tol){
+        if(inSlowZone || Math.abs(ma3 - ma4) <= tol){
           hingeStatus = "contested";
           hingeText = "contested";
-        }else if(ema55 < ema100 - tol){
+        }else if(ma3 < ma4 - tol){
           hingeStatus = "supports_bearish";
           hingeText = "supports bearish regime";
         }else{
@@ -16084,63 +16141,44 @@ If there is NO open position, use this Section 2 instead:
         }
       }
 
-      const ledStates = {
-        EMA9:false,
-        EMA21:false,
-        EMA55:false,
-        EMA100:false,
-        EMA200:false
-      };
+      const ledStates = Object.fromEntries(slotIds.map(slotId => [slotId,false]));
       let fastMatch = 0;
       let slowMatch = 0;
       let hingeMatch = 0;
-      if(fullBull){
-        ledStates.EMA9 = true;
-        ledStates.EMA21 = true;
-        ledStates.EMA55 = true;
-        ledStates.EMA100 = true;
-        ledStates.EMA200 = true;
-        fastMatch = 2;
-        slowMatch = 2;
-        hingeMatch = 1;
-      }else if(fullBear){
-        ledStates.EMA9 = true;
-        ledStates.EMA21 = true;
-        ledStates.EMA55 = true;
-        ledStates.EMA100 = true;
-        ledStates.EMA200 = true;
+      if(fullBull || fullBear){
+        slotIds.forEach(slotId => { ledStates[slotId] = true; });
         fastMatch = 2;
         slowMatch = 2;
         hingeMatch = 1;
       }else if(selectedRegime === "bullish"){
-        ledStates.EMA100 = true;
-        ledStates.EMA200 = true;
+        ledStates.MA4 = true;
+        ledStates.MA5 = true;
         slowMatch = 2;
         if(fastPairState === "bullish"){
-          ledStates.EMA9 = true;
-          ledStates.EMA21 = true;
+          ledStates.MA1 = true;
+          ledStates.MA2 = true;
           fastMatch = 2;
         }
         if(hingeStatus === "supports_bullish"){
-          ledStates.EMA55 = true;
+          ledStates.MA3 = true;
           hingeMatch = 1;
         }
       }else if(selectedRegime === "bearish"){
-        ledStates.EMA100 = true;
-        ledStates.EMA200 = true;
+        ledStates.MA4 = true;
+        ledStates.MA5 = true;
         slowMatch = 2;
         if(fastPairState === "bearish"){
-          ledStates.EMA9 = true;
-          ledStates.EMA21 = true;
+          ledStates.MA1 = true;
+          ledStates.MA2 = true;
           fastMatch = 2;
         }
         if(hingeStatus === "supports_bearish"){
-          ledStates.EMA55 = true;
+          ledStates.MA3 = true;
           hingeMatch = 1;
         }
       }
 
-      const okByEma = [ledStates.EMA9,ledStates.EMA21,ledStates.EMA55,ledStates.EMA100,ledStates.EMA200];
+      const okByEma = slotIds.map(slotId => !!ledStates[slotId]);
       const okCount = okByEma.filter(Boolean).length;
       let summary = "Transition / Compression";
       if(fullBull){
@@ -16161,6 +16199,7 @@ If there is NO open position, use this Section 2 instead:
         else summary = "Bearish regime / pullback";
       }
 
+      const valuesBySlot = {MA1:ma1,MA2:ma2,MA3:ma3,MA4:ma4,MA5:ma5};
       const diagnostics = {
         selectedRegime,
         fastPairState,
@@ -16174,35 +16213,30 @@ If there is NO open position, use this Section 2 instead:
           tfKey:debugCtx && debugCtx.tfKey ? debugCtx.tfKey : null,
           tfInterval:debugCtx && debugCtx.tfInterval ? debugCtx.tfInterval : null,
           sourceType:debugCtx && debugCtx.sourceType ? debugCtx.sourceType : "unknown",
-          sourcePath:debugCtx && debugCtx.sourcePath ? debugCtx.sourcePath : "MA_STACK_STRIP.fetchTf -> emaSeries(closes,p)",
+          sourcePath:debugCtx && debugCtx.sourcePath ? debugCtx.sourcePath : "MA_STACK_STRIP.snapshot",
           sourceIndex:Number.isFinite(Number(debugCtx && debugCtx.sourceIndex)) ? Number(debugCtx.sourceIndex) : null,
           tolerance:tol,
-          values:{EMA9:ema9,EMA21:ema21,EMA55:ema55,EMA100:ema100,EMA200:ema200},
-          valid:{
-            EMA9:Number.isFinite(ema9),
-            EMA21:Number.isFinite(ema21),
-            EMA55:Number.isFinite(ema55),
-            EMA100:Number.isFinite(ema100),
-            EMA200:Number.isFinite(ema200)
-          },
+          values:valuesBySlot,
+          valid:{MA1:true,MA2:true,MA3:true,MA4:true,MA5:true},
           bearishComparisons:{
-            "EMA9<EMA21":c9_21 < 0,
-            "EMA21<EMA55":c21_55 < 0,
-            "EMA55<EMA100":c55_100 < 0,
-            "EMA100<EMA200":c100_200 < 0
+            "MA1<MA2":c12 < 0,
+            "MA2<MA3":c23 < 0,
+            "MA3<MA4":c34 < 0,
+            "MA4<MA5":c45 < 0
           },
           bullishComparisons:{
-            "EMA9>EMA21":c9_21 > 0,
-            "EMA21>EMA55":c21_55 > 0,
-            "EMA55>EMA100":c55_100 > 0,
-            "EMA100>EMA200":c100_200 > 0
+            "MA1>MA2":c12 > 0,
+            "MA2>MA3":c23 > 0,
+            "MA3>MA4":c34 > 0,
+            "MA4>MA5":c45 > 0
           },
           deltas:{
-            "EMA9-EMA21":ema9 - ema21,
-            "EMA21-EMA55":ema21 - ema55,
-            "EMA55-EMA100":ema55 - ema100,
-            "EMA100-EMA200":ema100 - ema200
-          }
+            "MA1-MA2":ma1 - ma2,
+            "MA2-MA3":ma2 - ma3,
+            "MA3-MA4":ma3 - ma4,
+            "MA4-MA5":ma4 - ma5
+          },
+          labels
         }
       };
       return {
@@ -16219,6 +16253,7 @@ If there is NO open position, use this Section 2 instead:
         slowPairState,
         hingeStatus,
         hingeText,
+        hingeSlotLabel:labels[2] || "MA3",
         fastMatch,
         slowMatch,
         hingeMatch,
@@ -16246,13 +16281,15 @@ If there is NO open position, use this Section 2 instead:
       const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
       const diag = rank && rank.diagnostics ? rank.diagnostics : null;
       const dbg = diag && diag.debug ? diag.debug : null;
+      const labelMap = Array.isArray(rank.labels) && rank.labels.length === 5 ? rank.labels : ["MA1","MA2","MA3","MA4","MA5"];
+      const slotIds = ["MA1","MA2","MA3","MA4","MA5"];
       const side = rank.selectedRegime === "bullish" || rank.selectedRegime === "bearish" ? rank.selectedRegime : "mixed";
       const ledStates = diag && diag.ledStates ? diag.ledStates : {
-        EMA9:!!(rank.okByEma && rank.okByEma[0]),
-        EMA21:!!(rank.okByEma && rank.okByEma[1]),
-        EMA55:!!(rank.okByEma && rank.okByEma[2]),
-        EMA100:!!(rank.okByEma && rank.okByEma[3]),
-        EMA200:!!(rank.okByEma && rank.okByEma[4])
+        MA1:!!(rank.okByEma && rank.okByEma[0]),
+        MA2:!!(rank.okByEma && rank.okByEma[1]),
+        MA3:!!(rank.okByEma && rank.okByEma[2]),
+        MA4:!!(rank.okByEma && rank.okByEma[3]),
+        MA5:!!(rank.okByEma && rank.okByEma[4])
       };
       const sideLabel = side === "bullish" ? "Selected regime: bullish" : side === "bearish" ? "Selected regime: bearish" : "Selected regime: transition/compression";
       const fastState = rank.fastPairState || rank.fastStack || "mixed";
@@ -16262,7 +16299,7 @@ If there is NO open position, use this Section 2 instead:
       const hingeText = rank.hingeText || "mixed";
       const fastText = fastState === "mixed" ? "Fast pair: mixed 0/2" : `Fast pair: ${fastState} ${fastScore}/2`;
       const slowText = slowState === "mixed" ? "Slow pair: mixed 0/2" : `Slow pair: ${slowState} ${slowScore}/2`;
-      const rankRows = ["EMA9","EMA21","EMA55","EMA100","EMA200"].map(label => `${label}: ${ledStates[label] ? "OK" : "out"}`);
+      const rankRows = slotIds.map((slotId,idx) => `${labelMap[idx] || slotId}: ${ledStates[slotId] ? "OK" : "out"}`);
       const fmtDbg = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-US",{maximumFractionDigits:8}) : String(v);
       const showDebug = !!window.MA_SOURCE_DEBUG;
       const dbgLines = !showDebug
@@ -16274,30 +16311,30 @@ If there is NO open position, use this Section 2 instead:
         `source index: ${Number.isFinite(Number(dbg.sourceIndex)) ? Number(dbg.sourceIndex) : "-"}`,
         `source type: ${dbg.sourceType || "-"}`,
         `source path: ${dbg.sourcePath || "-"}`,
-        `EMA9: ${fmtDbg(dbg.values && dbg.values.EMA9)} (valid: ${!!(dbg.valid && dbg.valid.EMA9)})`,
-        `EMA21: ${fmtDbg(dbg.values && dbg.values.EMA21)} (valid: ${!!(dbg.valid && dbg.valid.EMA21)})`,
-        `EMA55: ${fmtDbg(dbg.values && dbg.values.EMA55)} (valid: ${!!(dbg.valid && dbg.valid.EMA55)})`,
-        `EMA100: ${fmtDbg(dbg.values && dbg.values.EMA100)} (valid: ${!!(dbg.valid && dbg.valid.EMA100)})`,
-        `EMA200: ${fmtDbg(dbg.values && dbg.values.EMA200)} (valid: ${!!(dbg.valid && dbg.valid.EMA200)})`,
+        `${labelMap[0]}: ${fmtDbg(dbg.values && dbg.values.MA1)} (valid: ${!!(dbg.valid && dbg.valid.MA1)})`,
+        `${labelMap[1]}: ${fmtDbg(dbg.values && dbg.values.MA2)} (valid: ${!!(dbg.valid && dbg.valid.MA2)})`,
+        `${labelMap[2]}: ${fmtDbg(dbg.values && dbg.values.MA3)} (valid: ${!!(dbg.valid && dbg.valid.MA3)})`,
+        `${labelMap[3]}: ${fmtDbg(dbg.values && dbg.values.MA4)} (valid: ${!!(dbg.valid && dbg.valid.MA4)})`,
+        `${labelMap[4]}: ${fmtDbg(dbg.values && dbg.values.MA5)} (valid: ${!!(dbg.valid && dbg.valid.MA5)})`,
         `tol: ${fmtDbg(dbg.tolerance)}`,
-        `EMA9 < EMA21: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA9<EMA21"])}`,
-        `EMA21 < EMA55: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA21<EMA55"])}`,
-        `EMA55 < EMA100: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA55<EMA100"])}`,
-        `EMA100 < EMA200: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["EMA100<EMA200"])}`,
-        `EMA9 > EMA21: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA9>EMA21"])}`,
-        `EMA21 > EMA55: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA21>EMA55"])}`,
-        `EMA55 > EMA100: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA55>EMA100"])}`,
-        `EMA100 > EMA200: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["EMA100>EMA200"])}`,
-        `EMA9 - EMA21: ${fmtDbg(dbg.deltas && dbg.deltas["EMA9-EMA21"])}`,
-        `EMA21 - EMA55: ${fmtDbg(dbg.deltas && dbg.deltas["EMA21-EMA55"])}`,
-        `EMA55 - EMA100: ${fmtDbg(dbg.deltas && dbg.deltas["EMA55-EMA100"])}`,
-        `EMA100 - EMA200: ${fmtDbg(dbg.deltas && dbg.deltas["EMA100-EMA200"])}`
+        `${labelMap[0]} < ${labelMap[1]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA1<MA2"])}`,
+        `${labelMap[1]} < ${labelMap[2]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA2<MA3"])}`,
+        `${labelMap[2]} < ${labelMap[3]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA3<MA4"])}`,
+        `${labelMap[3]} < ${labelMap[4]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA4<MA5"])}`,
+        `${labelMap[0]} > ${labelMap[1]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA1>MA2"])}`,
+        `${labelMap[1]} > ${labelMap[2]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA2>MA3"])}`,
+        `${labelMap[2]} > ${labelMap[3]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA3>MA4"])}`,
+        `${labelMap[3]} > ${labelMap[4]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA4>MA5"])}`,
+        `${labelMap[0]} - ${labelMap[1]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA1-MA2"])}`,
+        `${labelMap[1]} - ${labelMap[2]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA2-MA3"])}`,
+        `${labelMap[2]} - ${labelMap[3]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA3-MA4"])}`,
+        `${labelMap[3]} - ${labelMap[4]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA4-MA5"])}`
       ] : ["DEBUG: unavailable"]);
       return `<div style="font-weight:800;font-size:13px;line-height:1.1;margin-bottom:8px">${escHtml(tf.key)} Stack Rank</div>`+
         `<div>${escHtml(sideLabel)}</div>`+
         `<div>${escHtml(`LED Bias Match: ${Number(rank.okCount)||0}/5`)}</div>`+
         `<div>${escHtml(fastText)}</div>`+
-        `<div>${escHtml(`Hinge EMA55: ${hingeText}`)}</div>`+
+        `<div>${escHtml(`${rank.hingeSlotLabel || "MA3"}: ${hingeText}`)}</div>`+
         `<div>${escHtml(slowText)}</div>`+
         `<div>${escHtml(`Summary: ${rank.summary || "Transition / Compression"}`)}</div>`+
         `<div style="height:6px"></div>`+
@@ -16358,7 +16395,7 @@ If there is NO open position, use this Section 2 instead:
         const ev = r.blinkIntent === "green" ? "green" : r.blinkIntent === "red" ? "red" : "";
         const eventKey = eventIdentity(tf,r);
         tooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
-        return `<button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" aria-label="${tf.key} MA Stack"${style}><span class="v33-tf-label">${tf.key}</span><span class="${iconClass(r.icon)}">${r.icon}</span></button>`;
+        return `<button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" aria-label="${tf.key} MA Stack"${style}><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}</button>`;
       }).join("");
       if(strip.__v33LastHtml !== html){
         strip.innerHTML = html;
@@ -16397,15 +16434,17 @@ If there is NO open position, use this Section 2 instead:
         const ev = r.blinkIntent === "green" ? "green" : r.blinkIntent === "red" ? "red" : "";
         const eventKey = eventIdentity(tf,r);
         const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
-        const leds = ["EMA9","EMA21","EMA55","EMA100","EMA200"].map((label,idx) => {
+        const labels = Array.isArray(rank.labels) && rank.labels.length === 5 ? rank.labels : ["MA1","MA2","MA3","MA4","MA5"];
+        const slotIds = ["MA1","MA2","MA3","MA4","MA5"];
+        const leds = slotIds.map((slotId,idx) => {
           const on = !!(rank.okByEma && rank.okByEma[idx]);
           const side = rank.selectedSide === "bullish" ? "bull" : rank.selectedSide === "bearish" ? "bear" : "off";
           const cls = on && side !== "off" ? `v33-rank-led is-on ${side}` : "v33-rank-led";
-          return `<span class="${cls}" data-ema="${label}" aria-hidden="true"></span>`;
+          return `<span class="${cls}" data-ema="${labels[idx] || slotId}" aria-hidden="true"></span>`;
         }).join("");
         summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
         rankTooltipHtmlByTf.set(tf.key,compactRankTooltipHtml(tf,r));
-        return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" aria-label="${tf.key} MA Stack"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span><span class="${iconClass(r.icon)}">${r.icon}</span></span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
+        return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" aria-label="${tf.key} MA Stack"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}</span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
       }).join("");
       if(strip.__v33LastHtml !== html){
         strip.innerHTML = html;
@@ -16450,7 +16489,9 @@ If there is NO open position, use this Section 2 instead:
     async function fetchTf(tf){
       const h = hub();
       if(!h) return null;
-      const maxPeriod = Math.max(...stackPeriods());
+      const periods = stackPeriods();
+      if(!Array.isArray(periods) || periods.length !== 5) return null;
+      const maxPeriod = Math.max(...periods);
       const limit = Math.max(260,Math.min(1000,maxPeriod+60));
       const sourceRows = LIVE_TFS.has(tf.interval) && typeof h.getChartBuffer === "function"
         ? h.getChartBuffer(tf.interval)
@@ -16477,22 +16518,30 @@ If there is NO open position, use this Section 2 instead:
         }
         await Promise.all(TFs.map(async tf=>{
           try{
-            const periods = stackPeriods();
+            const slots = stackSlots();
+            if(!Array.isArray(slots) || slots.length !== 5){
+              out[tf.key] = unavailable("MA slots unavailable");
+              return;
+            }
+            const periods = slots.map(slot => slot.period);
             const includeForming = LIVE_TFS.has(tf.interval);
             let snapshot = null;
             if(h && typeof h.getAuthoritativeMaSnapshot === "function"){
               snapshot = h.getAuthoritativeMaSnapshot(tf.interval,{
-                periods,
+                slots,
                 includeForming,
                 requiredRows:Math.max(...periods) + 10
               });
             }
-            const sourceRows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : await fetchTf(tf);
-            const rows = Array.isArray(sourceRows)
-              ? sourceRows
+            const rows = snapshot && Array.isArray(snapshot.rows)
+              ? snapshot.rows
                   .map(row => Array.isArray(row) ? row : hubRowToKline(row))
                   .filter(row => row && row.every((v,idx) => idx > 5 || Number.isFinite(v)))
               : null;
+            if(!snapshot){
+              out[tf.key] = unavailable("MA snapshot unavailable");
+              return;
+            }
             if(snapshot && !snapshot.reliable){
               out[tf.key] = unavailable(`Warmup: ${snapshot.warmupCount}/${snapshot.requiredRows}`);
               return;
@@ -16524,11 +16573,11 @@ If there is NO open position, use this Section 2 instead:
               chartSnapshot:rankDbg && rankDbg.values ? rankDbg.values : null,
               maStack:rankDbg && rankDbg.values ? rankDbg.values : null,
               sssc:sssc && Array.isArray(sssc.emaVals) ? {
-                EMA9:sssc.emaVals[0],
-                EMA21:sssc.emaVals[1],
-                EMA55:sssc.emaVals[2],
-                EMA100:sssc.emaVals[3],
-                EMA200:sssc.emaVals[4]
+                MA1:sssc.emaVals[0],
+                MA2:sssc.emaVals[1],
+                MA3:sssc.emaVals[2],
+                MA4:sssc.emaVals[3],
+                MA5:sssc.emaVals[4]
               } : null,
               source:rankDbg ? {
                 sourcePath:rankDbg.sourcePath,
@@ -16560,14 +16609,15 @@ If there is NO open position, use this Section 2 instead:
     function labEventSettingKey(bucket){
       return bucket === "deepBounce" || bucket === "deepRisk" ? "deep" : bucket;
     }
-    function labPairIndexes(periods,ref){
-      const m = String(ref || "").match(/EMA(\d+)\/(\d+)/);
+    function labPairIndexes(slots,ref){
+      const m = String(ref || "").match(/MA(\d)[^/]*\/\s*MA(\d)/i);
       if(!m) return null;
-      const a = periods.indexOf(Number(m[1])), b = periods.indexOf(Number(m[2]));
+      const a = Number(m[1]) - 1;
+      const b = Number(m[2]) - 1;
       return a >= 0 && b >= 0 ? {a,b} : null;
     }
-    function labPairStillValid(ev,series,periods,candidateIdx,confirmedIdx){
-      const pair = labPairIndexes(periods,ev.ref);
+    function labPairStillValid(ev,series,slots,candidateIdx,confirmedIdx){
+      const pair = labPairIndexes(slots,ev.ref);
       if(!pair) return true;
       if(confirmedIdx <= candidateIdx) return true;
       const fast = series[pair.a], slow = series[pair.b];
@@ -16602,11 +16652,13 @@ If there is NO open position, use this Section 2 instead:
     }
     function markerEvents(tf,rows,opts={}){
       const source = (Array.isArray(rows) ? rows : []).filter(row => row && row.every((v,idx) => idx > 5 || Number.isFinite(v)));
-      const maxPeriod = Math.max(...stackPeriods());
+      const slots = stackSlots();
+      if(!Array.isArray(slots) || slots.length !== 5) return [];
+      const periods = slots.map(slot => slot.period);
+      const maxPeriod = Math.max(...periods);
       const start = Math.max(maxPeriod + 10, Number(opts.startIndex) || maxPeriod + 10);
       const end = Math.min(source.length - 1, Number.isFinite(opts.endIndex) ? opts.endIndex : source.length - 1);
       const windowSize = Math.max(maxPeriod + 25, Math.min(320,maxPeriod + 100));
-      const periods = stackPeriods();
       const closes = source.map(r=>Number(r[4]));
       const series = periods.map(p=>emaSeries(closes,p));
       const out = [];
@@ -16626,7 +16678,7 @@ If there is NO open position, use this Section 2 instead:
         const confirmedSlice = source.slice(Math.max(0,confirmedIndex-windowSize+1),confirmedIndex+1);
         if(confirmedSlice.length < maxPeriod + 10) continue;
         const confirmed = confirmationCandles ? classify(confirmedSlice) : r;
-        if(!labPairStillValid(ev,series,periods,i,confirmedIndex)) continue;
+        if(!labPairStillValid(ev,series,slots,i,confirmedIndex)) continue;
         if(!labStackStillValid(ev,confirmed)) continue;
         const candidateRow = source[i] || [];
         const confirmedRow = source[confirmedIndex] || [];
@@ -16668,7 +16720,7 @@ If there is NO open position, use this Section 2 instead:
       }
       return out;
     }
-    return {start,stop,refresh,refreshSoon,markerEvents,hubRowToKline,stackPeriods};
+    return {start,stop,refresh,refreshSoon,markerEvents,hubRowToKline,stackPeriods,stackSlots};
   })();
   window.MA_STACK_STRIP = MA_STACK_STRIP;
 
@@ -16744,20 +16796,20 @@ If there is NO open position, use this Section 2 instead:
       return "";
     }
     function shortPair(ref){
-      const m = String(ref || "").match(/EMA(\d+)\/(\d+)/);
-      return m ? `${m[1]}/${m[2]}` : String(ref || "Stack");
+      const m = String(ref || "").match(/MA(\d)\s*\/\s*MA(\d)/i);
+      return m ? `MA${m[1]}/MA${m[2]}` : String(ref || "Stack");
     }
     function markerLabel(ev){
       const bucket = eventBucket(ev);
       const pair = shortPair(ev.ref);
-      if(bucket === "crossover") return {icon:"×",text:`${pair} Cross`};
+      if(bucket === "crossover") return {icon:"X",text:`${pair} Cross`};
       if(bucket === "failed") return {icon:"!",text:`${pair} Fail`};
-      if(bucket === "bounce") return {icon:"↩",text:`${pair} Bounce`};
-      if(bucket === "release") return {icon:"↗",text:`${pair} Release`};
-      if(bucket === "transition") return {icon:"⇄",text:"Stack Tx"};
-      if(bucket === "deepBounce") return {icon:"◆",text:`${pair} Deep`};
-      if(bucket === "deepRisk") return {icon:"◇",text:`${pair} Risk`};
-      return {icon:"•",text:pair};
+      if(bucket === "bounce") return {icon:"B",text:`${pair} Bounce`};
+      if(bucket === "release") return {icon:"R",text:`${pair} Release`};
+      if(bucket === "transition") return {icon:"T",text:"Stack Tx"};
+      if(bucket === "deepBounce") return {icon:"D",text:`${pair} Deep`};
+      if(bucket === "deepRisk") return {icon:"!",text:`${pair} Risk`};
+      return {icon:"*",text:pair};
     }
     function eventBucketLab(ev){
       const type = String(ev.type || "").toLowerCase();
@@ -16860,7 +16912,8 @@ If there is NO open position, use this Section 2 instead:
       const h = window.PUBLIC_MARKET_DATA_HUB;
       if(!h || typeof h.getClosedBuffer !== "function") return [];
       let rows = h.getClosedBuffer(tf.interval) || [];
-      const warmup = Math.max(...MA_STACK_STRIP.stackPeriods()) + 80;
+      const periods = MA_STACK_STRIP.stackPeriods();
+      const warmup = Array.isArray(periods) && periods.length === 5 ? Math.max(...periods) + 80 : 280;
       if(s.range === "last100"){
         rows = rows.slice(-(100 + warmup));
       }else if(s.range === "last300"){
@@ -17058,14 +17111,17 @@ If there is NO open position, use this Section 2 instead:
       }).join("");
     }
     function pairOptions(type,current){
-      const periods = MA_STACK_STRIP.stackPeriods();
+      const slots = MA_STACK_STRIP && typeof MA_STACK_STRIP.stackSlots === "function" ? MA_STACK_STRIP.stackSlots() : null;
       const opts = [{value:"all",label:"All configured pairs"}];
-      for(let i=0;i<periods.length-1;i++){
-        for(let j=i+1;j<periods.length;j++){
-          const ref = `EMA${periods[i]}/${periods[j]}`;
+      if(!Array.isArray(slots) || slots.length !== 5) return selectOptions(opts,current);
+      for(let i=0;i<slots.length-1;i++){
+        for(let j=i+1;j<slots.length;j++){
+          const ref = `MA${i+1}/MA${j+1}`;
+          const aLabel = `MA${i+1} EMA${slots[i].period}`;
+          const bLabel = `MA${j+1} EMA${slots[j].period}`;
           const adjacent = j === i + 1;
           if(type === "deep" && adjacent) continue;
-          opts.push({value:ref,label:adjacent ? `${periods[i]}/${periods[j]} adjacent` : `${periods[i]}/${periods[j]} deep/wide`});
+          opts.push({value:ref,label:adjacent ? `${aLabel} / ${bLabel} adjacent` : `${aLabel} / ${bLabel} deep/wide`});
         }
       }
       return selectOptions(opts,current);
@@ -17235,6 +17291,8 @@ If there is NO open position, use this Section 2 instead:
   "use strict";
   const MODULE = "EMA_CHART_OVERLAY_MODULE";
   const $id = id => document.getElementById(id);
+  const SLOT_IDS = [1,2,3,4,5];
+  const LEGACY_SERIES_BY_SLOT = {1:"ema20",2:"ema50",3:"ema3",4:"ema4",5:"ema5"};
   const STYLE = "btc_futures_chart_v13_05_";
   const WIDTH = "btc_futures_chart_v13_18_";
   const EXTRA = "btc_futures_chart_v13_32r1_";
@@ -17297,7 +17355,7 @@ If there is NO open position, use this Section 2 instead:
     [1,2,3].forEach(n=>{ const el=$id(defaults[n].periodEl); if(el) el.value = period(n); });
   }
   function updateLabels(){
-    [1,2,3,4,5].forEach(n=>{ const l=$id(defaults[n].label); if(l) l.textContent = "EMA" + period(n); });
+    [1,2,3,4,5].forEach(n=>{ const l=$id(defaults[n].label); if(l) l.textContent = `MA${n} EMA${period(n)}`; });
   }
   function ensureToggle(n){
     const box = document.querySelector(".indicator-toggles"); if(!box) return;
@@ -17305,7 +17363,7 @@ If there is NO open position, use this Section 2 instead:
     let el = $id(defaults[n].toggle);
     if(!el){
       const lab=document.createElement("label"); lab.className="toggle";
-      lab.innerHTML = `<input id="${defaults[n].toggle}" type="checkbox"><span id="${defaults[n].label}">EMA${period(n)}</span>`;
+      lab.innerHTML = `<input id="${defaults[n].toggle}" type="checkbox"><span id="${defaults[n].label}">MA${n} EMA${period(n)}</span>`;
       box.insertBefore(lab,before||null);
       el = $id(defaults[n].toggle);
     }
@@ -17341,13 +17399,48 @@ If there is NO open position, use this Section 2 instead:
   }
   function ensureToggles(){ [4,5].forEach(ensureToggle); updateLabels(); }
   function computeEMA(src,p){ return typeof EMA === "function" ? EMA(src,p) : []; }
+  function assignLegacySeries(slot,series){
+    const key = LEGACY_SERIES_BY_SLOT[slot];
+    if(!key) return;
+    window[key] = series;
+    if(slot === 1) ema20 = series;
+    else if(slot === 2) ema50 = series;
+    else if(slot === 3) ema3 = series;
+    else if(slot === 4) ema4 = series;
+    else if(slot === 5) ema5 = series;
+  }
+  function getCanonicalMASlots(){
+    return SLOT_IDS.map(n => {
+      const slotPeriod = period(n);
+      const legacySeriesName = LEGACY_SERIES_BY_SLOT[n];
+      const series = window[legacySeriesName] || [];
+      return {
+        slot:n,
+        slotId:"MA" + n,
+        period:slotPeriod,
+        color:color(n),
+        alpha:alpha(n),
+        width:width(n),
+        stroke:strokeFor(n),
+        enabled:enabled(n),
+        label:"MA" + n + " EMA" + slotPeriod,
+        seriesName:legacySeriesName,
+        series
+      };
+    });
+  }
+  function getCanonicalMAPeriods(){
+    return getCanonicalMASlots().map(slot => slot.period);
+  }
+  function getActiveChartMASeries(){
+    const out = {};
+    getCanonicalMASlots().forEach(slot => { out[slot.slot] = slot.series; });
+    return out;
+  }
   function rebuildSeries(){
     try{
       syncHiddenPeriodInputs();
-      window.ema20 = ema20 = computeEMA(candles,period(1));
-      window.ema50 = ema50 = computeEMA(candles,period(2));
-      window.ema3 = ema3 = computeEMA(candles,period(3));
-      if(typeof rebuildCanonicalMASeries === "function") rebuildCanonicalMASeries();
+      SLOT_IDS.forEach(n => assignLegacySeries(n,computeEMA(candles,period(n))));
       if(typeof VWAP === "function") window.vwap = vwap = VWAP(candles);
     }catch(e){ console.error(MODULE + " rebuildSeries failed", e); }
     updateLabels();
@@ -17386,7 +17479,7 @@ If there is NO open position, use this Section 2 instead:
     rebuildSeries();
   };
   function row(n){
-    return `<div>EMA ${n}</div><div><input id="maisoMA${n}Period" type="number" min="1" max="999" step="1" value="${period(n)}"></div><input id="maisoMA${n}Color" type="color" value="${color(n)}"><input id="maisoMA${n}Alpha" type="range" min="0" max="100" step="1" value="${alpha(n)}"><input id="maisoMA${n}Width" type="range" min="1" max="10" step="0.5" value="${width(n)}">`;
+    return `<div>MA${n}</div><div><input id="maisoMA${n}Period" type="number" min="1" max="999" step="1" value="${period(n)}"></div><input id="maisoMA${n}Color" type="color" value="${color(n)}"><input id="maisoMA${n}Alpha" type="range" min="0" max="100" step="1" value="${alpha(n)}"><input id="maisoMA${n}Width" type="range" min="1" max="10" step="0.5" value="${width(n)}">`;
   }
   function rebuildSettings(){
     const card=$id("patch8IndicatorCard"); if(!card) return;
@@ -17394,7 +17487,7 @@ If there is NO open position, use this Section 2 instead:
     let grid=card.querySelector(".patch8-indicator-grid");
     if(!grid){ grid=document.createElement("div"); card.appendChild(grid); }
     grid.className = "patch8-indicator-grid maiso-grid";
-    grid.innerHTML = `<div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>${[1,2,3,4,5].map(row).join("")}<div>VWAP</div><div><span style="color:var(--muted)">—</span></div><input id="maisoVWAPColor" type="color" value="${vwapColor()}"><input id="maisoVWAPAlpha" type="range" min="0" max="100" step="1" value="${vwapAlpha()}"><input id="maisoVWAPWidth" type="range" min="1" max="10" step="0.5" value="${vwapWidth()}">`;
+    grid.innerHTML = `<div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>${[1,2,3,4,5].map(row).join("")}<div>VWAP</div><div><span style="color:var(--muted)">-</span></div><input id="maisoVWAPColor" type="color" value="${vwapColor()}"><input id="maisoVWAPAlpha" type="range" min="0" max="100" step="1" value="${vwapAlpha()}"><input id="maisoVWAPWidth" type="range" min="1" max="10" step="0.5" value="${vwapWidth()}">`;
     [1,2,3,4,5].forEach(n=>{
       const p=$id(`maisoMA${n}Period`), c=$id(`maisoMA${n}Color`), a=$id(`maisoMA${n}Alpha`), w=$id(`maisoMA${n}Width`);
       const syncPeriod=()=>{ 
@@ -17443,6 +17536,9 @@ If there is NO open position, use this Section 2 instead:
     width,
     strokeFor,
     enabled,
+    getCanonicalMASlots,
+    getCanonicalMAPeriods,
+    getActiveChartMASeries,
     ensureDepthForCurrentState,
     handleToggleChange(el){
       if(!el || !el.id) return;
@@ -17452,6 +17548,13 @@ If there is NO open position, use this Section 2 instead:
       try{ localStorage.setItem(toggleKey(n),el.checked ? "1" : "0"); }catch(_e){}
       if(el.checked) ensureDepthForCurrentState();
     }
+  };
+  window.getCanonicalMASlots = getCanonicalMASlots;
+  window.getCanonicalMAPeriods = getCanonicalMAPeriods;
+  window.getActiveChartMASeries = getActiveChartMASeries;
+  window.rebuildCanonicalMASeries = function(){
+    rebuildSeries();
+    return getActiveChartMASeries();
   };
   install(); setTimeout(install,100); setTimeout(install,700); window.addEventListener("load",()=>setTimeout(install,0),{once:true});
 })();
@@ -17475,13 +17578,7 @@ If there is NO open position, use this Section 2 instead:
     4:"tglEMA4",
     5:"tglEMA5"
   };
-  const labels = {
-    1:"lblEMA20",
-    2:"lblEMA50",
-    3:"lblEMA3",
-    4:"lblEMA4",
-    5:"lblEMA5"
-  };
+  const labels = {1:"lblEMA20",2:"lblEMA50",3:"lblEMA3",4:"lblEMA4",5:"lblEMA5"};
   const seriesNames = {
     1:"ema20",
     2:"ema50",
@@ -17507,12 +17604,40 @@ If there is NO open position, use this Section 2 instead:
     const el = $id(toggles[n]);
     return !!(el && el.checked);
   };
+  const slotMeta = n => {
+    try{
+      const api = window.EMA_CHART_OVERLAY_MODULE || null;
+      if(api && typeof api.getCanonicalMASlots === "function"){
+        const slots = api.getCanonicalMASlots();
+        if(Array.isArray(slots)){
+          return slots.find(s => Number(s && s.slot) === Number(n)) || null;
+        }
+      }
+    }catch(_e){}
+    return null;
+  };
   const label = n => {
+    const slot = slotMeta(n);
+    if(slot && Number.isFinite(Number(slot.period))){
+      return "MA" + n + " EMA" + Number(slot.period);
+    }
     const el = $id(labels[n]);
-    return el && el.textContent ? el.textContent : "EMA" + n;
+    if(el && el.textContent){
+      const plain = String(el.textContent).replace(/\s+/g,"").trim();
+      if(/^EMA\d+$/i.test(plain)){
+        return "MA" + n + " " + plain.toUpperCase();
+      }
+      return "MA" + n + " " + plain;
+    }
+    return "MA" + n;
   };
   const series = n => {
     try{
+      const api = window.EMA_CHART_OVERLAY_MODULE || null;
+      if(api && typeof api.getActiveChartMASeries === "function"){
+        const active = api.getActiveChartMASeries();
+        if(active && Array.isArray(active[n])) return active[n];
+      }
       return window[seriesNames[n]];
     }catch(_e){
       return null;
@@ -18806,14 +18931,14 @@ If there is NO open position, use this Section 2 instead:
   const STORE='btc_futures_chart_r13_sssc_proto_v1_';
   const TFS=[['1D','1d',SSSC_TARGET_CLOSED_CANDLES],['4H','4h',SSSC_TARGET_CLOSED_CANDLES],['1H','1h',SSSC_TARGET_CLOSED_CANDLES],['15M','15m',SSSC_TARGET_CLOSED_CANDLES],['5M','5m',SSSC_TARGET_CLOSED_CANDLES],['3M','3m',SSSC_TARGET_CLOSED_CANDLES],['1M','1m',SSSC_TARGET_CLOSED_CANDLES]];
   const LIVE_DIAG_TFS=new Set(['15m','5m','3m','1m']);
-  const PERIODS=[9,21,55,100,200];
-  const PAIRS=[[9,21],[21,55],[55,100],[100,200]];
+  const DEFAULT_MA_PERIODS=[9,21,55,100,200];
   const $=id=>document.getElementById(id);
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,Number(v)||0));
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
   let visible=false, calcTimer=null, drag=null;
   let data={}, lastFullFetch=0, lastRender=0, currentSymbol='';
   let previousMomentumByTf={}, lastRenderedMomentumByTf={}, previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
+  let hadCanonicalMaSlots=false;
   function hub(){ return window.PUBLIC_MARKET_DATA_HUB || null; }
   function tfLabelToInterval(label){
     const key = String(label || "").trim().toUpperCase();
@@ -18824,6 +18949,45 @@ If there is NO open position, use this Section 2 instead:
     const key = String(interval || "").trim().toLowerCase();
     const map = {"1m":"1M","3m":"3M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"};
     return map[key] || String(interval || "").toUpperCase();
+  }
+  function currentMaSlots({allowStartupFallback=true}={}){
+    try{
+      const provider =
+        (window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots === "function")
+          ? window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots
+          : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+      const slots = provider ? provider() : null;
+      if(Array.isArray(slots) && slots.length === 5){
+        const normalized = slots.map((slot,i) => {
+          const period = Math.round(Number(slot && slot.period) || DEFAULT_MA_PERIODS[i]);
+          return {
+            slot:i + 1,
+            slotId:"MA" + (i + 1),
+            period:Math.max(1,Math.min(999,period))
+          };
+        });
+        hadCanonicalMaSlots = true;
+        return normalized;
+      }
+    }catch(_e){}
+    if(hadCanonicalMaSlots || !allowStartupFallback) return null;
+    return [1,2,3,4,5].map((slot,i) => ({
+      slot,
+      slotId:"MA" + slot,
+      period:DEFAULT_MA_PERIODS[i]
+    }));
+  }
+  function currentMaPeriods(opts){
+    const slots = currentMaSlots(opts);
+    return Array.isArray(slots) && slots.length === 5 ? slots.map(slot => slot.period) : null;
+  }
+  function pairSlots(slots){
+    return [
+      [slots[0],slots[1]],
+      [slots[1],slots[2]],
+      [slots[2],slots[3]],
+      [slots[3],slots[4]]
+    ];
   }
 
   function sym(){ try{return cfg().symbol}catch(_e){return (document.getElementById('market')?.value||'BTCUSDC').toUpperCase()} }
@@ -18846,15 +19010,50 @@ If there is NO open position, use this Section 2 instead:
   function stackClean(vals,price){ const spreads=[]; for(let i=0;i<vals.length-1;i++)spreads.push(Math.abs(vals[i]-vals[i+1])/(price||vals[i])*10000); return clamp(spreads.reduce((a,b)=>a+b,0)/Math.max(1,spreads.length)*7,0,100); }
   function slopeScore(series,price){ const a=last(series), b=prev(series,8); if(a==null||b==null||!price)return 0; return clamp(((a-b)/price)*10000*7,-100,100); }
   function slopePower(series,price){ const a=last(series), b=prev(series,8), c=prev(series,16); if(a==null||b==null||c==null||!price)return 0; const recent=Math.abs((a-b)/price); const prior=Math.abs((b-c)/price); return clamp((recent-prior)*100000,-100,100); }
-  function spreadDir(vals,price){ let s=0; PAIRS.forEach(([f,sl])=>{const a=vals[PERIODS.indexOf(f)],b=vals[PERIODS.indexOf(sl)]; if(a&&b&&price){const d=(a-b)/price*10000; s+=clamp(d*8,-100,100)}}); return clamp(s/PAIRS.length,-100,100); }
-  function spreadPower(emas,price){ let sum=0,cnt=0; PAIRS.forEach(([f,sl])=>{const A=emas[f],B=emas[sl]; const a=last(A),b=last(B),ap=prev(A,8),bp=prev(B,8); if([a,b,ap,bp,price].every(x=>x!=null)){const now=Math.abs(a-b)/price;const old=Math.abs(ap-bp)/price;sum+=clamp((now-old)*100000,-100,100);cnt++;}}); return cnt?sum/cnt:0; }
+  function spreadDir(vals,price){
+    if(!Array.isArray(vals) || vals.length < 2 || !price) return 0;
+    let s=0, pairs=0;
+    for(let i=0;i<vals.length-1;i++){
+      const a = Number(vals[i]);
+      const b = Number(vals[i+1]);
+      if(Number.isFinite(a) && Number.isFinite(b)){
+        const d=(a-b)/price*10000;
+        s += clamp(d*8,-100,100);
+        pairs++;
+      }
+    }
+    return pairs ? clamp(s/pairs,-100,100) : 0;
+  }
+  function spreadPower(emasBySlot,price,slots){
+    const useSlots = Array.isArray(slots) && slots.length === 5 ? slots : currentMaSlots({allowStartupFallback:false});
+    if(!Array.isArray(useSlots) || useSlots.length !== 5) return 0;
+    let sum=0,cnt=0;
+    for(let i=0;i<useSlots.length-1;i++){
+      const A=emasBySlot[useSlots[i].slotId],B=emasBySlot[useSlots[i+1].slotId];
+      const a=last(A),b=last(B),ap=prev(A,8),bp=prev(B,8);
+      if([a,b,ap,bp,price].every(x=>x!=null)){
+        const now=Math.abs(a-b)/price;
+        const old=Math.abs(ap-bp)/price;
+        sum+=clamp((now-old)*100000,-100,100);
+        cnt++;
+      }
+    }
+    return cnt?sum/cnt:0;
+  }
   function crossState(fast,slow){ const len=Math.min(fast.length,slow.length); if(len<3)return {label:'None',age:null,dir:0,quality:0,forming:false}; const fa=fast[fast.length-1].value, sa=slow[slow.length-1].value, fp=fast[fast.length-2].value, sp=slow[slow.length-2].value; const dist=(fa-sa); let lastCross=null; for(let i=1;i<len;i++){const a0=fast[fast.length-len+i-1].value-slow[slow.length-len+i-1].value; const a1=fast[fast.length-len+i].value-slow[slow.length-len+i].value; if(a0<=0&&a1>0)lastCross={age:len-i-1,dir:1}; if(a0>=0&&a1<0)lastCross={age:len-i-1,dir:-1};} if(fp<=sp&&fa>sa)return {label:'Bull X Fresh',age:0,dir:1,quality:85}; if(fp>=sp&&fa<sa)return {label:'Bear X Fresh',age:0,dir:-1,quality:85}; if(Math.abs(dist/((sa||1)))<0.00035)return {label:(dist>=0?'Bull':'Bear')+' forming',age:null,dir:dist>=0?1:-1,quality:35,forming:true}; if(lastCross){const stale=lastCross.age>24;return {label:(lastCross.dir>0?'Bull X ':'Bear X ')+(stale?'Old':'Confirmed'),age:lastCross.age,dir:lastCross.dir,quality:stale?25:60};} return {label:'None',age:null,dir:0,quality:0}; }
   function eventForLevel(price,emaVal,dir){ if(price==null||emaVal==null)return 'n/a'; const d=(price-emaVal)/price*10000; if(Math.abs(d)<8)return 'Retest'; if(dir>=0&&price>emaVal)return 'Hold'; if(dir<0&&price<emaVal)return 'Reject'; return dir>=0?'Loss':'Reclaim'; }
   function clusterState(vals,price){ const spread=(Math.max(...vals)-Math.min(...vals))/(price||vals[0])*10000; if(spread<18)return 'Chop'; if(spread<42)return 'Compressing'; return 'Expanded'; }
   function diagnose(label,tf,rows,snapshot){
     if(!rows||!rows.length) return {tf:label,interval:tf,available:false,reason:'Unavailable'};
+    const slots = currentMaSlots({allowStartupFallback:true});
+    if(!Array.isArray(slots) || slots.length !== 5){
+      return {tf:label,interval:tf,available:false,reason:'ma-slots-unavailable'};
+    }
     if(rows.length<SSSC_MIN_CLOSED_CANDLES){
       return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true};
+    }
+    if(!snapshot){
+      return {tf:label,interval:tf,available:false,reason:'ma-snapshot-unavailable',rows:rows.length,reliability:'snapshot-missing',warmupLimited:true};
     }
     if(snapshot && !snapshot.reliable){
       return {
@@ -18867,50 +19066,48 @@ If there is NO open position, use this Section 2 instead:
         warmupLimited:true
       };
     }
+    const periods = slots.map(slot => slot.period);
+    const pairs = pairSlots(slots);
     const price=rows[rows.length-1].close;
-    const emas={};
-    if(snapshot && snapshot.alignedByPeriod && snapshot.periods && snapshot.periods.length){
-      PERIODS.forEach(p=>{
-        const aligned = Array.isArray(snapshot.alignedByPeriod[p]) ? snapshot.alignedByPeriod[p] : [];
-        const built = [];
-        for(let i=0;i<rows.length;i++){
-          const v = Number(aligned[i]);
-          if(Number.isFinite(v)){
-            built.push({time:rows[i].time,value:v});
-          }
-        }
-        emas[p] = built;
-      });
-    }else{
-      PERIODS.forEach(p=>{ emas[p]=ema(rows,p); });
+    if(!snapshot.alignedBySlot || !snapshot.valuesBySlot){
+      return {tf:label,interval:tf,available:false,reason:'ma-snapshot-unavailable',rows:rows.length,reliability:'snapshot-missing',warmupLimited:true};
     }
-    const vals = PERIODS.map(p=>{
-      if(snapshot && snapshot.valuesByPeriod && Number.isFinite(Number(snapshot.valuesByPeriod[p]))){
-        return Number(snapshot.valuesByPeriod[p]);
+    const emasBySlot={};
+    slots.forEach(slot=>{
+      const aligned = Array.isArray(snapshot.alignedBySlot[slot.slotId]) ? snapshot.alignedBySlot[slot.slotId] : [];
+      const built = [];
+      for(let i=0;i<rows.length;i++){
+        const v = Number(aligned[i]);
+        if(Number.isFinite(v)) built.push({time:rows[i].time,value:v});
       }
-      return last(emas[p]);
+      emasBySlot[slot.slotId] = built;
+    });
+    const vals = slots.map(slot => {
+      const snapValue = Number(snapshot.valuesBySlot[slot.slotId]);
+      if(Number.isFinite(snapValue)) return snapValue;
+      return last(emasBySlot[slot.slotId]);
     });
     if(vals.some(v=>v==null || !Number.isFinite(Number(v)))){
       return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true};
     }
     const stackDir=stackDirection(vals);
     const clean=stackClean(vals,price);
-    const slopeDir=0.45*slopeScore(emas[21],price)+0.35*slopeScore(emas[55],price)+0.20*slopeScore(emas[100],price);
+    const slopeDir=0.45*slopeScore(emasBySlot.MA2,price)+0.35*slopeScore(emasBySlot.MA3,price)+0.20*slopeScore(emasBySlot.MA4,price);
     const sprDir=spreadDir(vals,price);
-    const c921=crossState(emas[9],emas[21]);
-    const c2155=crossState(emas[21],emas[55]);
-    const c55100=crossState(emas[55],emas[100]);
-    const c100200=crossState(emas[100],emas[200]);
-    const direction=clamp(stackDir*0.44+slopeDir*0.30+sprDir*0.20+c921.dir*6,-100,100);
-    const slopePow=0.55*slopePower(emas[21],price)+0.30*slopePower(emas[55],price)+0.15*slopePower(emas[100],price);
-    const sprPow=spreadPower(emas,price);
+    const c12=crossState(emasBySlot.MA1,emasBySlot.MA2);
+    const c23=crossState(emasBySlot.MA2,emasBySlot.MA3);
+    const c34=crossState(emasBySlot.MA3,emasBySlot.MA4);
+    const c45=crossState(emasBySlot.MA4,emasBySlot.MA5);
+    const direction=clamp(stackDir*0.44+slopeDir*0.30+sprDir*0.20+c12.dir*6,-100,100);
+    const slopePow=0.55*slopePower(emasBySlot.MA2,price)+0.30*slopePower(emasBySlot.MA3,price)+0.15*slopePower(emasBySlot.MA4,price);
+    const sprPow=spreadPower(emasBySlot,price,slots);
     const magnitude=clamp(slopePow*0.52+sprPow*0.42+(clean<20?-18:0),-100,100);
     const state=direction>55?'Bullish':direction>18?'Mixed Bullish':direction<-55?'Bearish':direction<-18?'Mixed Bearish':'Mixed';
     const phase=clean<18?'Compression / Chop': magnitude>35?(direction>=0?'Bullish Markup / Trend':'Bearish Transition'):magnitude<-25?(direction>=0?'Bullish Fading':'Bearish Fading'):Math.abs(direction)<25?'Compression / Chop':'Pullback / Retest';
     const magState=magnitude>35?'Expanding':magnitude>10?'Strengthening':magnitude<-35?'Fading':magnitude<-10?'Weakening':'Neutral';
     const vw=vwapCalc(rows);
     const vwapEvent=vw==null?'Unavailable':price>vw?(direction>=0?'Hold':'Reclaim'):(direction>=0?'Loss':'Below');
-    const events={x921:c921.label,x2155:c2155.label,x55100:c55100.label,x100200:c100200.label,ema9:eventForLevel(price,vals[0],direction),ema21:eventForLevel(price,vals[1],direction),ema55:eventForLevel(price,vals[2],direction),vwap:vwapEvent,cluster:clusterState(vals,price),earlyWarning:'None'};
+    const events={x12:c12.label,x23:c23.label,x34:c34.label,x45:c45.label,ma1:eventForLevel(price,vals[0],direction),ma2:eventForLevel(price,vals[1],direction),ma3:eventForLevel(price,vals[2],direction),vwap:vwapEvent,cluster:clusterState(vals,price),earlyWarning:'None'};
     return {
       tf:label,
       interval:tf,
@@ -18918,7 +19115,7 @@ If there is NO open position, use this Section 2 instead:
       rows:rows.length,
       price,
       vwap:vw,
-      emas,
+      emasBySlot,
       emaVals:vals,
       direction,
       magnitude,
@@ -18931,7 +19128,10 @@ If there is NO open position, use this Section 2 instead:
       sprDir,
       slopePow,
       sprPow,
-      crosses:{c921,c2155,c55100,c100200},
+      crosses:{c12,c23,c34,c45},
+      slots,
+      periods,
+      pairs,
       events,
       earlyWarning:null,
       reliability:rows.length>=SSSC_TARGET_CLOSED_CANDLES?'full-warmup':'minimum-warmup',
@@ -18944,30 +19144,48 @@ If there is NO open position, use this Section 2 instead:
       } : null
     };
   }
-  function deriveEarlyWarning(label,tf,closedRows,formingRow,confirmed){ if(!formingRow||!confirmed||!confirmed.available||!closedRows||!closedRows.length) return null; const trialRows=closedRows.concat([{...formingRow}]); const trial=diagnose(label,tf,trialRows); if(!trial||!trial.available) return null; const hints=[]; if(trial.crosses.c921.forming||trial.crosses.c2155.forming||trial.crosses.c55100.forming||trial.crosses.c100200.forming) hints.push('Unconfirmed cross forming'); if(trial.events.vwap!==confirmed.events.vwap) hints.push('Unconfirmed VWAP '+trial.events.vwap); if(trial.clean>=18&&confirmed.clean<18) hints.push('Unconfirmed compression break'); if(trial.phase!==confirmed.phase) hints.push('Unconfirmed '+trial.phase); if(trial.magnitude<confirmed.magnitude-10) hints.push('Unconfirmed momentum weakening'); if(!hints.length&&Math.sign(trial.direction)!==Math.sign(confirmed.direction)) hints.push('Unconfirmed transition'); if(!hints.length) return null; return {label:hints[0],trial}; }
+  function deriveEarlyWarning(confirmed,live){
+    if(!confirmed || !live || !confirmed.available || !live.available) return null;
+    const hints = [];
+    if((live.crosses && (live.crosses.c12?.forming || live.crosses.c23?.forming || live.crosses.c34?.forming || live.crosses.c45?.forming))){
+      hints.push('Unconfirmed cross forming');
+    }
+    if(live.events && confirmed.events && live.events.vwap !== confirmed.events.vwap){
+      hints.push('Unconfirmed VWAP ' + live.events.vwap);
+    }
+    if(Number(live.clean) >= 18 && Number(confirmed.clean) < 18) hints.push('Unconfirmed compression break');
+    if(String(live.phase || '') !== String(confirmed.phase || '')) hints.push('Unconfirmed ' + (live.phase || 'phase shift'));
+    if(Number(live.magnitude) < Number(confirmed.magnitude) - 10) hints.push('Unconfirmed momentum weakening');
+    if(!hints.length && Math.sign(Number(live.direction) || 0) !== Math.sign(Number(confirmed.direction) || 0)) hints.push('Unconfirmed transition');
+    if(!hints.length) return null;
+    return {label:hints[0],trial:live};
+  }
   function liveRows(closedRows,formingRow){ if(!Array.isArray(closedRows)||!closedRows.length) return []; if(!formingRow||!Number.isFinite(Number(formingRow.time))) return closedRows.slice(); const out=closedRows.slice(); const last=out[out.length-1]; if(last&&Number(formingRow.time)<=Number(last.time)) return out; out.push({...formingRow}); return out; }
   function buildDiagnosticSet(label,tf,count,h){
     const requested = Math.max(count || 0,SSSC_MIN_CLOSED_CANDLES);
+    const slots = currentMaSlots({allowStartupFallback:true});
+    if(!Array.isArray(slots) || slots.length !== 5){
+      return {tf:label,interval:tf,available:false,reason:'ma-slots-unavailable',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
+    }
     const useSnapshot = h && typeof h.getAuthoritativeMaSnapshot === "function";
     const confirmedSnapshot = useSnapshot
-      ? h.getAuthoritativeMaSnapshot(tf,{periods:PERIODS,includeForming:false,requiredRows:requested})
+      ? h.getAuthoritativeMaSnapshot(tf,{slots,includeForming:false,requiredRows:requested})
       : null;
-    const closedRows = confirmedSnapshot && Array.isArray(confirmedSnapshot.rows)
-      ? confirmedSnapshot.rows.slice(-requested)
-      : (h ? h.getClosedBuffer(tf) : []).slice(-requested);
-    if(!closedRows.length) return null;
+    if(!confirmedSnapshot || !Array.isArray(confirmedSnapshot.rows) || !confirmedSnapshot.rows.length){
+      return {tf:label,interval:tf,available:false,reason:'ma-snapshot-unavailable',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
+    }
+    const closedRows = confirmedSnapshot.rows.slice(-requested);
 
     const liveSnapshot = LIVE_DIAG_TFS.has(tf) && useSnapshot
-      ? h.getAuthoritativeMaSnapshot(tf,{periods:PERIODS,includeForming:true,requiredRows:requested})
+      ? h.getAuthoritativeMaSnapshot(tf,{slots,includeForming:true,requiredRows:requested})
       : null;
-    const forming = h ? h.getFormingCandle(tf) : null;
     const liveRowsForTf = LIVE_DIAG_TFS.has(tf)
-      ? (liveSnapshot && Array.isArray(liveSnapshot.rows) ? liveSnapshot.rows.slice(-requested) : liveRows(closedRows,forming))
+      ? (liveSnapshot && Array.isArray(liveSnapshot.rows) ? liveSnapshot.rows.slice(-requested) : closedRows.slice())
       : closedRows.slice();
 
     const confirmedDiagnostic = diagnose(label,tf,closedRows,confirmedSnapshot);
     const liveDiagnostic = diagnose(label,tf,liveRowsForTf,liveSnapshot || confirmedSnapshot);
-    const warning = deriveEarlyWarning(label,tf,closedRows,forming,confirmedDiagnostic);
+    const warning = deriveEarlyWarning(confirmedDiagnostic,liveDiagnostic);
     const mode = LIVE_DIAG_TFS.has(tf) && liveRowsForTf.length > closedRows.length ? 'live' : 'confirmed';
     const active = (LIVE_DIAG_TFS.has(tf) && liveDiagnostic && liveDiagnostic.available) ? liveDiagnostic : confirmedDiagnostic;
     if(active && active.available){
@@ -18992,7 +19210,16 @@ If there is NO open position, use this Section 2 instead:
   function animateRollingDigits(scope){ if(!scope) return; requestAnimationFrame(()=>requestAnimationFrame(()=>{ scope.querySelectorAll('.sssc-odo-roll[data-odo-to]').forEach(el=>{ const to=String(el.dataset.odoTo||'translateY(0)'); if(el.style.transform===to) return; el.style.transform=to; }); })); }
   function powerGauge(value,tf){ value=clamp(value,-100,100); const prev=Number.isFinite(previousMomentumByTf[tf])?clamp(previousMomentumByTf[tf],-100,100):null; const cx=74,cy=60,radius=56,a=gaugeAngle(value); const tip=polar(cx,cy,52,a); const baseLen=13,halfBase=3.7,rad=a*Math.PI/180; const bx=cx+baseLen*Math.cos(rad+Math.PI), by=cy+baseLen*Math.sin(rad+Math.PI); const pxv=Math.cos(rad+Math.PI/2)*halfBase, pyv=Math.sin(rad+Math.PI/2)*halfBase; const points=`${tip.x.toFixed(1)},${tip.y.toFixed(1)} ${(bx+pxv).toFixed(1)},${(by+pyv).toFixed(1)} ${(bx-pxv).toFixed(1)},${(by-pyv).toFixed(1)}`; let ghost=''; if(prev!==null){ const ga=gaugeAngle(prev), grad=ga*Math.PI/180, gtip=polar(cx,cy,50,ga), gbx=cx+12*Math.cos(grad+Math.PI), gby=cy+12*Math.sin(grad+Math.PI), gpx=Math.cos(grad+Math.PI/2)*3.3, gpy=Math.sin(grad+Math.PI/2)*3.3; ghost=`<polygon class="ghostNeedle" points="${gtip.x.toFixed(1)},${gtip.y.toFixed(1)} ${(gbx+gpx).toFixed(1)},${(gby+gpy).toFixed(1)} ${(gbx-gpx).toFixed(1)},${(gby-gpy).toFixed(1)}"/>`; } let ticks=''; for(let i=-100;i<=100;i+=20){ const aa=gaugeAngle(i), p1=polar(cx,cy,45,aa), p2=polar(cx,cy,53,aa); ticks += `<line class="tick" x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}"/>`; } return `<div class="sssc-gauge"><svg viewBox="0 0 148 68" aria-label="Momentum ${signedText(value)}"><path class="gaugeInner" d="M 18 60 A 56 56 0 0 1 130 60 L 74 60 Z"/><path class="arc" d="M 18 60 A 56 56 0 0 1 130 60"/><path class="arcHi" d="M 18 60 A 56 56 0 0 1 130 60"/><g>${ticks}</g>${ghost}<polygon class="needle" points="${points}"/><rect class="hub" x="51" y="48" width="46" height="20" rx="0" ry="0"/><text class="svgval" x="74" y="58">${signedText(value)}</text></svg></div>`; }
   function chip(txt){ const s=String(txt||'-'); let cls=''; if(/Bull|Hold|Reclaim/i.test(s))cls='bull'; if(/Bear|Loss|Below|Reject/i.test(s))cls='bear'; if(/Fresh|Expanding|Strengthening/i.test(s))cls='blue'; if(/Failed|Chop|Compress|Weak|Old/i.test(s))cls='warn'; return `<span class="sssc-ui-chip ${cls}">${s}</span>`; }
-  function eventRows(items){ const head=`<div class="sssc-ui-event-row"><b>TF</b><b>X9/21</b><b>X21/55</b><b>X55/100</b><b>X100/200</b><b>EMA9</b><b>EMA21</b><b>EMA55</b><b>VWAP</b><b>Cluster</b></div>`; return head+items.map(d=>{ if(!d.available)return `<div class="sssc-ui-event-row"><b>${d.tf}</b>${'<span>-</span>'.repeat(9)}</div>`; const e=d.events; return `<div class="sssc-ui-event-row" data-tf="${d.tf}"><b>${d.tf}</b>${chip(e.x921)}${chip(e.x2155)}${chip(e.x55100)}${chip(e.x100200)}${chip(e.ema9)}${chip(e.ema21)}${chip(e.ema55)}${chip(e.vwap)}${chip(e.cluster)}</div>`}).join(''); }
+  function eventRows(items){
+    const first = (items || []).find(d => d && d.available && Array.isArray(d.slots) && d.slots.length === 5);
+    const slotLabels = first ? first.slots.map(slot => `${slot.slotId} EMA${slot.period}`) : ["MA1","MA2","MA3","MA4","MA5"];
+    const head=`<div class="sssc-ui-event-row"><b>TF</b><b>X${slotLabels[0]}/${slotLabels[1]}</b><b>X${slotLabels[1]}/${slotLabels[2]}</b><b>X${slotLabels[2]}/${slotLabels[3]}</b><b>X${slotLabels[3]}/${slotLabels[4]}</b><b>${slotLabels[0]}</b><b>${slotLabels[1]}</b><b>${slotLabels[2]}</b><b>VWAP</b><b>Cluster</b></div>`;
+    return head + items.map(d=>{
+      if(!d.available) return `<div class="sssc-ui-event-row"><b>${d.tf}</b>${'<span>-</span>'.repeat(9)}</div>`;
+      const e=d.events || {};
+      return `<div class="sssc-ui-event-row" data-tf="${d.tf}"><b>${d.tf}</b>${chip(e.x12)}${chip(e.x23)}${chip(e.x34)}${chip(e.x45)}${chip(e.ma1)}${chip(e.ma2)}${chip(e.ma3)}${chip(e.vwap)}${chip(e.cluster)}</div>`;
+    }).join('');
+  }
   function kpi(label,val,sub,cls='',extra=''){ return `<div class="sssc-ui-kpi ${extra}"><label>${label}</label><div class="val ${cls}">${val}</div><div class="sub">${sub}</div></div>`; }
   function changedValue(key,val){ val=String(val); const old=previousTopValues[key]; const changed=old!==undefined && old!==val; previousTopValues[key]=val; return changed; }
   function blinkClass(key,val){ return changedValue(key,val)?' sssc-value-blink':''; }
@@ -19001,8 +19228,30 @@ If there is NO open position, use this Section 2 instead:
   function settleScoreRoll(items){ for(const it of items){ if(!it||!it.available) continue; const tf=it.tf; previousScoreValueByTf[tf]=lastRenderedScoreByTf[tf]; pendingScoreRollByTf[tf]=false; } }
   function magClass(v){ return v>20?'sssc-ui-blue':v<-20?'sssc-ui-red':'sssc-ui-gray'; }
   function rowHtml(d){ if(!d||!d.available)return `<div class="sssc-ui-row"><div class="sssc-ui-tf">${d?d.tf:'-'}</div><div class="sssc-ui-dir">Unavailable</div><div>-</div><div>-</div><div class="sssc-ui-score">-</div><div class="sssc-ui-power-state">${d?.reason||'-'}</div></div>`; const strCls=strengthClass(d.direction); const scCls=scoreClass(d.direction); const phCls=phaseClass(d.phase); const scoreVal=Math.abs(Math.round(d.direction)); const fromScore=pendingScoreRollByTf[d.tf]?previousScoreValueByTf[d.tf]:scoreVal; return `<div class="sssc-ui-row" data-tf="${d.tf}"><div class="sssc-ui-tf">${d.tf}</div><div><div class="sssc-ui-dir"><span class="sssc-dir-state">${dirLabel(d.direction)}</span> | <span class="sssc-dir-value ${strCls}">${scoreVal}</span></div><div class="sssc-ui-phase ${phCls}">${d.phase}</div></div><div class="sssc-ribbon">${ribbonSegments(d.direction)}</div><div class="sssc-gauge-wrap">${powerGauge(d.magnitude,d.tf)}</div><div class="sssc-ui-score ${scCls}">${rollingDigits(scoreVal,fromScore,'score','',{width:2})}</div><div><div class="sssc-ui-power-state ${magClass(d.magnitude)}">${d.magState}</div></div></div>`; }
-  function render(force=false){ if(!force && Date.now()-lastRender<500)return; lastRender=Date.now(); const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'}); updatePreviousMomentum(items); updatePreviousScores(items); const avail=items.filter(x=>x.available); const dir=avg(avail,'direction'); const pow=avg(avail,'magnitude'); const align=avail.length/items.length; const clarity=clamp(Math.abs(dir)*0.42+(100-Math.abs(pow))*0.12+align*42,0,100); const risk=clamp(100-clarity+(avail.slice(-2).some(x=>x.available&&Math.sign(x.direction)!==Math.sign(dir))?14:0),0,100); const act=action(dir,pow,clarity,risk); const dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED'; const dirCls=strengthClass(dir); const powCls=pow>20?'blue':pow<-20?'red':'gray'; const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`, momVal=signed(pow), clarityVal=Math.round(clarity)+'%', riskVal=Math.round(risk)+'%'; const topNode=$('ssscDashTop'); const rowsNode=$('ssscDashRows'); topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('MOMENTUM',`<span class="${blinkClass('kpi_mom',momVal)}">${momVal}</span>`,pow>20?'Expansion improving':pow<-20?'Momentum fading':'Neutral',powCls)+kpi('CLARITY',`<span class="${blinkClass('kpi_clarity',clarityVal)}">${clarityVal}</span>`,clarity>62?'Clean enough to read':'Signal needs caution',clarity>62?'green':'gray')+kpi('EXECUTION RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('ACTION',act,actionComment(act),'', 'action'); rowsNode.innerHTML=items.map(rowHtml).join(''); $('ssscDashEvents').innerHTML=eventRows(items); animateRollingDigits(rowsNode); settleScoreRoll(items); bindRows(); const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable')); const h=hub(); const wsTick=h&&h.diag?h.diag.lastWsTickTime:0; const wsAge=wsTick?Math.round((Date.now()-wsTick)/1000)+'s':'never'; $('ssscDashFooter').innerHTML=`Module: ${MODULE} | WS age: ${wsAge} | REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500–1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`; }
-  function detail(tf){ const d=data[tf]; const box=$('ssscDashDetail'), title=$('ssscDashDetailTitle'), grid=$('ssscDashDetailGrid'); if(!d)return; box.classList.remove('hidden'); title.textContent='TF Detail — '+tf; const dt=$('ssscDetailToggle'); if(dt)dt.textContent='Collapse'; if(!d.available){grid.innerHTML=`<div class="sssc-ui-detail-box">Unavailable\n${d.reason||''}</div>`;return} const emaLines=PERIODS.map((p,i)=>`EMA${p}: ${fmt(d.emaVals[i],2)}`).join('\n'); const spreadLines=PAIRS.map(([a,b])=>`EMA${a}/${b}: ${fmt((d.emaVals[PERIODS.indexOf(a)]-d.emaVals[PERIODS.indexOf(b)])/d.price*10000,1)} bps`).join('\n'); const crossLines=`9/21: ${d.crosses.c921.label}\n21/55: ${d.crosses.c2155.label}\n55/100: ${d.crosses.c55100.label}\n100/200: ${d.crosses.c100200.label}`; const eventLines=Object.entries(d.events).map(([k,v])=>`${k}: ${v}`).join('\n'); grid.innerHTML=`<div class="sssc-ui-detail-box"><b>Values</b>\nPrice: ${fmt(d.price,2)}\nVWAP: ${d.vwap==null?'Unavailable':fmt(d.vwap,2)}\n${emaLines}</div><div class="sssc-ui-detail-box"><b>SSSC</b>\nDirection: ${signed(d.direction)}\nMomentum: ${signed(d.magnitude)}\nStack: ${fmt(d.stackDir,0)}\nSlope dir: ${fmt(d.slopeDir,0)}\nSpread dir: ${fmt(d.sprDir,0)}\nSlope momentum: ${fmt(d.slopePow,0)}\nSpread momentum: ${fmt(d.sprPow,0)}</div><div class="sssc-ui-detail-box"><b>Spreads / Crosses</b>\n${spreadLines}\n\n${crossLines}</div><div class="sssc-ui-detail-box"><b>Events</b>\n${eventLines}</div><div class="sssc-ui-detail-box"><b>Phase</b>\nState: ${d.state}\nPhase: ${d.phase}\nMomentum: ${d.magState}\nRows: ${d.rows}</div><div class="sssc-ui-detail-box"><b>Implication</b>\n${d.direction>35?'Bullish side favored.':d.direction<-35?'Bearish side favored.':'Mixed / wait for acceptance.'}\n${d.magnitude>25?'Current directional force strengthening.':d.magnitude<-25?'Current direction fading.':'Momentum stable / low signal.'}\n3M/1M warnings do not override 15M/1H/4H unless confirming failure/rejection/acceptance.</div>`; }
+  function render(force=false){ if(!force && Date.now()-lastRender<500)return; lastRender=Date.now(); const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'}); updatePreviousMomentum(items); updatePreviousScores(items); const avail=items.filter(x=>x.available); const dir=avg(avail,'direction'); const pow=avg(avail,'magnitude'); const align=avail.length/items.length; const clarity=clamp(Math.abs(dir)*0.42+(100-Math.abs(pow))*0.12+align*42,0,100); const risk=clamp(100-clarity+(avail.slice(-2).some(x=>x.available&&Math.sign(x.direction)!==Math.sign(dir))?14:0),0,100); const act=action(dir,pow,clarity,risk); const dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED'; const dirCls=strengthClass(dir); const powCls=pow>20?'blue':pow<-20?'red':'gray'; const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`, momVal=signed(pow), clarityVal=Math.round(clarity)+'%', riskVal=Math.round(risk)+'%'; const topNode=$('ssscDashTop'); const rowsNode=$('ssscDashRows'); topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('MOMENTUM',`<span class="${blinkClass('kpi_mom',momVal)}">${momVal}</span>`,pow>20?'Expansion improving':pow<-20?'Momentum fading':'Neutral',powCls)+kpi('CLARITY',`<span class="${blinkClass('kpi_clarity',clarityVal)}">${clarityVal}</span>`,clarity>62?'Clean enough to read':'Signal needs caution',clarity>62?'green':'gray')+kpi('EXECUTION RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('ACTION',act,actionComment(act),'', 'action'); rowsNode.innerHTML=items.map(rowHtml).join(''); $('ssscDashEvents').innerHTML=eventRows(items); animateRollingDigits(rowsNode); settleScoreRoll(items); bindRows(); const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable')); const h=hub(); const wsTick=h&&h.diag?h.diag.lastWsTickTime:0; const wsAge=wsTick?Math.round((Date.now()-wsTick)/1000)+'s':'never'; $('ssscDashFooter').innerHTML=`Module: ${MODULE} | WS age: ${wsAge} | REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500-1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`; }
+  function detail(tf){
+    const d=data[tf];
+    const box=$('ssscDashDetail'), title=$('ssscDashDetailTitle'), grid=$('ssscDashDetailGrid');
+    if(!d) return;
+    box.classList.remove('hidden');
+    title.textContent='TF Detail - '+tf;
+    const dt=$('ssscDetailToggle');
+    if(dt) dt.textContent='Collapse';
+    if(!d.available){
+      grid.innerHTML=`<div class="sssc-ui-detail-box">Unavailable\n${d.reason||''}</div>`;
+      return;
+    }
+    const slots = (Array.isArray(d.slots) && d.slots.length === 5)
+      ? d.slots
+      : currentMaSlots({allowStartupFallback:true});
+    const pairs = (Array.isArray(d.pairs) && d.pairs.length === 4) ? d.pairs : (Array.isArray(slots) ? pairSlots(slots) : []);
+    const slotLabel = slot => `${slot.slotId} EMA${slot.period}`;
+    const emaLines = (Array.isArray(slots) ? slots : []).map((slot,i)=>`${slotLabel(slot)}: ${fmt(d.emaVals[i],2)}`).join('\n');
+    const spreadLines = pairs.map(([a,b],i)=>`${slotLabel(a)} / ${slotLabel(b)}: ${fmt((d.emaVals[i]-d.emaVals[i+1])/d.price*10000,1)} bps`).join('\n');
+    const crossLines = `MA1/MA2: ${d.crosses.c12.label}\nMA2/MA3: ${d.crosses.c23.label}\nMA3/MA4: ${d.crosses.c34.label}\nMA4/MA5: ${d.crosses.c45.label}`;
+    const eventLines = Object.entries(d.events).map(([k,v])=>`${k}: ${v}`).join('\n');
+    grid.innerHTML=`<div class="sssc-ui-detail-box"><b>Values</b>\nPrice: ${fmt(d.price,2)}\nVWAP: ${d.vwap==null?'Unavailable':fmt(d.vwap,2)}\n${emaLines}</div><div class="sssc-ui-detail-box"><b>SSSC</b>\nDirection: ${signed(d.direction)}\nMomentum: ${signed(d.magnitude)}\nStack: ${fmt(d.stackDir,0)}\nSlope dir: ${fmt(d.slopeDir,0)}\nSpread dir: ${fmt(d.sprDir,0)}\nSlope momentum: ${fmt(d.slopePow,0)}\nSpread momentum: ${fmt(d.sprPow,0)}</div><div class="sssc-ui-detail-box"><b>Spreads / Crosses</b>\n${spreadLines}\n\n${crossLines}</div><div class="sssc-ui-detail-box"><b>Events</b>\n${eventLines}</div><div class="sssc-ui-detail-box"><b>Phase</b>\nState: ${d.state}\nPhase: ${d.phase}\nMomentum: ${d.magState}\nRows: ${d.rows}</div><div class="sssc-ui-detail-box"><b>Implication</b>\n${d.direction>35?'Bullish side favored.':d.direction<-35?'Bearish side favored.':'Mixed / wait for acceptance.'}\n${d.magnitude>25?'Current directional force strengthening.':d.magnitude<-25?'Current direction fading.':'Momentum stable / low signal.'}\n3M/1M warnings do not override 15M/1H/4H unless confirming failure/rejection/acceptance.</div>`;
+  }
   function bindRows(){ document.querySelectorAll('#ssscDash [data-tf]').forEach(el=>{ if(el.__ssscBound)return; el.__ssscBound=true; el.addEventListener('click',()=>detail(el.dataset.tf)); }); }
   function calculate(){ const h=hub(); const liveSymbol=sym(); if(currentSymbol&&currentSymbol!==liveSymbol){ data={}; } currentSymbol=liveSymbol; for(const [label,tf,count] of TFS){ const diagnostic=buildDiagnosticSet(label,tf,count,h); data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; } render(); }
   async function seedFromHub(full=false){
@@ -19072,2646 +19321,3 @@ If there is NO open position, use this Section 2 instead:
   };
 })();
 
-(() => {
-  "use strict";
-
-  const MODULE = "CALCULATOR_MODULE";
-  const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
-  const OPEN_ALGO_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
-  const ALGO_ORDER_WRITE_URL = "https://fapi.binance.com/fapi/v1/algoOrder";
-  const ORDER_WRITE_URL = "https://fapi.binance.com/fapi/v1/order";
-  const STORE = "btc_futures_chart_v13_calculator_";
-  const LEVELS_VISIBLE_KEY = STORE + "levels_visible";
-  const SL_SEND_ENABLED_KEY = STORE + "sl_send_enabled";
-  const CBS_ENABLED_KEY = STORE + "cbs_enabled";
-  let zTop = 82;
-  let direction = "LONG";
-  let syncingStop = false;
-  let lastStopEdit = "level";
-  let levelsVisible = true;
-  let slSendEnabled = false;
-  let cbsEnabled = false;
-  let binanceLimitRowSeq = 0;
-  const binanceLimitRowMetaByRowId = new Map();
-  let currentStopAlgoMeta = null;
-  let lastReadDiagnostic = null;
-  let lastOverlayDiagnostic = null;
-  let lastSendDiagnostic = null;
-  let overlayLevelBoxes = [];
-  let overlayDrag = {active:false,row:null,target:"row"};
-  let suppressNextOverlayClick = false;
-  let sendPopupDrag = null;
-  let lastReadStateSnapshot = null;
-  let sendPlanState = null;
-  let sendPlanSeq = 0;
-
-  function q(id){ return document.getElementById(id); }
-  function num(v){
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
-  function clamp(v,min,max){ return Math.max(min,Math.min(max,v)); }
-  function fmtPrice(v){
-    const n = num(v);
-    return n == null ? "-" : Math.round(n).toLocaleString("en-US");
-  }
-  function fmtLot(v){
-    const n = num(v);
-    return n == null ? "-" : Number(n.toFixed(3)).toFixed(3);
-  }
-  function fmtMoney(v){
-    const n = num(v);
-    if(n == null) return "-";
-    return (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
-  }
-  function moneyColor(v){
-    const n = num(v);
-    return n == null || n === 0 ? "#111" : n > 0 ? "#047857" : "#f6465d";
-  }
-  function setMoney(node,value){
-    if(!node) return;
-    node.textContent = fmtMoney(value);
-    node.style.color = moneyColor(value);
-  }
-  function setStatus(text){
-    const el = q("calcModuleStatus");
-    if(el) el.textContent = text || "";
-  }
-  function loadLevelsVisible(){
-    try{
-      const raw = localStorage.getItem(LEVELS_VISIBLE_KEY);
-      if(raw == null) return true;
-      return raw !== "0";
-    }catch(_e){
-      return true;
-    }
-  }
-  function loadSlSendEnabled(){
-    try{
-      return localStorage.getItem(SL_SEND_ENABLED_KEY) === "1";
-    }catch(_e){
-      return false;
-    }
-  }
-  function loadCbsEnabled(){
-    try{
-      return localStorage.getItem(CBS_ENABLED_KEY) === "1";
-    }catch(_e){
-      return false;
-    }
-  }
-  function saveLevelsVisible(next){
-    levelsVisible = !!next;
-    try{ localStorage.setItem(LEVELS_VISIBLE_KEY,levelsVisible ? "1" : "0"); }catch(_e){}
-    const tgl = q("calcModuleLevelsToggle");
-    if(tgl) tgl.checked = levelsVisible;
-    const box = q("calcModuleLevelsToggleWrap");
-    if(box){
-      box.classList.toggle("is-on",levelsVisible);
-      box.classList.toggle("is-off",!levelsVisible);
-    }
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
-  }
-  function saveSlSendEnabled(next){
-    slSendEnabled = !!next;
-    try{ localStorage.setItem(SL_SEND_ENABLED_KEY,slSendEnabled ? "1" : "0"); }catch(_e){}
-    const tgl = q("calcModuleSlToggle");
-    if(tgl) tgl.checked = slSendEnabled;
-    const wrap = q("calcModuleSlToggleWrap");
-    if(wrap){
-      wrap.classList.toggle("is-on",slSendEnabled);
-      wrap.classList.toggle("is-off",!slSendEnabled);
-    }
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
-  }
-  function saveCbsEnabled(next){
-    cbsEnabled = !!next;
-    try{ localStorage.setItem(CBS_ENABLED_KEY,cbsEnabled ? "1" : "0"); }catch(_e){}
-    const tgl = q("calcModuleCbsToggle");
-    if(tgl) tgl.checked = cbsEnabled;
-    const wrap = q("calcModuleCbsToggleWrap");
-    if(wrap){
-      wrap.classList.toggle("is-on",cbsEnabled);
-      wrap.classList.toggle("is-off",!cbsEnabled);
-    }
-  }
-
-  function calcLevelsInteractive(){
-    try{
-      const win = q("calcModuleWindow");
-      const winVisible = win ? !win.classList.contains("hidden") : false;
-      return !!(levelsVisible && winVisible);
-    }catch(_e){ return !!levelsVisible; }
-  }
-  function calcSlInteractive(){
-    return calcLevelsInteractive() && slSendEnabled;
-  }
-  function levelInput(row){ return row ? row.querySelector(".calc-module-level") : null; }
-  function lotInput(row){ return row ? row.querySelector(".calc-module-lot") : null; }
-  function isRowEmpty(row){
-    const levelVal = String(levelInput(row)?.value || "").trim();
-    const lotVal = String(lotInput(row)?.value || "").trim();
-    return !levelVal && !lotVal;
-  }
-
-  function ensureButton(){
-    const account = q("mBalance") && q("mBalance").closest(".metric");
-    const assess = q("v29AssessMetric");
-    let wrap = q("calcModuleMetric");
-    let btn = q("calcOpenBtn");
-    if(btn && wrap) return btn;
-    if(!wrap){
-      wrap = document.createElement("div");
-      wrap.id = "calcModuleMetric";
-      wrap.className = "calc-module-metric";
-    }
-    if(!btn){
-      btn = document.createElement("button");
-      btn.id = "calcOpenBtn";
-      btn.type = "button";
-      btn.className = "calc-module-icon";
-    }
-    if(btn.parentNode !== wrap){
-      wrap.innerHTML = "";
-      wrap.appendChild(btn);
-    }
-    btn.title = "Position Calculator";
-    btn.setAttribute("aria-label","Open position calculator");
-    btn.setAttribute("aria-pressed","false");
-    btn.textContent = "🧮";
-    if(assess && assess.parentNode){
-      assess.insertAdjacentElement("afterend",wrap);
-    }else if(account && account.parentNode){
-      account.insertAdjacentElement("beforebegin",wrap);
-    }else{
-      document.querySelector(".metrics")?.appendChild(wrap);
-    }
-    return btn;
-  }
-
-  function ensureWindow(){
-    let win = q("calcModuleWindow");
-    if(win) return win;
-    win = document.createElement("div");
-    win.id = "calcModuleWindow";
-    win.className = "calc-module-window hidden";
-    win.innerHTML = `
-      <div class="calc-module-resize calc-module-resize-n" data-resize="n"></div>
-      <div class="calc-module-resize calc-module-resize-s" data-resize="s"></div>
-      <div class="calc-module-resize calc-module-resize-e" data-resize="e"></div>
-      <div class="calc-module-resize calc-module-resize-w" data-resize="w"></div>
-      <div class="calc-module-resize calc-module-resize-ne" data-resize="ne"></div>
-      <div class="calc-module-resize calc-module-resize-nw" data-resize="nw"></div>
-      <div class="calc-module-resize calc-module-resize-se" data-resize="se"></div>
-      <div class="calc-module-resize calc-module-resize-sw" data-resize="sw"></div>
-      <div class="calc-module-head" id="calcModuleHead">
-        <div class="calc-module-title">Position Calculator</div>
-        <div class="calc-module-actions">
-          <button id="calcModuleClose" type="button" title="Close">x</button>
-        </div>
-      </div>
-      <div class="calc-module-body" id="calcModuleBody">
-        <div class="calc-module-grid">
-          <div class="calc-module-col">
-            <div class="calc-module-col-head">
-              <div class="calc-module-col-title"><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></div>
-              <button class="calc-module-add" id="calcModuleAddEntry" type="button">Add</button>
-            </div>
-            <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
-            <div id="calcModuleEntryRows"></div>
-          </div>
-          <div class="calc-module-col">
-            <div class="calc-module-col-head">
-              <div class="calc-module-col-title">EXITS <span class="calc-module-title-sum" id="calcModuleExitSum">0.000</span></div>
-              <button class="calc-module-add" id="calcModuleAddExit" type="button">Add</button>
-            </div>
-            <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
-            <div id="calcModuleExitRows"></div>
-          </div>
-        </div>
-        <div class="calc-module-stop">
-          <label class="calc-module-mini-toggle calc-module-sl-line-toggle" id="calcModuleSlToggleWrap" title="Include SL cancel/recreate in Confirm Send and allow SL drag">
-            <input id="calcModuleSlToggle" type="checkbox" aria-label="Enable SL send and SL drag">
-          </label>
-          <label for="calcModuleStopLevel">Stop loss</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" placeholder="Level">
-          <label for="calcModuleStopDistance">SL Distance</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" placeholder="Distance">
-        </div>
-        <div class="calc-module-panel">
-          <div class="calc-module-section-title is-toggle" id="calcModulePlTitle">PL @ Exits <span class="calc-module-caret" id="calcModulePlCaret">v</span></div>
-          <div id="calcModuleExitPlRows"></div>
-        </div>
-        <div class="calc-module-panel">
-          <div class="calc-module-section-title is-toggle" id="calcModuleSummaryTitle">Summary <span class="calc-module-caret" id="calcModuleSummaryCaret">v</span></div>
-          <div id="calcModuleSummaryBody">
-            <div class="calc-module-summary-row"><div class="calc-module-label">Total lots</div><div class="calc-module-value" id="calcModuleEntrySize">-</div></div>
-            <div class="calc-module-summary-row"><div class="calc-module-label">Average Entry</div><div class="calc-module-value" id="calcModuleAvgEntry">-</div></div>
-            <div class="calc-module-summary-row"><div class="calc-module-label">Risk</div><div class="calc-module-value" id="calcModuleRisk">-</div></div>
-            <div class="calc-module-summary-row"><div class="calc-module-label">Reward</div><div class="calc-module-value" id="calcModuleReward">-</div></div>
-          </div>
-        </div>
-        <div class="calc-module-binance-flat">
-          <div class="calc-module-binance-actions">
-            <button id="calcModuleClear" type="button">Clear</button>
-            <button id="calcModuleRead" type="button">Read</button>
-            <label class="calc-module-levels-toggle" id="calcModuleLevelsToggleWrap" title="Show/hide Calculator levels on chart">
-              <input id="calcModuleLevelsToggle" type="checkbox" checked>
-              <span>Levels</span>
-            </label>
-            <button id="calcModuleSend" type="button" title="Prepare Binance order send plan">Send</button>
-            <label class="calc-module-mini-toggle" id="calcModuleCbsToggleWrap" title="Cancel Binance-read LIMIT orders before placing fresh LIMIT orders">
-              <input id="calcModuleCbsToggle" type="checkbox">
-              <span>CBS</span>
-            </label>
-          </div>
-          <div class="calc-module-status" id="calcModuleStatus"></div>
-        </div>
-      </div>`;
-    document.body.appendChild(win);
-    return win;
-  }
-
-  function rows(containerId){
-    return Array.from(q(containerId)?.querySelectorAll(".calc-module-row") || []);
-  }
-  function readRows(containerId){
-    return rows(containerId).map(row => ({
-      row,
-      level:num(row.querySelector(".calc-module-level")?.value),
-      lot:num(row.querySelector(".calc-module-lot")?.value)
-    })).filter(r => r.level != null && r.lot != null && r.lot > 0);
-  }
-  function readEntry(){
-    const list = readRows("calcModuleEntryRows");
-    let qty = 0;
-    let value = 0;
-    list.forEach(r => {
-      qty += r.lot;
-      value += r.level * r.lot;
-    });
-    return {rows:list, qty, avg:qty > 0 ? value / qty : null};
-  }
-  function capExitLots(maxQty){
-    let remaining = Math.max(0,Number(maxQty) || 0);
-    rows("calcModuleExitRows").forEach(row => {
-      const input = row.querySelector(".calc-module-lot");
-      const lot = num(input?.value);
-      if(!input || lot == null || lot <= 0) return;
-      const capped = Math.max(0,Math.min(lot,remaining));
-      if(Math.abs(capped - lot) > 1e-9) input.value = capped > 0 ? capped.toFixed(3) : "";
-      remaining -= capped;
-    });
-  }
-  function setDirection(next){
-    direction = next === "SHORT" ? "SHORT" : "LONG";
-    const btn = q("calcModuleDir");
-    if(!btn) return;
-    btn.textContent = direction;
-    btn.classList.toggle("is-long",direction === "LONG");
-    btn.classList.toggle("is-short",direction === "SHORT");
-  }
-  function syncStopFromLevel(avg){
-    if(syncingStop) return;
-    const stop = num(q("calcModuleStopLevel")?.value);
-    if(avg == null || stop == null) return;
-    syncingStop = true;
-    q("calcModuleStopDistance").value = Math.abs(avg - stop).toFixed(0);
-    syncingStop = false;
-  }
-  function syncStopFromDistance(avg){
-    if(syncingStop) return;
-    const dist = num(q("calcModuleStopDistance")?.value);
-    if(avg == null || dist == null) return;
-    syncingStop = true;
-    const stop = direction === "LONG" ? avg - Math.abs(dist) : avg + Math.abs(dist);
-    q("calcModuleStopLevel").value = Math.round(stop);
-    syncingStop = false;
-  }
-  function syncStopForAvg(avg){
-    if(lastStopEdit === "distance") syncStopFromDistance(avg);
-    else syncStopFromLevel(avg);
-  }
-  function calculate(){
-    const entry = readEntry();
-    capExitLots(entry.qty);
-    const exits = readRows("calcModuleExitRows");
-    let exitQty = 0;
-    let reward = 0;
-    const plRows = q("calcModuleExitPlRows");
-    if(plRows) plRows.innerHTML = "";
-
-    exits.forEach((row,index) => {
-      exitQty += row.lot;
-      const pl = entry.avg == null
-        ? null
-        : direction === "LONG"
-          ? (row.level - entry.avg) * row.lot
-          : (entry.avg - row.level) * row.lot;
-      if(pl != null) reward += pl;
-      const line = document.createElement("div");
-      line.className = "calc-module-summary-row calc-module-exit-pl";
-      line.innerHTML = `<div class="calc-module-label">PL @ Ex ${index + 1}</div><div class="calc-module-value"></div>`;
-      setMoney(line.querySelector(".calc-module-value"),pl);
-      plRows?.appendChild(line);
-    });
-
-    syncStopForAvg(entry.avg);
-    const stop = num(q("calcModuleStopLevel")?.value);
-    const risk = entry.avg != null && stop != null && entry.qty > 0
-      ? direction === "LONG"
-        ? (stop - entry.avg) * entry.qty
-        : (entry.avg - stop) * entry.qty
-      : null;
-
-    q("calcModuleEntrySum").textContent = fmtLot(entry.qty || 0);
-    q("calcModuleExitSum").textContent = fmtLot(exitQty || 0);
-    q("calcModuleExitSum").classList.toggle("calc-module-underfilled",entry.qty > 0 && exitQty < entry.qty);
-    q("calcModuleEntrySize").textContent = entry.qty > 0 ? fmtLot(entry.qty) : "-";
-    q("calcModuleAvgEntry").textContent = entry.avg != null ? fmtPrice(entry.avg) : "-";
-    setMoney(q("calcModuleRisk"),risk);
-    setMoney(q("calcModuleReward"),exits.length ? reward : null);
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
-  }
-  function clearBinanceMetaOnRow(row){
-    if(!row) return;
-    const rowId = row.dataset.calcRowId;
-    if(rowId) binanceLimitRowMetaByRowId.delete(rowId);
-    delete row.dataset.calcRowId;
-    delete row.dataset.source;
-    row.classList.remove("calc-module-row-binance-limit");
-    row.classList.remove("calc-module-row-open-position");
-    row.removeAttribute("title");
-    row.dataset.openPosition = "0";
-    row.__binanceLimitOrderMeta = null;
-    lotInput(row)?.classList.remove("calc-module-lot-binance-limit");
-    const lvl = levelInput(row);
-    const lot = lotInput(row);
-    if(lvl) lvl.title = "";
-    if(lot) lot.title = "";
-  }
-  function isOpenPositionRow(row){
-    return !!(row && row.dataset && row.dataset.openPosition === "1");
-  }
-  function setOpenPositionRow(row,isOpenPosition){
-    if(!row) return;
-    const on = !!isOpenPosition;
-    row.dataset.openPosition = on ? "1" : "0";
-    row.classList.toggle("calc-module-row-open-position",on);
-    row.title = on ? "Open Position" : (row.title || "");
-    const lvl = levelInput(row);
-    const lot = lotInput(row);
-    if(lvl) lvl.title = on ? "Open Position" : "";
-    if(lot) lot.title = on ? "Open Position" : "";
-  }
-  function applyRowSourceAndMeta(row,opts){
-    if(!row) return row;
-    const source = opts && opts.source ? String(opts.source) : "";
-    if(source === "binance-limit"){
-      row.dataset.source = source;
-      row.classList.add("calc-module-row-binance-limit");
-      row.title = "Binance LIMIT order";
-      lotInput(row)?.classList.add("calc-module-lot-binance-limit");
-    }else{
-      clearBinanceMetaOnRow(row);
-    }
-    const meta = opts && opts.meta;
-    if(meta){
-      const rowId = (opts && opts.rowId ? String(opts.rowId) : "") || ("calc_row_" + (++binanceLimitRowSeq));
-      row.dataset.calcRowId = rowId;
-      row.__binanceLimitOrderMeta = meta;
-      binanceLimitRowMetaByRowId.set(rowId,meta);
-    }
-    return row;
-  }
-  function setRowLocked(row,locked,options){
-    if(!row) return;
-    const opts = options || {};
-    const isLocked = !!locked;
-    row.dataset.locked = isLocked ? "1" : "0";
-    row.classList.toggle("calc-module-row-locked",isLocked);
-    const removeBtn = row.querySelector(".calc-module-remove");
-    if(removeBtn){
-      const keepRemoveEnabled = !!opts.keepRemoveEnabled;
-      const disabled = isLocked && !keepRemoveEnabled;
-      removeBtn.disabled = disabled;
-      removeBtn.classList.toggle("calc-module-remove-locked",disabled);
-      removeBtn.title = isLocked ? "Open position row is locked (remove is local only)" : "Remove";
-    }
-    const lvl = levelInput(row);
-    const lot = lotInput(row);
-    if(lvl){
-      lvl.disabled = isLocked;
-      lvl.readOnly = isLocked;
-      lvl.classList.toggle("calc-module-input-locked",isLocked);
-    }
-    if(lot){
-      lot.disabled = isLocked;
-      lot.readOnly = isLocked;
-      lot.classList.toggle("calc-module-input-locked",isLocked);
-    }
-  }
-  function unlockEntryRows(){
-    rows("calcModuleEntryRows").forEach(row => setRowLocked(row,false));
-  }
-  function applyMappedRow(containerId,item){
-    const container = q(containerId);
-    if(!container || !item) return null;
-    const allRows = rows(containerId);
-    const reusable = allRows.find(row => isRowEmpty(row));
-    if(reusable){
-      clearBinanceMetaOnRow(reusable);
-      const lvl = levelInput(reusable);
-      const lot = lotInput(reusable);
-      if(lvl) lvl.value = item.level == null ? "" : Math.round(item.level);
-      if(lot) lot.value = item.lot == null ? "" : Number(item.lot).toFixed(3);
-      setOpenPositionRow(reusable,false);
-      applyRowSourceAndMeta(reusable,item);
-      return reusable;
-    }
-    return addRow(
-      containerId,
-      item.level == null ? "" : Math.round(item.level),
-      item.lot == null ? "" : Number(item.lot).toFixed(3),
-      item
-    );
-  }
-  function addRow(containerId,level="",lot="",options){
-    const container = q(containerId);
-    if(!container) return null;
-    const opts = options || {};
-    const row = document.createElement("div");
-    row.className = "calc-module-row";
-    row.innerHTML = `
-      <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
-      <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" placeholder="Lot" value="${lot}">
-      <button class="calc-module-remove" type="button" title="Remove">x</button>`;
-    applyRowSourceAndMeta(row,opts);
-    setOpenPositionRow(row,!!opts.openPosition);
-    setRowLocked(row,!!opts.locked,{keepRemoveEnabled:!!opts.keepRemoveEnabled});
-    row.querySelectorAll("input").forEach(input => input.addEventListener("input",() => {
-      markSendPlanStale("Row edited after preflight.");
-      calculate();
-    },false));
-    row.querySelector(".calc-module-remove").addEventListener("click",() => {
-      markSendPlanStale("Row removed after preflight.");
-      clearBinanceMetaOnRow(row);
-      row.remove();
-      calculate();
-    },false);
-    container.appendChild(row);
-    calculate();
-    return row;
-  }
-  function setRows(containerId,data,options){
-    const container = q(containerId);
-    if(!container) return;
-    const opts = options || {};
-    container.innerHTML = "";
-    const list = data && data.length ? data : [{}];
-    list.forEach((item,index) => {
-      addRow(
-        containerId,
-        item.level == null ? "" : Math.round(item.level),
-        item.lot == null ? "" : Number(item.lot).toFixed(3),
-        {
-          locked:!!(opts.lockFirstRow && index === 0),
-          openPosition:!!(opts.openPositionFirstRow && index === 0),
-          keepRemoveEnabled:!!(opts.keepRemoveEnabledFirstRow && index === 0)
-        }
-      );
-    });
-  }
-  function clearCalculatorLocal(){
-    markSendPlanStale("Calculator cleared after preflight.");
-    clearMappedLimitRows("calcModuleEntryRows");
-    clearMappedLimitRows("calcModuleExitRows");
-    binanceLimitRowMetaByRowId.clear();
-    setRows("calcModuleEntryRows",[{}]);
-    setRows("calcModuleExitRows",[{}]);
-    const stopLevel = q("calcModuleStopLevel");
-    const stopDistance = q("calcModuleStopDistance");
-    if(stopLevel) stopLevel.value = "";
-    if(stopDistance) stopDistance.value = "";
-    currentStopAlgoMeta = null;
-    setStatus("Calculator cleared locally.");
-    calculate();
-  }
-
-  function currentSymbol(){
-    try{ return cfg().symbol; }catch(_e){ return (marketEl && marketEl.value ? marketEl.value : "").toUpperCase(); }
-  }
-  function sideFromPosition(row){
-    const amt = Number(row && row.positionAmt);
-    const ps = String(row && row.positionSide || "").toUpperCase();
-    return amt < 0 || ps === "SHORT" ? "SHORT" : "LONG";
-  }
-  function openBoxPosition(){
-    const boxes = Array.isArray(openPositionBoxes) ? openPositionBoxes.filter(b => b && (!b.symbol || b.symbol === currentSymbol())) : [];
-    if(!boxes.length) return null;
-    const side = String(boxes[0].side || boxes[0].letter || "").toUpperCase().includes("SHORT") || boxes[0].letter === "S" ? "SHORT" : "LONG";
-    let qty = 0;
-    let value = 0;
-    boxes.forEach(b => {
-      const qv = Math.abs(Number(b.qty));
-      const px = Number(b.price);
-      if(Number.isFinite(qv) && qv > 0 && Number.isFinite(px) && px > 0){
-        qty += qv;
-        value += px * qv;
-      }
-    });
-    return qty > 0 ? {side,qty,entry:value / qty,source:"openPositionBoxes"} : null;
-  }
-  async function signedPosition(){
-    if(typeof hasKeys !== "function" || !hasKeys()) return null;
-    const key = apiKeyEl.value.trim();
-    const sec = apiSecretEl.value.trim();
-    const off = typeof timeOffset === "function" ? await timeOffset() : 0;
-    const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
-    const row = (risk || []).find(r => r && r.symbol === currentSymbol() && Math.abs(Number(r.positionAmt)) > 1e-12);
-    if(!row) return null;
-    const qty = Math.abs(Number(row.positionAmt));
-    const entry = Number(row.entryPrice);
-    if(!(qty > 0) || !(entry > 0)) return null;
-    return {
-      side:sideFromPosition(row),
-      qty,
-      entry,
-      source:"positionRisk",
-      positionSide:toUpper(row.positionSide || "") || null
-    };
-  }
-  function unwrapOrders(rows){
-    if(Array.isArray(rows)) return rows;
-    if(rows && Array.isArray(rows.orders)) return rows.orders;
-    if(rows && Array.isArray(rows.data)) return rows.data;
-    return [];
-  }
-  function toUpper(v){
-    return String(v == null ? "" : v).toUpperCase();
-  }
-  function safeCloneOrder(order){
-    if(order == null || typeof order !== "object") return order;
-    if(typeof structuredClone === "function"){
-      try{ return structuredClone(order); }catch(_e){}
-    }
-    try{ return JSON.parse(JSON.stringify(order)); }catch(_e){ return order; }
-  }
-  function isLimitOrder(order){
-    return toUpper(order && order.type) === "LIMIT";
-  }
-  function isReduceOnly(order){
-    const ro = order && order.reduceOnly;
-    return ro === true || String(ro).toLowerCase() === "true";
-  }
-  function orderContextDirection(order,fallbackDirection){
-    const ps = toUpper(order && order.positionSide);
-    if(ps === "LONG") return "LONG";
-    if(ps === "SHORT") return "SHORT";
-    return fallbackDirection === "SHORT" ? "SHORT" : "LONG";
-  }
-  function buildLimitOrderMeta(order){
-    return {
-      orderId:order && order.orderId != null ? order.orderId : null,
-      clientOrderId:order && order.clientOrderId != null ? order.clientOrderId : null,
-      symbol:order && order.symbol != null ? order.symbol : null,
-      side:order && order.side != null ? order.side : null,
-      positionSide:order && order.positionSide != null ? order.positionSide : null,
-      type:order && order.type != null ? order.type : null,
-      status:order && (order.status != null ? order.status : order.orderStatus != null ? order.orderStatus : null),
-      price:order && order.price != null ? order.price : null,
-      origQty:order && order.origQty != null ? order.origQty : null,
-      executedQty:order && order.executedQty != null ? order.executedQty : null,
-      timeInForce:order && order.timeInForce != null ? order.timeInForce : null,
-      reduceOnly:order && order.reduceOnly != null ? order.reduceOnly : null,
-      workingType:order && order.workingType != null ? order.workingType : null,
-      updateTime:order && order.updateTime != null ? order.updateTime : null,
-      rawOrder:safeCloneOrder(order)
-    };
-  }
-  function buildAlgoOrderMeta(order){
-    return {
-      algoId:order && order.algoId != null ? order.algoId : null,
-      clientAlgoId:order && order.clientAlgoId != null ? order.clientAlgoId : null,
-      symbol:order && order.symbol != null ? order.symbol : null,
-      side:order && order.side != null ? order.side : null,
-      positionSide:order && order.positionSide != null ? order.positionSide : null,
-      type:order && (order.type != null ? order.type : order.algoType != null ? order.algoType : null),
-      status:order && (order.status != null ? order.status : order.orderStatus != null ? order.orderStatus : null),
-      triggerPrice:orderStopPrice(order),
-      workingType:order && order.workingType != null ? order.workingType : null,
-      updateTime:order && order.updateTime != null ? order.updateTime : null,
-      rawOrder:safeCloneOrder(order)
-    };
-  }
-  function clearMappedLimitRows(containerId){
-    rows(containerId).forEach(row => {
-      if(row.dataset.source !== "binance-limit") return;
-      clearBinanceMetaOnRow(row);
-      row.remove();
-    });
-  }
-  function publishReadDiagnostic(diag){
-    lastReadDiagnostic = diag || null;
-    window.__calculatorReadDiagnostic = lastReadDiagnostic;
-    try{ console.info(MODULE + " read diagnostic",lastReadDiagnostic); }catch(_e){}
-  }
-  function publishOverlayDiagnostic(diag){
-    lastOverlayDiagnostic = diag || null;
-    window.__calculatorOverlayDiagnostic = lastOverlayDiagnostic;
-  }
-  function publishSendDiagnostic(diag){
-    lastSendDiagnostic = diag || null;
-    window.__calculatorSendDiagnostic = lastSendDiagnostic;
-  }
-  function hEsc(value){
-    return String(value == null ? "" : value)
-      .replace(/&/g,"&amp;")
-      .replace(/</g,"&lt;")
-      .replace(/>/g,"&gt;")
-      .replace(/"/g,"&quot;")
-      .replace(/'/g,"&#39;");
-  }
-  function approxEqual(a,b,eps){
-    const av = Number(a);
-    const bv = Number(b);
-    if(!Number.isFinite(av) || !Number.isFinite(bv)) return false;
-    return Math.abs(av - bv) <= (eps == null ? 1e-10 : eps);
-  }
-  function normalizeOrderId(v){
-    if(v == null) return "";
-    const s = String(v).trim();
-    return s;
-  }
-  function orderKeyFromMeta(meta){
-    if(!meta) return "";
-    const id = normalizeOrderId(meta.orderId);
-    if(id) return "id:" + id;
-    const cid = String(meta.clientOrderId || "").trim();
-    if(cid) return "cid:" + cid;
-    return "";
-  }
-  function orderKeyFromOrder(order){
-    if(!order) return "";
-    const id = normalizeOrderId(order.orderId);
-    if(id) return "id:" + id;
-    const cid = String(order.clientOrderId || "").trim();
-    if(cid) return "cid:" + cid;
-    return "";
-  }
-  function snapshotOrder(order){
-    if(!order || typeof order !== "object") return null;
-    return {
-      orderId:order.orderId != null ? String(order.orderId) : "",
-      clientOrderId:order.clientOrderId != null ? String(order.clientOrderId) : "",
-      symbol:String(order.symbol || ""),
-      side:toUpper(order.side),
-      positionSide:toUpper(order.positionSide || "BOTH"),
-      type:toUpper(order.type),
-      status:toUpper(order.status || order.orderStatus || ""),
-      price:num(order.price),
-      origQty:num(order.origQty),
-      executedQty:num(order.executedQty),
-      timeInForce:toUpper(order.timeInForce || ""),
-      reduceOnly:isReduceOnly(order),
-      updateTime:num(order.updateTime),
-      raw:safeCloneOrder(order)
-    };
-  }
-  function buildReadStateSnapshot(position,snapshot,mapped){
-    const sym = currentSymbol();
-    const dir = position && position.side ? position.side : direction;
-    const limitOrderMap = new Map();
-    const mappedRows = []
-      .concat(mapped && Array.isArray(mapped.entryRows) ? mapped.entryRows : [])
-      .concat(mapped && Array.isArray(mapped.exitRows) ? mapped.exitRows : []);
-    mappedRows.forEach(item => {
-      const meta = item && item.meta ? item.meta : null;
-      const raw = meta && meta.rawOrder ? meta.rawOrder : null;
-      const key = orderKeyFromMeta(meta);
-      if(!key || !raw) return;
-      limitOrderMap.set(key,snapshotOrder(raw));
-    });
-    return {
-      at:new Date().toISOString(),
-      symbol:sym,
-      direction:dir === "SHORT" ? "SHORT" : "LONG",
-      openPosition:position
-        ? {
-            side:position.side === "SHORT" ? "SHORT" : "LONG",
-            qty:num(position.qty),
-            entry:num(position.entry),
-            positionSide:toUpper(position.positionSide || "")
-          }
-        : null,
-      mappedLimitOrderMap:limitOrderMap,
-      ignoredAlgoCount:num(mapped && mapped.diagnostic && mapped.diagnostic.ignoredAlgoOrders) || 0
-    };
-  }
-  function collectLiveLimitOrdersByKey(snapshot){
-    const map = new Map();
-    const sym = toUpper(snapshot && snapshot.symbol);
-    const rows = (snapshot && snapshot.normalOrders || [])
-      .filter(o => o && toUpper(o.symbol) === sym)
-      .filter(isLiveOrder)
-      .filter(isLimitOrder);
-    rows.forEach(order => {
-      const key = orderKeyFromOrder(order);
-      if(!key) return;
-      map.set(key,snapshotOrder(order));
-    });
-    return map;
-  }
-  function inferDirectionForSend(livePosition){
-    if(livePosition && (livePosition.side === "LONG" || livePosition.side === "SHORT")) return livePosition.side;
-    if(lastReadStateSnapshot && (lastReadStateSnapshot.direction === "LONG" || lastReadStateSnapshot.direction === "SHORT")){
-      return lastReadStateSnapshot.direction;
-    }
-    return direction === "SHORT" ? "SHORT" : "LONG";
-  }
-  function inferPositionSideForNewOrder(contextDirection){
-    const dir = contextDirection === "SHORT" ? "SHORT" : "LONG";
-    const fromSnapshot = lastReadStateSnapshot && lastReadStateSnapshot.openPosition
-      ? toUpper(lastReadStateSnapshot.openPosition.positionSide || "")
-      : "";
-    if(fromSnapshot === "LONG" || fromSnapshot === "SHORT" || fromSnapshot === "BOTH") return fromSnapshot;
-    for(const row of rows("calcModuleEntryRows").concat(rows("calcModuleExitRows"))){
-      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
-      const ps = toUpper(meta && meta.positionSide || "");
-      if(ps === "LONG" || ps === "SHORT" || ps === "BOTH") return ps;
-    }
-    return dir;
-  }
-  function sideForNewRow(rowType,contextDirection){
-    const dir = contextDirection === "SHORT" ? "SHORT" : "LONG";
-    if(dir === "LONG") return rowType === "entry" ? "BUY" : "SELL";
-    return rowType === "entry" ? "SELL" : "BUY";
-  }
-  function currentOpenPositionRowSnapshot(){
-    const entryRows = rows("calcModuleEntryRows");
-    const row = entryRows.find(isOpenPositionRow);
-    if(!row) return null;
-    return {
-      side:direction === "SHORT" ? "SHORT" : "LONG",
-      qty:num(lotInput(row)?.value),
-      entry:num(levelInput(row)?.value)
-    };
-  }
-  function formatPlanValue(v,kind){
-    const n = num(v);
-    if(n == null) return "-";
-    if(kind === "qty") return Number(n.toFixed(3)).toFixed(3);
-    if(kind === "price") return String(Number(n.toFixed(8)));
-    return String(n);
-  }
-  function ensureSendPopup(){
-    let popup = q("calcModuleSendPopup");
-    if(popup) return popup;
-    popup = document.createElement("div");
-    popup.id = "calcModuleSendPopup";
-    popup.className = "calc-module-send-popup hidden";
-    popup.innerHTML = `
-      <div class="calc-module-send-popup-head" id="calcModuleSendPopupHead">
-        <div class="calc-module-send-popup-title" id="calcModuleSendPopupTitle">Send Plan</div>
-        <button id="calcModuleSendPopupClose" type="button" title="Close">x</button>
-      </div>
-      <div class="calc-module-send-summary" id="calcModuleSendSummary"></div>
-      <div class="calc-module-send-wrap">
-        <table class="calc-module-send-table">
-          <colgroup>
-            <col class="calc-col-action">
-            <col class="calc-col-type">
-            <col class="calc-col-side">
-            <col class="calc-col-old-price">
-            <col class="calc-col-new-price">
-            <col class="calc-col-old-qty">
-            <col class="calc-col-new-qty">
-            <col class="calc-col-order-id">
-            <col class="calc-col-status">
-            <col class="calc-col-response">
-          </colgroup>
-          <thead>
-            <tr>
-              <th>Action</th>
-              <th>Type</th>
-              <th>Side</th>
-              <th>Old Price</th>
-              <th>New Price</th>
-              <th>Old Qty</th>
-              <th>New Qty</th>
-              <th>Order ID</th>
-              <th>Status</th>
-              <th>Binance Response</th>
-            </tr>
-          </thead>
-          <tbody id="calcModuleSendBody"></tbody>
-        </table>
-      </div>
-      <div class="calc-module-send-popup-actions">
-        <button id="calcModuleConfirmSend" type="button">Confirm Send</button>
-      </div>`;
-    document.body.appendChild(popup);
-    const closeBtn = q("calcModuleSendPopupClose");
-    if(closeBtn){
-      closeBtn.addEventListener("click",() => {
-        if(sendPlanState && sendPlanState.executing){
-          setStatus("Confirm Send is in progress.");
-          return;
-        }
-        clearSendPlan();
-      },false);
-    }
-    const head = q("calcModuleSendPopupHead");
-    if(head && !head.__calcSendPopupDragBound){
-      head.__calcSendPopupDragBound = true;
-      head.addEventListener("pointerdown",e => {
-        if(e.target.closest("button")) return;
-        const r = popup.getBoundingClientRect();
-        sendPopupDrag = {x:e.clientX,y:e.clientY,left:r.left,top:r.top};
-        popup.style.zIndex = String(++zTop);
-        try{ head.setPointerCapture(e.pointerId); }catch(_e){}
-        e.preventDefault();
-      },false);
-      head.addEventListener("pointermove",e => {
-        if(!sendPopupDrag) return;
-        popup.style.left = clamp(sendPopupDrag.left + e.clientX - sendPopupDrag.x,6,window.innerWidth - 80) + "px";
-        popup.style.top = clamp(sendPopupDrag.top + e.clientY - sendPopupDrag.y,6,window.innerHeight - 60) + "px";
-      },false);
-      const endDrag = e => {
-        if(!sendPopupDrag) return;
-        sendPopupDrag = null;
-        try{ head.releasePointerCapture(e.pointerId); }catch(_e){}
-      };
-      head.addEventListener("pointerup",endDrag,false);
-      head.addEventListener("pointercancel",endDrag,false);
-    }
-    return popup;
-  }
-  function markSendPlanStale(reason){
-    if(!sendPlanState || !Array.isArray(sendPlanState.rows)) return;
-    if(sendPlanState.executing) return;
-    sendPlanState.stale = true;
-    sendPlanState.staleReason = reason || "Calculator state changed after preflight.";
-    sendPlanState.canConfirm = false;
-    renderSendPlanTable();
-  }
-  function clearSendPlan(){
-    sendPlanState = null;
-    sendPopupDrag = null;
-    const popup = q("calcModuleSendPopup");
-    if(popup) popup.classList.add("hidden");
-    const titleEl = q("calcModuleSendPopupTitle");
-    if(titleEl) titleEl.textContent = "Send Plan";
-    const summaryEl = q("calcModuleSendSummary");
-    if(summaryEl){
-      summaryEl.textContent = "";
-      summaryEl.classList.remove("is-stale");
-    }
-    const bodyEl = q("calcModuleSendBody");
-    if(bodyEl) bodyEl.innerHTML = "";
-    const confirmBtn = q("calcModuleConfirmSend");
-    if(confirmBtn){
-      confirmBtn.disabled = true;
-      confirmBtn.onclick = null;
-    }
-    const actionsWrap = confirmBtn ? confirmBtn.parentElement : null;
-    if(actionsWrap) actionsWrap.style.display = "none";
-  }
-  function updateSendButtonState(state){
-    const btn = q("calcModuleSend");
-    if(!btn) return;
-    btn.disabled = !!state;
-    btn.textContent = state ? "Preparing..." : "Send";
-  }
-  function renderSendPlanTable(){
-    const box = ensureSendPopup();
-    if(!box) return;
-    if(!sendPlanState || !Array.isArray(sendPlanState.rows)){
-      box.classList.add("hidden");
-      return;
-    }
-    const liveSym = currentSymbol();
-    if(!sendPlanState.stale && sendPlanState.symbol && liveSym && toUpper(sendPlanState.symbol) !== toUpper(liveSym)){
-      sendPlanState.stale = true;
-      sendPlanState.staleReason = "Symbol changed after preflight.";
-      sendPlanState.canConfirm = false;
-    }
-    box.classList.remove("hidden");
-    box.style.zIndex = String(++zTop);
-    const blockedCount = sendPlanState.rows.filter(r => r && r.action === "Blocked").length;
-    const writableCount = sendPlanState.rows.filter(r => r && !!r.writable).length;
-    const stale = !!sendPlanState.stale;
-    const canConfirm = !!(sendPlanState.canConfirm && !sendPlanState.executing && writableCount > 0 && blockedCount === 0 && !stale);
-    const hasResult = sendPlanState.rows.some(r => r && (r.status === "Confirmed" || r.status === "Failed"));
-    const title = hasResult ? "Send Results" : "Send Plan";
-    const summary = [
-      "CBS: " + (sendPlanState.cbsEnabled ? "ON" : "OFF"),
-      "SL Send: " + (sendPlanState.slSendEnabled ? "ON" : "OFF"),
-      "Writable: " + writableCount,
-      "Blocked: " + blockedCount,
-      "Ignored: " + sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
-      "Skipped: " + sendPlanState.rows.filter(r => r && r.action === "Skip").length
-    ].join(" | ");
-    let lastSection = "";
-    const rowsHtml = sendPlanState.rows.map((row) => {
-      const isError = row && (
-        row.action === "Blocked" ||
-        row.status === "Blocked" ||
-        row.status === "Failed" ||
-        !!row.unexpectedResponse
-      );
-      const cls = isError
-        ? "is-error"
-        : row.action === "Ignored"
-          ? "is-ignored"
-          : row.writable
-            ? "is-writable"
-            : "";
-      const section = row && row.section ? String(row.section) : "LIMIT Orders";
-      const sectionHtml = section !== lastSection
-        ? `<tr class="calc-module-send-section"><td colspan="10">${hEsc(section)}</td></tr>`
-        : "";
-      lastSection = section;
-      return `${sectionHtml}<tr class="${cls}">
-        <td>${hEsc(row.action)}</td>
-        <td>${hEsc(row.type)}</td>
-        <td>${hEsc(row.side || "-")}</td>
-        <td>${hEsc(row.oldPrice || "-")}</td>
-        <td>${hEsc(row.newPrice || "-")}</td>
-        <td>${hEsc(row.oldQty || "-")}</td>
-        <td>${hEsc(row.newQty || "-")}</td>
-        <td>${hEsc(row.orderId || "-")}</td>
-        <td>${hEsc(row.status || "-")}</td>
-        <td class="calc-module-send-response">${hEsc(row.response || "-")}</td>
-      </tr>`;
-    }).join("");
-    const titleEl = q("calcModuleSendPopupTitle");
-    if(titleEl) titleEl.textContent = title;
-    const summaryEl = q("calcModuleSendSummary");
-    if(summaryEl){
-      const staleText = stale ? " | STALE: " + (sendPlanState.staleReason || "Calculator changed after preflight.") : "";
-      summaryEl.textContent = summary + staleText;
-      summaryEl.classList.toggle("is-stale",stale);
-    }
-    const bodyEl = q("calcModuleSendBody");
-    if(bodyEl){
-      bodyEl.innerHTML = rowsHtml || `<tr><td colspan="10">No rows.</td></tr>`;
-    }
-    const confirmBtn = q("calcModuleConfirmSend");
-    const actionsWrap = confirmBtn ? confirmBtn.parentElement : null;
-    if(actionsWrap){
-      actionsWrap.style.display = (canConfirm || sendPlanState.executing) ? "flex" : "none";
-    }
-    if(confirmBtn){
-      confirmBtn.textContent = sendPlanState.executing ? "Sending..." : "Confirm Send";
-      confirmBtn.disabled = !canConfirm;
-      confirmBtn.onclick = () => confirmSendPlan(sendPlanState.planId);
-    }
-  }
-  function usableOverlayRows(containerId){
-    return rows(containerId).map((row,index) => ({
-      index,
-      row,
-      level:num(levelInput(row)?.value),
-      lot:num(lotInput(row)?.value)
-    })).filter(item => item.level != null && item.lot != null && item.lot > 0);
-  }
-  function currentOverlayRows(){
-    const entries = usableOverlayRows("calcModuleEntryRows");
-    const exits = usableOverlayRows("calcModuleExitRows");
-    const slLevel = num(q("calcModuleStopLevel")?.value);
-    const entryQty = entries.reduce((sum,row) => sum + row.lot,0);
-    const entryAvg = entryQty > 0
-      ? entries.reduce((sum,row) => sum + row.level * row.lot,0) / entryQty
-      : null;
-    const entryRows = entries.map(item => ({
-      type:"entry",
-      level:item.level,
-      lot:item.lot,
-      row:item.row,
-      openPosition:isOpenPositionRow(item.row),
-      text:(isOpenPositionRow(item.row) ? "Open Position" : "Entry") + " | " + Number(item.lot).toFixed(3)
-    }));
-    const exitRows = exits.map((item,index) => {
-      const pl = entryAvg == null
-        ? null
-        : direction === "LONG"
-          ? (item.level - entryAvg) * item.lot
-          : (entryAvg - item.level) * item.lot;
-      const plText = pl == null
-        ? "$-"
-        : (pl < 0 ? "-$" + Math.abs(pl).toFixed(2) : "$" + Math.abs(pl).toFixed(2));
-      return {
-        type:"exit",
-        level:item.level,
-        lot:item.lot,
-        row:item.row,
-        openPosition:false,
-        text:"Ex " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + plText
-      };
-    });
-    const stopRow = slLevel != null && slLevel > 0 ? {
-      type:"sl",
-      level:slLevel,
-      row:null,
-      openPosition:false,
-      text:"SL | " + (entryAvg == null || entryQty <= 0
-        ? "$-"
-        : (() => {
-            const pl = direction === "LONG"
-              ? (slLevel - entryAvg) * entryQty
-              : (entryAvg - slLevel) * entryQty;
-            return pl < 0 ? "-$" + Math.abs(pl).toFixed(2) : "$" + Math.abs(pl).toFixed(2);
-          })())
-    } : null;
-    return {entries:entryRows, exits:exitRows, stop:stopRow, entryAvg, entryQty};
-  }
-  function overlayBoxAtClient(clientX,clientY){
-    if(!canvas || !overlayLevelBoxes.length) return null;
-    const rect = canvas.getBoundingClientRect();
-    const x = clientX - rect.left;
-    const y = clientY - rect.top;
-    for(let i=overlayLevelBoxes.length-1;i>=0;i--){
-      const box = overlayLevelBoxes[i];
-      if(x >= box.x1 && x <= box.x2 && y >= box.y1 && y <= box.y2) return box;
-    }
-    return null;
-  }
-  function setRowLevelFromClientY(row,clientY){
-    const rect = canvas.getBoundingClientRect();
-    const y = clientY - rect.top;
-    const price = priceFromCanvasY(y);
-    if(price == null) return;
-    const input = levelInput(row);
-    if(!input || input.disabled || input.readOnly) return;
-    const next = String(Math.round(price));
-    if(input.value === next) return;
-    input.value = next;
-    markSendPlanStale("Chart drag changed a row level after preflight.");
-    calculate();
-  }
-  function setStopLevelFromClientY(clientY){
-    const rect = canvas.getBoundingClientRect();
-    const y = clientY - rect.top;
-    const price = priceFromCanvasY(y);
-    if(price == null) return;
-    const input = q("calcModuleStopLevel");
-    if(!input || input.disabled || input.readOnly) return;
-    const next = String(Math.round(price));
-    if(input.value === next) return;
-    input.value = next;
-    lastStopEdit = "level";
-    markSendPlanStale("Chart drag changed SL level after preflight.");
-    syncStopFromLevel(readEntry().avg);
-    calculate();
-  }
-  function drawCalculatorLevelsOverlay(){
-    overlayLevelBoxes = [];
-    if(!levelsVisible) return;
-    if(!canvas || !ctx) return;
-    const state = currentPriceLineState || {};
-    const top = num(state.top);
-    const priceH = num(state.priceH);
-    const minP = num(state.minP);
-    const maxP = num(state.maxP);
-    const left = num(state.left);
-    const chartRight = num(state.chartRight);
-    if(top == null || priceH == null || minP == null || maxP == null || left == null || chartRight == null) return;
-    if(!(priceH > 0) || !(maxP > minP) || !(chartRight > left)) return;
-    const overlayRows = currentOverlayRows();
-    const items = overlayRows.entries.concat(overlayRows.exits,overlayRows.stop ? [overlayRows.stop] : [])
-      .map(item => {
-        const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
-        return { ...item, y };
-      })
-      .filter(item => item.y >= top - 2 && item.y <= top + priceH + 2);
-    publishOverlayDiagnostic({
-      at:new Date().toISOString(),
-      visible:levelsVisible,
-      entries:overlayRows.entries.length,
-      exits:overlayRows.exits.length,
-      stop:overlayRows.stop ? 1 : 0,
-      drawn:items.length,
-      boxes:overlayLevelBoxes.length,
-      dragActive:!!overlayDrag.active
-    });
-    if(!items.length) return;
-
-    const padX = 6;
-    const labelH = 16;
-    const gap = 2;
-    const chartBottom = top + priceH;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(left,top,chartRight - left,priceH);
-    ctx.clip();
-    ctx.font = "11px Arial";
-    ctx.textBaseline = "middle";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([5,2]);
-    items.forEach(item => {
-      const y = px(item.y);
-      ctx.strokeStyle = item.type === "sl" ? "rgba(180,126,38,0.70)" : "rgba(112,122,138,0.70)";
-      ctx.beginPath();
-      ctx.moveTo(px(left),y);
-      ctx.lineTo(px(chartRight),y);
-      ctx.stroke();
-    });
-    ctx.setLineDash([]);
-
-    const placed = [];
-    const sorted = items.slice().sort((a,b) => a.y - b.y);
-    sorted.forEach(item => {
-      const textW = Math.ceil(ctx.measureText(item.text).width) + padX * 2;
-      const minY = top + labelH / 2;
-      const maxY = chartBottom - labelH / 2;
-      let cy = clamp(item.y,minY,maxY);
-      if(placed.length){
-        const prev = placed[placed.length - 1];
-        const minCy = prev.cy + labelH + gap;
-        if(cy < minCy) cy = minCy;
-      }
-      placed.push({
-        item,
-        w:Math.min(textW,Math.max(56,chartRight - left - 8)),
-        h:labelH,
-        cy
-      });
-    });
-    for(let i=placed.length - 1;i>=0;i--){
-      const cur = placed[i];
-      const maxCy = chartBottom - labelH / 2 - (placed.length - 1 - i) * (labelH + gap);
-      cur.cy = Math.min(cur.cy,maxCy);
-      if(i > 0){
-        const prev = placed[i - 1];
-        if(prev.cy > cur.cy - (labelH + gap)) prev.cy = cur.cy - (labelH + gap);
-      }
-    }
-    placed.forEach(p => {
-      const x = chartRight - p.w - 8;
-      const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
-      const isOpenPos = !!p.item.openPosition;
-      const isSl = p.item.type === "sl";
-      ctx.fillStyle = isOpenPos
-        ? "rgba(255,247,204,0.95)"
-        : isSl
-          ? "rgba(255,243,214,0.96)"
-          : "rgba(255,255,255,0.94)";
-      ctx.strokeStyle = isSl ? "rgba(180,126,38,0.70)" : "rgba(112,122,138,0.70)";
-      ctx.lineWidth = 1;
-      ctx.fillRect(ix(x),ix(y),p.w,p.h);
-      ctx.strokeRect(px(x),px(y),p.w,p.h);
-      ctx.fillStyle = isSl ? "#8b5e14" : "#39414a";
-      ctx.textAlign = "left";
-      ctx.fillText(p.item.text,x + padX,y + p.h / 2 + 0.5);
-      overlayLevelBoxes.push({
-        x1:x,
-        y1:y,
-        x2:x + p.w,
-        y2:y + p.h,
-        row:p.item.row,
-        type:p.item.type,
-        openPosition:isOpenPos,
-        draggable:(!isOpenPos && p.item.type !== "sl" && calcLevelsInteractive()) || (p.item.type === "sl" && calcSlInteractive())
-      });
-    });
-    publishOverlayDiagnostic({
-      at:new Date().toISOString(),
-      visible:levelsVisible,
-      entries:overlayRows.entries.length,
-      exits:overlayRows.exits.length,
-      stop:overlayRows.stop ? 1 : 0,
-      drawn:items.length,
-      boxes:overlayLevelBoxes.length,
-      dragActive:!!overlayDrag.active
-    });
-    ctx.restore();
-  }
-  function installDrawOverlayHook(){
-    if(window.__calcLevelsDrawWrapped) return;
-    if(typeof draw !== "function") return;
-    window.__calcLevelsDrawWrapped = true;
-    const prevDraw = draw;
-    window.draw = draw = function(){
-      const result = prevDraw.apply(this,arguments);
-      try{ drawCalculatorLevelsOverlay(); }catch(e){ console.warn(MODULE + " levels overlay draw failed",e); }
-      return result;
-    };
-  }
-  function installOverlayDragHooks(){
-    if(!canvas || canvas.__calculatorOverlayDragHooks) return;
-    canvas.__calculatorOverlayDragHooks = true;
-    canvas.addEventListener("mousedown",e => {
-      if(!calcLevelsInteractive()) return;
-      const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if(!hit || !hit.draggable) return;
-      if(hit.type !== "sl" && !hit.row) return;
-      overlayDrag.active = true;
-      overlayDrag.row = hit.row || null;
-      overlayDrag.target = hit.type === "sl" ? "sl" : "row";
-      if(overlayDrag.target === "sl") setStopLevelFromClientY(e.clientY);
-      else setRowLevelFromClientY(hit.row,e.clientY);
-      canvas.style.cursor = "pointer";
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    },true);
-    canvas.addEventListener("mousemove",e => {
-      if(overlayDrag.active){
-        if(overlayDrag.target === "sl") setStopLevelFromClientY(e.clientY);
-        else setRowLevelFromClientY(overlayDrag.row,e.clientY);
-        canvas.style.cursor = "pointer";
-        return;
-      }
-      if(dragChart || dragAxis) return;
-      if(!calcLevelsInteractive()) return;
-      const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if(hit && hit.draggable) canvas.style.cursor = "pointer";
-    },false);
-    window.addEventListener("mouseup",e => {
-      if(!overlayDrag.active) return;
-      overlayDrag.active = false;
-      overlayDrag.row = null;
-      overlayDrag.target = "row";
-      suppressNextOverlayClick = true;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if(canvas) canvas.style.cursor = "crosshair";
-    },true);
-    canvas.addEventListener("click",e => {
-      if(!suppressNextOverlayClick) return;
-      suppressNextOverlayClick = false;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    },true);
-  }
-  async function readOpenOrdersSnapshot(){
-    const sym = currentSymbol();
-    const snapshot = {
-      symbol:sym,
-      normalOrders:Array.isArray(window.v13OpenOrders21) ? window.v13OpenOrders21.slice() : [],
-      algoOrders:Array.isArray(window.v13OpenAlgoOrders21) ? window.v13OpenAlgoOrders21.slice() : [],
-      normalFetchError:null,
-      algoFetchError:null
-    };
-    if(typeof hasKeys === "function" && hasKeys() && typeof signedGet === "function"){
-      const key = apiKeyEl.value.trim();
-      const sec = apiSecretEl.value.trim();
-      const off = typeof timeOffset === "function" ? await timeOffset() : 0;
-      try{
-        snapshot.normalOrders = unwrapOrders(await signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off));
-      }catch(e){
-        snapshot.normalFetchError = e;
-      }
-      try{
-        snapshot.algoOrders = unwrapOrders(await signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off));
-      }catch(e){
-        snapshot.algoFetchError = e;
-      }
-    }
-    return snapshot;
-  }
-  function mapLimitOrdersForCalculator(snapshot,activeDirection){
-    const directionCtx = activeDirection === "SHORT" ? "SHORT" : "LONG";
-    const sym = toUpper(snapshot && snapshot.symbol);
-    const normalLive = (snapshot && snapshot.normalOrders || [])
-      .filter(o => o && toUpper(o.symbol) === sym)
-      .filter(isLiveOrder);
-    const algoLive = (snapshot && snapshot.algoOrders || [])
-      .filter(o => o && toUpper(o.symbol) === sym)
-      .filter(isLiveOrder);
-    const limitOrders = normalLive.filter(isLimitOrder);
-    const nonLimitOrders = normalLive.filter(o => !isLimitOrder(o));
-    const mappedEntries = [];
-    const mappedExits = [];
-    let ignoredByPositionSide = 0;
-    limitOrders.forEach((order,index) => {
-      const orderCtx = orderContextDirection(order,directionCtx);
-      if(orderCtx !== directionCtx){
-        ignoredByPositionSide++;
-        return;
-      }
-      const side = toUpper(order && order.side);
-      let role = null;
-      if(isReduceOnly(order)){
-        role = "exit";
-      }else if(orderCtx === "LONG"){
-        if(side === "BUY") role = "entry";
-        else if(side === "SELL") role = "exit";
-      }else{
-        if(side === "SELL") role = "entry";
-        else if(side === "BUY") role = "exit";
-      }
-      if(!role) return;
-      const level = num(order && order.price);
-      if(level == null || level <= 0) return;
-      const lot = num(order && order.origQty);
-      const rowId = "binance_limit_" + String(order && order.orderId != null ? order.orderId : "na") + "_" + String(++binanceLimitRowSeq) + "_" + String(index);
-      const mapped = {
-        rowId,
-        level,
-        lot:lot != null && lot > 0 ? lot : null,
-        source:"binance-limit",
-        meta:buildLimitOrderMeta(order)
-      };
-      if(role === "entry") mappedEntries.push(mapped);
-      else mappedExits.push(mapped);
-    });
-    return {
-      entryRows:mappedEntries,
-      exitRows:mappedExits,
-      diagnostic:{
-        normalLimitOrdersFound:limitOrders.length,
-        mappedEntries:mappedEntries.length,
-        mappedExits:mappedExits.length,
-        ignoredAlgoOrders:algoLive.length,
-        ignoredNonLimitOrders:nonLimitOrders.length,
-        ignoredByPositionSide
-      }
-    };
-  }
-  async function readOpenOrders(){
-    const snapshot = await readOpenOrdersSnapshot();
-    return [].concat(snapshot.normalOrders || [], snapshot.algoOrders || []);
-  }
-  function compareOpenPositionSnapshot(referencePos,livePos){
-    const ref = referencePos || null;
-    const live = livePos || null;
-    if(!ref && !live) return null;
-    if(!ref && live) return "Open position changed since last Read (was flat, now open).";
-    if(ref && !live) return "Open position changed since last Read (position is now flat).";
-    const refQty = num(ref && ref.qty);
-    const liveQty = num(live && live.qty);
-    if(refQty == null || liveQty == null || !approxEqual(refQty,liveQty,1e-9)){
-      return "Open position size changed since last Read.";
-    }
-    const refEntry = num(ref && ref.entry);
-    const liveEntry = num(live && live.entry);
-    if(refEntry == null || liveEntry == null || !approxEqual(refEntry,liveEntry,1e-8)){
-      return "Open position entry level changed since last Read.";
-    }
-    return null;
-  }
-  function buildExternalChangeReason(baseOrder,liveOrder){
-    if(!baseOrder) return "Missing baseline metadata from last Read.";
-    if(!liveOrder) return "Existing Binance LIMIT order disappeared from live open orders.";
-    if(!isLiveOrder(liveOrder.raw || liveOrder)) return "Existing Binance LIMIT order is no longer open.";
-    if(toUpper(liveOrder.type) !== "LIMIT") return "Existing Binance LIMIT order type changed externally.";
-    if(toUpper(baseOrder.side) !== toUpper(liveOrder.side)) return "Existing Binance LIMIT order side changed externally.";
-    if(toUpper(baseOrder.positionSide || "BOTH") !== toUpper(liveOrder.positionSide || "BOTH")) return "Existing Binance LIMIT order positionSide changed externally.";
-    if(!approxEqual(baseOrder.price,liveOrder.price,1e-8)) return "Existing Binance LIMIT order price changed externally.";
-    if(!approxEqual(baseOrder.origQty,liveOrder.origQty,1e-10)) return "Existing Binance LIMIT order quantity changed externally.";
-    return null;
-  }
-  function addPlanRow(plan,row){
-    if(row && !row.section) row.section = "LIMIT Orders";
-    plan.rows.push(row);
-    return row;
-  }
-  function prepareManualRowPlan(plan,row,rowType,contextDirection){
-    const level = num(levelInput(row)?.value);
-    const lot = num(lotInput(row)?.value);
-    const base = {
-      action:"New",
-      type:rowType === "entry" ? "Entry" : "Exit",
-      side:sideForNewRow(rowType,contextDirection),
-      oldPrice:"-",
-      newPrice:formatPlanValue(level,"price"),
-      oldQty:"-",
-      newQty:formatPlanValue(lot,"qty"),
-      orderId:"-",
-      status:"Planned",
-      response:"",
-      writable:true,
-      mode:"new",
-      rowRef:row,
-      payload:{
-        rowType,
-        level,
-        quantity:lot,
-        side:sideForNewRow(rowType,contextDirection)
-      }
-    };
-    if(level == null || level <= 0 || lot == null || lot <= 0){
-      base.action = "Blocked";
-      base.status = "Blocked";
-      base.response = "Any writable row has invalid price or quantity.";
-      base.writable = false;
-      base.mode = "blocked";
-      plan.blocked = true;
-    }
-    addPlanRow(plan,base);
-  }
-  function prepareExistingRowPlan(plan,row,rowType,meta,baseOrder,liveOrder){
-    const level = num(levelInput(row)?.value);
-    const lot = num(lotInput(row)?.value);
-    const key = orderKeyFromMeta(meta);
-    const oldPrice = num(baseOrder && baseOrder.price);
-    const oldQty = num(baseOrder && baseOrder.origQty);
-    const side = toUpper((baseOrder && baseOrder.side) || (meta && meta.side) || "");
-    const rowPlan = {
-      action:"Skip",
-      type:rowType === "entry" ? "Entry" : "Exit",
-      side:side || "-",
-      oldPrice:formatPlanValue(oldPrice,"price"),
-      newPrice:formatPlanValue(level,"price"),
-      oldQty:formatPlanValue(oldQty,"qty"),
-      newQty:formatPlanValue(lot,"qty"),
-      orderId:(meta && meta.orderId != null) ? String(meta.orderId) : (meta && meta.clientOrderId ? String(meta.clientOrderId) : "-"),
-      status:"Skipped",
-      response:"",
-      writable:false,
-      mode:"skip",
-      rowRef:row,
-      orderKey:key
-    };
-    const externalChange = buildExternalChangeReason(baseOrder,liveOrder);
-    if(externalChange){
-      rowPlan.action = "Blocked";
-      rowPlan.status = "Blocked";
-      rowPlan.response = externalChange;
-      rowPlan.mode = "blocked";
-      rowPlan.writable = false;
-      plan.blocked = true;
-      addPlanRow(plan,rowPlan);
-      return;
-    }
-    if(level == null || level <= 0 || lot == null || lot <= 0){
-      rowPlan.action = "Blocked";
-      rowPlan.status = "Blocked";
-      rowPlan.response = "Any writable row has invalid price or quantity.";
-      rowPlan.mode = "blocked";
-      rowPlan.writable = false;
-      plan.blocked = true;
-      addPlanRow(plan,rowPlan);
-      return;
-    }
-    const changed = !approxEqual(level,oldPrice,1e-8) || !approxEqual(lot,oldQty,1e-10);
-    if(changed){
-      rowPlan.action = "Modify";
-      rowPlan.status = "Planned";
-      rowPlan.writable = true;
-      rowPlan.mode = "modify";
-      rowPlan.payload = {
-        symbol:(meta && meta.symbol) || (baseOrder && baseOrder.symbol) || currentSymbol(),
-        orderId:meta && meta.orderId != null ? meta.orderId : null,
-        origClientOrderId:meta && meta.clientOrderId ? meta.clientOrderId : null,
-        side:(meta && meta.side) || (baseOrder && baseOrder.side) || side,
-        positionSide:(meta && meta.positionSide) || (baseOrder && baseOrder.positionSide) || "",
-        timeInForce:(meta && meta.timeInForce) || (baseOrder && baseOrder.timeInForce) || "GTC",
-        reduceOnly:meta && meta.reduceOnly != null ? meta.reduceOnly : (baseOrder && baseOrder.reduceOnly),
-        price:level,
-        quantity:lot,
-        meta
-      };
-    }
-    addPlanRow(plan,rowPlan);
-  }
-  function buildIgnoredRemovedRows(plan,presentKeys){
-    const baselineMap = lastReadStateSnapshot && lastReadStateSnapshot.mappedLimitOrderMap;
-    if(!(baselineMap instanceof Map)) return;
-    baselineMap.forEach((baseOrder,key) => {
-      if(presentKeys.has(key)) return;
-      addPlanRow(plan,{
-        action:"Ignored",
-        type:"LIMIT",
-        side:toUpper(baseOrder && baseOrder.side) || "-",
-        oldPrice:formatPlanValue(baseOrder && baseOrder.price,"price"),
-        newPrice:"-",
-        oldQty:formatPlanValue(baseOrder && baseOrder.origQty,"qty"),
-        newQty:"-",
-        orderId:baseOrder && baseOrder.orderId ? String(baseOrder.orderId) : (baseOrder && baseOrder.clientOrderId ? String(baseOrder.clientOrderId) : "-"),
-        status:"Ignored",
-        response:"Removed locally only. Cancellation is not part of this stage.",
-        writable:false,
-        mode:"ignored"
-      });
-    });
-  }
-  function buildPlanFromCurrentRows(livePos,liveSnapshot){
-    const plan = {
-      planId:++sendPlanSeq,
-      at:new Date().toISOString(),
-      symbol:currentSymbol(),
-      rows:[],
-      blocked:false,
-      canConfirm:false,
-      executing:false,
-      stale:false,
-      staleReason:"",
-      liveSnapshot:null,
-      cbsEnabled:!!cbsEnabled,
-      slSendEnabled:!!slSendEnabled
-    };
-    const contextDirection = inferDirectionForSend(livePos);
-    const liveLimitMap = collectLiveLimitOrdersByKey(liveSnapshot);
-    const baseMap = lastReadStateSnapshot && lastReadStateSnapshot.mappedLimitOrderMap instanceof Map
-      ? lastReadStateSnapshot.mappedLimitOrderMap
-      : new Map();
-    const entryRows = rows("calcModuleEntryRows");
-    const exitRows = rows("calcModuleExitRows");
-    const presentBinanceKeys = new Set();
-    const limitRowRecords = [];
-
-    entryRows.forEach(row => {
-      if(isRowEmpty(row)) return;
-      if(isOpenPositionRow(row)){
-        addPlanRow(plan,{
-          section:"LIMIT Orders",
-          action:"Ignored",
-          type:"Open Position",
-          side:contextDirection === "SHORT" ? "SELL" : "BUY",
-          oldPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
-          newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
-          oldQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
-          newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
-          orderId:"-",
-          status:"Ignored",
-          response:"Open Position row is calculator-local and never written.",
-          writable:false,
-          mode:"ignored",
-          rowRef:row
-        });
-        return;
-      }
-      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
-      limitRowRecords.push({row,rowType:"entry",meta});
-    });
-    exitRows.forEach(row => {
-      if(isRowEmpty(row)) return;
-      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
-      limitRowRecords.push({row,rowType:"exit",meta});
-    });
-
-    if(slSendEnabled){
-      const stopLevel = num(q("calcModuleStopLevel")?.value);
-      if(!livePos){
-        plan.blocked = true;
-        addPlanRow(plan,{
-          section:"SL Operation",
-          action:"Blocked",
-          type:"SL",
-          side:"-",
-          oldPrice:"-",
-          newPrice:formatPlanValue(stopLevel,"price"),
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"No live open position. SL send requires an open position.",
-          writable:false,
-          mode:"blocked"
-        });
-      }else if(stopLevel == null || stopLevel <= 0){
-        plan.blocked = true;
-        addPlanRow(plan,{
-          section:"SL Operation",
-          action:"Blocked",
-          type:"SL",
-          side:livePos.side === "SHORT" ? "BUY" : "SELL",
-          oldPrice:"-",
-          newPrice:formatPlanValue(stopLevel,"price"),
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"SL level is invalid.",
-          writable:false,
-          mode:"blocked"
-        });
-      }else{
-        const liveAlgoStop = findStopOrderForPosition(livePos,liveSnapshot,true);
-        const stopMeta = liveAlgoStop && liveAlgoStop.order
-          ? buildAlgoOrderMeta(liveAlgoStop.order)
-          : currentStopAlgoMeta;
-        if(stopMeta && (stopMeta.algoId != null || String(stopMeta.clientAlgoId || "").trim() !== "")){
-          addPlanRow(plan,{
-            section:"SL Operation",
-            action:"Cancel",
-            type:"SL",
-            side:toUpper(stopMeta.side) || (livePos.side === "SHORT" ? "BUY" : "SELL"),
-            oldPrice:formatPlanValue(stopMeta.triggerPrice,"price"),
-            newPrice:"-",
-            oldQty:"-",
-            newQty:"-",
-            orderId:stopMeta.algoId != null ? String(stopMeta.algoId) : String(stopMeta.clientAlgoId || "-"),
-            status:"Planned",
-            response:"",
-            writable:true,
-            mode:"sl-cancel",
-            payload:{
-              symbol:plan.symbol,
-              algoId:stopMeta.algoId != null ? stopMeta.algoId : null,
-              clientAlgoId:stopMeta.clientAlgoId ? String(stopMeta.clientAlgoId) : "",
-              meta:stopMeta
-            }
-          });
-        }else{
-          addPlanRow(plan,{
-            section:"SL Operation",
-            action:"Skip",
-            type:"SL",
-            side:livePos.side === "SHORT" ? "BUY" : "SELL",
-            oldPrice:"-",
-            newPrice:formatPlanValue(stopLevel,"price"),
-            oldQty:"-",
-            newQty:"-",
-            orderId:"-",
-            status:"Skipped",
-            response:"No active SL algo order to cancel.",
-            writable:false,
-            mode:"skip"
-          });
-        }
-        const slSide = livePos.side === "SHORT" ? "BUY" : "SELL";
-        const slPositionSide = toUpper(livePos.positionSide || "");
-        addPlanRow(plan,{
-          section:"SL Operation",
-          action:"New",
-          type:"SL",
-          side:slSide,
-          oldPrice:"-",
-          newPrice:formatPlanValue(stopLevel,"price"),
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Planned",
-          response:"",
-          writable:true,
-          mode:"sl-create",
-          payload:{
-            symbol:plan.symbol,
-            side:slSide,
-            triggerPrice:stopLevel,
-            positionSide:slPositionSide,
-            workingType:stopMeta && stopMeta.workingType ? stopMeta.workingType : null
-          }
-        });
-      }
-    }else{
-      addPlanRow(plan,{
-        section:"SL Operation",
-        action:"Ignored",
-        type:"SL",
-        side:"-",
-        oldPrice:"-",
-        newPrice:formatPlanValue(num(q("calcModuleStopLevel")?.value),"price"),
-        oldQty:"-",
-        newQty:"-",
-        orderId:"-",
-        status:"Ignored",
-        response:"SL toggle is OFF.",
-        writable:false,
-        mode:"ignored"
-      });
-    }
-
-    if(cbsEnabled){
-      const cancelAdded = new Set();
-      const cbsBlockedRows = new Set();
-      limitRowRecords.forEach(record => {
-        const row = record.row;
-        const rowType = record.rowType;
-        const meta = record.meta;
-        if(meta && row.dataset && row.dataset.source === "binance-limit"){
-          const key = orderKeyFromMeta(meta);
-          if(!key){
-            addPlanRow(plan,{
-              section:"LIMIT Orders",
-              action:"Blocked",
-              type:rowType === "entry" ? "Entry" : "Exit",
-              side:"-",
-              oldPrice:"-",
-              newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
-              oldQty:"-",
-              newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
-              orderId:"-",
-              status:"Blocked",
-              response:"Calculator row is missing required metadata for modifying an existing Binance order.",
-              writable:false,
-              mode:"blocked",
-              rowRef:row
-            });
-            plan.blocked = true;
-            cbsBlockedRows.add(row);
-            return;
-          }
-          presentBinanceKeys.add(key);
-          const baseOrder = baseMap.get(key);
-          const liveOrder = liveLimitMap.get(key);
-          const externalChange = buildExternalChangeReason(baseOrder,liveOrder);
-          if(externalChange){
-            addPlanRow(plan,{
-              section:"LIMIT Orders",
-              action:"Blocked",
-              type:rowType === "entry" ? "Entry" : "Exit",
-              side:toUpper((baseOrder && baseOrder.side) || (meta && meta.side) || "-"),
-              oldPrice:formatPlanValue(num(baseOrder && baseOrder.price),"price"),
-              newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
-              oldQty:formatPlanValue(num(baseOrder && baseOrder.origQty),"qty"),
-              newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
-              orderId:(meta && meta.orderId != null) ? String(meta.orderId) : (meta && meta.clientOrderId ? String(meta.clientOrderId) : "-"),
-              status:"Blocked",
-              response:externalChange,
-              writable:false,
-              mode:"blocked",
-              rowRef:row
-            });
-            plan.blocked = true;
-            cbsBlockedRows.add(row);
-            return;
-          }
-          if(!cancelAdded.has(key)){
-            cancelAdded.add(key);
-            addPlanRow(plan,{
-              section:"LIMIT Orders",
-              action:"Cancel",
-              type:"LIMIT",
-              side:toUpper((baseOrder && baseOrder.side) || (meta && meta.side) || "-"),
-              oldPrice:formatPlanValue(num(baseOrder && baseOrder.price),"price"),
-              newPrice:"-",
-              oldQty:formatPlanValue(num(baseOrder && baseOrder.origQty),"qty"),
-              newQty:"-",
-              orderId:(meta && meta.orderId != null) ? String(meta.orderId) : (meta && meta.clientOrderId ? String(meta.clientOrderId) : "-"),
-              status:"Planned",
-              response:"",
-              writable:true,
-              mode:"limit-cancel-cbs",
-              payload:{
-                symbol:(meta && meta.symbol) || (baseOrder && baseOrder.symbol) || plan.symbol,
-                orderId:meta && meta.orderId != null ? meta.orderId : null,
-                origClientOrderId:meta && meta.clientOrderId ? String(meta.clientOrderId) : "",
-                meta
-              }
-            });
-          }
-        }
-      });
-      limitRowRecords.forEach(record => {
-        if(cbsBlockedRows.has(record.row)) return;
-        prepareManualRowPlan(plan,record.row,record.rowType,contextDirection);
-      });
-    }else{
-      limitRowRecords.forEach(record => {
-        const row = record.row;
-        const rowType = record.rowType;
-        const meta = record.meta;
-        if(meta && row.dataset && row.dataset.source === "binance-limit"){
-          const key = orderKeyFromMeta(meta);
-          if(!key){
-            addPlanRow(plan,{
-              section:"LIMIT Orders",
-              action:"Blocked",
-              type:rowType === "entry" ? "Entry" : "Exit",
-              side:"-",
-              oldPrice:"-",
-              newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
-              oldQty:"-",
-              newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
-              orderId:"-",
-              status:"Blocked",
-              response:"Calculator row is missing required metadata for modifying an existing Binance order.",
-              writable:false,
-              mode:"blocked",
-              rowRef:row
-            });
-            plan.blocked = true;
-            return;
-          }
-          presentBinanceKeys.add(key);
-          prepareExistingRowPlan(plan,row,rowType,meta,baseMap.get(key),liveLimitMap.get(key));
-          return;
-        }
-        prepareManualRowPlan(plan,row,rowType,contextDirection);
-      });
-    }
-
-    buildIgnoredRemovedRows(plan,presentBinanceKeys);
-
-    const algoRows = (liveSnapshot && liveSnapshot.algoOrders || [])
-      .filter(o => o && toUpper(o.symbol) === toUpper(plan.symbol))
-      .filter(isLiveOrder);
-    if(algoRows.length){
-      addPlanRow(plan,{
-        section:"SL Operation",
-        action:"Ignored",
-        type:"Algo/SL",
-        side:"-",
-        oldPrice:"-",
-        newPrice:"-",
-        oldQty:"-",
-        newQty:"-",
-        orderId:"-",
-        status:"Ignored",
-        response:"Ignored " + algoRows.length + " open algo/SL order(s).",
-        writable:false,
-        mode:"ignored"
-      });
-    }
-
-    if(!lastReadStateSnapshot){
-      plan.blocked = true;
-      addPlanRow(plan,{
-        section:"LIMIT Orders",
-        action:"Blocked",
-        type:"Preflight",
-        side:"-",
-        oldPrice:"-",
-        newPrice:"-",
-        oldQty:"-",
-        newQty:"-",
-        orderId:"-",
-        status:"Blocked",
-        response:"Calculator Read snapshot is missing. Click Read first.",
-        writable:false,
-        mode:"blocked"
-      });
-    }
-
-    const positionMismatch = compareOpenPositionSnapshot(
-      lastReadStateSnapshot ? lastReadStateSnapshot.openPosition : currentOpenPositionRowSnapshot(),
-      livePos
-    );
-    if(positionMismatch){
-      plan.blocked = true;
-      addPlanRow(plan,{
-        section:"LIMIT Orders",
-        action:"Blocked",
-        type:"Open Position",
-        side:"-",
-        oldPrice:"-",
-        newPrice:"-",
-        oldQty:"-",
-        newQty:"-",
-        orderId:"-",
-        status:"Blocked",
-        response:positionMismatch,
-        writable:false,
-        mode:"blocked"
-      });
-    }
-
-    if(liveSnapshot && (liveSnapshot.normalFetchError || liveSnapshot.algoFetchError)){
-      plan.blocked = true;
-      addPlanRow(plan,{
-        section:"LIMIT Orders",
-        action:"Blocked",
-        type:"Preflight",
-        side:"-",
-        oldPrice:"-",
-        newPrice:"-",
-        oldQty:"-",
-        newQty:"-",
-        orderId:"-",
-        status:"Blocked",
-        response:"Preflight live open-orders read failed.",
-        writable:false,
-        mode:"blocked"
-      });
-    }
-
-    plan.canConfirm = !plan.blocked && plan.rows.some(r => r && !!r.writable);
-    plan.liveSnapshot = liveSnapshot;
-    return plan;
-  }
-  async function signedBinanceWrite(url,method,params){
-    if(typeof hasKeys !== "function" || !hasKeys()) throw new Error("API keys are required.");
-    const key = apiKeyEl.value.trim();
-    const sec = apiSecretEl.value.trim();
-    const off = typeof timeOffset === "function" ? await timeOffset() : 0;
-    const q = new URLSearchParams({
-      ...params,
-      recvWindow:"5000",
-      timestamp:String(Date.now() + off)
-    }).toString();
-    const sig = await hmac(sec,q);
-    const res = await API.fetch(url + "?" + q + "&signature=" + sig,{
-      method:method,
-      cache:"no-store",
-      headers:{"X-MBX-APIKEY":key}
-    });
-    const data = await res.json().catch(() => null);
-    if(!res.ok){
-      const err = new Error(data && data.msg ? data.msg : ("HTTP " + res.status));
-      err.code = data && data.code != null ? data.code : null;
-      err.data = data;
-      throw err;
-    }
-    return data || {};
-  }
-  async function signedOrderWrite(method,params){
-    return signedBinanceWrite(ORDER_WRITE_URL,method,params);
-  }
-  async function signedAlgoOrderWrite(method,params){
-    return signedBinanceWrite(ALGO_ORDER_WRITE_URL,method,params);
-  }
-  function applyWriteSuccessToRow(row,response,fallback){
-    if(!row) return;
-    const base = fallback && typeof fallback === "object" ? fallback : {};
-    const merged = Object.assign({},base,response || {});
-    if(response && response.orderId != null) merged.orderId = response.orderId;
-    if(response && response.clientOrderId != null) merged.clientOrderId = response.clientOrderId;
-    if(response && response.origQty != null) merged.origQty = response.origQty;
-    if(response && response.price != null) merged.price = response.price;
-    if(!merged.symbol) merged.symbol = currentSymbol();
-    if(!merged.type) merged.type = "LIMIT";
-    const meta = buildLimitOrderMeta(merged);
-    applyRowSourceAndMeta(row,{
-      source:"binance-limit",
-      meta,
-      rowId:row.dataset && row.dataset.calcRowId ? row.dataset.calcRowId : null
-    });
-  }
-  function binanceResponseText(resp){
-    if(!resp) return "";
-    if(resp.code != null && resp.msg) return String(resp.code) + " " + String(resp.msg);
-    if(resp.msg) return String(resp.msg);
-    if(resp.orderId != null) return "orderId=" + String(resp.orderId);
-    if(resp.algoId != null) return "algoId=" + String(resp.algoId);
-    if(resp.clientAlgoId != null) return "clientAlgoId=" + String(resp.clientAlgoId);
-    try{ return JSON.stringify(resp); }catch(_e){ return String(resp); }
-  }
-  async function runPlanWriteRow(rowPlan,contextDirection){
-    if(!rowPlan || !rowPlan.writable) return {ok:true,skip:true};
-    if(rowPlan.mode === "sl-cancel"){
-      const p = rowPlan.payload || {};
-      const send = {
-        symbol:String(p.symbol || currentSymbol())
-      };
-      if(p.algoId != null && String(p.algoId).trim() !== "") send.algoId = String(p.algoId);
-      else if(p.clientAlgoId) send.clientAlgoId = String(p.clientAlgoId);
-      else throw new Error("Missing algoId/clientAlgoId for SL cancel.");
-      const resp = await signedAlgoOrderWrite("DELETE",send);
-      return {ok:true,response:resp};
-    }
-    if(rowPlan.mode === "sl-create"){
-      const p = rowPlan.payload || {};
-      const send = {
-        symbol:String(p.symbol || currentSymbol()),
-        side:String(p.side || ""),
-        algoType:"CONDITIONAL",
-        type:"STOP_MARKET",
-        closePosition:"true",
-        triggerPrice:String(Number(p.triggerPrice)),
-        workingType:String(p.workingType || "CONTRACT_PRICE")
-      };
-      const ps = toUpper(p.positionSide || "");
-      if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
-      const resp = await signedAlgoOrderWrite("POST",send);
-      return {ok:true,response:resp};
-    }
-    if(rowPlan.mode === "limit-cancel-cbs"){
-      const p = rowPlan.payload || {};
-      const send = {
-        symbol:String(p.symbol || currentSymbol())
-      };
-      if(p.orderId != null && String(p.orderId).trim() !== "") send.orderId = String(p.orderId);
-      else if(p.origClientOrderId) send.origClientOrderId = String(p.origClientOrderId);
-      else throw new Error("Missing orderId/origClientOrderId for LIMIT cancel.");
-      const resp = await signedOrderWrite("DELETE",send);
-      return {ok:true,response:resp};
-    }
-    if(rowPlan.mode === "modify"){
-      const p = rowPlan.payload || {};
-      const send = {
-        symbol:String(p.symbol || currentSymbol()),
-        side:String(p.side || rowPlan.side || ""),
-        type:"LIMIT",
-        quantity:String(Number(p.quantity)),
-        price:String(Number(p.price)),
-        timeInForce:String(p.timeInForce || "GTC")
-      };
-      if(p.orderId != null && String(p.orderId).trim() !== "") send.orderId = String(p.orderId);
-      else if(p.origClientOrderId) send.origClientOrderId = String(p.origClientOrderId);
-      else throw new Error("Missing orderId/origClientOrderId for modify.");
-      const ps = toUpper(p.positionSide || "");
-      if(ps) send.positionSide = ps;
-      if(p.reduceOnly === true || String(p.reduceOnly).toLowerCase() === "true") send.reduceOnly = "true";
-      const resp = await signedOrderWrite("PUT",send);
-      applyWriteSuccessToRow(rowPlan.rowRef,resp,p.meta && p.meta.rawOrder ? p.meta.rawOrder : p.meta);
-      return {ok:true,response:resp};
-    }
-    if(rowPlan.mode === "new"){
-      const p = rowPlan.payload || {};
-      const ps = inferPositionSideForNewOrder(contextDirection);
-      const send = {
-        symbol:String(currentSymbol()),
-        side:String(p.side || rowPlan.side || sideForNewRow(p.rowType || "entry",contextDirection)),
-        type:"LIMIT",
-        quantity:String(Number(p.quantity)),
-        price:String(Number(p.level)),
-        timeInForce:"GTC"
-      };
-      if(ps && ps !== "BOTH") send.positionSide = ps;
-      const resp = await signedOrderWrite("POST",send);
-      applyWriteSuccessToRow(rowPlan.rowRef,resp,{
-        symbol:currentSymbol(),
-        side:send.side,
-        positionSide:send.positionSide || "BOTH",
-        type:"LIMIT",
-        price:send.price,
-        origQty:send.quantity,
-        timeInForce:send.timeInForce
-      });
-      return {ok:true,response:resp};
-    }
-    return {ok:true,skip:true};
-  }
-  async function prepareSendPlan(){
-    clearSendPlan();
-    if(typeof hasKeys !== "function" || !hasKeys()){
-      sendPlanState = {
-        planId:++sendPlanSeq,
-        at:new Date().toISOString(),
-        symbol:currentSymbol(),
-        rows:[{
-          action:"Blocked",
-          type:"Preflight",
-          side:"-",
-          oldPrice:"-",
-          newPrice:"-",
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"API keys are required before Send preflight.",
-          writable:false,
-          mode:"blocked"
-        }],
-        blocked:true,
-        canConfirm:false,
-        executing:false,
-        stale:false,
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled
-      };
-      publishSendDiagnostic({
-        at:new Date().toISOString(),
-        phase:"preflight",
-        blocked:true,
-        writable:0
-      });
-      renderSendPlanTable();
-      setStatus("Send blocked. API keys required.");
-      return;
-    }
-    updateSendButtonState(true);
-    setStatus("Send preflight: reading live Binance state...");
-    try{
-      const livePos = await signedPosition();
-      const liveSnapshot = await readOpenOrdersSnapshot();
-      sendPlanState = buildPlanFromCurrentRows(livePos,liveSnapshot);
-      sendPlanState.stale = false;
-      sendPlanState.staleReason = "";
-      publishSendDiagnostic({
-        at:new Date().toISOString(),
-        phase:"preflight",
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled,
-        blocked:!sendPlanState.canConfirm,
-        writable:sendPlanState.rows.filter(r => r && r.writable).length,
-        blockedRows:sendPlanState.rows.filter(r => r && r.action === "Blocked").length,
-        ignoredRows:sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
-        skippedRows:sendPlanState.rows.filter(r => r && r.action === "Skip").length
-      });
-      renderSendPlanTable();
-      if(sendPlanState.canConfirm) setStatus("Preflight ready. Review table and click Confirm Send.");
-      else setStatus("Preflight completed with blocked/ignored rows.");
-    }catch(e){
-      sendPlanState = {
-        planId:++sendPlanSeq,
-        at:new Date().toISOString(),
-        symbol:currentSymbol(),
-        rows:[{
-          action:"Blocked",
-          type:"Preflight",
-          side:"-",
-          oldPrice:"-",
-          newPrice:"-",
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"Preflight failed: " + (e && e.message ? e.message : String(e)),
-          writable:false,
-          mode:"blocked"
-        }],
-        blocked:true,
-        canConfirm:false,
-        executing:false,
-        stale:false,
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled
-      };
-      publishSendDiagnostic({
-        at:new Date().toISOString(),
-        phase:"preflight",
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled,
-        blocked:true,
-        error:e && e.message ? e.message : String(e),
-        writable:0
-      });
-      renderSendPlanTable();
-      setStatus("Send preflight failed.");
-    }finally{
-      updateSendButtonState(false);
-    }
-  }
-  async function confirmSendPlan(planId){
-    if(!sendPlanState || sendPlanState.planId !== planId || sendPlanState.executing) return;
-    if(!sendPlanState.canConfirm){
-      setStatus("Confirm Send blocked. Run Send preflight again.");
-      renderSendPlanTable();
-      return;
-    }
-    const contextDirection = inferDirectionForSend(lastReadStateSnapshot && lastReadStateSnapshot.openPosition);
-    sendPlanState.executing = true;
-    renderSendPlanTable();
-    setStatus("Confirm Send in progress...");
-    const writable = sendPlanState.rows.filter(r => r && r.writable);
-    let haltAfterSlFailure = false;
-    let haltReason = "";
-    for(const rowPlan of sendPlanState.rows){
-      if(!rowPlan) continue;
-      if(!rowPlan.writable){
-        if(rowPlan.action === "Skip") rowPlan.status = "Skipped";
-        else if(rowPlan.action === "Ignored") rowPlan.status = "Ignored";
-        else if(rowPlan.action === "Blocked") rowPlan.status = "Blocked";
-        renderSendPlanTable();
-        continue;
-      }
-      if(haltAfterSlFailure){
-        rowPlan.status = "Blocked";
-        rowPlan.response = haltReason || "Blocked because SL operation failed.";
-        rowPlan.unexpectedResponse = false;
-        renderSendPlanTable();
-        continue;
-      }
-      rowPlan.status = "Pending";
-      rowPlan.response = "";
-      renderSendPlanTable();
-      try{
-        const out = await runPlanWriteRow(rowPlan,contextDirection);
-        if(out && out.skip){
-          rowPlan.status = "Skipped";
-        }else{
-          const resp = out && out.response ? out.response : null;
-          const okResp = !!(resp && (
-            resp.orderId != null ||
-            resp.clientOrderId != null ||
-            resp.origClientOrderId != null ||
-            resp.algoId != null ||
-            resp.clientAlgoId != null ||
-            resp.success === true ||
-            resp.code === 0 ||
-            toUpper(resp.status) === "NEW" ||
-            toUpper(resp.status) === "PARTIALLY_FILLED" ||
-            toUpper(resp.status) === "CANCELED" ||
-            toUpper(resp.status) === "CANCELLED"
-          ));
-          if(okResp){
-            rowPlan.status = "Confirmed";
-            rowPlan.unexpectedResponse = false;
-            rowPlan.response = binanceResponseText(resp);
-          }else{
-            rowPlan.status = "Failed";
-            rowPlan.unexpectedResponse = true;
-            rowPlan.response = "Unexpected Binance response: " + binanceResponseText(resp);
-          }
-        }
-      }catch(e){
-        rowPlan.status = "Failed";
-        const code = e && e.code != null ? String(e.code) + " " : "";
-        rowPlan.unexpectedResponse = false;
-        rowPlan.response = code + (e && e.message ? e.message : String(e));
-      }
-      if(rowPlan.section === "SL Operation" && rowPlan.status === "Failed"){
-        if(rowPlan.mode === "sl-create"){
-          haltReason = "SL placement failed; position may be unprotected. LIMIT order actions were stopped.";
-          rowPlan.response = (rowPlan.response ? rowPlan.response + " | " : "") + "SL placement failed; position may be unprotected.";
-          try{
-            await readOpenOrdersSnapshot();
-          }catch(_e){}
-        }else{
-          haltReason = "SL cancel failed. LIMIT order actions were stopped.";
-        }
-        haltAfterSlFailure = true;
-      }
-      renderSendPlanTable();
-    }
-    sendPlanState.executing = false;
-    sendPlanState.canConfirm = false;
-    try{
-      await readBinance({preserveSendPlan:true});
-    }catch(_e){}
-    renderSendPlanTable();
-    const failed = writable.filter(r => r && r.status === "Failed").length;
-    publishSendDiagnostic({
-      at:new Date().toISOString(),
-      phase:"confirm",
-      cbsEnabled:!!(sendPlanState && sendPlanState.cbsEnabled),
-      slSendEnabled:!!(sendPlanState && sendPlanState.slSendEnabled),
-      failed,
-      totalWritable:writable.length,
-      confirmed:writable.filter(r => r && r.status === "Confirmed").length,
-      skipped:writable.filter(r => r && r.status === "Skipped").length
-    });
-    setStatus(failed ? ("Confirm Send completed with " + failed + " failed row(s).") : "Confirm Send completed.");
-  }
-  function orderStopPrice(order){
-    for(const key of ["stopPrice","triggerPrice","activatePrice","price"]){
-      const n = num(order && order[key]);
-      if(n != null && n > 0) return n;
-    }
-    return null;
-  }
-  function isLiveOrder(order){
-    const status = String(order && (order.status || order.orderStatus || "NEW") || "NEW").toUpperCase();
-    return !status || status === "NEW" || status === "PENDING" || status === "ACCEPTED" || status === "PARTIALLY_FILLED" || status.includes("NEW");
-  }
-  function isStopOrder(order){
-    const text = [order && order.type,order && order.origType,order && order.orderType,order && order.algoType]
-      .map(v => String(v || "").toUpperCase())
-      .join(" ");
-    return text.includes("STOP") && !text.includes("TAKE_PROFIT") && !text.includes("TRAILING") && orderStopPrice(order) != null;
-  }
-  function findStopOrderForPosition(pos,snapshot,algoOnly){
-    const sym = currentSymbol();
-    const opposite = pos.side === "SHORT" ? "BUY" : "SELL";
-    const orders = snapshot
-      ? (algoOnly ? [].concat(snapshot.algoOrders || []) : [].concat(snapshot.normalOrders || [], snapshot.algoOrders || []))
-      : [];
-    const candidates = orders
-      .filter(o => o && String(o.symbol || "") === sym)
-      .filter(isLiveOrder)
-      .filter(isStopOrder)
-      .filter(o => String(o.side || "").toUpperCase() === opposite)
-      .filter(o => {
-        const ps = String(o.positionSide || "").toUpperCase();
-        return !ps || ps === "BOTH" || ps === pos.side;
-      })
-      .map(o => ({price:orderStopPrice(o), order:o}))
-      .filter(x => x.price != null);
-    if(!candidates.length) return null;
-    const directional = candidates.filter(x => pos.side === "LONG" ? x.price < pos.entry : x.price > pos.entry);
-    const pool = directional.length ? directional : candidates;
-    pool.sort((a,b) => pos.side === "LONG" ? b.price - a.price : a.price - b.price);
-    return pool[0] || null;
-  }
-  async function findStopForPosition(pos,snapshot){
-    let localSnapshot = snapshot;
-    if(!localSnapshot){
-      try{
-        localSnapshot = await readOpenOrdersSnapshot();
-      }catch(_e){
-        localSnapshot = {symbol:currentSymbol(),normalOrders:[],algoOrders:[]};
-      }
-    }
-    const best = findStopOrderForPosition(pos,localSnapshot,false);
-    return best ? best.price : null;
-  }
-  async function readBinance(options){
-    const opts = options || {};
-    if(!opts.preserveSendPlan) markSendPlanStale("Read clicked after preflight.");
-    lastReadStateSnapshot = null;
-    setStatus("Reading current open position...");
-    const diag = {
-      at:new Date().toISOString(),
-      symbol:currentSymbol(),
-      positionSource:null,
-      positionSide:null,
-      normalLimitOrdersFound:0,
-      mappedEntries:0,
-      mappedExits:0,
-      ignoredAlgoOrders:0,
-      ignoredNonLimitOrders:0,
-      ignoredByPositionSide:0,
-      openOrdersReadStatus:"not-requested"
-    };
-    try{
-      const pos = await signedPosition() || openBoxPosition();
-      unlockEntryRows();
-      if(pos){
-        diag.positionSource = pos.source || null;
-        diag.positionSide = pos.side || null;
-        setDirection(pos.side);
-        setRows(
-          "calcModuleEntryRows",
-          [{level:pos.entry,lot:pos.qty}],
-          {lockFirstRow:true,openPositionFirstRow:true,keepRemoveEnabledFirstRow:true}
-        );
-      }else{
-        unlockEntryRows();
-      }
-
-      clearMappedLimitRows("calcModuleEntryRows");
-      clearMappedLimitRows("calcModuleExitRows");
-      binanceLimitRowMetaByRowId.clear();
-
-      let snapshot = null;
-      let mapped = null;
-      try{
-        snapshot = await readOpenOrdersSnapshot();
-        const normalErr = !!snapshot.normalFetchError;
-        const algoErr = !!snapshot.algoFetchError;
-        diag.openOrdersReadStatus = normalErr && algoErr ? "error" : (normalErr || algoErr ? "partial" : "ok");
-      }catch(_e){
-        diag.openOrdersReadStatus = "error";
-      }
-
-      if(snapshot){
-        mapped = mapLimitOrdersForCalculator(snapshot,pos ? pos.side : direction);
-        diag.normalLimitOrdersFound = mapped.diagnostic.normalLimitOrdersFound;
-        diag.mappedEntries = mapped.diagnostic.mappedEntries;
-        diag.mappedExits = mapped.diagnostic.mappedExits;
-        diag.ignoredAlgoOrders = mapped.diagnostic.ignoredAlgoOrders;
-        diag.ignoredNonLimitOrders = mapped.diagnostic.ignoredNonLimitOrders;
-        diag.ignoredByPositionSide = mapped.diagnostic.ignoredByPositionSide;
-        mapped.entryRows.forEach(item => applyMappedRow("calcModuleEntryRows",item));
-        mapped.exitRows.forEach(item => applyMappedRow("calcModuleExitRows",item));
-      }
-
-      let stop = null;
-      currentStopAlgoMeta = null;
-      if(pos){
-        const bestStop = snapshot ? findStopOrderForPosition(pos,snapshot,false) : null;
-        const algoStop = snapshot ? findStopOrderForPosition(pos,snapshot,true) : null;
-        stop = bestStop ? bestStop.price : await findStopForPosition(pos,snapshot);
-        currentStopAlgoMeta = algoStop && algoStop.order ? buildAlgoOrderMeta(algoStop.order) : null;
-      }
-      if(pos && stop != null){
-        q("calcModuleStopLevel").value = Math.round(stop);
-        lastStopEdit = "level";
-        syncStopFromLevel(pos.entry);
-      }
-      if(snapshot){
-        lastReadStateSnapshot = buildReadStateSnapshot(pos,snapshot,mapped || {entryRows:[],exitRows:[],diagnostic:{}});
-      }else{
-        lastReadStateSnapshot = buildReadStateSnapshot(pos,{symbol:currentSymbol(),normalOrders:[],algoOrders:[]},{entryRows:[],exitRows:[],diagnostic:{}});
-      }
-      calculate();
-      if(!pos){
-        setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
-      }else if(diag.openOrdersReadStatus === "error"){
-        setStatus("Position loaded. Open orders read failed.");
-      }else{
-        setStatus(stop != null ? "" : "No stop found.");
-      }
-      publishReadDiagnostic(diag);
-    }catch(e){
-      console.warn(MODULE + " Binance read failed",e);
-      setStatus("Read failed.");
-      lastReadStateSnapshot = null;
-      diag.openOrdersReadStatus = "error";
-      publishReadDiagnostic(diag);
-    }
-  }
-
-  function installDragResize(win){
-    const head = q("calcModuleHead");
-    let drag = null;
-    head.addEventListener("pointerdown",e => {
-      if(e.target.closest("button")) return;
-      const r = win.getBoundingClientRect();
-      drag = {x:e.clientX,y:e.clientY,left:r.left,top:r.top};
-      win.style.zIndex = String(++zTop);
-      head.setPointerCapture(e.pointerId);
-      e.preventDefault();
-    },false);
-    head.addEventListener("pointermove",e => {
-      if(!drag) return;
-      win.style.left = clamp(drag.left + e.clientX - drag.x,0,window.innerWidth - 80) + "px";
-      win.style.top = clamp(drag.top + e.clientY - drag.y,0,window.innerHeight - 40) + "px";
-    },false);
-    const endDrag = e => {
-      if(!drag) return;
-      drag = null;
-      try{ head.releasePointerCapture(e.pointerId); }catch(_e){}
-    };
-    head.addEventListener("pointerup",endDrag,false);
-    head.addEventListener("pointercancel",endDrag,false);
-
-    win.querySelectorAll(".calc-module-resize").forEach(handle => {
-      handle.addEventListener("pointerdown",e => {
-        e.preventDefault();
-        e.stopPropagation();
-        const r = win.getBoundingClientRect();
-        const start = {x:e.clientX,y:e.clientY,left:r.left,top:r.top,width:r.width,height:r.height,dir:handle.dataset.resize || ""};
-        win.style.zIndex = String(++zTop);
-        handle.setPointerCapture(e.pointerId);
-        const move = ev => {
-          const dx = ev.clientX - start.x;
-          const dy = ev.clientY - start.y;
-          let left = start.left, top = start.top, width = start.width, height = start.height;
-          const minW = 395, minH = 320;
-          if(start.dir.includes("e")) width = start.width + dx;
-          if(start.dir.includes("s")) height = start.height + dy;
-          if(start.dir.includes("w")){ width = start.width - dx; left = start.left + dx; }
-          if(start.dir.includes("n")){ height = start.height - dy; top = start.top + dy; }
-          if(width < minW){ if(start.dir.includes("w")) left -= minW - width; width = minW; }
-          if(height < minH){ if(start.dir.includes("n")) top -= minH - height; height = minH; }
-          left = clamp(left,0,window.innerWidth - 80);
-          top = clamp(top,0,window.innerHeight - 40);
-          width = Math.min(width,window.innerWidth - left - 6);
-          height = Math.min(height,window.innerHeight - top - 6);
-          win.style.left = left + "px";
-          win.style.top = top + "px";
-          win.style.width = width + "px";
-          win.style.height = height + "px";
-        };
-        const up = ev => {
-          document.removeEventListener("pointermove",move,true);
-          document.removeEventListener("pointerup",up,true);
-          document.removeEventListener("pointercancel",up,true);
-          try{ handle.releasePointerCapture(ev.pointerId); }catch(_e){}
-        };
-        document.addEventListener("pointermove",move,true);
-        document.addEventListener("pointerup",up,true);
-        document.addEventListener("pointercancel",up,true);
-      },true);
-    });
-  }
-
-  function priceFromCanvasY(y){
-    const state = currentPriceLineState || {};
-    const top = num(state.top) ?? 8;
-    const priceH = num(state.priceH) ?? lastAreaH;
-    const minP = num(state.minP) ?? lastYMin;
-    const maxP = num(state.maxP) ?? lastYMax;
-    if(priceH == null || !(priceH > 0) || minP == null || maxP == null || !(maxP > minP)) return null;
-    const chartY = clamp(y,top,top + priceH);
-    return maxP - ((chartY - top) / priceH) * (maxP - minP);
-  }
-  function copyText(text){
-    if(navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.left = "-9999px";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try{ document.execCommand("copy"); }finally{ ta.remove(); }
-    return Promise.resolve();
-  }
-  function ensureContextMenu(){
-    let menu = q("calcModuleContextMenu");
-    if(menu) return menu;
-    menu = document.createElement("div");
-    menu.id = "calcModuleContextMenu";
-    menu.className = "calc-module-context-menu hidden";
-    menu.innerHTML = `<button id="calcModuleCopyPrice" type="button">Copy Price | -</button>`;
-    document.body.appendChild(menu);
-    return menu;
-  }
-  function hideContextMenu(){
-    q("calcModuleContextMenu")?.classList.add("hidden");
-  }
-  function installContextMenu(){
-    if(!canvas || canvas.__calculatorModuleContextMenu) return;
-    canvas.__calculatorModuleContextMenu = true;
-    canvas.addEventListener("contextmenu",e => {
-      const rect = canvas.getBoundingClientRect();
-      const y = e.clientY - rect.top;
-      const price = priceFromCanvasY(y);
-      if(price == null) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const label = fmtPrice(price);
-      const menu = ensureContextMenu();
-      const btn = q("calcModuleCopyPrice");
-      btn.textContent = "Copy Price | " + label;
-      btn.onclick = () => copyText(label).finally(hideContextMenu);
-      menu.style.left = Math.min(e.clientX,window.innerWidth - 176) + "px";
-      menu.style.top = Math.min(e.clientY,window.innerHeight - 42) + "px";
-      menu.classList.remove("hidden");
-    },false);
-    document.addEventListener("click",e => {
-      if(!e.target.closest || !e.target.closest("#calcModuleContextMenu")) hideContextMenu();
-    },true);
-    window.addEventListener("blur",hideContextMenu,false);
-    document.addEventListener("keydown",e => { if(e.key === "Escape") hideContextMenu(); },false);
-  }
-
-  function bindCalculator(){
-    const win = ensureWindow();
-    const openBtn = ensureButton();
-    if(win.__calculatorModuleBound) return;
-    win.__calculatorModuleBound = true;
-    levelsVisible = loadLevelsVisible();
-    slSendEnabled = loadSlSendEnabled();
-    cbsEnabled = loadCbsEnabled();
-    saveLevelsVisible(levelsVisible);
-    saveSlSendEnabled(slSendEnabled);
-    saveCbsEnabled(cbsEnabled);
-    installDrawOverlayHook();
-    installOverlayDragHooks();
-
-    function showCalculator(){
-      win.classList.remove("hidden");
-      win.style.zIndex = String(++zTop);
-      openBtn.classList.add("is-on");
-      openBtn.setAttribute("aria-pressed","true");
-    }
-    function hideCalculator(){
-      win.classList.add("hidden");
-      openBtn.classList.remove("is-on");
-      openBtn.setAttribute("aria-pressed","false");
-    }
-
-    openBtn.addEventListener("click",() => {
-      if(win.classList.contains("hidden")) showCalculator();
-      else hideCalculator();
-    },false);
-    q("calcModuleClose").addEventListener("click",hideCalculator,false);
-    q("calcModuleDir").addEventListener("click",() => {
-      markSendPlanStale("Direction changed after preflight.");
-      setDirection(direction === "LONG" ? "SHORT" : "LONG");
-      lastStopEdit = "distance";
-      syncStopFromDistance(readEntry().avg);
-      calculate();
-    },false);
-    q("calcModuleAddEntry").addEventListener("click",() => {
-      markSendPlanStale("Entry row list changed after preflight.");
-      addRow("calcModuleEntryRows");
-    },false);
-    q("calcModuleAddExit").addEventListener("click",() => {
-      markSendPlanStale("Exit row list changed after preflight.");
-      addRow("calcModuleExitRows");
-    },false);
-    q("calcModuleStopLevel").addEventListener("input",() => {
-      markSendPlanStale("SL level changed after preflight.");
-      lastStopEdit = "level";
-      syncStopFromLevel(readEntry().avg);
-      calculate();
-    },false);
-    q("calcModuleStopDistance").addEventListener("input",() => {
-      markSendPlanStale("SL distance changed after preflight.");
-      lastStopEdit = "distance";
-      syncStopFromDistance(readEntry().avg);
-      calculate();
-    },false);
-    q("calcModulePlTitle").addEventListener("click",() => {
-      const body = q("calcModuleExitPlRows");
-      const closed = body.classList.toggle("calc-module-collapsed");
-      q("calcModulePlCaret").textContent = closed ? ">" : "v";
-    },false);
-    q("calcModuleSummaryTitle").addEventListener("click",() => {
-      const body = q("calcModuleSummaryBody");
-      const closed = body.classList.toggle("calc-module-collapsed");
-      q("calcModuleSummaryCaret").textContent = closed ? ">" : "v";
-    },false);
-    q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
-    q("calcModuleRead").addEventListener("click",readBinance,false);
-    q("calcModuleSend").addEventListener("click",prepareSendPlan,false);
-    q("calcModuleLevelsToggle").addEventListener("change",e => {
-      saveLevelsVisible(!!(e.target && e.target.checked));
-    },false);
-    q("calcModuleCbsToggle").addEventListener("change",e => {
-      markSendPlanStale("CBS toggle changed after preflight.");
-      saveCbsEnabled(!!(e.target && e.target.checked));
-    },false);
-    q("calcModuleSlToggle").addEventListener("change",e => {
-      markSendPlanStale("SL toggle changed after preflight.");
-      saveSlSendEnabled(!!(e.target && e.target.checked));
-    },false);
-
-    installDragResize(win);
-    if(marketEl && !marketEl.__calcSendStaleBound){
-      marketEl.__calcSendStaleBound = true;
-      marketEl.addEventListener("change",() => {
-        markSendPlanStale("Symbol changed after preflight.");
-      },false);
-    }
-    setDirection("LONG");
-    addRow("calcModuleEntryRows");
-    addRow("calcModuleExitRows");
-    installContextMenu();
-    window.CALCULATOR_MODULE = {
-      version:MODULE,
-      open:showCalculator,
-      hide:hideCalculator,
-      calculate,
-      priceFromCanvasY,
-      getBinanceLimitRowMeta(rowOrId){
-        const rowId = typeof rowOrId === "string"
-          ? rowOrId
-          : rowOrId && rowOrId.dataset
-            ? rowOrId.dataset.calcRowId
-            : "";
-        return rowId ? binanceLimitRowMetaByRowId.get(rowId) || null : null;
-      },
-      getBinanceLimitRowMetaMap(){ return new Map(binanceLimitRowMetaByRowId); },
-      getLastReadDiagnostic(){ return lastReadDiagnostic; },
-      getLastOverlayDiagnostic(){ return lastOverlayDiagnostic; },
-      getLastSendDiagnostic(){ return lastSendDiagnostic; },
-      setLevelsVisible(next){ saveLevelsVisible(!!next); },
-      getLevelsVisible(){ return !!levelsVisible; },
-      setSlSendEnabled(next){ saveSlSendEnabled(!!next); },
-      getSlSendEnabled(){ return !!slSendEnabled; },
-      setCbsEnabled(next){ saveCbsEnabled(!!next); },
-      getCbsEnabled(){ return !!cbsEnabled; }
-    };
-  }
-
-  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",bindCalculator,{once:true});
-  else bindCalculator();
-})();
