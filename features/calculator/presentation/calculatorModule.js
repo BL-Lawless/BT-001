@@ -10,6 +10,9 @@
   const LEVELS_VISIBLE_KEY = STORE + "levels_visible";
   const SL_SEND_ENABLED_KEY = STORE + "sl_send_enabled";
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
+  const STRUCTURAL_WARNING_TEXT = "Position/orders changed \u2014 re-check math";
+  const AUTO_SYNC_POLL_MS = 2000;
+  const AUTO_SYNC_DEBOUNCE_MS = 800;
   let zTop = 82;
   let direction = "LONG";
   let syncingStop = false;
@@ -30,6 +33,13 @@
   let lastReadStateSnapshot = null;
   let sendPlanState = null;
   let sendPlanSeq = 0;
+  let autoSyncEnabled = false;
+  let autoSyncPollTimer = null;
+  let autoSyncDebounceTimer = null;
+  let autoSyncChecking = false;
+  let autoSyncRefreshing = false;
+  let autoSyncBaselineSignature = "";
+  let structuralWarningActive = false;
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -61,7 +71,17 @@
   }
   function setStatus(text){
     const el = q("calcModuleStatus");
-    if(el) el.textContent = text || "";
+    if(el){
+      el.textContent = text || "";
+      el.classList.toggle("is-warning",text === STRUCTURAL_WARNING_TEXT);
+    }
+  }
+  function showStructuralWarning(){
+    structuralWarningActive = true;
+    setStatus(STRUCTURAL_WARNING_TEXT);
+  }
+  function clearStructuralWarning(){
+    structuralWarningActive = false;
   }
   function infra(){
     return window.CalculatorInfrastructure || null;
@@ -271,7 +291,7 @@
             <button id="calcModuleRead" type="button">Read</button>
             <label class="calc-module-levels-toggle" id="calcModuleLevelsToggleWrap" title="Show/hide Calculator levels on chart">
               <input id="calcModuleLevelsToggle" type="checkbox" checked>
-              <span>Levels</span>
+              <span>Show</span>
             </label>
             <button id="calcModuleSend" type="button" title="Prepare Binance order send plan">Send</button>
             <label class="calc-module-mini-toggle" id="calcModuleCbsToggleWrap" title="Cancel Binance-read LIMIT orders before placing fresh LIMIT orders">
@@ -423,6 +443,25 @@
   }
   function isOpenPositionRow(row){
     return !!(row && row.dataset && row.dataset.openPosition === "1");
+  }
+  function snapshotManualRows(containerId){
+    return rows(containerId)
+      .filter(row => row && row.dataset.source !== "binance-limit" && !isOpenPositionRow(row) && !isRowEmpty(row))
+      .map(row => ({
+        level:String(levelInput(row)?.value || ""),
+        lot:String(lotInput(row)?.value || "")
+      }));
+  }
+  function restoreManualRows(containerId,manualRows){
+    if(!Array.isArray(manualRows) || !manualRows.length) return;
+    manualRows.forEach(item => addRow(containerId,item.level,item.lot));
+  }
+  function clearOpenPositionRows(){
+    rows("calcModuleEntryRows").forEach(row => {
+      if(!isOpenPositionRow(row)) return;
+      row.remove();
+    });
+    if(!rows("calcModuleEntryRows").length) addRow("calcModuleEntryRows");
   }
   function setOpenPositionRow(row,isOpenPosition){
     if(!row) return;
@@ -793,6 +832,88 @@
     });
     return map;
   }
+  function roundedSignatureNumber(value,places){
+    const n = num(value);
+    if(n == null) return null;
+    return Number(n.toFixed(places == null ? 10 : places));
+  }
+  function buildStructuralSignature(position,snapshot){
+    const sym = toUpper((snapshot && snapshot.symbol) || currentSymbol());
+    const liveLimitOrders = (snapshot && snapshot.normalOrders || [])
+      .filter(order => order && toUpper(order.symbol) === sym)
+      .filter(isLiveOrder)
+      .filter(isLimitOrder)
+      .map(order => ({
+        key:orderKeyFromOrder(order),
+        orderId:order && order.orderId != null ? String(order.orderId) : "",
+        clientOrderId:order && order.clientOrderId != null ? String(order.clientOrderId) : "",
+        side:toUpper(order && order.side),
+        positionSide:toUpper(order && order.positionSide || "BOTH"),
+        price:roundedSignatureNumber(order && order.price,8),
+        quantity:roundedSignatureNumber(order && order.origQty,10),
+        status:toUpper(order && (order.status != null ? order.status : order.orderStatus != null ? order.orderStatus : ""))
+      }))
+      .sort((a,b) => String(a.key || a.orderId || a.clientOrderId).localeCompare(String(b.key || b.orderId || b.clientOrderId)));
+    const pos = position
+      ? {
+          side:position.side === "SHORT" ? "SHORT" : "LONG",
+          positionSide:toUpper(position.positionSide || ""),
+          qty:roundedSignatureNumber(position.qty,10),
+          entry:roundedSignatureNumber(position.entry,8)
+        }
+      : null;
+    return JSON.stringify({symbol:sym,openPosition:pos,limitOrders:liveLimitOrders});
+  }
+  function updateAutoSyncBaseline(position,snapshot){
+    autoSyncBaselineSignature = buildStructuralSignature(position,snapshot || {symbol:currentSymbol(),normalOrders:[]});
+  }
+  async function readStructuralStateForAutoSync(){
+    const pos = await signedPosition() || openBoxPosition();
+    const snapshot = await readOpenOrdersSnapshot();
+    if(snapshot && snapshot.normalFetchError) return null;
+    return {
+      position:pos,
+      snapshot,
+      signature:buildStructuralSignature(pos,snapshot)
+    };
+  }
+  function scheduleAutoSyncRefresh(){
+    if(!autoSyncEnabled || autoSyncRefreshing) return;
+    showStructuralWarning();
+    markSendPlanStale(STRUCTURAL_WARNING_TEXT);
+    clearTimeout(autoSyncDebounceTimer);
+    autoSyncDebounceTimer = setTimeout(async() => {
+      if(!autoSyncEnabled || autoSyncRefreshing) return;
+      autoSyncRefreshing = true;
+      try{
+        await readBinance({preserveSendPlan:true,autoSync:true});
+      }finally{
+        showStructuralWarning();
+        autoSyncRefreshing = false;
+      }
+    },AUTO_SYNC_DEBOUNCE_MS);
+  }
+  async function checkAutoSyncStructuralState(){
+    if(!autoSyncEnabled || autoSyncChecking || autoSyncRefreshing || !autoSyncBaselineSignature) return;
+    autoSyncChecking = true;
+    try{
+      const live = await readStructuralStateForAutoSync();
+      if(!live || !live.signature) return;
+      if(live.signature !== autoSyncBaselineSignature){
+        scheduleAutoSyncRefresh();
+      }
+    }catch(_e){
+    }finally{
+      autoSyncChecking = false;
+    }
+  }
+  function enableAutoSyncDetection(){
+    autoSyncEnabled = true;
+    if(autoSyncPollTimer) return;
+    autoSyncPollTimer = setInterval(() => {
+      checkAutoSyncStructuralState();
+    },AUTO_SYNC_POLL_MS);
+  }
   function inferDirectionForSend(livePosition){
     if(livePosition && (livePosition.side === "LONG" || livePosition.side === "SHORT")) return livePosition.side;
     if(lastReadStateSnapshot && (lastReadStateSnapshot.direction === "LONG" || lastReadStateSnapshot.direction === "SHORT")){
@@ -1020,8 +1141,9 @@
     if(titleEl) titleEl.textContent = title;
     const summaryEl = q("calcModuleSendSummary");
     if(summaryEl){
-      const staleText = stale ? " | STALE: " + (sendPlanState.staleReason || "Calculator changed after preflight.") : "";
-      summaryEl.textContent = summary + staleText;
+      const staleReason = sendPlanState.staleReason || "Calculator changed after preflight.";
+      const staleText = stale ? " | STALE: " + staleReason : "";
+      summaryEl.textContent = stale && staleReason === STRUCTURAL_WARNING_TEXT ? STRUCTURAL_WARNING_TEXT : summary + staleText;
       summaryEl.classList.toggle("is-stale",stale);
     }
     const bodyEl = q("calcModuleSendBody");
@@ -2089,6 +2211,7 @@
   }
   async function prepareSendPlan(){
     clearSendPlan();
+    clearStructuralWarning();
     if(typeof hasKeys !== "function" || !hasKeys()){
       sendPlanState = {
         planId:++sendPlanSeq,
@@ -2343,6 +2466,10 @@
   }
   async function readBinance(options){
     const opts = options || {};
+    if(opts.userRead){
+      clearStructuralWarning();
+      clearTimeout(autoSyncDebounceTimer);
+    }
     if(!opts.preserveSendPlan) markSendPlanStale("Read clicked after preflight.");
     lastReadStateSnapshot = null;
     setStatus("Reading current open position...");
@@ -2360,6 +2487,7 @@
       openOrdersReadStatus:"not-requested"
     };
     try{
+      const preservedAutoEntryRows = opts.autoSync ? snapshotManualRows("calcModuleEntryRows") : [];
       const pos = await signedPosition() || openBoxPosition();
       unlockEntryRows();
       if(pos){
@@ -2373,6 +2501,7 @@
         );
       }else{
         unlockEntryRows();
+        clearOpenPositionRows();
       }
 
       clearMappedLimitRows("calcModuleEntryRows");
@@ -2401,6 +2530,7 @@
         mapped.entryRows.forEach(item => applyMappedRow("calcModuleEntryRows",item));
         mapped.exitRows.forEach(item => applyMappedRow("calcModuleExitRows",item));
       }
+      if(opts.autoSync && pos) restoreManualRows("calcModuleEntryRows",preservedAutoEntryRows);
 
       let stop = null;
       currentStopAlgoMeta = null;
@@ -2417,9 +2547,12 @@
       }
       if(snapshot){
         lastReadStateSnapshot = buildReadStateSnapshot(pos,snapshot,mapped || {entryRows:[],exitRows:[],diagnostic:{}});
+        updateAutoSyncBaseline(pos,snapshot);
       }else{
         lastReadStateSnapshot = buildReadStateSnapshot(pos,{symbol:currentSymbol(),normalOrders:[],algoOrders:[]},{entryRows:[],exitRows:[],diagnostic:{}});
+        updateAutoSyncBaseline(pos,{symbol:currentSymbol(),normalOrders:[]});
       }
+      if(opts.userRead) enableAutoSyncDetection();
       calculate();
       if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
@@ -2428,6 +2561,7 @@
       }else{
         setStatus(stop != null ? "" : "No stop found.");
       }
+      if(opts.autoSync || structuralWarningActive) setStatus(STRUCTURAL_WARNING_TEXT);
       publishReadDiagnostic(diag);
     }catch(e){
       console.warn(MODULE + " Binance read failed",e);
@@ -2633,7 +2767,7 @@
       q("calcModuleSummaryCaret").textContent = closed ? ">" : "v";
     },false);
     q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
-    q("calcModuleRead").addEventListener("click",readBinance,false);
+    q("calcModuleRead").addEventListener("click",() => readBinance({userRead:true}),false);
     q("calcModuleSend").addEventListener("click",prepareSendPlan,false);
     q("calcModuleLevelsToggle").addEventListener("change",e => {
       saveLevelsVisible(!!(e.target && e.target.checked));
@@ -2688,5 +2822,3 @@
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",bindCalculator,{once:true});
   else bindCalculator();
 })();
-
-

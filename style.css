@@ -1016,12 +1016,12 @@ button:hover{filter:brightness(1.04)}
    Isolated Assess module styles only.
 ========================================================= */
 .v29-assess-metric{
-  background:var(--panel);
-  border:1px solid var(--border);
+  background:transparent;
+  border:0;
   border-radius:5px;
-  padding:4px 7px;
-  flex:0 0 46px;
-  min-width:46px;
+  padding:0;
+  flex:0 0 30px;
+  min-width:30px;
   display:flex;
   align-items:center;
   justify-content:center;
@@ -1030,14 +1030,14 @@ button:hover{filter:brightness(1.04)}
 .v29-assess-metric + .metric-account-start{margin-left:0 !important;}
 .v29-assess-btn{
   margin:0;
-  width:30px;
+  width:28px;
   height:28px;
   padding:0;
-  border:1px solid var(--border);
-  border-radius:6px;
-  background:#eef0f2;
-  color:#111;
-  font-size:16px;
+  border:1px solid #cfd5dc;
+  border-radius:5px;
+  background:#fff;
+  color:#1e2329;
+  font-size:18px;
   font-weight:800;
   line-height:1;
   cursor:pointer;
@@ -1097,12 +1097,20 @@ button:hover{filter:brightness(1.04)}
 /* PATCH_33_CLEAN_BASE — base fixes before SSSC */
 #resetView{display:none !important}
 #reload.v33-reload-icon{
-  min-width:30px;
-  width:30px;
-  padding:4px 0;
+  min-width:28px;
+  width:28px;
+  height:28px;
+  padding:0;
   text-align:center;
-  font-size:17px;
+  font-size:18px;
   line-height:1;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  background:#fff;
+  border-color:#cfd5dc;
+  color:#1e2329;
+  border-radius:5px;
 }
 #patch8IndicatorCard .v33-ma-grid{
   display:grid !important;
@@ -1214,6 +1222,12 @@ button:hover{filter:brightness(1.04)}
   height:17px;
   display:block;
   pointer-events:none;
+}
+#reload.v33-reload-icon .ui-btn-icon,
+.v29-assess-btn .ui-btn-icon,
+.calc-module-icon .ui-btn-icon{
+  width:20px;
+  height:20px;
 }
 .v33-ma-stack-box{gap:1px;position:relative;overflow:visible}
 .v33-ma-stack-box:hover{filter:brightness(1.03)}
@@ -1590,29 +1604,29 @@ button:hover{filter:brightness(1.04)}
    Isolated floating position calculator. UI-only, no order action.
 ========================================================= */
 .calc-module-icon{
-  width:30px;
+  width:28px;
   height:28px;
   padding:0;
   margin:0;
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  background:#eef0f2;
-  border:1px solid var(--border);
-  border-radius:6px;
-  color:#111;
-  font-size:17px;
+  background:#fff;
+  border:1px solid #cfd5dc;
+  border-radius:5px;
+  color:#1e2329;
+  font-size:18px;
   font-weight:800;
   line-height:1;
   cursor:pointer;
 }
 .calc-module-metric{
-  background:var(--panel);
-  border:1px solid var(--border);
+  background:transparent;
+  border:0;
   border-radius:5px;
-  padding:4px 7px;
-  flex:0 0 46px;
-  min-width:46px;
+  padding:0;
+  flex:0 0 30px;
+  min-width:30px;
   display:flex;
   align-items:center;
   justify-content:center;
@@ -1957,6 +1971,10 @@ button:hover{filter:brightness(1.04)}
   color:#707a8a;
   font-size:11px;
   line-height:1.25;
+}
+.calc-module-status.is-warning{
+  color:#b91c1c;
+  font-weight:800;
 }
 .calc-module-send-popup{
   position:fixed;
