@@ -32,10 +32,10 @@
       window.__calculatorPresentationLoaded = true;
 
       try{
-        await loadScript("Features/calculator/domain/calculatorDomain.js");
-        await loadScript("Features/calculator/application/calculatorService.js");
-        await loadScript("Features/calculator/infrastructure/storageAdapter.js");
-        await loadScript("Features/calculator/presentation/calculatorModule.js");
+        await loadScript("features/calculator/domain/calculatorDomain.js");
+        await loadScript("features/calculator/application/calculatorService.js");
+        await loadScript("features/calculator/infrastructure/storageAdapter.js");
+        await loadScript("features/calculator/presentation/calculatorModule.js");
       }catch(error){
         console.error("Calculator feature bootstrap failed.",error);
       }

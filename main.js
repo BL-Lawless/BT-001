@@ -8139,35 +8139,6 @@ startTradeAuto();
     }
   };
 
-  candleTip = function(c){
-    const d = new Date(c.time*1000);
-    const lines = [
-      formatDateTime(d),
-      'O : ' + ip(c.open),
-      'H : ' + ip(c.high),
-      'L : ' + ip(c.low),
-      'C : ' + ip(c.close),
-      'V : ' + fv(c.volume)
-    ];
-    ctx.save();
-    ctx.font = '11px Arial';
-    const pad = 7, lh = 14;
-    const w = Math.max(...lines.map(s => ctx.measureText(s).width)) + pad*2;
-    const h = lines.length * lh + pad*2;
-    const axis = (typeof RIGHT_AXIS === 'number' ? RIGHT_AXIS : 88);
-    const x = Math.max(8, canvas.clientWidth - axis - w - 12);
-    const y = 8;
-    ctx.fillStyle = 'rgba(255,255,255,.96)';
-    ctx.strokeStyle = '#d9dce1';
-    ctx.fillRect(x,y,w,h);
-    ctx.strokeRect(x,y,w,h);
-    ctx.fillStyle = '#1e2329';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    lines.forEach((s,i) => ctx.fillText(s,x+pad,y+pad+i*lh));
-    ctx.restore();
-  };
-
   if(canvas && !window.__patch8CanvasClickInstalled){
     window.__patch8CanvasClickInstalled = true;
     canvas.addEventListener('click', e => {
@@ -15209,7 +15180,9 @@ If there is NO open position, use this Section 2 instead:
   }
   function setSsscTabActive(){ const root=document.querySelector('#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid'); if(!root) return; root.querySelectorAll('.v24-settings-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab==='sssc')); root.querySelectorAll('.v24-settings-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab==='sssc')); try{localStorage.setItem('btc_futures_chart_v13_24_settings_tab','sssc');}catch(_e){} }
   function install(){
-    installReportOptions(); installDatePickers(); installReportHandlers(); installMAToggles(); installMASettings(); calcExtraMAs(); installStrictIsolateClickGuard();
+    installReportOptions(); installDatePickers(); installReportHandlers();
+    if(!window.MA_FEATURE){ installMAToggles(); installMASettings(); calcExtraMAs(); }
+    installStrictIsolateClickGuard();
     try{ if(typeof updateReportControls==='function') updateReportControls(); }catch(_e){}
     try{ draw(); }catch(_e){}
   }
@@ -15344,7 +15317,7 @@ If there is NO open position, use this Section 2 instead:
     canvas.addEventListener('mousedown',e=>{down={x:e.clientX,y:e.clientY,target:isoTargetAt(e)};},true);
     canvas.addEventListener('click',e=>{ const moved=down?Math.hypot(e.clientX-down.x,e.clientY-down.y):999; const upTarget=isoTargetAt(e); if(!down||moved>4||!down.target||!upTarget||down.target!==upTarget){ e.stopImmediatePropagation(); e.preventDefault(); } down=null; },true);
   }
-  function install(){ ensureToggles(); calcExtraMAs(); rebuildIndicatorSettings(); installIsolateGuard(); try{draw();}catch(_e){} }
+  function install(){ if(!window.MA_FEATURE){ ensureToggles(); calcExtraMAs(); rebuildIndicatorSettings(); } installIsolateGuard(); try{draw();}catch(_e){} }
   const prevOpenSettings=typeof openSettings==='function'?openSettings:null;
   if(prevOpenSettings&&!window.__v32r2OpenSettingsWrapped){ window.__v32r2OpenSettingsWrapped=true; openSettings=function(){ const r=prevOpenSettings.apply(this,arguments); setTimeout(install,0); setTimeout(rebuildIndicatorSettings,150); return r; }; }
   install(); setTimeout(install,0); setTimeout(install,300); setTimeout(install,900); window.addEventListener('load',()=>setTimeout(install,0),{once:true});
@@ -17341,8 +17314,10 @@ If there is NO open position, use this Section 2 instead:
 
   function installAll(){
     installReloadReset();
-    ensureMaToggles();
-    rebuildMaSettings();
+    if(!window.MA_FEATURE){
+      ensureMaToggles();
+      rebuildMaSettings();
+    }
     MA_STACK_MARKERS.installSettings();
     installClosedLinksRow();
     updateFinalExTotals();
@@ -17368,7 +17343,7 @@ If there is NO open position, use this Section 2 instead:
   window.Patch33CleanBase = {version:MODULE, install:installAll};
 })();
 
-// MA overlay + MA tooltip ownership moved to Features/ma/* modules.
+// MA overlay + MA tooltip ownership moved to features/ma/* modules.
 
 (() => {
   "use strict";
