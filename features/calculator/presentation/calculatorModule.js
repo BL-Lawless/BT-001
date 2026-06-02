@@ -13,6 +13,7 @@
   const STRUCTURAL_WARNING_TEXT = "Position/orders changed \u2014 re-check math";
   const AUTO_SYNC_POLL_MS = 2000;
   const AUTO_SYNC_DEBOUNCE_MS = 800;
+  const CALC_OWNED_REFRESH_SOURCES = new Set(["preflightRead","sendConfirm","postSendRefresh","resultWindowClose"]);
   let zTop = 82;
   let direction = "LONG";
   let syncingStop = false;
@@ -40,6 +41,7 @@
   let autoSyncRefreshing = false;
   let autoSyncBaselineSignature = "";
   let structuralWarningActive = false;
+  let calculatorOwnedRefreshDepth = 0;
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -82,6 +84,17 @@
   }
   function clearStructuralWarning(){
     structuralWarningActive = false;
+  }
+  function isCalculatorOwnedRefreshActive(){
+    return calculatorOwnedRefreshDepth > 0;
+  }
+  async function withCalculatorOwnedRefresh(_source,callback){
+    calculatorOwnedRefreshDepth++;
+    try{
+      return await callback();
+    }finally{
+      calculatorOwnedRefreshDepth = Math.max(0,calculatorOwnedRefreshDepth - 1);
+    }
   }
   function infra(){
     return window.CalculatorInfrastructure || null;
@@ -884,9 +897,17 @@
     clearTimeout(autoSyncDebounceTimer);
     autoSyncDebounceTimer = setTimeout(async() => {
       if(!autoSyncEnabled || autoSyncRefreshing) return;
+      if(isCalculatorOwnedRefreshActive()){
+        try{
+          const live = await readStructuralStateForAutoSync();
+          if(live && live.snapshot) updateAutoSyncBaseline(live.position,live.snapshot);
+          clearStructuralWarning();
+        }catch(_e){}
+        return;
+      }
       autoSyncRefreshing = true;
       try{
-        await readBinance({preserveSendPlan:true,autoSync:true});
+        await readBinance({preserveSendPlan:true,autoSync:true,source:"autoWatch"});
       }finally{
         showStructuralWarning();
         autoSyncRefreshing = false;
@@ -900,6 +921,11 @@
       const live = await readStructuralStateForAutoSync();
       if(!live || !live.signature) return;
       if(live.signature !== autoSyncBaselineSignature){
+        if(isCalculatorOwnedRefreshActive()){
+          updateAutoSyncBaseline(live.position,live.snapshot);
+          clearStructuralWarning();
+          return;
+        }
         scheduleAutoSyncRefresh();
       }
     }catch(_e){
@@ -1010,7 +1036,7 @@
           setStatus("Confirm Send is in progress.");
           return;
         }
-        clearSendPlan();
+        clearSendPlan({source:"resultWindowClose"});
       },false);
     }
     const head = q("calcModuleSendPopupHead");
@@ -1047,27 +1073,34 @@
     sendPlanState.canConfirm = false;
     renderSendPlanTable();
   }
-  function clearSendPlan(){
-    sendPlanState = null;
-    sendPopupDrag = null;
-    const popup = q("calcModuleSendPopup");
-    if(popup) popup.classList.add("hidden");
-    const titleEl = q("calcModuleSendPopupTitle");
-    if(titleEl) titleEl.textContent = "Send Plan";
-    const summaryEl = q("calcModuleSendSummary");
-    if(summaryEl){
-      summaryEl.textContent = "";
-      summaryEl.classList.remove("is-stale");
+  function clearSendPlan(options){
+    const opts = options || {};
+    const owned = CALC_OWNED_REFRESH_SOURCES.has(opts.source);
+    if(owned) calculatorOwnedRefreshDepth++;
+    try{
+      sendPlanState = null;
+      sendPopupDrag = null;
+      const popup = q("calcModuleSendPopup");
+      if(popup) popup.classList.add("hidden");
+      const titleEl = q("calcModuleSendPopupTitle");
+      if(titleEl) titleEl.textContent = "Send Plan";
+      const summaryEl = q("calcModuleSendSummary");
+      if(summaryEl){
+        summaryEl.textContent = "";
+        summaryEl.classList.remove("is-stale");
+      }
+      const bodyEl = q("calcModuleSendBody");
+      if(bodyEl) bodyEl.innerHTML = "";
+      const confirmBtn = q("calcModuleConfirmSend");
+      if(confirmBtn){
+        confirmBtn.disabled = true;
+        confirmBtn.onclick = null;
+      }
+      const actionsWrap = confirmBtn ? confirmBtn.parentElement : null;
+      if(actionsWrap) actionsWrap.style.display = "none";
+    }finally{
+      if(owned) calculatorOwnedRefreshDepth = Math.max(0,calculatorOwnedRefreshDepth - 1);
     }
-    const bodyEl = q("calcModuleSendBody");
-    if(bodyEl) bodyEl.innerHTML = "";
-    const confirmBtn = q("calcModuleConfirmSend");
-    if(confirmBtn){
-      confirmBtn.disabled = true;
-      confirmBtn.onclick = null;
-    }
-    const actionsWrap = confirmBtn ? confirmBtn.parentElement : null;
-    if(actionsWrap) actionsWrap.style.display = "none";
   }
   function updateSendButtonState(state){
     const btn = q("calcModuleSend");
@@ -2212,6 +2245,7 @@
   async function prepareSendPlan(){
     clearSendPlan();
     clearStructuralWarning();
+    clearTimeout(autoSyncDebounceTimer);
     if(typeof hasKeys !== "function" || !hasKeys()){
       sendPlanState = {
         planId:++sendPlanSeq,
@@ -2251,8 +2285,15 @@
     updateSendButtonState(true);
     setStatus("Send preflight: reading live Binance state...");
     try{
-      const livePos = await signedPosition();
-      const liveSnapshot = await readOpenOrdersSnapshot();
+      const preflightState = await withCalculatorOwnedRefresh("preflightRead",async() => {
+        const livePos = await signedPosition();
+        const liveSnapshot = await readOpenOrdersSnapshot();
+        return {livePos,liveSnapshot};
+      });
+      const livePos = preflightState.livePos;
+      const liveSnapshot = preflightState.liveSnapshot;
+      updateAutoSyncBaseline(livePos,liveSnapshot);
+      clearStructuralWarning();
       sendPlanState = buildPlanFromCurrentRows(livePos,liveSnapshot);
       sendPlanState.stale = false;
       sendPlanState.staleReason = "";
@@ -2319,84 +2360,87 @@
       return;
     }
     const contextDirection = inferDirectionForSend(lastReadStateSnapshot && lastReadStateSnapshot.openPosition);
+    clearTimeout(autoSyncDebounceTimer);
     sendPlanState.executing = true;
     renderSendPlanTable();
     setStatus("Confirm Send in progress...");
     const writable = sendPlanState.rows.filter(r => r && r.writable);
-    let haltAfterSlFailure = false;
-    let haltReason = "";
-    for(const rowPlan of sendPlanState.rows){
-      if(!rowPlan) continue;
-      if(!rowPlan.writable){
-        if(rowPlan.action === "Skip") rowPlan.status = "Skipped";
-        else if(rowPlan.action === "Ignored") rowPlan.status = "Ignored";
-        else if(rowPlan.action === "Blocked") rowPlan.status = "Blocked";
+    await withCalculatorOwnedRefresh("sendConfirm",async() => {
+      let haltAfterSlFailure = false;
+      let haltReason = "";
+      for(const rowPlan of sendPlanState.rows){
+        if(!rowPlan) continue;
+        if(!rowPlan.writable){
+          if(rowPlan.action === "Skip") rowPlan.status = "Skipped";
+          else if(rowPlan.action === "Ignored") rowPlan.status = "Ignored";
+          else if(rowPlan.action === "Blocked") rowPlan.status = "Blocked";
+          renderSendPlanTable();
+          continue;
+        }
+        if(haltAfterSlFailure){
+          rowPlan.status = "Blocked";
+          rowPlan.response = haltReason || "Blocked because SL operation failed.";
+          rowPlan.unexpectedResponse = false;
+          renderSendPlanTable();
+          continue;
+        }
+        rowPlan.status = "Pending";
+        rowPlan.response = "";
         renderSendPlanTable();
-        continue;
-      }
-      if(haltAfterSlFailure){
-        rowPlan.status = "Blocked";
-        rowPlan.response = haltReason || "Blocked because SL operation failed.";
-        rowPlan.unexpectedResponse = false;
-        renderSendPlanTable();
-        continue;
-      }
-      rowPlan.status = "Pending";
-      rowPlan.response = "";
-      renderSendPlanTable();
-      try{
-        const out = await runPlanWriteRow(rowPlan,contextDirection);
-        if(out && out.skip){
-          rowPlan.status = "Skipped";
-        }else{
-          const resp = out && out.response ? out.response : null;
-          const okResp = !!(resp && (
-            resp.orderId != null ||
-            resp.clientOrderId != null ||
-            resp.origClientOrderId != null ||
-            resp.algoId != null ||
-            resp.clientAlgoId != null ||
-            resp.success === true ||
-            resp.code === 0 ||
-            toUpper(resp.status) === "NEW" ||
-            toUpper(resp.status) === "PARTIALLY_FILLED" ||
-            toUpper(resp.status) === "CANCELED" ||
-            toUpper(resp.status) === "CANCELLED"
-          ));
-          if(okResp){
-            rowPlan.status = "Confirmed";
-            rowPlan.unexpectedResponse = false;
-            rowPlan.response = binanceResponseText(resp);
+        try{
+          const out = await runPlanWriteRow(rowPlan,contextDirection);
+          if(out && out.skip){
+            rowPlan.status = "Skipped";
           }else{
-            rowPlan.status = "Failed";
-            rowPlan.unexpectedResponse = true;
-            rowPlan.response = "Unexpected Binance response: " + binanceResponseText(resp);
+            const resp = out && out.response ? out.response : null;
+            const okResp = !!(resp && (
+              resp.orderId != null ||
+              resp.clientOrderId != null ||
+              resp.origClientOrderId != null ||
+              resp.algoId != null ||
+              resp.clientAlgoId != null ||
+              resp.success === true ||
+              resp.code === 0 ||
+              toUpper(resp.status) === "NEW" ||
+              toUpper(resp.status) === "PARTIALLY_FILLED" ||
+              toUpper(resp.status) === "CANCELED" ||
+              toUpper(resp.status) === "CANCELLED"
+            ));
+            if(okResp){
+              rowPlan.status = "Confirmed";
+              rowPlan.unexpectedResponse = false;
+              rowPlan.response = binanceResponseText(resp);
+            }else{
+              rowPlan.status = "Failed";
+              rowPlan.unexpectedResponse = true;
+              rowPlan.response = "Unexpected Binance response: " + binanceResponseText(resp);
+            }
           }
+        }catch(e){
+          rowPlan.status = "Failed";
+          const code = e && e.code != null ? String(e.code) + " " : "";
+          rowPlan.unexpectedResponse = false;
+          rowPlan.response = code + (e && e.message ? e.message : String(e));
         }
-      }catch(e){
-        rowPlan.status = "Failed";
-        const code = e && e.code != null ? String(e.code) + " " : "";
-        rowPlan.unexpectedResponse = false;
-        rowPlan.response = code + (e && e.message ? e.message : String(e));
-      }
-      if(rowPlan.section === "SL Operation" && rowPlan.status === "Failed"){
-        if(rowPlan.mode === "sl-create"){
-          haltReason = "SL placement failed; position may be unprotected. LIMIT order actions were stopped.";
-          rowPlan.response = (rowPlan.response ? rowPlan.response + " | " : "") + "SL placement failed; position may be unprotected.";
-          try{
-            await readOpenOrdersSnapshot();
-          }catch(_e){}
-        }else{
-          haltReason = "SL cancel failed. LIMIT order actions were stopped.";
+        if(rowPlan.section === "SL Operation" && rowPlan.status === "Failed"){
+          if(rowPlan.mode === "sl-create"){
+            haltReason = "SL placement failed; position may be unprotected. LIMIT order actions were stopped.";
+            rowPlan.response = (rowPlan.response ? rowPlan.response + " | " : "") + "SL placement failed; position may be unprotected.";
+            try{
+              await readOpenOrdersSnapshot();
+            }catch(_e){}
+          }else{
+            haltReason = "SL cancel failed. LIMIT order actions were stopped.";
+          }
+          haltAfterSlFailure = true;
         }
-        haltAfterSlFailure = true;
+        renderSendPlanTable();
       }
-      renderSendPlanTable();
-    }
+    });
     sendPlanState.executing = false;
     sendPlanState.canConfirm = false;
     try{
-      await readBinance({preserveSendPlan:true});
+      await readBinance({preserveSendPlan:true,source:"postSendRefresh"});
     }catch(_e){}
     renderSendPlanTable();
     const failed = writable.filter(r => r && r.status === "Failed").length;
@@ -2466,7 +2510,13 @@
   }
   async function readBinance(options){
     const opts = options || {};
-    if(opts.userRead){
+    const source = opts.source || (opts.userRead ? "userRead" : opts.autoSync ? "autoWatch" : "");
+    const isAutoWatch = source === "autoWatch";
+    const isOwnedRefresh = CALC_OWNED_REFRESH_SOURCES.has(source);
+    if(isOwnedRefresh && !opts.__ownedWrapped){
+      return withCalculatorOwnedRefresh(source,() => readBinance({...opts,__ownedWrapped:true}));
+    }
+    if(source === "userRead"){
       clearStructuralWarning();
       clearTimeout(autoSyncDebounceTimer);
     }
@@ -2487,8 +2537,11 @@
       openOrdersReadStatus:"not-requested"
     };
     try{
-      const preservedAutoEntryRows = opts.autoSync ? snapshotManualRows("calcModuleEntryRows") : [];
-      const pos = await signedPosition() || openBoxPosition();
+      const preservedAutoEntryRows = isAutoWatch ? snapshotManualRows("calcModuleEntryRows") : [];
+      const readState = isOwnedRefresh
+        ? await withCalculatorOwnedRefresh(source,async() => ({pos:await signedPosition() || openBoxPosition()}))
+        : {pos:await signedPosition() || openBoxPosition()};
+      const pos = readState.pos;
       unlockEntryRows();
       if(pos){
         diag.positionSource = pos.source || null;
@@ -2511,7 +2564,9 @@
       let snapshot = null;
       let mapped = null;
       try{
-        snapshot = await readOpenOrdersSnapshot();
+        snapshot = isOwnedRefresh
+          ? await withCalculatorOwnedRefresh(source,() => readOpenOrdersSnapshot())
+          : await readOpenOrdersSnapshot();
         const normalErr = !!snapshot.normalFetchError;
         const algoErr = !!snapshot.algoFetchError;
         diag.openOrdersReadStatus = normalErr && algoErr ? "error" : (normalErr || algoErr ? "partial" : "ok");
@@ -2530,7 +2585,7 @@
         mapped.entryRows.forEach(item => applyMappedRow("calcModuleEntryRows",item));
         mapped.exitRows.forEach(item => applyMappedRow("calcModuleExitRows",item));
       }
-      if(opts.autoSync && pos) restoreManualRows("calcModuleEntryRows",preservedAutoEntryRows);
+      if(isAutoWatch && pos) restoreManualRows("calcModuleEntryRows",preservedAutoEntryRows);
 
       let stop = null;
       currentStopAlgoMeta = null;
@@ -2552,7 +2607,7 @@
         lastReadStateSnapshot = buildReadStateSnapshot(pos,{symbol:currentSymbol(),normalOrders:[],algoOrders:[]},{entryRows:[],exitRows:[],diagnostic:{}});
         updateAutoSyncBaseline(pos,{symbol:currentSymbol(),normalOrders:[]});
       }
-      if(opts.userRead) enableAutoSyncDetection();
+      if(source === "userRead") enableAutoSyncDetection();
       calculate();
       if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
@@ -2561,7 +2616,11 @@
       }else{
         setStatus(stop != null ? "" : "No stop found.");
       }
-      if(opts.autoSync || structuralWarningActive) setStatus(STRUCTURAL_WARNING_TEXT);
+      if(isOwnedRefresh){
+        clearStructuralWarning();
+      }else if(isAutoWatch || structuralWarningActive){
+        setStatus(STRUCTURAL_WARNING_TEXT);
+      }
       publishReadDiagnostic(diag);
     }catch(e){
       console.warn(MODULE + " Binance read failed",e);
