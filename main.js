@@ -139,12 +139,8 @@ const SET5 = STORE + "ema_toggle_5";
 ========================================================= */
 
 let candles = [];
-let ema20 = [];
-let ema50 = [];
-let ema3 = [];
-let ema4 = [];
-let ema5 = [];
 let vwap = [];
+let maSeriesBySlot = {1:[],2:[],3:[],4:[],5:[]};
 
 let fillMarkers = [];
 let resultLinks = [];
@@ -328,9 +324,9 @@ function emaPeriod(input,fallback){
 }
 
 function updateEmaLabels(){
-  if(lblEMA20) lblEMA20.textContent = "MA1 EMA" + emaPeriod(emaPeriod1El,9);
-  if(lblEMA50) lblEMA50.textContent = "MA2 EMA" + emaPeriod(emaPeriod2El,21);
-  if(lblEMA3) lblEMA3.textContent = "MA3 EMA" + emaPeriod(emaPeriod3El,55);
+  if(lblEMA20) lblEMA20.textContent = "EMA" + emaPeriod(emaPeriod1El,9);
+  if(lblEMA50) lblEMA50.textContent = "EMA" + emaPeriod(emaPeriod2El,21);
+  if(lblEMA3) lblEMA3.textContent = "EMA" + emaPeriod(emaPeriod3El,55);
 }
 
 function emaToggleStoreKey(n){
@@ -804,14 +800,29 @@ function EMA(src,p){
   return out;
 }
 
-function canonicalMAExtraKey(n,suffix){
+const CANONICAL_MA_SLOTS = [1,2,3,4,5];
+const CANONICAL_MA_DEFAULTS = {
+  1:{period:9,color:"#ff7900",toggle:"tglEMA20"},
+  2:{period:21,color:"#0000ff",toggle:"tglEMA50"},
+  3:{period:55,color:"#d600a9",toggle:"tglEMA3"},
+  4:{period:100,color:"#0b7a00",toggle:"tglEMA4"},
+  5:{period:200,color:"#008c7a",toggle:"tglEMA5"}
+};
+
+function canonicalMAStorageKey(n,suffix){
+  if(n <= 3){
+    if(suffix === "Period") return STORE + `ema_period_${n}`;
+    if(suffix === "Color") return `btc_futures_chart_v13_05_ema${n}_color`;
+    if(suffix === "Alpha") return `btc_futures_chart_v13_05_ema${n}_alpha`;
+    if(suffix === "Width") return `btc_futures_chart_v13_18_ema${n}_width`;
+  }
   return `btc_futures_chart_v13_32r1_ma${n}${suffix}`;
 }
 
 function canonicalMAStroke(n){
-  const defaults = {4:"#0b7a00",5:"#008c7a"};
-  const hex = localStorage.getItem(canonicalMAExtraKey(n,"Color")) || defaults[n] || "#111827";
-  const alphaRaw = Number(localStorage.getItem(canonicalMAExtraKey(n,"Alpha")));
+  const defaults = CANONICAL_MA_DEFAULTS[n] || {};
+  const hex = localStorage.getItem(canonicalMAStorageKey(n,"Color")) || defaults.color || "#111827";
+  const alphaRaw = Number(localStorage.getItem(canonicalMAStorageKey(n,"Alpha")));
   const alpha = Number.isFinite(alphaRaw) ? clamp(alphaRaw,0,100) / 100 : 1;
   let h = String(hex || "#111827").replace("#","");
   if(h.length === 3) h = h.split("").map(c => c + c).join("");
@@ -820,12 +831,13 @@ function canonicalMAStroke(n){
 }
 
 function canonicalMAWidth(n){
-  const raw = Number(localStorage.getItem(canonicalMAExtraKey(n,"Width")));
+  const raw = Number(localStorage.getItem(canonicalMAStorageKey(n,"Width")));
   return Number.isFinite(raw) ? clamp(raw,1,10) : 2;
 }
 
 function canonicalMAEnabled(n){
-  const el = document.getElementById("tglEMA" + n);
+  const meta = CANONICAL_MA_DEFAULTS[n] || {};
+  const el = meta.toggle ? document.getElementById(meta.toggle) : null;
   if(el) return !!el.checked;
   const key = emaToggleStoreKey(n);
   if(!key) return false;
@@ -833,16 +845,26 @@ function canonicalMAEnabled(n){
 }
 
 function rebuildCanonicalMASeries(){
-  ema4 = EMA(candles,chartIndicatorPeriodValue(4,100));
-  ema5 = EMA(candles,chartIndicatorPeriodValue(5,200));
-  window.ema4 = ema4;
-  window.ema5 = ema5;
+  CANONICAL_MA_SLOTS.forEach(n => {
+    const fallback = (CANONICAL_MA_DEFAULTS[n] && CANONICAL_MA_DEFAULTS[n].period) || 1;
+    maSeriesBySlot[n] = EMA(candles,chartIndicatorPeriodValue(n,fallback));
+  });
+  return maSeriesBySlot;
 }
 
 function chartIndicatorPeriodValue(n,fallback){
-  const ids = n <= 3
-    ? [`emaPeriod${n}`]
-    : [`maisoMA${n}Period`,`v33MA${n}Period`];
+  try{
+    if(window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASettings === "function"){
+      const settings = window.MA_FEATURE.getCanonicalMASettings();
+      const slot = Array.isArray(settings) ? settings.find(item => Number(item && item.slot) === Number(n)) : null;
+      const value = Number(slot && slot.period);
+      if(Number.isFinite(value) && value > 0) return value;
+    }
+  }catch(_e){}
+  const ids = [
+    `maOwnerMA${n}Period`,
+    n <= 3 ? `emaPeriod${n}` : null
+  ].filter(Boolean);
   for(const id of ids){
     const el = document.getElementById(id);
     const value = Number(el && el.value);
@@ -859,15 +881,9 @@ function chartIndicatorPeriodValue(n,fallback){
 }
 
 function longestEnabledChartIndicatorPeriod(){
-  const defs = [
-    [tglEMA20,1,9],
-    [tglEMA50,2,21],
-    [tglEMA3,3,55],
-    [document.getElementById("tglEMA4"),4,100],
-    [document.getElementById("tglEMA5"),5,200]
-  ];
   let longest = 0;
-  for(const [_toggle,n,fallback] of defs){
+  for(const n of CANONICAL_MA_SLOTS){
+    const fallback = (CANONICAL_MA_DEFAULTS[n] && CANONICAL_MA_DEFAULTS[n].period) || 1;
     if(canonicalMAEnabled(n)) longest = Math.max(longest, chartIndicatorPeriodValue(n,fallback));
   }
   return longest;
@@ -919,9 +935,18 @@ function VWAP(src){
       v = 0;
     }
 
-    const typ = (c.high + c.low + c.close) / 3;
-    pv += typ * c.volume;
-    v += c.volume;
+    const high = Number(c.high);
+    const low = Number(c.low);
+    const close = Number(c.close);
+    const volume = Number(c.volume ?? c.baseVolume ?? 0);
+    if(!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close) || !Number.isFinite(volume)){
+      pt = c.time;
+      continue;
+    }
+
+    const typ = (high + low + close) / 3;
+    pv += typ * volume;
+    v += volume;
 
     if(v > 0) out.push({time:c.time,value:pv/v});
     pt = c.time;
@@ -930,15 +955,59 @@ function VWAP(src){
   return out;
 }
 
+function setCurrentVWAPSeries(next){
+  vwap = Array.isArray(next) ? next : [];
+  window.vwap = vwap;
+  return vwap;
+}
+
+function currentVWAPSeries(){
+  if(Array.isArray(vwap) && vwap.length) return vwap;
+  if(Array.isArray(window.vwap) && window.vwap.length){
+    vwap = window.vwap;
+    return vwap;
+  }
+  if(Array.isArray(candles) && candles.length){
+    return setCurrentVWAPSeries(VWAP(candles));
+  }
+  return Array.isArray(vwap) ? vwap : [];
+}
+
+window.MA_RUNTIME_CONTEXT = {
+  getCandles(){ return candles; },
+  getSeriesMap(){ return maSeriesBySlot; },
+  computeEMA: EMA,
+  computeVWAP: VWAP,
+  getVWAP: currentVWAPSeries,
+  setVWAP: setCurrentVWAPSeries,
+  getCanvas(){ return canvas; },
+  getCtx(){ return ctx; },
+  getRightAxisWidth(){ return RIGHT_AXIS; },
+  getVisibleCount(){ return visibleCount; },
+  getDefaultVisible(){ return DEF_VISIBLE; },
+  chartDesiredClosedDepth,
+  range,
+  olderIfNeeded
+};
+
 function indicators(){
-  ema20 = EMA(candles,emaPeriod(emaPeriod1El,9));
-  ema50 = EMA(candles,emaPeriod(emaPeriod2El,21));
-  ema3 = EMA(candles,emaPeriod(emaPeriod3El,55));
-  window.ema20 = ema20;
-  window.ema50 = ema50;
-  window.ema3 = ema3;
-  rebuildCanonicalMASeries();
-  vwap = VWAP(candles);
+  if(window.MA_FEATURE && typeof window.MA_FEATURE.rebuildSeries === "function"){
+    window.MA_FEATURE.rebuildSeries();
+  }else{
+    rebuildCanonicalMASeries();
+    setCurrentVWAPSeries(VWAP(candles));
+  }
+}
+indicators.__usesMAFeature = true;
+
+function canonicalChartMASeries(){
+  try{
+    if(window.MA_FEATURE && typeof window.MA_FEATURE.getActiveChartMASeries === "function"){
+      const active = window.MA_FEATURE.getActiveChartMASeries();
+      if(active && typeof active === "object") return active;
+    }
+  }catch(_e){}
+  return maSeriesBySlot;
 }
 
 
@@ -962,7 +1031,9 @@ function updateDailyFromLive(c){
 function metrics(c){
   if(c) updateDailyFromLive(c);
 
-  const vw = vwap.length ? vwap[vwap.length-1].value : null;
+  const vwapSeries = currentVWAPSeries();
+  const rawVWAP = vwapSeries.length ? Number(vwapSeries[vwapSeries.length-1].value) : NaN;
+  const vw = Number.isFinite(rawVWAP) && rawVWAP > 0 ? rawVWAP : null;
 
   mSymbol.textContent = cfg().symbol;
 
@@ -984,7 +1055,7 @@ function metrics(c){
     mChange.style.color = css("--text");
   }
 
-  mVWAP.textContent = vw == null ? "-" : ip(vw);
+  mVWAP.textContent = vw == null ? "-" : fp(vw);
   updatePositionStrip(c);
   updateTabTitle();
 }
@@ -1702,8 +1773,8 @@ const marketDataHub = (() => {
     const fromCanonical = () => {
       try{
         const provider =
-          (window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots === "function")
-            ? window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots
+          (window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function")
+            ? window.MA_FEATURE.getCanonicalMASlots
             : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
         const slots = provider ? provider() : null;
         if(!Array.isArray(slots) || slots.length !== 5) return null;
@@ -2434,10 +2505,8 @@ async function loadChart(opt={}){
     lastMarkPrice = null;
     dailyState = null;
     candles = Array.isArray(nextCandles) ? nextCandles : marketDataHub.getChartBuffer(iv());
-    ema20 = [];
-    ema50 = [];
-    ema3 = [];
-    vwap = [];
+    maSeriesBySlot = {1:[],2:[],3:[],4:[],5:[]};
+    setCurrentVWAPSeries([]);
     noMoreOlder = false;
     loadingOlder = false;
     olderFetchArmed = false;
@@ -4224,23 +4293,24 @@ function draw(){
 
   const im = idxMap(vis);
 
-  const emaOverlayApi = window.EMA_CHART_OVERLAY_MODULE || null;
-  const emaSeriesByIndex = {1:ema20,2:ema50,3:ema3,4:ema4,5:ema5};
+  const maOverlayApi = window.MA_FEATURE || null;
+  const chartMaSeries = canonicalChartMASeries();
+  const chartVwap = currentVWAPSeries();
   [1,2,3,4,5].forEach(n => {
-    const on = emaOverlayApi && typeof emaOverlayApi.enabled === "function"
-      ? emaOverlayApi.enabled(n)
+    const on = maOverlayApi && typeof maOverlayApi.enabled === "function"
+      ? maOverlayApi.enabled(n)
       : canonicalMAEnabled(n);
     if(!on) return;
-    const series = emaSeriesByIndex[n];
-    const stroke = emaOverlayApi && typeof emaOverlayApi.strokeFor === "function"
-      ? emaOverlayApi.strokeFor(n)
-      : (n <= 3 ? getIndicatorStroke("ema" + n,["#ff7900","#0000ff","#d600a9"][n-1]) : canonicalMAStroke(n));
-    const lineWidth = emaOverlayApi && typeof emaOverlayApi.width === "function"
-      ? emaOverlayApi.width(n)
+    const series = chartMaSeries[n];
+    const stroke = maOverlayApi && typeof maOverlayApi.strokeFor === "function"
+      ? maOverlayApi.strokeFor(n)
+      : canonicalMAStroke(n);
+    const lineWidth = maOverlayApi && typeof maOverlayApi.width === "function"
+      ? maOverlayApi.width(n)
       : canonicalMAWidth(n);
     drawInd(series,vis,im,mapX,mapY,stroke,lineWidth);
   });
-  if(tglVWAP.checked) drawInd(vwap,vis,im,mapX,mapY,getIndicatorStroke("vwap","#f59e0b"),2);
+  if(tglVWAP.checked) drawInd(chartVwap,vis,im,mapX,mapY,getIndicatorStroke("vwap","#f59e0b"),2);
 
   tradeOverlays(vis,mapX,mapY,slot,clip);
 
@@ -4631,8 +4701,8 @@ rememberKeysEl.addEventListener("change",() => {
   tglLots
 ].forEach(el => el && el.addEventListener("change",() => {
   try{
-    if(window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.handleToggleChange === "function"){
-      window.EMA_CHART_OVERLAY_MODULE.handleToggleChange(el);
+    if(window.MA_FEATURE && typeof window.MA_FEATURE.handleToggleChange === "function"){
+      window.MA_FEATURE.handleToggleChange(el);
     }
   }catch(_e){}
   draw();
@@ -4647,8 +4717,8 @@ rememberKeysEl.addEventListener("change",() => {
     el.dataset.prevPeriod = String(next);
     if(next > prev){
       try{
-        if(window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState === "function"){
-          window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState();
+        if(window.MA_FEATURE && typeof window.MA_FEATURE.ensureDepthForCurrentState === "function"){
+          window.MA_FEATURE.ensureDepthForCurrentState();
         }
       }catch(_e){}
     }
@@ -8832,7 +8902,8 @@ startTradeAuto();
     metrics = function(c){
       prevMetrics(c);
       try{
-        const vw = vwap && vwap.length ? Number(vwap[vwap.length-1].value) : NaN;
+        const series = typeof currentVWAPSeries === "function" ? currentVWAPSeries() : vwap;
+        const vw = series && series.length ? Number(series[series.length-1].value) : NaN;
         const cur = c && isFinite(Number(c.close)) ? Number(c.close) : (dailyState && isFinite(Number(dailyState.close)) ? Number(dailyState.close) : (candles.length ? Number(candles[candles.length-1].close) : NaN));
         if(mVWAP){
           if(isFinite(vw) && isFinite(cur)) mVWAP.style.color = vw > cur ? '#991b1b' : '#047857';
@@ -9078,23 +9149,24 @@ startTradeAuto();
     }
 
     const im = idxMap(vis);
-    const emaOverlayApi = window.EMA_CHART_OVERLAY_MODULE || null;
-    const emaSeriesByIndex = {1:ema20,2:ema50,3:ema3,4:ema4,5:ema5};
+    const maOverlayApi = window.MA_FEATURE || null;
+    const chartMaSeries = canonicalChartMASeries();
+    const chartVwap = currentVWAPSeries();
     [1,2,3,4,5].forEach(n => {
-      const on = emaOverlayApi && typeof emaOverlayApi.enabled === 'function'
-        ? emaOverlayApi.enabled(n)
+      const on = maOverlayApi && typeof maOverlayApi.enabled === 'function'
+        ? maOverlayApi.enabled(n)
         : canonicalMAEnabled(n);
       if(!on) return;
-      const series = emaSeriesByIndex[n];
-      const stroke = emaOverlayApi && typeof emaOverlayApi.strokeFor === 'function'
-        ? emaOverlayApi.strokeFor(n)
-        : (n <= 3 ? getIndicatorStroke('ema'+n,['#ff7900','#0000ff','#d600a9'][n-1]) : canonicalMAStroke(n));
-      const lineWidth = emaOverlayApi && typeof emaOverlayApi.width === 'function'
-        ? emaOverlayApi.width(n)
+      const series = chartMaSeries[n];
+      const stroke = maOverlayApi && typeof maOverlayApi.strokeFor === 'function'
+        ? maOverlayApi.strokeFor(n)
+        : canonicalMAStroke(n);
+      const lineWidth = maOverlayApi && typeof maOverlayApi.width === 'function'
+        ? maOverlayApi.width(n)
         : canonicalMAWidth(n);
       drawInd(series,vis,im,mapX,mapY,stroke,lineWidth);
     });
-    if(tglVWAP.checked) drawInd(vwap,vis,im,mapX,mapY,getIndicatorStroke('vwap','#f59e0b'),2);
+    if(tglVWAP.checked) drawInd(chartVwap,vis,im,mapX,mapY,getIndicatorStroke('vwap','#f59e0b'),2);
 
     tradeOverlays(vis,mapX,mapY,slot,clip);
     /* PATCH_37F: single current-price dashed line is owned by drawCountdown(). */
@@ -14925,7 +14997,7 @@ If there is NO open position, use this Section 2 instead:
   function positionContext(entries){ const boxes=boxRows(); let totalSize=0,avgEntry=null,side="NONE"; if(boxes.length){ totalSize=boxes.reduce((a,b)=>a+Math.abs(n(b.qty)||0),0); avgEntry=weightedAvg(boxes.map(b=>({qty:Math.abs(n(b.qty)||0),price:n(b.price)}))); const sides=Array.from(new Set(boxes.map(sideOfBox).filter(x=>x&&x!=="-"))); side=sides.length===1?sides[0]:sides.length?"MIXED":"NONE"; }else if(entries.length){ totalSize=entries.reduce((a,e)=>a+Math.abs(n(e.qty)||0),0); avgEntry=weightedAvg(entries); const sides=Array.from(new Set(entries.map(e=>e.side||"").filter(Boolean))); side=sides.length===1?sides[0]:sides.length?"MIXED":"NONE"; } if(!(totalSize>0)) side="NONE"; return {boxes,totalSize,avgEntry,side}; }
   function stopPrice(o){ for(const v of [o&&o.stopPrice,o&&o.triggerPrice,o&&o.activatePrice,o&&o.price]){ const x=n(v); if(x!=null&&x>0) return x; } return null; }
   function activeSL(pos,current){ const sym=currentSymbol(); const opp=pos.side==="SHORT"?"BUY":"SELL"; let list=[]; try{ const pool=[].concat(window.v13OpenOrders21||[],window.v13OpenAlgoOrders21||[]); list=pool.filter(o=>o&&String(o.symbol||"")===sym).filter(o=>{ const st=String(o.status||o.orderStatus||"NEW").toUpperCase(); return !st||st==="NEW"||st==="PENDING"||st==="ACCEPTED"||st.includes("NEW"); }).filter(o=>{ const ps=String(o.positionSide||"").toUpperCase(); return !ps||ps==="BOTH"||ps===pos.side; }).filter(o=>String(o.side||"").toUpperCase()===opp).filter(o=>{ const types=[o&&o.type,o&&o.origType,o&&o.orderType,o&&o.algoType].map(x=>String(x||"").toUpperCase()).join(" "); return types.includes("STOP")&&!types.includes("TAKE_PROFIT")&&!types.includes("TRAILING"); }).map(o=>({price:stopPrice(o)})).filter(x=>x.price!=null); }catch(_e){list=[];} if(!list.length) return null; const directional=current==null?[]:list.filter(x=>pos.side==="LONG"?x.price<current:x.price>current); const pool=directional.length?directional:list; pool.sort((a,b)=>pos.side==="LONG"?b.price-a.price:a.price-b.price); return pool[0].price; }
-  function indicatorLines(){ const out=[]; try{ if(Array.isArray(ema20)&&ema20.length) out.push("MA1: "+fmtPrice(ema20[ema20.length-1].value)); }catch(_e){} try{ if(Array.isArray(ema50)&&ema50.length) out.push("MA2: "+fmtPrice(ema50[ema50.length-1].value)); }catch(_e){} try{ if(Array.isArray(ema3)&&ema3.length) out.push("MA3: "+fmtPrice(ema3[ema3.length-1].value)); }catch(_e){} try{ if(Array.isArray(vwap)&&vwap.length) out.push("VWAP: "+fmtPrice(vwap[vwap.length-1].value)); }catch(_e){} return out; }
+  function indicatorLines(){ const out=[]; try{ const slots=window.MA_FEATURE&&typeof window.MA_FEATURE.getCanonicalMASlots==="function"?window.MA_FEATURE.getCanonicalMASlots():[]; slots.forEach(slot=>{ const arr=slot&&Array.isArray(slot.series)?slot.series:[]; if(arr.length) out.push(slot.label+": "+fmtPrice(arr[arr.length-1].value)); }); }catch(_e){} try{ const series=typeof currentVWAPSeries==="function"?currentVWAPSeries():vwap; if(Array.isArray(series)&&series.length) out.push("VWAP: "+fmtPrice(series[series.length-1].value)); }catch(_e){} return out; }
   function failureReport(market){ const lines=["Some Assess datasets are missing or failed.","","Missing datasets:"]; if(market.missing&&market.missing.length) market.missing.forEach(x=>lines.push("- "+x)); else lines.push("- none"); lines.push("","Details:"); Object.keys(market.tfs||{}).forEach(key=>{const b=market.tfs[key]; if(b&&b.errors&&b.errors.length) lines.push("- "+key+": "+b.errors.join(" | "));}); return lines.join("\n"); }
 
   function buildDataPacket(market,useFallback){ const symbol=currentSymbol(); const appPrice=appCurrentPrice(); const latestFetched=market.tfs["1M"]&&market.tfs["1M"].klines&&market.tfs["1M"].klines.length?market.tfs["1M"].klines[market.tfs["1M"].klines.length-1].close:null; const entries=openEntries(); const pos=positionContext(entries); const sl=activeSL(pos,appPrice); const asset=quoteAsset(); const lines=[]; const add=s=>lines.push(s); add("PRIVATE POSITION CONTEXT INCLUDED. REVIEW BEFORE SHARING."); add("Patch: "+MODULE); add("Generated Dubai/local time: "+localTime(Date.now())); add(""); add("FIXED ASSESSMENT RULES"); add("- Use the currently selected app instrument in the report header: "+symbol+" - POSITION / MARKET ASSESSMENT"); add("- 3M and 1M are MICROSTRUCTURE / EARLY WARNING ONLY."); add("- 3M and 1M may flag immediate exit/reduce warnings, momentum exhaustion, micro sweep, failed continuation, acceptance/failure/rejection/continuation weakness."); add("- 3M and 1M must not override 15M / 1H structure unless they confirm failure or acceptance."); add("- Prioritize the existing open position first. Exit/reduce risk comes before add/no-add calls."); add("- Treat missing datasets as unavailable. Do not infer missing data."); add(""); if(market.missing&&market.missing.length){ add("WARNING: PARTIAL DATA PACKAGE"); market.missing.forEach(x=>add("- Missing: "+x)); add(""); } add("POSITION CONTEXT"); add("- Symbol: "+symbol); add("- Current price / app live: "+fmtPrice(appPrice)); add("- Latest fetched close: "+fmtPrice(latestFetched)); add("- Position side: "+pos.side); add("- Total size: "+fmtQty(pos.totalSize)+" "+asset); add("- Average entry: "+fmtPrice(pos.avgEntry)); add("- Active SL: "+(sl==null?"NO SL":fmtPrice(sl))); add("- SL source: existing app order state including normal open orders and conditional/algo orders if loaded"); add(""); add("OPEN ENTRIES"); add("- Source: existing reconstructed app state only; no new userTrades/accounting rebuild."); if(entries.length) entries.forEach(e=>add("- #"+e.sequence+" | level "+fmtPrice(e.price)+" | lot "+fmtQty(e.qty)+" "+asset+" | time "+fmtTime(e.time))); else add("- unavailable / none detected"); add(""); add("ACTIVE LEVELS - A. EXISTING / LIVE"); add("- Current price: "+fmtPrice(appPrice)); add("- Average entry: "+fmtPrice(pos.avgEntry)); add("- Active SL: "+(sl==null?"NO SL":fmtPrice(sl))); entries.forEach(e=>add("- Entry #"+e.sequence+": "+fmtPrice(e.price))); try{ if(dailyState){ add("- Day open: "+fmtPrice(dailyState.open)); add("- Day high: "+fmtPrice(dailyState.high)); add("- Day low: "+fmtPrice(dailyState.low)); } }catch(_e){} indicatorLines().forEach(x=>add("- "+x)); add(""); add("ACTIVE LEVELS - B/C. DERIVED STRUCTURE + VOLUME/PARTICIPATION"); Object.keys(market.tfs).forEach(key=>{ const b=market.tfs[key]; const sum=summarizeTF(b,appPrice||latestFetched||0); if(!sum){add("- "+key+": unavailable");return;} add("- "+key+" | role "+b.plan.role+" | range "+fmtPrice(sum.low)+"-"+fmtPrice(sum.high)+" | close position "+fmtPct(sum.pos)+" | swings "+sum.hhll+" | nearest support "+(sum.below?fmtPrice(sum.below.price):"-")+" | nearest resistance "+(sum.above?fmtPrice(sum.above.price):"-")+" | sweep/failure "+sum.sweep+" | compression "+sum.compression+" | taker buy ratio "+fmtPct(sum.takerRatio)+" | latest vol/avg "+(sum.avgVol?fmtNum((sum.latestVol||0)/sum.avgVol)+"x":"-")+" | OI change "+sum.oiContext); }); add(""); add("MULTI-TF MARKET DATA"); TF_PLAN.forEach(tf=>{ const b=market.tfs[tf.key]; const arr=b&&b.klines?b.klines:[]; const sum=summarizeTF(b,appPrice||latestFetched||0); add(""); add(tf.key+" - "+tf.role); if(!arr.length){add("- DATA MISSING");return;} add("- Fetched candles: "+arr.length); add("- Full-window high/low: "+fmtPrice(sum.low)+" / "+fmtPrice(sum.high)); add("- Latest close: "+fmtPrice(sum.latest.close)); add("- Current position in range: "+fmtPct(sum.pos)); add("- Recent swing high: "+(sum.recentHigh?fmtPrice(sum.recentHigh.price)+" @ "+fmtTime(sum.recentHigh.time):"-")); add("- Recent swing low: "+(sum.recentLow?fmtPrice(sum.recentLow.price)+" @ "+fmtTime(sum.recentLow.time):"-")); add("- Range high/low: "+fmtPrice(sum.rangeHigh)+" / "+fmtPrice(sum.rangeLow)); add("- Mark latest close: "+(sum.markLatest?fmtPrice(sum.markLatest.close):"unavailable")); add("- OI context: "+sum.oiContext); add("Raw candles: time,open,high,low,close,volume,quoteVolume,trades,takerBuyBase,takerBuyQuote"); const rawCount=useFallback?tf.fallbackRaw:tf.raw; arr.slice(-rawCount).forEach(c=>add([fmtTime(c.openTime),fmtRawPrice(c.open),fmtRawPrice(c.high),fmtRawPrice(c.low),fmtRawPrice(c.close),fmtNum(c.volume),fmtNum(c.quoteVolume),c.tradeCount==null?"-":String(c.tradeCount),fmtNum(c.takerBuyBase),fmtNum(c.takerBuyQuote)].join(","))); }); return lines.join("\n"); }
@@ -14955,9 +15027,6 @@ If there is NO open position, use this Section 2 instead:
     ma4Alpha:'100', ma5Alpha:'100',
     ma4Width:'2', ma5Width:'2'
   };
-  let ema4=[], ema5=[];
-  window.ema4=ema4; window.ema5=ema5;
-
   function n(v){ const x=Number(v); return Number.isFinite(x)?x:null; }
   function ls(key){ const v=localStorage.getItem(K(key)); return v==null?defaults[key]:v; }
   function setLS(key,val){ localStorage.setItem(K(key),String(val)); }
@@ -14971,7 +15040,7 @@ If there is NO open position, use this Section 2 instead:
     return `rgba(${r},${g},${b},${a})`;
   }
   function widthFor(num){ const x=n(ls('ma'+num+'Width')); return x&&x>0?Math.max(1,Math.min(10,x)):2; }
-  function maLabel(num){ return 'MA'+num+' EMA'+period(num); }
+  function maLabel(num){ return 'EMA'+period(num); }
   function maToggle(num){ return $id('tglEMA'+num); }
   function maEnabled(num){ const el=maToggle(num); return !!(el&&el.checked); }
   function valAt(arr,t){ if(!Array.isArray(arr)) return null; for(let i=arr.length-1;i>=0;i--){ if(Number(arr[i].time)<=Number(t)) return arr[i].value; } return null; }
@@ -15075,35 +15144,37 @@ If there is NO open position, use this Section 2 instead:
     const el=$id('tglEMA'+num); if(el) el.addEventListener('change',()=>{try{draw();}catch(_e){}},false);
   }
   function installMAToggles(){
+    if(window.MA_SETTINGS_MODULE && typeof window.MA_SETTINGS_MODULE.ensureToggles === "function"){
+      window.MA_SETTINGS_MODULE.ensureToggles();
+      return;
+    }
     const vw=$id('tglVWAP')&&$id('tglVWAP').closest('label');
     installToggle(4,vw); installToggle(5,vw); updateMALabels();
   }
   function maRow(num){
-    return `<div>MA ${num}</div><input id="v32r1MA${num}Period" type="number" min="1" max="999" step="1" value="${ls('ma'+num+'Period')}"><input id="v32r1MA${num}Color" type="color" value="${ls('ma'+num+'Color')}"><input id="v32r1MA${num}Alpha" type="range" min="0" max="100" step="1" value="${ls('ma'+num+'Alpha')}"><input id="v32r1MA${num}Width" type="number" min="1" max="10" step="0.5" value="${ls('ma'+num+'Width')}">`;
+    return `<div>${maLabel(num)}</div><input id="v32r1MA${num}Period" type="number" min="1" max="999" step="1" value="${ls('ma'+num+'Period')}"><input id="v32r1MA${num}Color" type="color" value="${ls('ma'+num+'Color')}"><input id="v32r1MA${num}Alpha" type="range" min="0" max="100" step="1" value="${ls('ma'+num+'Alpha')}"><input id="v32r1MA${num}Width" type="number" min="1" max="10" step="0.5" value="${ls('ma'+num+'Width')}">`;
   }
   function bindMA(num){
     ['Period','Color','Alpha','Width'].forEach(k=>{ const el=$id('v32r1MA'+num+k); if(!el||el.__v32r1Bound) return; el.__v32r1Bound=true; const f=()=>{setLS('ma'+num+k,el.value); updateMALabels(); calcExtraMAs(); try{draw();}catch(_e){}}; el.addEventListener('input',f,false); el.addEventListener('change',f,false); });
   }
   function updateMALabels(){ [4,5].forEach(num=>{ const l=$id('lblEMA'+num); if(l) l.textContent=maLabel(num); }); }
   function installMASettings(){
+    if(window.MA_FEATURE && typeof window.MA_FEATURE.rebuildSettings === "function"){
+      window.MA_FEATURE.rebuildSettings();
+      return;
+    }
     installMAToggles();
     const card=$id('patch8IndicatorCard') || [...document.querySelectorAll('#settingsModal .settings-card')].find(c=>/EMA|Indicator/i.test(c.textContent||''));
     if(!card) return;
     let wrap=$id('v32r1MASettings');
     if(!wrap){ wrap=document.createElement('div'); wrap.id='v32r1MASettings'; card.appendChild(wrap); }
-    wrap.innerHTML=`<div class="v32r1-ma-grid"><div class="head">MA</div><div class="head">Period</div><div class="head">Color</div><div class="head">Transp.</div><div class="head">Thick.</div>${maRow(4)}${maRow(5)}</div><div class="v32r1-note">MA4 and MA5 are fully independent. Values appear in the candle info block only when toggled ON.</div>`;
+    wrap.innerHTML=`<div class="v32r1-ma-grid"><div class="head">Indicator</div><div class="head">Period</div><div class="head">Color</div><div class="head">Transp.</div><div class="head">Thick.</div>${maRow(4)}${maRow(5)}</div>`;
     bindMA(4); bindMA(5);
   }
   function calcExtraMAs(){
     try{ if(typeof rebuildCanonicalMASeries === 'function') rebuildCanonicalMASeries(); }catch(_e){}
   }
   const prevIndicators=typeof indicators==='function'?indicators:null;
-  // PATCH_38: legacy extra-MA indicators wrapper disabled; canonical indicators() owns MA1-MA5.
-  function drawExtraMAs(){
-    return;
-  }
-  // PATCH_38: legacy MA4/MA5 redraw wrapper disabled.
-
   const prevAutoY=typeof autoYRange==='function'?autoYRange:null;
   if(prevAutoY&&!window.__v32r1AutoYWrapped){ window.__v32r1AutoYWrapped=true; autoYRange=function(vis){
     return candleOnlyYRange(vis);
@@ -15163,7 +15234,7 @@ If there is NO open position, use this Section 2 instead:
   function oldStyle(k,suf,def){ return localStorage.getItem('btc_futures_chart_v13_05_'+k+'_'+suf) || def; }
   function fmt(v){ const x=n(v); return x==null?'-':Math.round(x).toLocaleString('en-US'); }
   function period(num){ const x=n(get('ma'+num+'Period')); return x&&x>0?Math.round(x):Number(DEF['ma'+num+'Period']); }
-  function label(num){ return 'MA'+num+' EMA'+period(num); }
+  function label(num){ return 'EMA'+period(num); }
   function maEnabled(num){ const el=$id('tglEMA'+num); return !!(el&&el.checked); }
   function hexToRgba(hex,alphaPct){
     const a=Math.max(0,Math.min(100,n(alphaPct)??100))/100;
@@ -15174,6 +15245,10 @@ If there is NO open position, use this Section 2 instead:
   function width(num){ const x=n(get('ma'+num+'Width')); return x&&x>0?Math.max(1,Math.min(10,x)):2; }
   function valAt(arr,t){ if(!Array.isArray(arr)) return null; for(let i=arr.length-1;i>=0;i--){ if(Number(arr[i].time)<=Number(t)) return arr[i].value; } return null; }
   function ensureToggles(){
+    if(window.MA_SETTINGS_MODULE && typeof window.MA_SETTINGS_MODULE.ensureToggles === "function"){
+      window.MA_SETTINGS_MODULE.ensureToggles();
+      return;
+    }
     const box=document.querySelector('.indicator-toggles'); if(!box) return;
     const before=$id('tglVWAP')&&$id('tglVWAP').closest('label');
     [4,5].forEach(num=>{
@@ -15192,6 +15267,10 @@ If there is NO open position, use this Section 2 instead:
     return `<div>${name}</div><div>${periodHtml}</div><input id="${colorId}" type="color" value="${values.color}"><input id="${alphaId}" type="range" min="0" max="100" step="1" value="${values.alpha}"><input id="${widthId}" type="range" min="1" max="10" step="0.5" value="${values.width}" title="Thickness">`;
   }
   function rebuildIndicatorSettings(){
+    if(window.MA_FEATURE && typeof window.MA_FEATURE.rebuildSettings === "function"){
+      window.MA_FEATURE.rebuildSettings();
+      return;
+    }
     const card=$id('patch8IndicatorCard'); if(!card) return;
     const orphan=$id('v32r1MASettings'); if(orphan) orphan.remove();
     const desc=card.querySelector('.settings-card-desc'); if(desc) desc.textContent='Set period, color, transparency, and thickness in one row per indicator.';
@@ -15203,8 +15282,8 @@ If there is NO open position, use this Section 2 instead:
       ${row('MA1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width',{period:($id('emaPeriod1')&&$id('emaPeriod1').value)||'9',color:oldStyle('ema1','color','#ff7900'),alpha:oldStyle('ema1','alpha','100'),width:oldWidth('ema1')})}
       ${row('MA2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width',{period:($id('emaPeriod2')&&$id('emaPeriod2').value)||'21',color:oldStyle('ema2','color','#0000ff'),alpha:oldStyle('ema2','alpha','100'),width:oldWidth('ema2')})}
       ${row('MA3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width',{period:($id('emaPeriod3')&&$id('emaPeriod3').value)||'55',color:oldStyle('ema3','color','#d600a9'),alpha:oldStyle('ema3','alpha','100'),width:oldWidth('ema3')})}
-      ${row('MA4','v32r2MA4Period','v32r2MA4Color','v32r2MA4Alpha','v32r2MA4Width',{period:get('ma4Period','100'),color:get('ma4Color','#0b7a00'),alpha:get('ma4Alpha','100'),width:get('ma4Width','2')})}
-      ${row('MA5','v32r2MA5Period','v32r2MA5Color','v32r2MA5Alpha','v32r2MA5Width',{period:get('ma5Period','200'),color:get('ma5Color','#008c7a'),alpha:get('ma5Alpha','100'),width:get('ma5Width','2')})}
+      ${row('EMA'+period(4),'v32r2MA4Period','v32r2MA4Color','v32r2MA4Alpha','v32r2MA4Width',{period:get('ma4Period','100'),color:get('ma4Color','#0b7a00'),alpha:get('ma4Alpha','100'),width:get('ma4Width','2')})}
+      ${row('EMA'+period(5),'v32r2MA5Period','v32r2MA5Color','v32r2MA5Alpha','v32r2MA5Width',{period:get('ma5Period','200'),color:get('ma5Color','#008c7a'),alpha:get('ma5Alpha','100'),width:get('ma5Width','2')})}
       ${row('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','patch18VWAPWidth',{period:'',color:oldStyle('vwap','color','#6f6658'),alpha:oldStyle('vwap','alpha','100'),width:oldWidth('vwap')})}`;
     bindBaseRows(); bindExtraRows();
   }
@@ -15228,15 +15307,9 @@ If there is NO open position, use this Section 2 instead:
       });
     });
   }
-  let ema4=[], ema5=[]; window.ema4=ema4; window.ema5=ema5;
   function calcExtraMAs(){
     try{ if(typeof rebuildCanonicalMASeries === 'function') rebuildCanonicalMASeries(); }catch(_e){}
   }
-  // PATCH_38: legacy extra-MA indicators wrapper disabled; canonical indicators() owns MA1-MA5.
-  function drawExtraMAs(){
-    return;
-  }
-  // PATCH_38: legacy MA4/MA5 redraw wrapper disabled.
   if(typeof autoYRange==='function'&&!window.__v32r2AutoYWrapped){ window.__v32r2AutoYWrapped=true; autoYRange=function(vis){
     return candleOnlyYRange(vis);
   }; }
@@ -15503,18 +15576,22 @@ If there is NO open position, use this Section 2 instead:
   function maColor(n){ return n<=3 ? ls(STYLE_PREFIX+"ema"+n+"_color", ["#ff7900","#0000ff","#d600a9"][n-1]) : ls(EXTRA_PREFIX+"ma"+n+"Color", n===4?"#0b7a00":"#008c7a"); }
   function maAlpha(n){ return n<=3 ? ls(STYLE_PREFIX+"ema"+n+"_alpha", "100") : ls(EXTRA_PREFIX+"ma"+n+"Alpha", "100"); }
   function maWidth(n){ return n<=3 ? ls(WIDTH_PREFIX+"ema"+n+"_width", "2") : ls(EXTRA_PREFIX+"ma"+n+"Width", "2"); }
-  function maLabel(n){ return "MA" + n; }
+  function maLabel(n){ return "EMA" + maPeriod(n); }
   function row(n){ return `<div>${maLabel(n)}</div><div><input id="v33MA${n}Period" type="number" min="1" max="999" step="1" value="${maPeriod(n)}"></div><input id="v33MA${n}Color" type="color" value="${maColor(n)}"><input id="v33MA${n}Alpha" type="range" min="0" max="100" step="1" value="${maAlpha(n)}"><input id="v33MA${n}Width" type="range" min="1" max="10" step="0.5" value="${maWidth(n)}" title="Thickness">`; }
   function updateMaToggleLabels(){
-    [["lblEMA20",1],["lblEMA50",2],["lblEMA3",3],["lblEMA4",4],["lblEMA5",5]].forEach(([id,n])=>{ const l=$id(id); if(l) l.textContent=`MA${n} EMA${maPeriod(n)}`; });
+    [["lblEMA20",1],["lblEMA50",2],["lblEMA3",3],["lblEMA4",4],["lblEMA5",5]].forEach(([id,n])=>{ const l=$id(id); if(l) l.textContent=`EMA${maPeriod(n)}`; });
   }
   function ensureMaToggles(){
+    if(window.MA_SETTINGS_MODULE && typeof window.MA_SETTINGS_MODULE.ensureToggles === "function"){
+      window.MA_SETTINGS_MODULE.ensureToggles();
+      return;
+    }
     const box = document.querySelector(".indicator-toggles"); if(!box) return;
     const before = $id("tglVWAP") && $id("tglVWAP").closest("label");
     [4,5].forEach(n=>{
       if(!$id("tglEMA"+n)){
         const lab=document.createElement("label"); lab.className="toggle";
-        lab.innerHTML = `<input id="tglEMA${n}" type="checkbox"><span id="lblEMA${n}">MA${n} EMA${maPeriod(n)}</span>`;
+        lab.innerHTML = `<input id="tglEMA${n}" type="checkbox"><span id="lblEMA${n}">EMA${maPeriod(n)}</span>`;
         box.insertBefore(lab,before||null);
       }
       const el=$id("tglEMA"+n); if(el && !el.__v33Bound){ el.__v33Bound=true; el.addEventListener("change",()=>{try{draw();}catch(_e){}},false); }
@@ -15531,6 +15608,10 @@ If there is NO open position, use this Section 2 instead:
     });
   }
   function rebuildMaSettings(){
+    if(window.MA_FEATURE && typeof window.MA_FEATURE.rebuildSettings === "function"){
+      window.MA_FEATURE.rebuildSettings();
+      return;
+    }
     const card=$id("patch8IndicatorCard"); if(!card) return;
     const old=$id("v32r1MASettings"); if(old) old.remove();
     const desc=card.querySelector(".settings-card-desc"); if(desc) desc.textContent="Set period, color, transparency, and thickness in one row per indicator.";
@@ -15571,8 +15652,8 @@ If there is NO open position, use this Section 2 instead:
     function stackSlots(){
       try{
         const provider =
-          (window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots === "function")
-            ? window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots
+          (window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function")
+            ? window.MA_FEATURE.getCanonicalMASlots
             : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
         const slots = provider ? provider() : null;
         if(!Array.isArray(slots) || slots.length !== 5) return null;
@@ -17287,431 +17368,7 @@ If there is NO open position, use this Section 2 instead:
   window.Patch33CleanBase = {version:MODULE, install:installAll};
 })();
 
-(() => {
-  "use strict";
-  const MODULE = "EMA_CHART_OVERLAY_MODULE";
-  const $id = id => document.getElementById(id);
-  const SLOT_IDS = [1,2,3,4,5];
-  const LEGACY_SERIES_BY_SLOT = {1:"ema20",2:"ema50",3:"ema3",4:"ema4",5:"ema5"};
-  const STYLE = "btc_futures_chart_v13_05_";
-  const WIDTH = "btc_futures_chart_v13_18_";
-  const EXTRA = "btc_futures_chart_v13_32r1_";
-  const TOGGLE = "btc_futures_chart_v12_ema_toggle_";
-  const CORE_PERIOD_KEYS = [null,"ema_period_1","ema_period_2","ema_period_3"];
-  const STORE = (typeof window.STORE === "string" ? window.STORE : "btc_futures_chart_v12_");
-  const defaults = {
-    1:{period:9,color:"#ff7900",alpha:100,width:2,seriesName:"ema20",toggle:"tglEMA20",label:"lblEMA20",periodEl:"emaPeriod1"},
-    2:{period:21,color:"#0000ff",alpha:100,width:2,seriesName:"ema50",toggle:"tglEMA50",label:"lblEMA50",periodEl:"emaPeriod2"},
-    3:{period:55,color:"#d600a9",alpha:100,width:2,seriesName:"ema3",toggle:"tglEMA3",label:"lblEMA3",periodEl:"emaPeriod3"},
-    4:{period:100,color:"#0b7a00",alpha:100,width:2,seriesName:"ema4",toggle:"tglEMA4",label:"lblEMA4"},
-    5:{period:200,color:"#008c7a",alpha:100,width:2,seriesName:"ema5",toggle:"tglEMA5",label:"lblEMA5"},
-    vwap:{color:"#6f6658",alpha:100,width:2,toggle:"tglVWAP"}
-  };
-  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
-  const num = (v,d=null) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
-  const ls = (k,d) => { const v = localStorage.getItem(k); return v == null ? String(d) : v; };
-  const set = (k,v) => localStorage.setItem(k,String(v));
-  const corePeriodKey = n => STORE + CORE_PERIOD_KEYS[n];
-  const periodKey = n => n <= 3 ? corePeriodKey(n) : EXTRA + "ma" + n + "Period";
-  const toggleKey = n => TOGGLE + n;
-  const colorKey = n => n <= 3 ? STYLE + "ema" + n + "_color" : EXTRA + "ma" + n + "Color";
-  const alphaKey = n => n <= 3 ? STYLE + "ema" + n + "_alpha" : EXTRA + "ma" + n + "Alpha";
-  const widthKey = n => n <= 3 ? WIDTH + "ema" + n + "_width" : EXTRA + "ma" + n + "Width";
-  const vwapColorKey = () => STYLE + "vwap_color";
-  const vwapAlphaKey = () => STYLE + "vwap_alpha";
-  const vwapWidthKey = () => WIDTH + "vwap_width";
-  function period(n){ return Math.max(1,Math.min(999,Math.round(num(ls(periodKey(n),defaults[n].period),defaults[n].period)))); }
-  function color(n){ return ls(colorKey(n),defaults[n].color); }
-  function alpha(n){ return clamp(num(ls(alphaKey(n),defaults[n].alpha),defaults[n].alpha),0,100); }
-  function width(n){ return clamp(num(ls(widthKey(n),defaults[n].width),defaults[n].width),1,10); }
-  function vwapColor(){ return ls(vwapColorKey(),defaults.vwap.color); }
-  function vwapAlpha(){ return clamp(num(ls(vwapAlphaKey(),defaults.vwap.alpha),defaults.vwap.alpha),0,100); }
-  function vwapWidth(){ return clamp(num(ls(vwapWidthKey(),defaults.vwap.width),defaults.vwap.width),1,10); }
-  function rgba(hex,aPct){
-    const a = clamp(num(aPct,100),0,100)/100;
-    let h = String(hex||"#000000").replace("#","");
-    if(h.length===3) h=h.split("").map(c=>c+c).join("");
-    h=(h+"000000").slice(0,6);
-    return `rgba(${parseInt(h.slice(0,2),16)||0},${parseInt(h.slice(2,4),16)||0},${parseInt(h.slice(4,6),16)||0},${a})`;
-  }
-  function strokeFor(n){ return rgba(color(n),alpha(n)); }
-  function vwapStroke(){ return rgba(vwapColor(),vwapAlpha()); }
-  function enabled(n){
-    const el=$id(defaults[n].toggle);
-    if(el) return !!el.checked;
-    try{
-      const raw = localStorage.getItem(toggleKey(n));
-      return raw === "1";
-    }catch(_e){
-      return false;
-    }
-  }
-  function tooltipEnabled(n){
-    const state = window.__maisoTooltipToggleState;
-    if(state && typeof state[n] === "boolean") return state[n];
-    return enabled(n);
-  }
-  function syncHiddenPeriodInputs(){
-    [1,2,3].forEach(n=>{ const el=$id(defaults[n].periodEl); if(el) el.value = period(n); });
-  }
-  function updateLabels(){
-    [1,2,3,4,5].forEach(n=>{ const l=$id(defaults[n].label); if(l) l.textContent = `MA${n} EMA${period(n)}`; });
-  }
-  function ensureToggle(n){
-    const box = document.querySelector(".indicator-toggles"); if(!box) return;
-    const before = $id("tglVWAP") && $id("tglVWAP").closest("label");
-    let el = $id(defaults[n].toggle);
-    if(!el){
-      const lab=document.createElement("label"); lab.className="toggle";
-      lab.innerHTML = `<input id="${defaults[n].toggle}" type="checkbox"><span id="${defaults[n].label}">MA${n} EMA${period(n)}</span>`;
-      box.insertBefore(lab,before||null);
-      el = $id(defaults[n].toggle);
-    }
-    // Remove duplicated same-ID toggles and stale listeners on MA4/MA5 by cloning only those dynamic controls.
-    const all = Array.from(document.querySelectorAll("#" + defaults[n].toggle));
-    all.slice(1).forEach(x=>{ const lab=x.closest("label"); if(lab) lab.remove(); else x.remove(); });
-    if(n >= 4 && el && !el.__maisoClean){
-      const checked = !!el.checked;
-      const lab = el.closest("label");
-      const cloneLab = lab ? lab.cloneNode(true) : null;
-      if(cloneLab && lab.parentNode){
-        lab.parentNode.replaceChild(cloneLab,lab);
-        el = $id(defaults[n].toggle);
-        if(el) el.checked = checked;
-      }
-    }
-    el = $id(defaults[n].toggle);
-    if(el){
-      try{
-        const raw = localStorage.getItem(toggleKey(n));
-        if(raw != null) el.checked = raw === "1";
-      }catch(_e){}
-    }
-    if(el && !el.__maisoClean){
-      el.__maisoClean = true;
-      el.addEventListener("change",()=>{ 
-        try{ localStorage.setItem(toggleKey(n),el.checked ? "1" : "0"); }catch(_e){}
-        try{ if(window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState === "function"){ window.EMA_CHART_OVERLAY_MODULE.ensureDepthForCurrentState(); } }catch(_e){}
-        try{ if(typeof indicators==='function') indicators(); }catch(_e){}
-        try{ draw(); }catch(_e){}
-      },false);
-    }
-  }
-  function ensureToggles(){ [4,5].forEach(ensureToggle); updateLabels(); }
-  function computeEMA(src,p){ return typeof EMA === "function" ? EMA(src,p) : []; }
-  function assignLegacySeries(slot,series){
-    const key = LEGACY_SERIES_BY_SLOT[slot];
-    if(!key) return;
-    window[key] = series;
-    if(slot === 1) ema20 = series;
-    else if(slot === 2) ema50 = series;
-    else if(slot === 3) ema3 = series;
-    else if(slot === 4) ema4 = series;
-    else if(slot === 5) ema5 = series;
-  }
-  function getCanonicalMASlots(){
-    return SLOT_IDS.map(n => {
-      const slotPeriod = period(n);
-      const legacySeriesName = LEGACY_SERIES_BY_SLOT[n];
-      const series = window[legacySeriesName] || [];
-      return {
-        slot:n,
-        slotId:"MA" + n,
-        period:slotPeriod,
-        color:color(n),
-        alpha:alpha(n),
-        width:width(n),
-        stroke:strokeFor(n),
-        enabled:enabled(n),
-        label:"MA" + n + " EMA" + slotPeriod,
-        seriesName:legacySeriesName,
-        series
-      };
-    });
-  }
-  function getCanonicalMAPeriods(){
-    return getCanonicalMASlots().map(slot => slot.period);
-  }
-  function getActiveChartMASeries(){
-    const out = {};
-    getCanonicalMASlots().forEach(slot => { out[slot.slot] = slot.series; });
-    return out;
-  }
-  function rebuildSeries(){
-    try{
-      syncHiddenPeriodInputs();
-      SLOT_IDS.forEach(n => assignLegacySeries(n,computeEMA(candles,period(n))));
-      if(typeof VWAP === "function") window.vwap = vwap = VWAP(candles);
-    }catch(e){ console.error(MODULE + " rebuildSeries failed", e); }
-    updateLabels();
-  }
-  async function ensureDepthForCurrentState(){
-    if(!Array.isArray(candles) || !candles.length) return;
-    if(typeof chartDesiredClosedDepth !== "function" || typeof olderIfNeeded !== "function" || typeof range !== "function") return;
-    const need = chartDesiredClosedDepth(visibleCount || DEF_VISIBLE);
-    if(candles.length >= need) return;
-    const prevVisible = visibleCount;
-    const prevRight = rightOffset;
-    const prevManualY = manualY;
-    const prevYMin = yMin;
-    const prevYMax = yMax;
-    try{
-      olderFetchArmed = true;
-      olderFetchTargetVisible = Math.max(Number(olderFetchTargetVisible) || 0,Number(prevVisible) || 0);
-      await olderIfNeeded(range());
-    }catch(_e){}
-    if(Number.isFinite(prevVisible) && prevVisible > 0) visibleCount = prevVisible;
-    if(Number.isFinite(prevRight) && prevRight >= 0) rightOffset = prevRight;
-    manualY = !!prevManualY;
-    if(prevManualY){
-      yMin = prevYMin;
-      yMax = prevYMax;
-    }
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
-  }
-  function handlePeriodMaybeIncrease(n,oldVal,newVal){
-    if(!(newVal > oldVal)) return;
-    ensureDepthForCurrentState();
-  }
-  const prevIndicators = typeof indicators === "function" ? indicators : null;
-  indicators = window.indicators = function(){
-    if(prevIndicators) prevIndicators.apply(this,arguments);
-    rebuildSeries();
-  };
-  function row(n){
-    return `<div>MA${n}</div><div><input id="maisoMA${n}Period" type="number" min="1" max="999" step="1" value="${period(n)}"></div><input id="maisoMA${n}Color" type="color" value="${color(n)}"><input id="maisoMA${n}Alpha" type="range" min="0" max="100" step="1" value="${alpha(n)}"><input id="maisoMA${n}Width" type="range" min="1" max="10" step="0.5" value="${width(n)}">`;
-  }
-  function rebuildSettings(){
-    const card=$id("patch8IndicatorCard"); if(!card) return;
-    const desc=card.querySelector(".settings-card-desc"); if(desc) desc.textContent = "Each MA and VWAP is an independent chart element. They share this panel only.";
-    let grid=card.querySelector(".patch8-indicator-grid");
-    if(!grid){ grid=document.createElement("div"); card.appendChild(grid); }
-    grid.className = "patch8-indicator-grid maiso-grid";
-    grid.innerHTML = `<div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>${[1,2,3,4,5].map(row).join("")}<div>VWAP</div><div><span style="color:var(--muted)">-</span></div><input id="maisoVWAPColor" type="color" value="${vwapColor()}"><input id="maisoVWAPAlpha" type="range" min="0" max="100" step="1" value="${vwapAlpha()}"><input id="maisoVWAPWidth" type="range" min="1" max="10" step="0.5" value="${vwapWidth()}">`;
-    [1,2,3,4,5].forEach(n=>{
-      const p=$id(`maisoMA${n}Period`), c=$id(`maisoMA${n}Color`), a=$id(`maisoMA${n}Alpha`), w=$id(`maisoMA${n}Width`);
-      const syncPeriod=()=>{ 
-        const oldPeriod = period(n);
-        const nextPeriod = clamp(Math.round(num(p.value,defaults[n].period)),1,999);
-        set(periodKey(n), nextPeriod);
-        syncHiddenPeriodInputs();
-        rebuildSeries();
-        handlePeriodMaybeIncrease(n,oldPeriod,nextPeriod);
-        try{ if(window.MA_STACK_STRIP) window.MA_STACK_STRIP.refreshSoon(); }catch(_e){}
-        try{ draw(); }catch(_e){}
-      };
-      const syncColor=()=>{ set(colorKey(n), c.value); try{ draw(); }catch(_e){} };
-      const syncAlpha=()=>{ set(alphaKey(n), clamp(num(a.value,defaults[n].alpha),0,100)); try{ draw(); }catch(_e){} };
-      const syncWidth=()=>{ set(widthKey(n), clamp(num(w.value,defaults[n].width),1,10)); try{ draw(); }catch(_e){} };
-      if(p){p.addEventListener("input",syncPeriod,false);p.addEventListener("change",syncPeriod,false);} if(c){c.addEventListener("input",syncColor,false);c.addEventListener("change",syncColor,false);} if(a){a.addEventListener("input",syncAlpha,false);a.addEventListener("change",syncAlpha,false);} if(w){w.addEventListener("input",syncWidth,false);w.addEventListener("change",syncWidth,false);} });
-    [["maisoVWAPColor",vwapColorKey(),vwapColor],["maisoVWAPAlpha",vwapAlphaKey(),vwapAlpha],["maisoVWAPWidth",vwapWidthKey(),vwapWidth]].forEach(([id,key,normal])=>{ const el=$id(id); if(!el) return; const sync=()=>{ set(key, id.endsWith("Width")?clamp(num(el.value,2),1,10):id.endsWith("Alpha")?clamp(num(el.value,100),0,100):el.value); try{ draw(); }catch(_e){} }; el.addEventListener("input",sync,false); el.addEventListener("change",sync,false); });
-  }
-  function cleanDrawInd(points,vis,map,mapX,mapY,col,w){
-    if(typeof indVisible !== "function" || !ctx) return;
-    const pts = indVisible(points,vis); if(!pts || pts.length < 2) return;
-    ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = w; ctx.beginPath(); let started=false;
-    for(const p of pts){ const i=map.get(p.time); if(i===undefined) continue; const x=mapX(i), y=mapY(p.value); if(!started){ctx.moveTo(x,y); started=true;} else ctx.lineTo(x,y); }
-    if(started) ctx.stroke(); ctx.restore();
-  }
-  function drawCleanExtra(vis,mapX,mapY,slot,clip){
-    return;
-  }
-  const prevAutoY = typeof autoYRange === "function" ? autoYRange : null;
-  autoYRange = window.autoYRange = function(vis){
-    return candleOnlyYRange(vis);
-  };
-  // PATCH_38: MA4/MA5 are drawn by the canonical candle draw pass, not by a late redraw wrapper.
-  if(typeof openSettings === "function" && !window.__maisoOpenWrapped){
-    const prevOpen = openSettings; window.__maisoOpenWrapped = true;
-    openSettings = window.openSettings = function(){ const r=prevOpen.apply(this,arguments); setTimeout(rebuildSettings,0); setTimeout(rebuildSettings,150); setTimeout(rebuildSettings,500); return r; };
-  }
-  function install(){ ensureToggles(); syncHiddenPeriodInputs(); rebuildSeries(); rebuildSettings(); updateLabels(); try{ draw(); }catch(_e){} }
-  window.MA_VWAP_ISOLATION_R5 = {version:MODULE,install,period,color,alpha,width,vwapColor,vwapAlpha,vwapWidth};
-  window.EMA_CHART_OVERLAY_MODULE = {
-    version:MODULE,
-    install,
-    period,
-    color,
-    alpha,
-    width,
-    strokeFor,
-    enabled,
-    getCanonicalMASlots,
-    getCanonicalMAPeriods,
-    getActiveChartMASeries,
-    ensureDepthForCurrentState,
-    handleToggleChange(el){
-      if(!el || !el.id) return;
-      const byId = {tglEMA20:1,tglEMA50:2,tglEMA3:3,tglEMA4:4,tglEMA5:5};
-      const n = byId[el.id];
-      if(!n) return;
-      try{ localStorage.setItem(toggleKey(n),el.checked ? "1" : "0"); }catch(_e){}
-      if(el.checked) ensureDepthForCurrentState();
-    }
-  };
-  window.getCanonicalMASlots = getCanonicalMASlots;
-  window.getCanonicalMAPeriods = getCanonicalMAPeriods;
-  window.getActiveChartMASeries = getActiveChartMASeries;
-  window.rebuildCanonicalMASeries = function(){
-    rebuildSeries();
-    return getActiveChartMASeries();
-  };
-  install(); setTimeout(install,100); setTimeout(install,700); window.addEventListener("load",()=>setTimeout(install,0),{once:true});
-})();
-
-(() => {
-  "use strict";
-  const MODULE = "V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_PLAIN";
-  const STYLE = "btc_futures_chart_v13_05_";
-  const EXTRA = "btc_futures_chart_v13_32r1_";
-  const DEFAULT_COLORS = {
-    1:"#ff7900",
-    2:"#0000ff",
-    3:"#d600a9",
-    4:"#0b7a00",
-    5:"#008c7a"
-  };
-  const toggles = {
-    1:"tglEMA20",
-    2:"tglEMA50",
-    3:"tglEMA3",
-    4:"tglEMA4",
-    5:"tglEMA5"
-  };
-  const labels = {1:"lblEMA20",2:"lblEMA50",3:"lblEMA3",4:"lblEMA4",5:"lblEMA5"};
-  const seriesNames = {
-    1:"ema20",
-    2:"ema50",
-    3:"ema3",
-    4:"ema4",
-    5:"ema5"
-  };
-  const colorKey = n => n <= 3 ? STYLE + "ema" + n + "_color" : EXTRA + "ma" + n + "Color";
-  const $id = id => document.getElementById(id);
-  const stored = (key,def) => {
-    try{
-      const v = localStorage.getItem(key);
-      return v == null ? def : v;
-    }catch(_e){
-      return def;
-    }
-  };
-  const maColor = n => stored(colorKey(n),DEFAULT_COLORS[n]);
-  const isOn = n => {
-    if(window.__maisoTooltipToggleState && typeof window.__maisoTooltipToggleState[n] === "boolean"){
-      return window.__maisoTooltipToggleState[n];
-    }
-    const el = $id(toggles[n]);
-    return !!(el && el.checked);
-  };
-  const slotMeta = n => {
-    try{
-      const api = window.EMA_CHART_OVERLAY_MODULE || null;
-      if(api && typeof api.getCanonicalMASlots === "function"){
-        const slots = api.getCanonicalMASlots();
-        if(Array.isArray(slots)){
-          return slots.find(s => Number(s && s.slot) === Number(n)) || null;
-        }
-      }
-    }catch(_e){}
-    return null;
-  };
-  const label = n => {
-    const slot = slotMeta(n);
-    if(slot && Number.isFinite(Number(slot.period))){
-      return "MA" + n + " EMA" + Number(slot.period);
-    }
-    const el = $id(labels[n]);
-    if(el && el.textContent){
-      const plain = String(el.textContent).replace(/\s+/g,"").trim();
-      if(/^EMA\d+$/i.test(plain)){
-        return "MA" + n + " " + plain.toUpperCase();
-      }
-      return "MA" + n + " " + plain;
-    }
-    return "MA" + n;
-  };
-  const series = n => {
-    try{
-      const api = window.EMA_CHART_OVERLAY_MODULE || null;
-      if(api && typeof api.getActiveChartMASeries === "function"){
-        const active = api.getActiveChartMASeries();
-        if(active && Array.isArray(active[n])) return active[n];
-      }
-      return window[seriesNames[n]];
-    }catch(_e){
-      return null;
-    }
-  };
-  const valueAt = (arr,t) => {
-    if(typeof valAt === "function") return valAt(arr,t);
-    if(!Array.isArray(arr)) return null;
-    for(let i=arr.length-1;i>=0;i--){
-      if(Number(arr[i].time) <= Number(t)) return arr[i].value;
-    }
-    return null;
-  };
-  const fmtPrice = v => {
-    const n = Number(v);
-    return Number.isFinite(n) ? Math.round(n).toLocaleString("en-US") : "-";
-  };
-  const textOf = line => String(line && line.text != null ? line.text : line || "");
-  const fontOf = () => "11px Arial";
-
-  if(typeof candleTip !== "function") return;
-
-  candleTip = window.candleTip = function(c){
-    const lines = [
-      {text:formatDateTime(c.time * 1000)},
-      {text:"O : " + ip(c.open)},
-      {text:"H : " + ip(c.high)},
-      {text:"L : " + ip(c.low)},
-      {text:"C : " + ip(c.close)},
-      {text:"V : " + fv(c.volume)}
-    ];
-
-    [1,2,3,4,5].forEach(n => {
-      try{
-        if(isOn(n)){
-          lines.push({
-            text:label(n) + " : " + fmtPrice(valueAt(series(n),c.time)),
-            color:maColor(n),
-            bold:false
-          });
-        }
-      }catch(_e){}
-    });
-
-    ctx.save();
-    const pad = 7;
-    const lh = 14;
-    let tw = 0;
-    for(const line of lines){
-      ctx.font = fontOf(line);
-      tw = Math.max(tw,ctx.measureText(textOf(line)).width);
-    }
-    tw += pad * 2;
-    const th = lines.length * lh + pad * 2;
-    const x = Math.max(8,canvas.clientWidth - RIGHT_AXIS - tw - 12);
-    const y = 8;
-
-    ctx.fillStyle = "rgba(255,255,255,.96)";
-    ctx.strokeStyle = "#d9dce1";
-    ctx.fillRect(x,y,tw,th);
-    ctx.strokeRect(x,y,tw,th);
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-
-    lines.forEach((line,i) => {
-      ctx.font = fontOf(line);
-      ctx.fillStyle = line.color || "#1e2329";
-      ctx.fillText(textOf(line),x+pad,y+pad+i*lh);
-    });
-    ctx.restore();
-  };
-
-  window.V13_CURSOR_TOOLTIP_MA_VALUE_COLOR_PLAIN = {version:MODULE};
-})();
+// MA overlay + MA tooltip ownership moved to Features/ma/* modules.
 
 (() => {
   "use strict";
@@ -18953,8 +18610,8 @@ If there is NO open position, use this Section 2 instead:
   function currentMaSlots({allowStartupFallback=true}={}){
     try{
       const provider =
-        (window.EMA_CHART_OVERLAY_MODULE && typeof window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots === "function")
-          ? window.EMA_CHART_OVERLAY_MODULE.getCanonicalMASlots
+        (window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function")
+          ? window.MA_FEATURE.getCanonicalMASlots
           : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
       const slots = provider ? provider() : null;
       if(Array.isArray(slots) && slots.length === 5){
