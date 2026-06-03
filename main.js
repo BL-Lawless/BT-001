@@ -13976,9 +13976,7 @@ startTradeAuto();
     btn.title = "Show/hide enabled MA and VWAP lines";
     const sync = () => {
       const on = localStorage.getItem(IND_VIS_KEY21) !== "0";
-      btn.innerHTML = on
-        ? `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M4 7.25h16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" opacity=".42"/><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" opacity=".42"/><path d="M8 16.75h8" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" opacity=".42"/></svg>`
-        : `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M4 7.25h16" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/><path d="M8 16.75h8" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>`;
+      btn.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>`;
       btn.classList.toggle("off", !on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
     };

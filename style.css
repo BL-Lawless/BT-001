@@ -775,7 +775,7 @@ button:hover{filter:brightness(1.04)}
   border:1px solid rgba(190,196,205,.9);
   border-radius:6px;
   background:rgba(255,255,255,.82);
-  color:#111;
+  color:#9ca3af;
   font-size:13px;
   line-height:1;
   display:inline-flex;
@@ -784,8 +784,8 @@ button:hover{filter:brightness(1.04)}
   cursor:pointer;
 }
 .v21-indicator-eye.off{
-  color:#9ca3af;
-  opacity:.55;
+  color:#111;
+  opacity:1;
   text-decoration:none;
 }
 .v21-settings-row{
@@ -1779,10 +1779,6 @@ button:hover{filter:brightness(1.04)}
   margin-bottom:6px;
 }
 .calc-module-col-title{
-  display:flex;
-  align-items:center;
-  gap:7px;
-  flex-wrap:wrap;
   font-size:13px;
   font-weight:400;
   text-transform:uppercase;
@@ -1790,18 +1786,29 @@ button:hover{filter:brightness(1.04)}
 }
 .calc-module-express-toggle{
   min-width:0;
-  padding:0 9px;
-  background:#f3f4f6;
-  border-color:#cfd4dc;
+  height:auto;
+  margin:0;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:flex-start;
+  gap:6px;
+  background:transparent;
+  border:0;
+  border-radius:0;
+  color:#6b7280;
+  font-size:11px;
+  font-weight:400;
+  line-height:1.2;
+  user-select:none;
+  cursor:pointer;
+  box-shadow:none;
 }
 .calc-module-express-toggle.is-on{
-  background:#dcfce7;
-  border-color:#16a34a;
-  color:#166534;
-  box-shadow:inset 0 0 0 1px rgba(22,163,74,.22);
+  color:#1f2937;
 }
 .calc-module-express-toggle.is-off{
-  opacity:.88;
+  opacity:.9;
 }
 .calc-module-dir{
   border:0;
@@ -1976,6 +1983,12 @@ button:hover{filter:brightness(1.04)}
   opacity:.55;
   cursor:not-allowed;
 }
+.calc-module-express-row{
+  margin-top:6px;
+  display:flex;
+  align-items:center;
+  justify-content:flex-start;
+}
 .calc-module-levels-toggle{
   height:30px;
   min-width:76px;
@@ -2035,6 +2048,12 @@ button:hover{filter:brightness(1.04)}
 }
 .calc-module-mini-toggle.is-on{
   box-shadow:inset 0 0 0 1px rgba(240,185,11,.45);
+}
+.calc-module-express-toggle input{
+  margin:0;
+  width:12px;
+  height:12px;
+  accent-color:#6b7280;
 }
 .calc-module-sl-line-toggle{
   min-width:0;

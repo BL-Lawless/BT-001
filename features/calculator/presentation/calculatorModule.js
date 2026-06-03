@@ -292,7 +292,7 @@
         <div class="calc-module-grid">
           <div class="calc-module-col">
             <div class="calc-module-col-head">
-              <div class="calc-module-col-title"><label class="calc-module-mini-toggle calc-module-express-toggle" id="calcModuleExpressToggleWrap" title="Express Mode skips preflight/review and executes immediately"><input id="calcModuleExpressToggle" type="checkbox" aria-label="Enable Express Mode"><span>Express</span></label><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></div>
+              <div class="calc-module-col-title"><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></div>
               <button class="calc-module-add" id="calcModuleAddEntry" type="button">Add</button>
             </div>
             <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
@@ -341,6 +341,7 @@
               <span>CBS</span>
             </label>
           </div>
+          <div class="calc-module-express-row"><label class="calc-module-express-toggle" id="calcModuleExpressToggleWrap" title="Express Mode skips preflight/review and executes immediately"><input id="calcModuleExpressToggle" type="checkbox" aria-label="Execute now confirm later"><span>Execute now confirm later</span></label></div>
           <div class="calc-module-status" id="calcModuleStatus"></div>
         </div>
       </div>`;
@@ -832,7 +833,7 @@
   }
   function buildReadStateSnapshot(position,snapshot,mapped){
     const sym = currentSymbol();
-    const dir = position && position.side ? position.side : direction;
+    const dir = position && position.side ? position.side : null;
     const limitOrderMap = new Map();
     const mappedRows = []
       .concat(mapped && Array.isArray(mapped.entryRows) ? mapped.entryRows : [])
@@ -847,7 +848,7 @@
     return {
       at:new Date().toISOString(),
       symbol:sym,
-      direction:dir === "SHORT" ? "SHORT" : "LONG",
+      direction:dir === "SHORT" ? "SHORT" : dir === "LONG" ? "LONG" : null,
       openPosition:position
         ? {
             side:position.side === "SHORT" ? "SHORT" : "LONG",
@@ -971,23 +972,30 @@
   }
   function inferDirectionForSend(livePosition){
     if(livePosition && (livePosition.side === "LONG" || livePosition.side === "SHORT")) return livePosition.side;
-    if(lastReadStateSnapshot && (lastReadStateSnapshot.direction === "LONG" || lastReadStateSnapshot.direction === "SHORT")){
+    if(
+      lastReadStateSnapshot &&
+      lastReadStateSnapshot.openPosition &&
+      (lastReadStateSnapshot.direction === "LONG" || lastReadStateSnapshot.direction === "SHORT")
+    ){
       return lastReadStateSnapshot.direction;
     }
     return direction === "SHORT" ? "SHORT" : "LONG";
   }
-  function inferPositionSideForNewOrder(contextDirection){
-    const dir = contextDirection === "SHORT" ? "SHORT" : "LONG";
-    const fromSnapshot = lastReadStateSnapshot && lastReadStateSnapshot.openPosition
-      ? toUpper(lastReadStateSnapshot.openPosition.positionSide || "")
-      : "";
-    if(fromSnapshot === "LONG" || fromSnapshot === "SHORT" || fromSnapshot === "BOTH") return fromSnapshot;
-    for(const row of rows("calcModuleEntryRows").concat(rows("calcModuleExitRows"))){
-      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
-      const ps = toUpper(meta && meta.positionSide || "");
-      if(ps === "LONG" || ps === "SHORT" || ps === "BOTH") return ps;
+  function inferPositionSideForNewOrder(contextDirection,livePosition,rowPlan){
+    const rowType = String(rowPlan && rowPlan.payload && rowPlan.payload.rowType || "");
+    const rowRef = rowPlan && rowPlan.rowRef;
+    const meta = rowRef && (rowRef.__binanceLimitOrderMeta || (rowRef.dataset && rowRef.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(rowRef.dataset.calcRowId) : null));
+    const livePs = toUpper(livePosition && livePosition.positionSide || "");
+    if(livePosition){
+      if(livePs === "LONG" || livePs === "SHORT") return livePs;
+      if(livePs === "BOTH") return "BOTH";
     }
-    return dir;
+    if(rowType === "entry"){
+      return "BOTH";
+    }
+    const metaPs = toUpper(meta && meta.positionSide || "");
+    if(metaPs === "LONG" || metaPs === "SHORT" || metaPs === "BOTH") return metaPs;
+    return "BOTH";
   }
   function sideForNewRow(rowType,contextDirection){
     const dir = contextDirection === "SHORT" ? "SHORT" : "LONG";
@@ -1658,7 +1666,8 @@
         rowType,
         level,
         quantity:lot,
-        side:sideForNewRow(rowType,contextDirection)
+        side:sideForNewRow(rowType,contextDirection),
+        reduceOnlyOverride:rowType === "exit"
       }
     };
     if(level == null || level <= 0 || lot == null || lot <= 0){
@@ -2078,7 +2087,15 @@
       });
     }
 
-    if(!lastReadStateSnapshot){
+    const hasManualWritableRows = limitRowRecords.some(record => {
+      const row = record && record.row;
+      return row && !isRowEmpty(row) && !isOpenPositionRow(row) && !(record.meta && row.dataset && row.dataset.source === "binance-limit");
+    });
+    const hasExistingBinanceRows = limitRowRecords.some(record => {
+      const row = record && record.row;
+      return !!(record && record.meta && row && row.dataset && row.dataset.source === "binance-limit");
+    });
+    if(!lastReadStateSnapshot && !hasManualWritableRows && (hasExistingBinanceRows || !!livePos || !!slSendEnabled || !!cbsEnabled)){
       plan.blocked = true;
       addPlanRow(plan,{
         section:"LIMIT Orders",
@@ -2262,7 +2279,7 @@
     }
     if(rowPlan.mode === "new"){
       const p = rowPlan.payload || {};
-      const ps = inferPositionSideForNewOrder(contextDirection);
+      const ps = inferPositionSideForNewOrder(contextDirection,rowPlan.livePosition || null,rowPlan);
       const send = {
         symbol:String(currentSymbol()),
         side:String(p.side || rowPlan.side || sideForNewRow(p.rowType || "entry",contextDirection)),
@@ -2463,6 +2480,7 @@
       const livePos = preflightState.livePos;
       const liveSnapshot = preflightState.liveSnapshot;
       updateAutoSyncBaseline(livePos,liveSnapshot);
+      lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
       clearStructuralWarning();
       sendPlanState = buildPlanFromCurrentRows(livePos,liveSnapshot);
       sendPlanState.stale = false;
