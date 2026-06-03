@@ -10,6 +10,7 @@
   const LEVELS_VISIBLE_KEY = STORE + "levels_visible";
   const SL_SEND_ENABLED_KEY = STORE + "sl_send_enabled";
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
+  const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
   const STRUCTURAL_WARNING_TEXT = "Position/orders changed \u2014 re-check math";
   const AUTO_SYNC_POLL_MS = 2000;
   const AUTO_SYNC_DEBOUNCE_MS = 800;
@@ -21,6 +22,7 @@
   let levelsVisible = true;
   let slSendEnabled = false;
   let cbsEnabled = false;
+  let expressModeEnabled = false;
   let binanceLimitRowSeq = 0;
   const binanceLimitRowMetaByRowId = new Map();
   let currentStopAlgoMeta = null;
@@ -134,6 +136,17 @@
       return false;
     }
   }
+  function loadExpressModeEnabled(){
+    const adapter = infra();
+    if(adapter && typeof adapter.readFlag === "function"){
+      return adapter.readFlag(EXPRESS_MODE_ENABLED_KEY,false);
+    }
+    try{
+      return localStorage.getItem(EXPRESS_MODE_ENABLED_KEY) === "1";
+    }catch(_e){
+      return false;
+    }
+  }
   function saveLevelsVisible(next){
     levelsVisible = !!next;
     const adapter = infra();
@@ -182,6 +195,22 @@
     if(wrap){
       wrap.classList.toggle("is-on",cbsEnabled);
       wrap.classList.toggle("is-off",!cbsEnabled);
+    }
+  }
+  function saveExpressModeEnabled(next){
+    expressModeEnabled = !!next;
+    const adapter = infra();
+    if(adapter && typeof adapter.writeFlag === "function"){
+      adapter.writeFlag(EXPRESS_MODE_ENABLED_KEY,expressModeEnabled);
+    }else{
+      try{ localStorage.setItem(EXPRESS_MODE_ENABLED_KEY,expressModeEnabled ? "1" : "0"); }catch(_e){}
+    }
+    const tgl = q("calcModuleExpressToggle");
+    if(tgl) tgl.checked = expressModeEnabled;
+    const wrap = q("calcModuleExpressToggleWrap");
+    if(wrap){
+      wrap.classList.toggle("is-on",expressModeEnabled);
+      wrap.classList.toggle("is-off",!expressModeEnabled);
     }
   }
 
@@ -263,7 +292,7 @@
         <div class="calc-module-grid">
           <div class="calc-module-col">
             <div class="calc-module-col-head">
-              <div class="calc-module-col-title"><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></div>
+              <div class="calc-module-col-title"><label class="calc-module-mini-toggle calc-module-express-toggle" id="calcModuleExpressToggleWrap" title="Express Mode skips preflight/review and executes immediately"><input id="calcModuleExpressToggle" type="checkbox" aria-label="Enable Express Mode"><span>Express</span></label><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></div>
               <button class="calc-module-add" id="calcModuleAddEntry" type="button">Add</button>
             </div>
             <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
@@ -1102,16 +1131,31 @@
       if(owned) calculatorOwnedRefreshDepth = Math.max(0,calculatorOwnedRefreshDepth - 1);
     }
   }
+  function currentMappedRowsForBaseline(){
+    const collect = containerId => rows(containerId)
+      .map(row => ({row,meta:row && row.__binanceLimitOrderMeta ? row.__binanceLimitOrderMeta : (row && row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null)}))
+      .filter(item => item && item.meta && item.meta.rawOrder);
+    return {
+      entryRows:collect("calcModuleEntryRows"),
+      exitRows:collect("calcModuleExitRows"),
+      diagnostic:{}
+    };
+  }
   function updateSendButtonState(state){
     const btn = q("calcModuleSend");
     if(!btn) return;
     btn.disabled = !!state;
-    btn.textContent = state ? "Preparing..." : "Send";
+    if(state) btn.textContent = expressModeEnabled ? "Running..." : "Preparing...";
+    else btn.textContent = "Send";
   }
   function renderSendPlanTable(){
     const box = ensureSendPopup();
     if(!box) return;
     if(!sendPlanState || !Array.isArray(sendPlanState.rows)){
+      box.classList.add("hidden");
+      return;
+    }
+    if(sendPlanState.showPopup === false){
       box.classList.add("hidden");
       return;
     }
@@ -2228,6 +2272,8 @@
         timeInForce:"GTC"
       };
       if(ps && ps !== "BOTH") send.positionSide = ps;
+      if(p.reduceOnlyOverride === true) send.reduceOnly = "true";
+      else if(p.reduceOnlyOverride === false) send.reduceOnly = "false";
       const resp = await signedOrderWrite("POST",send);
       applyWriteSuccessToRow(rowPlan.rowRef,resp,{
         symbol:currentSymbol(),
@@ -2242,151 +2288,59 @@
     }
     return {ok:true,skip:true};
   }
-  async function prepareSendPlan(){
-    clearSendPlan();
-    clearStructuralWarning();
-    clearTimeout(autoSyncDebounceTimer);
-    if(typeof hasKeys !== "function" || !hasKeys()){
-      sendPlanState = {
-        planId:++sendPlanSeq,
-        at:new Date().toISOString(),
-        symbol:currentSymbol(),
-        rows:[{
-          action:"Blocked",
-          type:"Preflight",
-          side:"-",
-          oldPrice:"-",
-          newPrice:"-",
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"API keys are required before Send preflight.",
-          writable:false,
-          mode:"blocked"
-        }],
-        blocked:true,
-        canConfirm:false,
-        executing:false,
-        stale:false,
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled
-      };
-      publishSendDiagnostic({
-        at:new Date().toISOString(),
-        phase:"preflight",
-        blocked:true,
-        writable:0
-      });
-      renderSendPlanTable();
-      setStatus("Send blocked. API keys required.");
-      return;
+  function expressExecutionPriority(rowPlan){
+    if(!rowPlan) return 99;
+    const mode = String(rowPlan.mode || "");
+    if(mode === "sl-cancel" || mode === "sl-create") return 30;
+    if(mode === "new"){
+      const source = rowPlan.rowRef && rowPlan.rowRef.dataset ? String(rowPlan.rowRef.dataset.source || "") : "";
+      return source === "binance-limit" ? 20 : 10;
     }
-    updateSendButtonState(true);
-    setStatus("Send preflight: reading live Binance state...");
-    try{
-      const preflightState = await withCalculatorOwnedRefresh("preflightRead",async() => {
-        const livePos = await signedPosition();
-        const liveSnapshot = await readOpenOrdersSnapshot();
-        return {livePos,liveSnapshot};
-      });
-      const livePos = preflightState.livePos;
-      const liveSnapshot = preflightState.liveSnapshot;
-      updateAutoSyncBaseline(livePos,liveSnapshot);
-      clearStructuralWarning();
-      sendPlanState = buildPlanFromCurrentRows(livePos,liveSnapshot);
-      sendPlanState.stale = false;
-      sendPlanState.staleReason = "";
-      publishSendDiagnostic({
-        at:new Date().toISOString(),
-        phase:"preflight",
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled,
-        blocked:!sendPlanState.canConfirm,
-        writable:sendPlanState.rows.filter(r => r && r.writable).length,
-        blockedRows:sendPlanState.rows.filter(r => r && r.action === "Blocked").length,
-        ignoredRows:sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
-        skippedRows:sendPlanState.rows.filter(r => r && r.action === "Skip").length
-      });
-      renderSendPlanTable();
-      if(sendPlanState.canConfirm) setStatus("Preflight ready. Review table and click Confirm Send.");
-      else setStatus("Preflight completed with blocked/ignored rows.");
-    }catch(e){
-      sendPlanState = {
-        planId:++sendPlanSeq,
-        at:new Date().toISOString(),
-        symbol:currentSymbol(),
-        rows:[{
-          action:"Blocked",
-          type:"Preflight",
-          side:"-",
-          oldPrice:"-",
-          newPrice:"-",
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"Preflight failed: " + (e && e.message ? e.message : String(e)),
-          writable:false,
-          mode:"blocked"
-        }],
-        blocked:true,
-        canConfirm:false,
-        executing:false,
-        stale:false,
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled
-      };
-      publishSendDiagnostic({
-        at:new Date().toISOString(),
-        phase:"preflight",
-        cbsEnabled:!!cbsEnabled,
-        slSendEnabled:!!slSendEnabled,
-        blocked:true,
-        error:e && e.message ? e.message : String(e),
-        writable:0
-      });
-      renderSendPlanTable();
-      setStatus("Send preflight failed.");
-    }finally{
-      updateSendButtonState(false);
-    }
+    if(mode === "modify" || mode === "limit-cancel-cbs") return 20;
+    return 40;
   }
-  async function confirmSendPlan(planId){
-    if(!sendPlanState || sendPlanState.planId !== planId || sendPlanState.executing) return;
-    if(!sendPlanState.canConfirm){
-      setStatus("Confirm Send blocked. Run Send preflight again.");
+  function orderedExecutionRows(plan,mode){
+    const rows = Array.isArray(plan && plan.rows) ? plan.rows.slice() : [];
+    if(mode !== "express") return rows;
+    return rows.sort((a,b) => expressExecutionPriority(a) - expressExecutionPriority(b));
+  }
+  async function executeSendPlan(plan,options={}){
+    if(!plan || !Array.isArray(plan.rows)) return;
+    if(!plan.canConfirm){
+      setStatus(options.blockedStatus || "Confirm Send blocked. Run Send preflight again.");
       renderSendPlanTable();
       return;
     }
-    const contextDirection = inferDirectionForSend(lastReadStateSnapshot && lastReadStateSnapshot.openPosition);
+    const contextDirection = options.contextDirection || inferDirectionForSend(lastReadStateSnapshot && lastReadStateSnapshot.openPosition);
+    const executionMode = options.executionMode || "normal";
     clearTimeout(autoSyncDebounceTimer);
-    sendPlanState.executing = true;
+    plan.executing = true;
+    if(options.hidePopupUntilComplete) plan.showPopup = false;
     renderSendPlanTable();
-    setStatus("Confirm Send in progress...");
-    const writable = sendPlanState.rows.filter(r => r && r.writable);
+    setStatus(options.inProgressStatus || "Confirm Send in progress...");
+    const writable = plan.rows.filter(r => r && r.writable);
     await withCalculatorOwnedRefresh("sendConfirm",async() => {
       let haltAfterSlFailure = false;
       let haltReason = "";
-      for(const rowPlan of sendPlanState.rows){
+      for(const rowPlan of orderedExecutionRows(plan,executionMode)){
         if(!rowPlan) continue;
         if(!rowPlan.writable){
           if(rowPlan.action === "Skip") rowPlan.status = "Skipped";
           else if(rowPlan.action === "Ignored") rowPlan.status = "Ignored";
           else if(rowPlan.action === "Blocked") rowPlan.status = "Blocked";
-          renderSendPlanTable();
+          if(!options.hidePopupUntilComplete) renderSendPlanTable();
           continue;
         }
         if(haltAfterSlFailure){
           rowPlan.status = "Blocked";
           rowPlan.response = haltReason || "Blocked because SL operation failed.";
           rowPlan.unexpectedResponse = false;
-          renderSendPlanTable();
+          if(!options.hidePopupUntilComplete) renderSendPlanTable();
           continue;
         }
         rowPlan.status = "Pending";
         rowPlan.response = "";
-        renderSendPlanTable();
+        if(!options.hidePopupUntilComplete) renderSendPlanTable();
         try{
           const out = await runPlanWriteRow(rowPlan,contextDirection);
           if(out && out.skip){
@@ -2434,11 +2388,12 @@
           }
           haltAfterSlFailure = true;
         }
-        renderSendPlanTable();
+        if(!options.hidePopupUntilComplete) renderSendPlanTable();
       }
     });
-    sendPlanState.executing = false;
-    sendPlanState.canConfirm = false;
+    plan.executing = false;
+    plan.canConfirm = false;
+    plan.showPopup = true;
     try{
       await readBinance({preserveSendPlan:true,source:"postSendRefresh"});
     }catch(_e){}
@@ -2446,15 +2401,269 @@
     const failed = writable.filter(r => r && r.status === "Failed").length;
     publishSendDiagnostic({
       at:new Date().toISOString(),
-      phase:"confirm",
-      cbsEnabled:!!(sendPlanState && sendPlanState.cbsEnabled),
-      slSendEnabled:!!(sendPlanState && sendPlanState.slSendEnabled),
+      phase:executionMode === "express" ? "express" : "confirm",
+      cbsEnabled:!!(plan && plan.cbsEnabled),
+      slSendEnabled:!!(plan && plan.slSendEnabled),
       failed,
       totalWritable:writable.length,
       confirmed:writable.filter(r => r && r.status === "Confirmed").length,
       skipped:writable.filter(r => r && r.status === "Skipped").length
     });
-    setStatus(failed ? ("Confirm Send completed with " + failed + " failed row(s).") : "Confirm Send completed.");
+    setStatus(failed ? ((options.donePrefix || "Confirm Send") + " completed with " + failed + " failed row(s).") : ((options.donePrefix || "Confirm Send") + " completed."));
+  }
+  async function prepareSendPlan(){
+    clearSendPlan();
+    clearStructuralWarning();
+    clearTimeout(autoSyncDebounceTimer);
+    if(typeof hasKeys !== "function" || !hasKeys()){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Preflight",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"API keys are required before Send preflight.",
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false,
+        stale:false,
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
+        showPopup:true
+      };
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"preflight",
+        blocked:true,
+        writable:0
+      });
+      renderSendPlanTable();
+      setStatus("Send blocked. API keys required.");
+      return;
+    }
+    updateSendButtonState(true);
+    setStatus("Send preflight: reading live Binance state...");
+    try{
+      const preflightState = await withCalculatorOwnedRefresh("preflightRead",async() => {
+        const livePos = await signedPosition();
+        const liveSnapshot = await readOpenOrdersSnapshot();
+        return {livePos,liveSnapshot};
+      });
+      const livePos = preflightState.livePos;
+      const liveSnapshot = preflightState.liveSnapshot;
+      updateAutoSyncBaseline(livePos,liveSnapshot);
+      clearStructuralWarning();
+      sendPlanState = buildPlanFromCurrentRows(livePos,liveSnapshot);
+      sendPlanState.stale = false;
+      sendPlanState.staleReason = "";
+      sendPlanState.showPopup = true;
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"preflight",
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
+        blocked:!sendPlanState.canConfirm,
+        writable:sendPlanState.rows.filter(r => r && r.writable).length,
+        blockedRows:sendPlanState.rows.filter(r => r && r.action === "Blocked").length,
+        ignoredRows:sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
+        skippedRows:sendPlanState.rows.filter(r => r && r.action === "Skip").length
+      });
+      renderSendPlanTable();
+      if(sendPlanState.canConfirm) setStatus("Preflight ready. Review table and click Confirm Send.");
+      else setStatus("Preflight completed with blocked/ignored rows.");
+    }catch(e){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Preflight",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"Preflight failed: " + (e && e.message ? e.message : String(e)),
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false,
+        stale:false,
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
+        showPopup:true
+      };
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"preflight",
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
+        blocked:true,
+        error:e && e.message ? e.message : String(e),
+        writable:0
+      });
+      renderSendPlanTable();
+      setStatus("Send preflight failed.");
+    }finally{
+      updateSendButtonState(false);
+    }
+  }
+  function applyExpressPayloadSafeguards(plan){
+    if(!plan || !Array.isArray(plan.rows)) return plan;
+    plan.rows.forEach(rowPlan => {
+      if(!rowPlan || rowPlan.mode !== "new" || !rowPlan.payload) return;
+      const rowType = String(rowPlan.payload.rowType || "");
+      rowPlan.payload.reduceOnlyOverride = rowType === "exit";
+    });
+    return plan;
+  }
+  async function executeExpressMode(){
+    clearSendPlan();
+    clearStructuralWarning();
+    clearTimeout(autoSyncDebounceTimer);
+    if(typeof hasKeys !== "function" || !hasKeys()){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Express",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"API keys are required before Express Mode execution.",
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false,
+        stale:false,
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
+        showPopup:true
+      };
+      renderSendPlanTable();
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"express",
+        blocked:true,
+        writable:0,
+        reason:"missing-api-keys"
+      });
+      setStatus("Express Mode blocked. API keys required.");
+      return;
+    }
+    updateSendButtonState(true);
+    setStatus("Express Mode: reading live Binance state...");
+    try{
+      const preflightState = await withCalculatorOwnedRefresh("preflightRead",async() => {
+        const livePos = await signedPosition();
+        const liveSnapshot = await readOpenOrdersSnapshot();
+        return {livePos,liveSnapshot};
+      });
+      const livePos = preflightState.livePos;
+      const liveSnapshot = preflightState.liveSnapshot;
+      updateAutoSyncBaseline(livePos,liveSnapshot);
+      lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
+      sendPlanState = applyExpressPayloadSafeguards(buildPlanFromCurrentRows(livePos,liveSnapshot));
+      sendPlanState.stale = false;
+      sendPlanState.staleReason = "";
+      sendPlanState.showPopup = false;
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"express",
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
+        blocked:!sendPlanState.canConfirm,
+        writable:sendPlanState.rows.filter(r => r && r.writable).length,
+        blockedRows:sendPlanState.rows.filter(r => r && r.action === "Blocked").length,
+        ignoredRows:sendPlanState.rows.filter(r => r && r.action === "Ignored").length,
+        skippedRows:sendPlanState.rows.filter(r => r && r.action === "Skip").length
+      });
+      if(!sendPlanState.canConfirm){
+        sendPlanState.showPopup = true;
+        renderSendPlanTable();
+        setStatus("Express Mode blocked. Review results.");
+        return;
+      }
+      await executeSendPlan(sendPlanState,{
+        executionMode:"express",
+        hidePopupUntilComplete:true,
+        contextDirection:inferDirectionForSend(livePos),
+        blockedStatus:"Express Mode blocked. Review results.",
+        inProgressStatus:"Express Mode executing...",
+        donePrefix:"Express Mode"
+      });
+    }catch(e){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Express",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"Express Mode failed: " + (e && e.message ? e.message : String(e)),
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false,
+        stale:false,
+        cbsEnabled:!!cbsEnabled,
+        slSendEnabled:!!slSendEnabled,
+        showPopup:true
+      };
+      renderSendPlanTable();
+      publishSendDiagnostic({
+        at:new Date().toISOString(),
+        phase:"express",
+        blocked:true,
+        error:e && e.message ? e.message : String(e),
+        writable:0
+      });
+      setStatus("Express Mode failed.");
+    }finally{
+      updateSendButtonState(false);
+    }
+  }
+  async function confirmSendPlan(planId){
+    if(!sendPlanState || sendPlanState.planId !== planId || sendPlanState.executing) return;
+    await executeSendPlan(sendPlanState,{
+      executionMode:"normal",
+      blockedStatus:"Confirm Send blocked. Run Send preflight again.",
+      inProgressStatus:"Confirm Send in progress...",
+      donePrefix:"Confirm Send"
+    });
   }
   function orderStopPrice(order){
     for(const key of ["stopPrice","triggerPrice","activatePrice","price"]){
@@ -2765,9 +2974,11 @@
     levelsVisible = loadLevelsVisible();
     slSendEnabled = loadSlSendEnabled();
     cbsEnabled = loadCbsEnabled();
+    expressModeEnabled = loadExpressModeEnabled();
     saveLevelsVisible(levelsVisible);
     saveSlSendEnabled(slSendEnabled);
     saveCbsEnabled(cbsEnabled);
+    saveExpressModeEnabled(expressModeEnabled);
     installDrawOverlayHook();
     installOverlayDragHooks();
 
@@ -2827,13 +3038,20 @@
     },false);
     q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
     q("calcModuleRead").addEventListener("click",() => readBinance({userRead:true}),false);
-    q("calcModuleSend").addEventListener("click",prepareSendPlan,false);
+    q("calcModuleSend").addEventListener("click",() => {
+      if(expressModeEnabled) executeExpressMode();
+      else prepareSendPlan();
+    },false);
     q("calcModuleLevelsToggle").addEventListener("change",e => {
       saveLevelsVisible(!!(e.target && e.target.checked));
     },false);
     q("calcModuleCbsToggle").addEventListener("change",e => {
       markSendPlanStale("CBS toggle changed after preflight.");
       saveCbsEnabled(!!(e.target && e.target.checked));
+    },false);
+    q("calcModuleExpressToggle").addEventListener("change",e => {
+      markSendPlanStale("Express Mode toggle changed after preflight.");
+      saveExpressModeEnabled(!!(e.target && e.target.checked));
     },false);
     q("calcModuleSlToggle").addEventListener("change",e => {
       markSendPlanStale("SL toggle changed after preflight.");

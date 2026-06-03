@@ -153,6 +153,8 @@ let activeOpenParentChainIds = new Set();
 let fundingIncomeRows = [];
 let fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
 let unresolvedCount = 0;
+let closedTradesLoadedSummaryText = tradeCountEl ? String(tradeCountEl.textContent || "") : "";
+let closedTradesOperationalText = "";
 
 const OPEN_POSITION_STATE = {
   markers:[],
@@ -968,13 +970,25 @@ function visibleClosedTradeWindowMs(){
   return {start,end,label:"Visible"};
 }
 
-function closedTradeStatus(text){
-  if(tradeCountEl) tradeCountEl.textContent = text;
+function renderClosedTradeStatus(){
+  if(!tradeCountEl) return;
+  const operational = String(closedTradesOperationalText || "").trim();
+  const summary = String(closedTradesLoadedSummaryText || "").trim();
+  const showSummary = !!(tglResults && tglResults.checked);
+  const text = operational || (showSummary ? summary : "");
+  tradeCountEl.textContent = text;
+  tradeCountEl.style.display = text ? "inline-block" : "none";
+}
+
+function closedTradeStatus(text,options={}){
+  const mode = options && options.mode === "summary" ? "summary" : "operational";
+  if(mode === "summary") closedTradesLoadedSummaryText = text || "";
+  else closedTradesOperationalText = text || "";
+  renderClosedTradeStatus();
 }
 
 function syncClosedTradesSummaryVisibility(){
-  if(!tradeCountEl) return;
-  tradeCountEl.style.display = tglResults && tglResults.checked ? "inline-block" : "none";
+  renderClosedTradeStatus();
 }
 
 function closedTradeStatusTime(ms){
@@ -1170,17 +1184,24 @@ async function loadClosedTradesForPeriod(period,opt={}){
     unresolvedCount = CLOSED_TRADES_STATE.unresolvedCount;
     syncLegacyTradeGlobalsFromOwners();
 
-    closedTradeStatus(
-      "From: " + closedTradeStatusDay(win.start) +
-      " | To: " + closedTradeStatusDay(win.end) +
-      " | Trades: " + summary.parents.length +
-      " | net P/L: " + closedTradeSignedMoney(netPnl) +
-      "\n" +
-      "Wins : " + summary.wins +
-      " , losses : " + summary.losses +
-      " | Profit : " + closedTradeMoneyAbs(summary.profit) +
-      " , Loss : " + closedTradeSignedMoney(summary.loss)
-    );
+    closedTradeStatus("",{mode:"operational"});
+    if(summary.parents.length){
+      closedTradeStatus(
+        "From: " + closedTradeStatusDay(win.start) +
+        " | To: " + closedTradeStatusDay(win.end) +
+        " | Trades: " + summary.parents.length +
+        " | net P/L: " + closedTradeSignedMoney(netPnl) +
+        "\n" +
+        "Wins : " + summary.wins +
+        " , losses : " + summary.losses +
+        " | Profit : " + closedTradeMoneyAbs(summary.profit) +
+        " , Loss : " + closedTradeSignedMoney(summary.loss),
+        {mode:"summary"}
+      );
+    }else{
+      closedTradeStatus("",{mode:"summary"});
+      if(!silent) closedTradeStatus("No closed trades in range");
+    }
 
     updatePositionStrip(candles.length ? candles[candles.length-1] : null);
     updateTabTitle();
@@ -4521,8 +4542,8 @@ async function loadTrades(opt={}){
 
 function clearTrades(){
   clearClosedTradesOwner();
-  tradeCountEl.textContent = "Trades: 0";
-  syncClosedTradesSummaryVisibility();
+  closedTradeStatus("",{mode:"operational"});
+  closedTradeStatus("Trades: 0",{mode:"summary"});
   updatePositionStrip(candles.length ? candles[candles.length-1] : null);
   updateTabTitle();
   draw();
