@@ -139,6 +139,8 @@ const SET5 = STORE + "ema_toggle_5";
 ========================================================= */
 
 let candles = [];
+let chartLoadGeneration = 0;
+let queuedChartLoadOptions = null;
 let vwap = [];
 let maSeriesBySlot = {1:[],2:[],3:[],4:[],5:[]};
 
@@ -968,6 +970,11 @@ function visibleClosedTradeWindowMs(){
 
 function closedTradeStatus(text){
   if(tradeCountEl) tradeCountEl.textContent = text;
+}
+
+function syncClosedTradesSummaryVisibility(){
+  if(!tradeCountEl) return;
+  tradeCountEl.style.display = tglResults && tglResults.checked ? "inline-block" : "none";
 }
 
 function closedTradeStatusTime(ms){
@@ -1963,27 +1970,31 @@ async function klines(endMs,limit){
   return klinesForInterval(iv(),endMs,limit);
 }
 
-async function fetchInitial(targetCount){
+async function fetchInitial(interval,targetCount,guard){
   const warmup = Math.max(
     Number(targetCount) || 0,
     chartDesiredClosedDepth(visibleCount || DEF_VISIBLE)
   );
   const desired = Math.max(1, Math.round(warmup));
-  if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.seedBuffer === "function"){
-    await window.PUBLIC_MARKET_DATA_HUB.seedBuffer(iv(), desired, true);
+  if(window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB.prepareTimeframeBuffer === "function"){
+    const prepared = await window.PUBLIC_MARKET_DATA_HUB.prepareTimeframeBuffer(interval,desired,{guard});
+    if(!prepared) return null;
+    if(prepared.continuous === false) throw new Error("Timeframe buffer continuity check failed for " + interval);
     if(typeof window.PUBLIC_MARKET_DATA_HUB.getChartBuffer === "function"){
-      return window.PUBLIC_MARKET_DATA_HUB.getChartBuffer(iv());
+      return window.PUBLIC_MARKET_DATA_HUB.getChartBuffer(interval);
     }
     if(typeof window.PUBLIC_MARKET_DATA_HUB.getClosedBuffer === "function"){
-      return window.PUBLIC_MARKET_DATA_HUB.getClosedBuffer(iv());
+      return window.PUBLIC_MARKET_DATA_HUB.getClosedBuffer(interval);
     }
   }
   let rows = [];
   let endMs = Date.now();
 
   while(rows.length < desired){
+    if(typeof guard === "function" && guard() === false) return null;
     const remaining = desired - rows.length;
-    const batch = await klines(endMs, Math.min(KLINE_LIMIT, remaining || KLINE_LIMIT));
+    const batch = await klinesForInterval(interval,endMs, Math.min(KLINE_LIMIT, remaining || KLINE_LIMIT));
+    if(typeof guard === "function" && guard() === false) return null;
     if(!batch.length) break;
 
     const oldestTime = batch[0] && batch[0].time ? batch[0].time * 1000 : null;
@@ -2144,6 +2155,8 @@ const marketDataHub = (() => {
     visibilityRecoveryTimer:null,
     closedKlinesByTf:{},
     formingKlineByTf:{},
+    gapRepairInFlightByTf:{},
+    lastGapRepairMsByTf:{},
     bufferSymbol:null,
     ssscSeedPromise:null,
     maStackSeedPromise:null
@@ -2480,8 +2493,46 @@ const marketDataHub = (() => {
       warnIntegrity(`forming-conflict:${tf}:${forming.time}`,"forming candle time conflicts with latest closed candle",{tf,forming,lastClosed});
       return closed;
     }
+    if(lastClosed && Number(forming.time) !== Number(lastClosed.time) + ivSec(tf)){
+      warnIntegrity(`forming-gap:${tf}:${forming.time}`,"forming candle would create a chart gap and was ignored",{tf,forming,lastClosed});
+      return closed;
+    }
     closed.push(forming);
     return closed;
+  }
+  function isGuardCurrent(guard){
+    return typeof guard !== "function" || guard() !== false;
+  }
+  function rebuildClosedStateFromRows(tf,rows,{limitOverride,source="rest"}={}){
+    const limit = Math.max(10, limitOverride || intervalKeep(tf));
+    const normalized = (Array.isArray(rows) ? rows : [])
+      .map(row => normalizeCandleRow(tf,row,{source,final:true}))
+      .filter(Boolean)
+      .sort((a,b) => Number(a.time) - Number(b.time));
+    const deduped = [];
+    for(const row of normalized){
+      const last = deduped[deduped.length-1];
+      if(last && Number(last.time) === Number(row.time)){
+        warnIntegrity(`duplicate-rebuild:${tf}:${row.time}`,"duplicate candle open times detected",{tf,time:row.time,source});
+        deduped[deduped.length-1] = mergeBufferRow(last,row);
+      }else{
+        deduped.push({...row,final:true});
+      }
+    }
+    let forming = null;
+    const tail = deduped[deduped.length-1];
+    if(isFormingRow(tf,tail)){
+      forming = {...cloneRow(tail),final:false,source};
+      deduped.pop();
+    }
+    state.closedKlinesByTf[tf] = deduped.slice(-limit);
+    trimClosedBuffer(tf,limit);
+    if(forming) state.formingKlineByTf[tf] = forming;
+    else delete state.formingKlineByTf[tf];
+    return {
+      closed:getClosedBuffer(tf),
+      forming:getFormingCandle(tf)
+    };
   }
   function canonicalTfKey(tf){
     const raw = String(tf || "").trim();
@@ -2865,19 +2916,23 @@ const marketDataHub = (() => {
       noMore:terminalBatch && rows.length < target
     };
   }
-  async function repairMissingClosedCandles(tf,gaps,reason="gap"){
+  async function repairMissingClosedCandles(tf,gaps,reason="gap",options={}){
     ensureBufferSymbol();
     if(!tf || !Array.isArray(gaps) || !gaps.length) return {fetched:0,merged:0};
+    const guard = options && options.guard;
+    const suppressRedraw = !!(options && options.suppressRedraw);
     if(state.gapRepairInFlightByTf[tf]) return state.gapRepairInFlightByTf[tf];
     const started = now();
     const task = (async () => {
       let fetched = 0;
       let merged = 0;
       for(const gap of gaps){
+        if(!isGuardCurrent(guard)) return {fetched,merged,reason,started,stale:true};
         const count = Math.max(1,Math.min(KLINE_LIMIT,Number(gap.missingCount) || 1));
         const endMs = (Number(gap.toTime) + ivSec(tf)) * 1000 - 1;
         if(!Number.isFinite(endMs) || endMs <= 0) continue;
         const rows = await klinesForInterval(tf,endMs,Math.min(KLINE_LIMIT,count + 2),cfg().symbol);
+        if(!isGuardCurrent(guard)) return {fetched,merged,reason,started,stale:true};
         fetched += rows.length;
         const wantedStart = Number(gap.fromTime);
         const wantedEnd = Number(gap.toTime);
@@ -2894,7 +2949,7 @@ const marketDataHub = (() => {
         merged += Math.max(0,getClosedBuffer(tf).length - before);
       }
       state.lastGapRepairMsByTf[tf] = now();
-      if(tf === iv() && merged){
+      if(!suppressRedraw && tf === iv() && merged){
         rehydrateActiveChartFromHub(tf,now(),"rest-gap-repair");
       }
       validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"post-gap-repair"});
@@ -2909,19 +2964,7 @@ const marketDataHub = (() => {
     if(!Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
     const limit = Math.max(10, limitOverride || intervalKeep(tf));
     if(replace){
-      let closed = rows
-        .map(row => normalizeCandleRow(tf,row,{source:"rest",final:true}))
-        .filter(Boolean);
-      let forming = null;
-      const tail = closed[closed.length-1];
-      if(isFormingRow(tf,tail)){
-        forming = {...cloneRow(tail),final:false};
-        closed = closed.slice(0,-1);
-      }
-      state.closedKlinesByTf[tf] = closed.slice(-limit);
-      trimClosedBuffer(tf,limit);
-      if(forming) setFormingCandle(tf,forming,{replace:true,source:"rest"});
-      else delete state.formingKlineByTf[tf];
+      rebuildClosedStateFromRows(tf,rows,{limitOverride:limit,source:"rest"});
       validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:"rest-replace"});
       return getClosedBuffer(tf);
     }
@@ -2974,6 +3017,63 @@ const marketDataHub = (() => {
     const olderRows = await fetchWindow(beforeMs,[],missing);
     prependClosedBuffer(tf,olderRows,retentionCap);
     return getClosedBuffer(tf);
+  }
+  async function prepareTimeframeBuffer(tf,count,options={}){
+    ensureBufferSymbol();
+    const targetClosed = Math.max(1, Number(count) || 0);
+    const keepCfg = sharedTfConfig(tf);
+    const retentionCap = Math.max(targetClosed, keepCfg ? keepCfg.cap : intervalKeep(tf));
+    const guard = options && options.guard;
+    const liveForming = getFormingCandle(tf);
+    const fetchWindow = async (endMs,target) => {
+      let rows = [];
+      let cursor = Number(endMs) || Date.now();
+      while(rows.length < target){
+        if(!isGuardCurrent(guard)) return null;
+        const remaining = target - rows.length;
+        const batch = await klinesForInterval(tf,cursor,Math.min(KLINE_LIMIT,remaining),cfg().symbol);
+        if(!isGuardCurrent(guard)) return null;
+        if(!batch.length) break;
+        rows = rows.length ? batch.concat(rows) : batch;
+        const oldest = batch[0];
+        const oldestMs = Number(oldest && (oldest.openTime || (oldest.time * 1000)));
+        if(batch.length < Math.min(KLINE_LIMIT,remaining) || !Number.isFinite(oldestMs)) break;
+        cursor = oldestMs - 1;
+      }
+      return rows;
+    };
+
+    const rows = await fetchWindow(Date.now(),Math.max(targetClosed + 1,targetClosed));
+    if(!rows || !rows.length || !isGuardCurrent(guard)) return null;
+
+    rebuildClosedStateFromRows(tf,rows,{limitOverride:retentionCap,source:"rest"});
+
+    let passes = 0;
+    let gaps = validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"timeframe-preload"});
+    while(gaps.length && passes < 6){
+      if(!isGuardCurrent(guard)) return null;
+      await repairMissingClosedCandles(tf,gaps,`timeframe-preload-${passes + 1}`,{
+        guard,
+        suppressRedraw:true
+      });
+      if(!isGuardCurrent(guard)) return null;
+      gaps = validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"timeframe-preload-verify"});
+      passes++;
+    }
+
+    const lastClosed = getClosedBuffer(tf).slice(-1)[0] || null;
+    if(liveForming && lastClosed && Number(liveForming.time) === Number(lastClosed.time) + ivSec(tf)){
+      setFormingCandle(tf,liveForming,{replace:true,source:liveForming.source || "ws"});
+    }
+    const forming = getFormingCandle(tf);
+    if(forming && lastClosed && Number(forming.time) !== Number(lastClosed.time) + ivSec(tf)){
+      delete state.formingKlineByTf[tf];
+    }
+    return {
+      closed:getClosedBuffer(tf),
+      chart:getChartBuffer(tf),
+      continuous:!gaps.length
+    };
   }
   async function seedSsscBuffers(force=false){
     ensureBufferSymbol();
@@ -3309,6 +3409,7 @@ const marketDataHub = (() => {
     setSsscVisible,
     setMaStackVisible,
     seedBuffer,
+    prepareTimeframeBuffer,
     ensureOlderClosedCandles,
     seedSsscBuffers,
     ensureSsscBuffers,
@@ -3350,7 +3451,17 @@ function stopWatch(){
 }
 
 async function loadChart(opt={}){
-  if(loading) return;
+  if(loading){
+    queuedChartLoadOptions = {...opt};
+    return;
+  }
+  const requestGeneration = ++chartLoadGeneration;
+  const requestedInterval = iv();
+  const requestedSymbol = cfg().symbol;
+  const guard = () =>
+    requestGeneration === chartLoadGeneration &&
+    requestedInterval === iv() &&
+    requestedSymbol === cfg().symbol;
   const preserveView = !!opt.preserveView;
   const keepVisible = preserveView ? visibleCount : DEF_VISIBLE;
   const keepRight = preserveView ? rightOffset : 0;
@@ -3372,10 +3483,11 @@ async function loadChart(opt={}){
   marketDataHub.resetConnectionState("loading chart");
 
   try{
-    const nextCandles = await fetchInitial(keepLoaded || undefined);
+    const nextCandles = await fetchInitial(requestedInterval,keepLoaded || undefined,guard);
+    if(!guard()) return;
     lastMarkPrice = null;
     dailyState = null;
-    candles = Array.isArray(nextCandles) ? nextCandles : marketDataHub.getChartBuffer(iv());
+    candles = Array.isArray(nextCandles) ? nextCandles : marketDataHub.getChartBuffer(requestedInterval);
     maSeriesBySlot = {1:[],2:[],3:[],4:[],5:[]};
     setCurrentVWAPSeries([]);
     noMoreOlder = false;
@@ -3405,6 +3517,7 @@ async function loadChart(opt={}){
     indicators();
 
     await fetchDaily().catch(e => console.error("Daily fetch failed",e));
+    if(!guard()) return;
 
     markLiveUpdate();
 
@@ -3415,15 +3528,28 @@ async function loadChart(opt={}){
     if(candles.length) metrics(candles[candles.length-1]);
 
     draw();
+    if(!guard()) return;
     marketDataHub.rebuildRequirements(true);
     await pollOnce();
+    if(!guard()) return;
     startDailyTimer();
     startWatch();
   }catch(e){
     console.error(e);
     marketDataHub.refreshConnectionStatus();
   }finally{
-    loading = false;
+    if(requestGeneration === chartLoadGeneration) loading = false;
+    const queued = queuedChartLoadOptions;
+    queuedChartLoadOptions = null;
+    const shouldReplayQueued = !!queued && (
+      requestGeneration !== chartLoadGeneration ||
+      requestedInterval !== iv() ||
+      requestedSymbol !== cfg().symbol
+    );
+    if(shouldReplayQueued){
+      loading = false;
+      loadChart(queued);
+    }
   }
 }
 
@@ -4396,6 +4522,7 @@ async function loadTrades(opt={}){
 function clearTrades(){
   clearClosedTradesOwner();
   tradeCountEl.textContent = "Trades: 0";
+  syncClosedTradesSummaryVisibility();
   updatePositionStrip(candles.length ? candles[candles.length-1] : null);
   updateTabTitle();
   draw();
@@ -5766,6 +5893,8 @@ window.addEventListener("keydown",e => {
 marketEl.addEventListener("change",handleMarketChange);
 
 intervalEl.addEventListener("change",handleIntervalChange);
+
+syncClosedTradesSummaryVisibility();
 
 function updateReportControls(){
   if(customRangeEl){
@@ -11953,6 +12082,7 @@ startTradeAuto();
 
   function syncTradeToggleState14(){
     const tradesOn = !!(tglResults && tglResults.checked);
+    syncClosedTradesSummaryVisibility();
     if(!tradesOn){
       if(tglPositions) tglPositions.checked = false;
       if(tglLots) tglLots.checked = false;
@@ -13825,7 +13955,9 @@ startTradeAuto();
     btn.title = "Show/hide enabled MA and VWAP lines";
     const sync = () => {
       const on = localStorage.getItem(IND_VIS_KEY21) !== "0";
-      btn.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>`;
+      btn.innerHTML = on
+        ? `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M4 7.25h16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" opacity=".42"/><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" opacity=".42"/><path d="M8 16.75h8" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" opacity=".42"/></svg>`
+        : `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M4 7.25h16" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/><path d="M8 16.75h8" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>`;
       btn.classList.toggle("off", !on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
     };
