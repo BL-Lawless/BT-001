@@ -16,6 +16,14 @@
     return Number.isFinite(n) ? Math.round(n).toLocaleString("en-US") : "-";
   }
 
+  function maMasterVisible() {
+    try {
+      return localStorage.getItem("btc_futures_chart_v13_21_indicators_visible") !== "0";
+    } catch (_e) {
+      return true;
+    }
+  }
+
   function installTooltipOwner() {
     if (window.__maTooltipOwnerInstalled) return;
     if (typeof window.candleTip !== "function") return;
@@ -39,6 +47,7 @@
       const settings = window.MA_SETTINGS_MODULE;
       const slots = seriesApi ? seriesApi.getCanonicalMASlots() : [];
       slots.forEach(slot => {
+        if (!maMasterVisible()) return;
         if (!slot.enabled) return;
         lines.push({
           text: slot.label + " : " + formatValue(valueAt(slot.series, c.time)),

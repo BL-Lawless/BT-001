@@ -512,7 +512,7 @@ function selectedReportPresetMs(){
   switch(reportWeeksEl.value){
     case "2w": return 2 * WEEK_MS;
     case "3w": return 3 * WEEK_MS;
-    case "1mth": return 30 * 24 * 60 * 60 * 1000;
+    case "4w": return 4 * WEEK_MS;
     case "1w":
     default: return WEEK_MS;
   }
@@ -539,7 +539,7 @@ function weeks(){
   switch(reportWeeksEl.value){
     case "2w": return 2;
     case "3w": return 3;
-    case "1mth": return 4;
+    case "4w": return 4;
     default: return 1;
   }
 }
@@ -548,8 +548,7 @@ function reportLabel(){
   switch(reportWeeksEl.value){
     case "2w": return "2W";
     case "3w": return "3W";
-    case "1mth": return "1M";
-    case "custom": return customReportRangeMs() ? "Custom" : "Custom*";
+    case "4w": return "4W";
     case "1w":
     default: return "1W";
   }
@@ -813,6 +812,276 @@ function updateAccountBalanceFromBalance(rows){
 async function getAccountBalance(key,sec,off){
   const endpoint = cfg().balance || "https://fapi.binance.com/fapi/v2/balance";
   return await signedGet(endpoint,{},key,sec,off);
+}
+
+let accountBalanceLoading = false;
+async function refreshAccountBalance(opt={}){
+  const silent = !!opt.silent;
+  const key = apiKeyEl.value.trim();
+  const sec = apiSecretEl.value.trim();
+
+  saveKeysLocal();
+  if(!key || !sec){
+    updateApiStatus();
+    return null;
+  }
+  if(accountBalanceLoading) return null;
+  accountBalanceLoading = true;
+  try{
+    const off = opt.off != null ? opt.off : await timeOffset();
+    const rows = await getAccountBalance(key,sec,off);
+    updateAccountBalanceFromBalance(rows);
+    updateTabTitle();
+    return rows;
+  }catch(e){
+    if(!silent) console.error("Account balance refresh failed",e);
+    else console.warn("Account balance refresh failed",e);
+    return null;
+  }finally{
+    accountBalanceLoading = false;
+    updateApiStatus();
+  }
+}
+
+let openPositionLoading = false;
+let lastOpenPositionRetrievalSig = null;
+function openPositionRetrievalSig(active){
+  if(!active) return "";
+  return [
+    active.symbol,
+    active.side,
+    Number(active.qty).toFixed(8),
+    Number(active.avg || 0).toFixed(8)
+  ].join(":");
+}
+
+function maybeRefreshBalanceForPositionChange(nextSig,off){
+  const prevSig = lastOpenPositionRetrievalSig;
+  lastOpenPositionRetrievalSig = nextSig;
+  if(prevSig === null) return;
+  if(prevSig !== nextSig){
+    refreshAccountBalance({silent:true,off}).catch(e => console.warn("Balance refresh after position change failed",e));
+  }
+}
+
+async function refreshOpenPosition(opt={}){
+  const silent = !!opt.silent;
+  const key = apiKeyEl.value.trim();
+  const sec = apiSecretEl.value.trim();
+
+  saveKeysLocal();
+  if(!key || !sec){
+    updateApiStatus();
+    return null;
+  }
+  if(openPositionLoading) return null;
+  openPositionLoading = true;
+
+  try{
+    const off = opt.off != null ? opt.off : await timeOffset();
+    const risk = await getPositions(key,sec,off);
+    const active = activePositionFromRisk(risk,cfg().symbol);
+
+    if(!active){
+      clearOpenPositionOwner();
+      clearActiveParentCache(cfg().symbol);
+      maybeRefreshBalanceForPositionChange("",off);
+      updatePositionStrip(candles.length ? candles[candles.length-1] : null);
+      updateTabTitle();
+      draw();
+      return {risk,active:null,off};
+    }
+
+    applyOpenPositionRiskOnly(risk,cfg().symbol);
+    const loaded = await loadActiveParentReconstruction(key,sec,off,active);
+    if(loaded && loaded.rec && reconstructionOpenMatchesPosition(loaded.rec,active)){
+      applyOpenPositionReconstruction(loaded.rec,risk,cfg().symbol);
+    }else{
+      applyOpenPositionRiskOnly(risk,cfg().symbol);
+    }
+
+    maybeRefreshBalanceForPositionChange(openPositionRetrievalSig(active),off);
+    updatePositionStrip(candles.length ? candles[candles.length-1] : null);
+    updateTabTitle();
+    draw();
+    return {risk,active,loaded,off};
+  }catch(e){
+    if(!silent) console.error("Open position refresh failed",e);
+    else console.warn("Open position refresh failed",e);
+    return null;
+  }finally{
+    openPositionLoading = false;
+    updateApiStatus();
+  }
+}
+
+let closedTradesLoading = false;
+const CLOSED_TRADES_VISIBLE_MAX_MS = 14 * 24 * 60 * 60 * 1000;
+
+function selectedClosedTradePeriod(period){
+  const raw = String(period || (reportWeeksEl && reportWeeksEl.value) || "1w").toLowerCase();
+  if(raw === "2w") return {value:"2w",weeks:2,label:"2W"};
+  if(raw === "3w") return {value:"3w",weeks:3,label:"3W"};
+  if(raw === "4w") return {value:"4w",weeks:4,label:"4W"};
+  return {value:"1w",weeks:1,label:"1W"};
+}
+
+function closedTradePeriodWindowMs(period){
+  const selected = selectedClosedTradePeriod(period);
+  const end = Date.now();
+  return {
+    start:end - selected.weeks * WEEK_MS,
+    end,
+    label:selected.label,
+    period:selected.value
+  };
+}
+
+function visibleClosedTradeWindowMs(){
+  const latest = candles && candles.length ? candles[candles.length - 1] : null;
+  const r = typeof range === "function" ? range() : null;
+  const firstVisible = r && candles && candles.length ? candles[Math.max(0,Math.min(candles.length - 1,r.start))] : null;
+  const rightIndex = r && candles && candles.length
+    ? Math.max(0,Math.min(candles.length - 1,Math.max(r.start,r.end - 1)))
+    : -1;
+  const rightVisible = rightIndex >= 0 ? candles[rightIndex] : null;
+  const startSec = firstVisible && Number.isFinite(Number(firstVisible.time))
+    ? Number(firstVisible.time)
+    : latest && Number.isFinite(Number(latest.time))
+      ? Number(latest.time)
+      : Math.floor(Date.now() / 1000);
+  const visibleEndSec = rightVisible && Number.isFinite(Number(rightVisible.time))
+    ? Number(rightVisible.time) + Math.max(0,(typeof ivSec === "function" ? ivSec() : 0) - 1)
+    : startSec;
+  const latestEndSec = latest && Number.isFinite(Number(latest.time))
+    ? Number(latest.time) + Math.max(0,(typeof ivSec === "function" ? ivSec() : 0) - 1)
+    : Math.floor(Date.now() / 1000);
+  const endSec = Math.min(visibleEndSec,latestEndSec);
+  const start = Math.max(0,Math.floor(Math.min(startSec,endSec) * 1000));
+  const end = Math.max(start,Math.floor(Math.max(startSec,endSec) * 1000));
+  return {start,end,label:"Visible"};
+}
+
+function closedTradeStatus(text){
+  if(tradeCountEl) tradeCountEl.textContent = text;
+}
+
+function closedTradeStatusTime(ms){
+  const d = new Date(ms);
+  const pad = v => String(v).padStart(2,"0");
+  return d.getFullYear() + "-" +
+    pad(d.getMonth() + 1) + "-" +
+    pad(d.getDate()) + " " +
+    pad(d.getHours()) + ":" +
+    pad(d.getMinutes());
+}
+
+function closedTradeStatusDay(ms){
+  const d = new Date(ms);
+  const pad = v => String(v).padStart(2,"0");
+  return pad(d.getDate()) + "/" + pad(d.getMonth() + 1);
+}
+
+function closedTradeExStats(rec){
+  const finalEx = [];
+  for(const m of rec && rec.markers || []){
+    if(m && m.role === "close" && !m.unresolved && m.isFinalExit && Number.isFinite(Number(m.time))){
+      finalEx.push(Number(m.time) * 1000);
+    }
+  }
+  finalEx.sort((a,b) => a - b);
+  return {
+    count:finalEx.length,
+    oldest:finalEx[0] || null,
+    newest:finalEx.length ? finalEx[finalEx.length - 1] : null
+  };
+}
+
+async function loadClosedTradesForPeriod(period,opt={}){
+  const silent = !!opt.silent;
+  const key = apiKeyEl.value.trim();
+  const sec = apiSecretEl.value.trim();
+
+  saveKeysLocal();
+  if(!key || !sec){
+    updateApiStatus();
+    return null;
+  }
+  if(closedTradesLoading) return null;
+  closedTradesLoading = true;
+
+  try{
+    if(!silent) closedTradeStatus("Loading closed trades...");
+
+    const win = closedTradePeriodWindowMs(period || opt.period);
+    const off = opt.off != null ? opt.off : await timeOffset();
+    closedTradeStatus("Fetching fills...");
+    let start = Math.max(0,win.start - RECON_LOOKBACK_WEEKS * WEEK_MS);
+    let rows = await getUserTradesRange(key,sec,off,start,win.end);
+    closedTradeStatus("Reconstructing trades...");
+    let full = reconstruct(rows,cfg().symbol);
+    const maxBackfillStart = Math.max(0,win.start - Math.max(RECON_LOOKBACK_WEEKS,52) * WEEK_MS);
+    while(hasPeriodUnresolvedClose(full,win) && start > maxBackfillStart){
+      closedTradeStatus("Fetching fills...");
+      start = Math.max(maxBackfillStart,start - TRADE_CHUNK_MS);
+      rows = await getUserTradesRange(key,sec,off,start,win.end);
+      closedTradeStatus("Reconstructing trades...");
+      full = reconstruct(rows,cfg().symbol);
+    }
+    fundingIncomeRows = await getFundingIncomeRange(key,sec,off,start,win.end).catch(e => {
+      console.warn("Funding income fetch failed",e);
+      fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:cfg().symbol};
+      return [];
+    });
+
+    const rec = filterClosedReconstructionForPeriod(full,win);
+    const exStats = closedTradeExStats(rec);
+
+    CLOSED_TRADES_STATE.markers = rec.markers;
+    CLOSED_TRADES_STATE.links = rec.links;
+    CLOSED_TRADES_STATE.fundingIncomeRows = fundingIncomeRows;
+    CLOSED_TRADES_STATE.fundingIncomeFetchStats = fundingIncomeFetchStats;
+    CLOSED_TRADES_STATE.unresolvedCount = rec.unresolved;
+    CLOSED_TRADES_STATE.fullReconstruction = full;
+    CLOSED_TRADES_STATE.reportProjection = rec;
+    unresolvedCount = CLOSED_TRADES_STATE.unresolvedCount;
+    syncLegacyTradeGlobalsFromOwners();
+
+    closedTradeStatus(
+      "from: " + closedTradeStatusDay(win.start) + "\n" +
+      "to: " + closedTradeStatusDay(win.end) + "\n" +
+      "trades: " + exStats.count
+    );
+
+    updatePositionStrip(candles.length ? candles[candles.length-1] : null);
+    updateTabTitle();
+    draw();
+    return {full,report:rec};
+  }catch(e){
+    console.error("Load closed trades failed",e);
+    if(!silent) closedTradeStatus("Trades: error");
+    return null;
+  }finally{
+    closedTradesLoading = false;
+    updateApiStatus();
+  }
+}
+
+async function loadClosedTradesForVisibleRange(opt={}){
+  return loadClosedTradesForPeriod(opt && opt.period,opt);
+}
+
+async function loadClosedTradesToday(opt={}){
+  return loadClosedTradesForPeriod("1w",opt);
+}
+
+if(typeof window !== "undefined"){
+  window.__separatedRetrievalR1 = true;
+  window.refreshOpenPosition = refreshOpenPosition;
+  window.loadClosedTradesForVisibleRange = loadClosedTradesForVisibleRange;
+  window.loadClosedTradesForPeriod = loadClosedTradesForPeriod;
+  window.loadClosedTradesToday = loadClosedTradesToday;
+  window.refreshAccountBalance = refreshAccountBalance;
 }
 
 function updatePositionStrip(c){
@@ -2970,6 +3239,254 @@ async function getTrades(key,sec,off){
   return all;
 }
 
+async function getUserTradesRange(key,sec,off,start,end){
+  const c = cfg();
+  const all = [];
+  const seen = new Set();
+  const startMs = Math.max(0,Math.floor(Number(start) || 0));
+  const endMs = Math.max(startMs,Math.floor(Number(end) || Date.now()));
+
+  let chunk = startMs;
+  while(chunk < endMs){
+    const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,endMs);
+    let page = chunk;
+    let n = 0;
+
+    while(page <= chunkEnd && n < 30){
+      const rows = await signedGet(
+        c.userTrades,
+        {
+          symbol:c.symbol,
+          startTime:String(Math.floor(page)),
+          endTime:String(Math.floor(chunkEnd)),
+          limit:String(TRADE_LIMIT)
+        },
+        key,
+        sec,
+        off
+      );
+
+      if(!Array.isArray(rows) || !rows.length) break;
+
+      for(const row of rows){
+        const k =
+          String(row.id ?? "") + "_" +
+          String(row.orderId ?? "") + "_" +
+          String(row.time ?? "");
+        if(!seen.has(k)){
+          seen.add(k);
+          all.push(row);
+        }
+      }
+
+      if(rows.length < TRADE_LIMIT) break;
+
+      const lt = Math.max(...rows.map(r => Number(r.time || 0)));
+      if(!isFinite(lt) || lt <= page) break;
+      page = lt + 1;
+      n++;
+    }
+
+    chunk = chunkEnd + 1;
+  }
+
+  return all.sort((a,b) =>
+    Number(a.time || 0) - Number(b.time || 0) ||
+    Number(a.id || 0) - Number(b.id || 0)
+  );
+}
+
+function activePositionFromRisk(risk,symbol){
+  const row = (Array.isArray(risk) ? risk : []).find(r => r && r.symbol === symbol && Math.abs(Number(r.positionAmt)) > 1e-12);
+  if(!row) return null;
+  const amt = Number(row.positionAmt);
+  const side = amt < 0 || String(row.positionSide || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+  return {row,symbol,side,sign:side === "SHORT" ? -1 : 1,qty:Math.abs(amt),avg:Number(row.entryPrice)};
+}
+
+function sideSignName(sign){
+  return sign < 0 ? "SHORT" : "LONG";
+}
+
+function reconstructionOpenMatchesPosition(rec,active){
+  if(!rec || !active) return false;
+  const lots = Array.isArray(rec.openLots) ? rec.openLots : [];
+  const activeLots = lots.filter(l => l && sideSignName(Number(l.sign)) === active.side);
+  if(!activeLots.length) return false;
+  const oppositeLots = lots.filter(l => l && sideSignName(Number(l.sign)) !== active.side && Math.abs(Number(l.remainingQty)) > 1e-12);
+  if(oppositeLots.length) return false;
+  const qty = activeLots.reduce((a,l) => a + Math.abs(Number(l.remainingQty) || 0),0);
+  const tol = Math.max(1e-8,active.qty * 1e-6);
+  return Math.abs(qty - active.qty) <= tol;
+}
+
+function activeParentCacheKey(symbol){
+  return STORE + "active_parent_" + String(symbol || "").toUpperCase();
+}
+
+function readActiveParentCache(symbol){
+  try{
+    const raw = localStorage.getItem(activeParentCacheKey(symbol));
+    return raw ? JSON.parse(raw) : null;
+  }catch(_e){
+    return null;
+  }
+}
+
+function writeActiveParentCache(symbol,active,startTime){
+  try{
+    localStorage.setItem(activeParentCacheKey(symbol),JSON.stringify({
+      symbol,
+      side:active && active.side,
+      startTime:Math.max(0,Math.floor(Number(startTime) || 0)),
+      updatedAt:Date.now()
+    }));
+  }catch(_e){}
+}
+
+function clearActiveParentCache(symbol){
+  try{ localStorage.removeItem(activeParentCacheKey(symbol)); }catch(_e){}
+}
+
+function activeChainIdsFromReconstruction(rec){
+  const ids = new Set();
+  (rec && rec.openLots || []).forEach(l => {
+    const id = stateChainId(l);
+    if(id) ids.add(id);
+  });
+  (rec && rec.openConnectors || []).forEach(l => {
+    const id = stateChainId(l);
+    if(id) ids.add(id);
+  });
+  return ids;
+}
+
+function applyOpenPositionReconstruction(rec,risk,symbol){
+  const chainIds = activeChainIdsFromReconstruction(rec);
+  const openLots = (rec && rec.openLots || []).filter(l => chainIds.has(stateChainId(l)));
+  const openConnectors = (rec && rec.openConnectors || []).filter(l => chainIds.has(stateChainId(l)));
+  const openMarkers = (rec && rec.markers || []).filter(m => chainIds.has(stateChainId(m)));
+  const openLinks = (rec && rec.links || []).filter(l => chainIds.has(stateChainId(l)));
+  const entryIds = new Set();
+  openConnectors.forEach(l => { if(l && l.entryMarkerId) entryIds.add(l.entryMarkerId); });
+  openMarkers.forEach(m => { if(m && m.role === "entry") entryIds.add(m.id); });
+
+  OPEN_POSITION_STATE.markers = openMarkers;
+  OPEN_POSITION_STATE.links = openLinks;
+  OPEN_POSITION_STATE.openLotLinks = openConnectors;
+  OPEN_POSITION_STATE.boxes = buildOpenBoxes(openLots,risk || [],symbol);
+  OPEN_POSITION_STATE.entryMarkerIds = entryIds;
+  OPEN_POSITION_STATE.activeParentChainIds = chainIds;
+  OPEN_POSITION_STATE.openLots = openLots;
+  syncLegacyTradeGlobalsFromOwners();
+}
+
+function applyOpenPositionRiskOnly(risk,symbol){
+  const boxes = buildOpenBoxes([],risk || [],symbol);
+  if(boxes.length){
+    const chainHint =
+      [...(OPEN_POSITION_STATE.activeParentChainIds || new Set())].find(Boolean) ||
+      (OPEN_POSITION_STATE.openLotLinks || []).map(stateChainId).find(Boolean) ||
+      (OPEN_POSITION_STATE.boxes || []).map(stateChainId).find(Boolean) ||
+      null;
+    if(chainHint) boxes.forEach(b => { if(!stateChainId(b)) b.chainId = chainHint; });
+    OPEN_POSITION_STATE.boxes = boxes;
+  }else{
+    clearOpenPositionOwner();
+  }
+  syncLegacyTradeGlobalsFromOwners();
+}
+
+async function loadActiveParentReconstruction(key,sec,off,active){
+  const now = Date.now() + off;
+  const symbol = active && active.symbol || cfg().symbol;
+  const cache = readActiveParentCache(symbol);
+  if(cache && cache.side === active.side && Number(cache.startTime) > 0){
+    const rows = await getUserTradesRange(key,sec,off,Math.max(0,Number(cache.startTime) - 1000),now);
+    const rec = reconstruct(rows,symbol);
+    if(reconstructionOpenMatchesPosition(rec,active)){
+      return {rows,rec,fromCache:true,startTime:Number(cache.startTime)};
+    }
+  }
+
+  const all = [];
+  const seen = new Set();
+  let end = now;
+  const maxStart = Math.max(0,now - RECON_LOOKBACK_WEEKS * WEEK_MS);
+  while(end > maxStart){
+    const start = Math.max(maxStart,end - TRADE_CHUNK_MS + 1);
+    const rows = await getUserTradesRange(key,sec,off,start,end);
+    for(let i = rows.length - 1; i >= 0; i--){
+      const row = rows[i];
+      const k = String(row.id ?? "") + "_" + String(row.orderId ?? "") + "_" + String(row.time ?? "");
+      if(!seen.has(k)){
+        seen.add(k);
+        all.unshift(row);
+      }
+    }
+
+    const rec = reconstruct(all,symbol);
+    if(reconstructionOpenMatchesPosition(rec,active)){
+      const chainIds = activeChainIdsFromReconstruction(rec);
+      const startSec = (rec.markers || [])
+        .filter(m => chainIds.has(stateChainId(m)) && m.role === "entry")
+        .reduce((min,m) => Math.min(min,Number(m.time) || min),Number.MAX_SAFE_INTEGER);
+      const startTime = Number.isFinite(startSec) && startSec !== Number.MAX_SAFE_INTEGER
+        ? startSec * 1000
+        : (all[0] ? Number(all[0].time) : start);
+      writeActiveParentCache(symbol,active,startTime);
+      return {rows:all,rec,fromCache:false,startTime};
+    }
+
+    end = start - 1;
+  }
+
+  return {rows:all,rec:all.length ? reconstruct(all,symbol) : null,fromCache:false,startTime:0};
+}
+
+function filterClosedReconstructionForPeriod(rec,win){
+  const startSec = Math.floor(win.start / 1000);
+  const endSec = Math.floor(win.end / 1000);
+  const closedChainIds = new Set();
+  const finalByChain = new Map();
+
+  for(const m of rec.markers || []){
+    if(!m || m.role !== "close" || m.unresolved || !m.isFinalExit) continue;
+    const id = stateChainId(m);
+    if(!id) continue;
+    const t = Number(m.time) || 0;
+    const prev = finalByChain.get(id);
+    if(!prev || t > prev.time) finalByChain.set(id,{marker:m,time:t});
+  }
+
+  finalByChain.forEach((final,id) => {
+    if(final.time >= startSec && final.time <= endSec) closedChainIds.add(id);
+  });
+
+  const markers = (rec.markers || []).filter(m => closedChainIds.has(stateChainId(m)));
+  const links = (rec.links || []).filter(l => closedChainIds.has(stateChainId(l)));
+  return {
+    ...rec,
+    markers,
+    links,
+    openConnectors:[],
+    openLots:[],
+    unresolved:markers.filter(m => m && m.unresolved).length
+  };
+}
+
+function hasPeriodUnresolvedClose(rec,win){
+  const startSec = Math.floor(win.start / 1000);
+  const endSec = Math.floor(win.end / 1000);
+  return (rec && rec.markers || []).some(m =>
+    m &&
+    m.role === "close" &&
+    m.unresolved &&
+    Number(m.time) >= startSec &&
+    Number(m.time) <= endSec
+  );
+}
+
 /* PATCH_37_REDO_NET_PL_FUNDING_UI_FIX: focused signed read-only funding income lookup. */
 async function getFundingIncome(key,sec,off){
   const c = cfg();
@@ -3035,6 +3552,63 @@ async function getFundingIncome(key,sec,off){
       matches:{}
     };
   }
+  return all;
+}
+
+async function getFundingIncomeRange(key,sec,off,start,end){
+  const c = cfg();
+  const endpoint = c.income || "https://fapi.binance.com/fapi/v1/income";
+  const all = [];
+  const seen = new Set();
+  const startMs = Math.max(0,Math.floor(Number(start) || 0));
+  const endMs = Math.max(startMs,Math.floor(Number(end) || Date.now()));
+
+  let chunk = startMs;
+  while(chunk < endMs){
+    const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,endMs);
+    let page = chunk;
+    let n = 0;
+
+    while(page <= chunkEnd && n < 30){
+      const rows = await signedGet(
+        endpoint,
+        {
+          symbol:c.symbol,
+          incomeType:"FUNDING_FEE",
+          startTime:String(Math.floor(page)),
+          endTime:String(Math.floor(chunkEnd)),
+          limit:"1000"
+        },
+        key,
+        sec,
+        off
+      );
+
+      if(!Array.isArray(rows) || !rows.length) break;
+
+      for(const row of rows){
+        const k =
+          String(row.tranId ?? row.time ?? "") + "_" +
+          String(row.symbol ?? "") + "_" +
+          String(row.income ?? "");
+        if(!seen.has(k)){
+          seen.add(k);
+          all.push(row);
+        }
+      }
+
+      if(rows.length < 1000) break;
+
+      const lt = Math.max(...rows.map(r => Number(r.time || 0)));
+      if(!isFinite(lt) || lt <= page) break;
+      page = lt + 1;
+      n++;
+    }
+
+    chunk = chunkEnd + 1;
+  }
+
+  fundingIncomeFetchStats = {rows:all.length,start:startMs,end:endMs,symbol:c.symbol};
   return all;
 }
 
@@ -3498,58 +4072,7 @@ function buildOpenBoxes(lots,risk,symbol){
 }
 
 async function loadTrades(opt={}){
-  const silent = !!opt.silent;
-  const key = apiKeyEl.value.trim();
-  const sec = apiSecretEl.value.trim();
-
-  saveKeysLocal();
-
-  if(!key || !sec){
-    updateApiStatus();
-    return;
-  }
-
-  if(tradeLoading) return;
-  tradeLoading = true;
-
-  try{
-    if(!silent) tradeCountEl.textContent = "Trades: ...";
-
-    const off = await timeOffset();
-    const rows = await getTrades(key,sec,off);
-    fundingIncomeRows = await getFundingIncome(key,sec,off).catch(e => {
-      console.warn("Funding income fetch failed",e);
-      fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:cfg().symbol};
-      return [];
-    });
-    const risk = await getPositions(key,sec,off);
-    const balanceRows = await getAccountBalance(key,sec,off).catch(e => {
-      console.warn("Balance fetch failed",e);
-      return null;
-    });
-    updateAccountBalanceFromBalance(balanceRows);
-
-    const full = reconstruct(rows,cfg().symbol);
-    const rec = filterReconstructionForReport(full);
-    const owners = routeReconstructionToTradeOwners(full,rec,risk,cfg().symbol);
-    updatePositionStrip(candles.length ? candles[candles.length-1] : null);
-    updateTabTitle();
-
-    tradeCountEl.textContent =
-      "Fills:" + owners.closed.markers.length +
-      " Links:" + owners.closed.links.length +
-      " Open:" + openPositionBoxes.length +
-      (unresolvedCount ? " Unres:" + unresolvedCount : "") +
-      " LB:" + RECON_LOOKBACK_WEEKS + "W";
-
-    draw();
-  }catch(e){
-    console.error("Load trades failed",e);
-    if(!silent) tradeCountEl.textContent = "Trades: error";
-  }finally{
-    tradeLoading = false;
-    updateApiStatus();
-  }
+  return loadClosedTradesForPeriod(opt && opt.period,opt);
 }
 
 function clearTrades(){
@@ -3564,13 +4087,14 @@ function startTradeAuto(){
   stopTradeAuto();
 
   setTimeout(() => {
-    if(hasKeys()) loadTrades({silent:true});
-    else updateApiStatus();
+    if(hasKeys()){
+      refreshAccountBalance({silent:true});
+      refreshOpenPosition({silent:true});
+    }else updateApiStatus();
   },2500);
 
   tradeAutoTimer = setInterval(() => {
-    if(hasKeys()) loadTrades({silent:true});
-    else updateApiStatus();
+    updateApiStatus();
   },TRADE_REFRESH_MS);
 }
 
@@ -4855,14 +5379,22 @@ canvas.addEventListener("dblclick",e => {
 
 function handleReloadClick(){
   loadChart();
+  if(hasKeys()){
+    refreshAccountBalance({silent:true});
+    refreshOpenPosition({silent:true});
+  }
 }
 
 function handleMarketChange(){
   clearTrades();
+  clearOpenPositionOwner();
   loadChart();
 
   setTimeout(() => {
-    if(hasKeys()) loadTrades({silent:true});
+    if(hasKeys()){
+      refreshAccountBalance({silent:true});
+      refreshOpenPosition({silent:true});
+    }
     else updateApiStatus();
   },2000);
 }
@@ -4893,7 +5425,8 @@ saveApiKeys.addEventListener("click",() => {
   closeApi();
 
   if(hasKeys()){
-    loadTrades({silent:false});
+    refreshAccountBalance({silent:false});
+    refreshOpenPosition({silent:false});
   }
 });
 
@@ -4918,18 +5451,15 @@ intervalEl.addEventListener("change",handleIntervalChange);
 
 function updateReportControls(){
   if(customRangeEl){
-    customRangeEl.classList.toggle("hidden", reportWeeksEl.value !== "custom");
+    customRangeEl.classList.add("hidden");
   }
+  const reportControl = reportWeeksEl && reportWeeksEl.closest ? reportWeeksEl.closest(".report-control") : null;
+  if(reportControl) reportControl.classList.remove("hidden");
 }
 
 function reloadTradesForReport(){
   updateReportControls();
-  clearTrades();
   updateApiStatus();
-
-  if(hasKeys()){
-    loadTrades({silent:false});
-  }
 
   draw();
 }
@@ -10555,7 +11085,7 @@ startTradeAuto();
     const sel = document.getElementById('reportWeeks');
     if(!sel) return;
     const specs = [
-      ['1w','1W'],['2w','2W'],['3w','3W'],['1mth','1M'],['3mth','3M'],['6mth','6M'],['custom','Custom']
+      ['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']
     ];
     const cur = sel.value || '1w';
     sel.innerHTML = '';
@@ -10573,9 +11103,7 @@ startTradeAuto();
     switch(reportWeeksEl.value){
       case '2w': return 2 * WEEK_MS;
       case '3w': return 3 * WEEK_MS;
-      case '1mth': return 30 * 24 * 60 * 60 * 1000;
-      case '3mth': return 90 * 24 * 60 * 60 * 1000;
-      case '6mth': return 180 * 24 * 60 * 60 * 1000;
+      case '4w': return 4 * WEEK_MS;
       case '1w':
       default: return WEEK_MS;
     }
@@ -10585,9 +11113,7 @@ startTradeAuto();
     switch(reportWeeksEl.value){
       case '2w': return 2;
       case '3w': return 3;
-      case '1mth': return 4;
-      case '3mth': return 13;
-      case '6mth': return 26;
+      case '4w': return 4;
       default: return 1;
     }
   };
@@ -10596,10 +11122,7 @@ startTradeAuto();
     switch(reportWeeksEl.value){
       case '2w': return '2W';
       case '3w': return '3W';
-      case '1mth': return '1M';
-      case '3mth': return '3M';
-      case '6mth': return '6M';
-      case 'custom': return customReportRangeMs() ? 'Custom' : 'Custom*';
+      case '4w': return '4W';
       case '1w':
       default: return '1W';
     }
@@ -11619,7 +12142,9 @@ startTradeAuto();
       positionRefreshBusy14 = false;
     }
   }
-  setInterval(refreshOpenPositionOnly14,3000);
+  if(!(typeof window !== "undefined" && window.__separatedRetrievalR1)){
+    setInterval(refreshOpenPositionOnly14,3000);
+  }
 
   // Keep dependency state stable after any redraw-triggering toggle change.
   syncTradeToggleState14();
@@ -13458,20 +13983,14 @@ startTradeAuto();
     try{
       const key = apiKeyEl.value.trim();
       const sec = apiSecretEl.value.trim();
-      const off = typeof timeOffset === "function" ? await timeOffset() : 0;
-      const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
+      const refreshed = typeof window.refreshOpenPosition === "function"
+        ? await window.refreshOpenPosition({silent:true})
+        : null;
+      if(!refreshed) return;
+      const risk = refreshed && Array.isArray(refreshed.risk) ? refreshed.risk : [];
+      const off = refreshed && refreshed.off != null ? refreshed.off : (typeof timeOffset === "function" ? await timeOffset() : 0);
       const sig = positionSig21(risk);
       const openPositionChanged = sig !== lastSig21;
-      const auth21 = {key,sec,off};
-      if(lastSig21 === null){
-        updateBoxesFromRisk21(risk);
-        try{ if(typeof draw === "function") draw(); }catch(e){}
-        if(sig && !(Array.isArray(openLotLinks) && openLotLinks.length)) scheduleOpenPositionVisualSync21(risk,auth21);
-      }else if(openPositionChanged){
-        updateBoxesFromRisk21(risk);
-        try{ if(typeof draw === "function") draw(); }catch(e){}
-        scheduleOpenPositionVisualSync21(risk,auth21);
-      }
       lastSig21 = sig;
 
       if(sig) await fetchOpenOrders21(key,sec,off);
@@ -15273,7 +15792,7 @@ If there is NO open position, use this Section 2 instead:
 
   function installReportOptions(){
     const sel=$id('reportWeeks'); if(!sel) return;
-    const specs=[['yesterday','Yesterday'],['today','Today'],['1w','1W'],['2w','2W'],['3w','3W'],['1mth','1M'],['custom','Custom']];
+    const specs=[['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']];
     const saved=localStorage.getItem(K('reportPeriod'));
     const current=(sel.value&&specs.some(x=>x[0]===sel.value)&&sel.value!=='1d')?sel.value:(saved||'1w');
     sel.innerHTML='';
@@ -15313,9 +15832,7 @@ If there is NO open position, use this Section 2 instead:
     switch(reportWeeksEl.value){
       case '2w': return 2*WEEK_MS;
       case '3w': return 3*WEEK_MS;
-      case '1mth': return 30*24*60*60*1000;
-      case 'today': return Math.max(1,Date.now()-startOfLocalDay(new Date()));
-      case 'yesterday': return 24*60*60*1000;
+      case '4w': return 4*WEEK_MS;
       case '1w': default: return WEEK_MS;
     }
   };
@@ -15329,23 +15846,17 @@ If there is NO open position, use this Section 2 instead:
   };
   reportRangeMs=function(){
     const now=Date.now(), today0=startOfLocalDay(new Date());
-    if(reportWeeksEl.value==='today') return {start:today0,end:now};
-    if(reportWeeksEl.value==='yesterday') return {start:today0-24*60*60*1000,end:today0-1};
-    if(reportWeeksEl.value==='custom'){ const c=customReportRangeMs(); if(c) return c; }
     return {start:now-selectedReportPresetMs(),end:now};
   };
   reportLabel=function(){
     switch(reportWeeksEl.value){
-      case 'today': return 'Today';
-      case 'yesterday': return 'Yesterday';
       case '2w': return '2W';
       case '3w': return '3W';
-      case '1mth': return '1M';
-      case 'custom': return customReportRangeMs()?'Custom':'Custom*';
+      case '4w': return '4W';
       case '1w': default: return '1W';
     }
   };
-  weeks=function(){ switch(reportWeeksEl.value){ case '2w': return 2; case '3w': return 3; case '1mth': return 4; case 'today': case 'yesterday': default: return 1; } };
+  weeks=function(){ switch(reportWeeksEl.value){ case '2w': return 2; case '3w': return 3; case '4w': return 4; default: return 1; } };
   const prevFilter=typeof filterReconstructionForReport==='function'?filterReconstructionForReport:null;
   if(prevFilter&&!window.__v32r1FilterWrapped){
     window.__v32r1FilterWrapped=true;

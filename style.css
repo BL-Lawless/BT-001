@@ -161,7 +161,17 @@ button:hover{filter:brightness(1.04)}
 }
 
 .trade-count{
-  display:none;
+  display:inline-block;
+  color:var(--muted);
+  font-size:12px;
+  white-space:pre-line;
+  max-width:520px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+#customRange{
+  display:none !important;
 }
 
 .conn-wrap{
