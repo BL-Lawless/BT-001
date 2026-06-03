@@ -16469,7 +16469,47 @@ If there is NO open position, use this Section 2 instead:
       return `${spreadScoreLabel(score)} | ${score}`;
     }
     function clamp100(v){ return Math.max(0,Math.min(100,Math.round(v))); }
-    function eventText(ev,freshOnly=false){ if(!ev) return freshOnly ? "No fresh event" : "None"; if(freshOnly && ev.age > 5) return "No fresh event"; return ev.label; }
+    function eventText(ev,freshOnly=false){
+      if(!ev) return freshOnly ? "No fresh event" : "None";
+      if(freshOnly) return freshMaPairEventText(ev);
+      return ev.label;
+    }
+    function maPairAgeText(age){
+      const n = Math.max(0,Math.floor(Number(age)));
+      if(!Number.isFinite(n) || n > 3) return "";
+      if(n === 0) return "current candle";
+      return `${n} candle${n === 1 ? "" : "s"} ago`;
+    }
+    function cleanMaPairPeriodText(ev){
+      const periods = [];
+      String((ev && ev.label) || (ev && ev.ref) || "").replace(/EMA\s*(\d+)/gi,(_m,p)=>{
+        const n = Number(p);
+        if(Number.isFinite(n)) periods.push(n);
+        return _m;
+      });
+      if(periods.length >= 2) return `EMAs ${periods[0]} / ${periods[1]}`;
+      return "EMAs";
+    }
+    function cleanMaPairTypeText(ev){
+      const raw = String(ev && ev.type || "").toLowerCase().trim();
+      if(raw === "crossover") return Number(ev && ev.dir) < 0 ? "Bear Crossover" : "Bull Crossover";
+      if(raw === "bounce/no-cross") return "Bounce";
+      return raw
+        .replace(/[-/]+/g," ")
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(word=>word.charAt(0).toUpperCase() + word.slice(1))
+        .join(" ") || "Event";
+    }
+    function freshMaPairEventText(ev){
+      const age = maPairAgeText(ev && ev.age);
+      if(!ev || !age) return "No fresh event";
+      return `${cleanMaPairPeriodText(ev)} ${cleanMaPairTypeText(ev)} | ${age}`;
+    }
+    function maPairTooltipLine(ev){
+      const text = freshMaPairEventText(ev);
+      return text === "No fresh event" ? "MA Pair: No fresh event" : text;
+    }
     function setupDir(upPairs,downPairs,upSlope,downSlope){ if(upPairs || upSlope >= 4) return 1; if(downPairs || downSlope >= 4) return -1; return 0; }
     function eventIdentity(tf,r){
       if(!r || (r.blinkIntent !== "green" && r.blinkIntent !== "red") || !r.blinkEvent) return "";
@@ -17105,12 +17145,12 @@ If there is NO open position, use this Section 2 instead:
         `Quality: ${Number.isFinite(r.quality) ? r.quality : 0}%`,
         `Spread: ${titleLine(r.title,"Spread")}`
       ];
-      return `<div style="font-weight:800;font-size:13px;line-height:1.1;margin-bottom:8px">${escHtml(tf.key)}</div>`+
-        rows.map(line=>`<div>${escHtml(line)}</div>`).join("")+
-        `<div style="height:8px"></div>`+
-        `<div>${escHtml("MA Pair: " + compactEventText(r.maPair || "No fresh event"))}</div>`+
-        `<div style="height:8px"></div>`+
-        `<div>${escHtml(eventLine(r))}</div>`;
+      return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)}</div>`+
+        rows.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
+        `<div class="v33-ma-stack-tip-spacer"></div>`+
+        `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipLine(r && r.maEvent))}</div>`+
+        `<div class="v33-ma-stack-tip-spacer"></div>`+
+        `<div class="v33-ma-stack-tip-row">${escHtml(eventLine(r))}</div>`;
     }
     function compactRankTooltipHtml(tf,r){
       const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
@@ -17165,24 +17205,24 @@ If there is NO open position, use this Section 2 instead:
         `${labelMap[2]} - ${labelMap[3]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA3-MA4"])}`,
         `${labelMap[3]} - ${labelMap[4]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA4-MA5"])}`
       ] : ["DEBUG: unavailable"]);
-      return `<div style="font-weight:800;font-size:13px;line-height:1.1;margin-bottom:8px">${escHtml(tf.key)} Stack Rank</div>`+
-        `<div>${escHtml(sideLabel)}</div>`+
-        `<div>${escHtml(`LED Bias Match: ${Number(rank.okCount)||0}/5`)}</div>`+
-        `<div>${escHtml(fastText)}</div>`+
-        `<div>${escHtml(`${rank.hingeSlotLabel || "MA3"}: ${hingeText}`)}</div>`+
-        `<div>${escHtml(slowText)}</div>`+
-        `<div>${escHtml(`Summary: ${rank.summary || "Transition / Compression"}`)}</div>`+
-        `<div style="height:6px"></div>`+
-        rankRows.map(line=>`<div>${escHtml(line)}</div>`).join("")+
-        (showDebug ? `<div style="height:8px"></div>` : "")+
-        dbgLines.map(line=>`<div>${escHtml(line)}</div>`).join("");
+      return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)} Stack Rank</div>`+
+        `<div class="v33-ma-stack-tip-row">${escHtml(sideLabel)}</div>`+
+        `<div class="v33-ma-stack-tip-row">${escHtml(`LED Bias Match: ${Number(rank.okCount)||0}/5`)}</div>`+
+        `<div class="v33-ma-stack-tip-row">${escHtml(fastText)}</div>`+
+        `<div class="v33-ma-stack-tip-row">${escHtml(`${rank.hingeSlotLabel || "MA3"}: ${hingeText}`)}</div>`+
+        `<div class="v33-ma-stack-tip-row">${escHtml(slowText)}</div>`+
+        `<div class="v33-ma-stack-tip-row">${escHtml(`Summary: ${rank.summary || "Transition / Compression"}`)}</div>`+
+        `<div class="v33-ma-stack-tip-spacer is-small"></div>`+
+        rankRows.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
+        (showDebug ? `<div class="v33-ma-stack-tip-spacer"></div>` : "")+
+        dbgLines.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("");
     }
     function ensureMaStackTooltip(){
       let tip = document.getElementById("v33MAStackTooltip");
       if(tip) return tip;
       tip = document.createElement("div");
       tip.id = "v33MAStackTooltip";
-      tip.style.cssText = "position:fixed;z-index:99999;display:none;pointer-events:none;background:rgba(17,24,39,.96);color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:6px;padding:8px 10px;font:11.5px Arial,sans-serif;line-height:1.35;box-shadow:0 8px 24px rgba(0,0,0,.24);white-space:nowrap";
+      tip.style.cssText = "position:fixed;z-index:99999;display:none;pointer-events:none;white-space:nowrap";
       document.body.appendChild(tip);
       return tip;
     }
