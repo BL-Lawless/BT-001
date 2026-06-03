@@ -2126,7 +2126,10 @@ const marketDataHub = (() => {
     lastChartActivitySourceByTf:{},
     lastActiveChartTf:null,
     lastActiveChartCandles:[],
-    lastChartValidationWarnMs:0
+    lastChartValidationWarnMs:0,
+    integrityWarnMsByKey:{},
+    gapRepairInFlightByTf:{},
+    lastGapRepairMsByTf:{}
   };
   const state = {
     generation:0,
@@ -2362,6 +2365,61 @@ const marketDataHub = (() => {
     streams.push(base + "@markPrice@1s");
     return streams;
   }
+  function intervalMs(tf){
+    return Math.max(1,ivSec(tf)) * 1000;
+  }
+  function fixedBucketAlignment(tf){
+    return tf !== "1w" && tf !== "1M";
+  }
+  function warnIntegrity(key,message,detail={},holdMs=8000){
+    const t = now();
+    const warnKey = String(key || message || "integrity");
+    if(t - (diag.integrityWarnMsByKey[warnKey] || 0) < holdMs) return;
+    diag.integrityWarnMsByKey[warnKey] = t;
+    console.warn(MODULE + " " + message,detail);
+  }
+  function rowOpenMs(row){
+    const raw = Number(row && (row.openTime ?? (Number(row.time) * 1000)));
+    return Number.isFinite(raw) ? raw : NaN;
+  }
+  function normalizeCandleRow(tf,row,{source="unknown",final=false}={}){
+    if(!tf || !row) return null;
+    const step = intervalMs(tf);
+    const openMs = rowOpenMs(row);
+    if(!Number.isFinite(openMs) || openMs <= 0){
+      warnIntegrity(`bad-time:${tf}:${source}`,"candle with invalid open time ignored",{tf,source,row});
+      return null;
+    }
+    const alignedMs = fixedBucketAlignment(tf) ? Math.floor(openMs / step) * step : openMs;
+    if(fixedBucketAlignment(tf) && openMs !== alignedMs){
+      warnIntegrity(`bad-bucket:${tf}:${source}`,"wrong candle bucket time ignored",{tf,source,openMs,expectedAlignedOpenMs:alignedMs,row});
+      return null;
+    }
+    const open = Number(row.open), high = Number(row.high), low = Number(row.low), close = Number(row.close);
+    if(![open,high,low,close].every(Number.isFinite)){
+      warnIntegrity(`bad-ohlc-number:${tf}:${source}`,"candle with non-numeric OHLC ignored",{tf,source,row});
+      return null;
+    }
+    if(high < Math.max(open,close) || low > Math.min(open,close)){
+      warnIntegrity(`bad-ohlc-shape:${tf}:${source}:${alignedMs}`,"OHLC invalidity detected",{tf,source,row});
+      return null;
+    }
+    return {
+      ...row,
+      time:Math.floor(alignedMs / 1000),
+      openTime:alignedMs,
+      closeTime:Number.isFinite(Number(row.closeTime)) ? Number(row.closeTime) : alignedMs + step - 1,
+      open,
+      high,
+      low,
+      close,
+      volume:Number.isFinite(Number(row.volume)) ? Number(row.volume) : 0,
+      baseVolume:Number.isFinite(Number(row.baseVolume)) ? Number(row.baseVolume) : (Number.isFinite(Number(row.volume)) ? Number(row.volume) : 0),
+      quoteVolume:Number.isFinite(Number(row.quoteVolume)) ? Number(row.quoteVolume) : 0,
+      final:!!final,
+      source
+    };
+  }
   function mergeBufferRow(existing,incoming){
     if(!existing) return {...incoming};
     const exHigh = Number(existing.high), exLow = Number(existing.low);
@@ -2381,8 +2439,8 @@ const marketDataHub = (() => {
     if(!Number.isFinite(merged.high)) merged.high = incoming.high;
     if(!Number.isFinite(merged.low)) merged.low = incoming.low;
     merged.close = incoming.close;
-    const exVol = Number(existing.volume), inVol = Number(incoming.volume);
-    if(Number.isFinite(exVol) && Number.isFinite(inVol)) merged.volume = Math.max(exVol,inVol);
+    const inVol = Number(incoming.volume);
+    if(Number.isFinite(inVol)) merged.volume = incoming.volume;
     return merged;
   }
   function cloneRow(row){
@@ -2398,7 +2456,8 @@ const marketDataHub = (() => {
     arr.sort((a,b) => Number(a.time) - Number(b.time));
     for(let i=arr.length-1;i>0;i--){
       if(Number(arr[i].time) === Number(arr[i-1].time)){
-        arr[i-1] = mergeBufferRow(arr[i-1],arr[i]);
+        warnIntegrity(`duplicate-closed:${tf}:${arr[i].time}`,"duplicate candle open times detected",{tf,time:arr[i].time});
+        arr[i-1] = arr[i].source === "ws" ? {...arr[i]} : (arr[i-1].source === "ws" ? arr[i-1] : mergeBufferRow(arr[i-1],arr[i]));
         arr.splice(i,1);
       }
     }
@@ -2418,6 +2477,7 @@ const marketDataHub = (() => {
     if(!forming) return closed;
     const lastClosed = closed.length ? closed[closed.length-1] : null;
     if(lastClosed && Number(forming.time) <= Number(lastClosed.time)){
+      warnIntegrity(`forming-conflict:${tf}:${forming.time}`,"forming candle time conflicts with latest closed candle",{tf,forming,lastClosed});
       return closed;
     }
     closed.push(forming);
@@ -2629,45 +2689,122 @@ const marketDataHub = (() => {
       });
     }
   }
-  function setFormingCandle(tf,row,{replace=false}={}){
+  function validateClosedBuffer(tf,rows,{repair=false,reason="validate"}={}){
+    const arr = Array.isArray(rows) ? rows : getClosedBuffer(tf);
+    if(!Array.isArray(arr) || arr.length < 2) return [];
+    const stepSec = ivSec(tf);
+    const gaps = [];
+    let unsorted = false;
+    const seen = new Set();
+    for(let i=0;i<arr.length;i++){
+      const row = arr[i];
+      const t = Number(row && row.time);
+      if(!Number.isFinite(t)) continue;
+      if(seen.has(t)) warnIntegrity(`duplicate-buffer:${tf}:${t}`,"duplicate candle open times detected",{tf,time:t,reason});
+      seen.add(t);
+      if(i > 0){
+        const prev = Number(arr[i-1] && arr[i-1].time);
+        if(Number.isFinite(prev)){
+          if(t < prev) unsorted = true;
+          const delta = t - prev;
+          if(delta > stepSec){
+            const gap = {
+              tf,
+              fromTime:prev + stepSec,
+              toTime:t - stepSec,
+              missingCount:Math.floor(delta / stepSec) - 1,
+              reason
+            };
+            gaps.push(gap);
+            warnIntegrity(`missing-closed:${tf}:${gap.fromTime}:${gap.toTime}`,"missing interval detected",gap,12000);
+          }
+        }
+      }
+      const open = Number(row.open), high = Number(row.high), low = Number(row.low), close = Number(row.close);
+      if([open,high,low,close].every(Number.isFinite) && (high < Math.max(open,close) || low > Math.min(open,close))){
+        warnIntegrity(`bad-buffer-ohlc:${tf}:${t}`,"OHLC invalidity detected",{tf,row,reason});
+      }
+    }
+    if(unsorted) warnIntegrity(`unsorted-buffer:${tf}`,"unsorted candle buffer detected",{tf,reason,rows:arr.slice(-20)});
+    if(repair && gaps.length) repairMissingClosedCandles(tf,gaps,reason).catch(e => {
+      warnIntegrity(`gap-repair-failed:${tf}`,"REST gap repair failed",{tf,reason,error:e && e.message ? e.message : String(e)},12000);
+    });
+    return gaps;
+  }
+  function setFormingCandle(tf,row,{replace=false,source="ws"}={}){
     if(!row){
       delete state.formingKlineByTf[tf];
       return null;
     }
+    const normalized = normalizeCandleRow(tf,row,{source,final:false});
+    if(!normalized) return state.formingKlineByTf[tf] || null;
+    const lastClosed = getClosedBuffer(tf).slice(-1)[0] || null;
+    if(lastClosed && Number(normalized.time) <= Number(lastClosed.time)){
+      warnIntegrity(`forming-closed-conflict:${tf}:${normalized.time}`,"forming candle time conflicts with latest closed candle",{tf,forming:normalized,lastClosed});
+      return null;
+    }
+    if(lastClosed && Number(normalized.time) > Number(lastClosed.time) + ivSec(tf)){
+      const gap = {
+        tf,
+        fromTime:Number(lastClosed.time) + ivSec(tf),
+        toTime:Number(normalized.time) - ivSec(tf),
+        missingCount:Math.floor((Number(normalized.time) - Number(lastClosed.time)) / ivSec(tf)) - 1,
+        reason:"forming-after-gap"
+      };
+      warnIntegrity(`missing-before-forming:${tf}:${gap.fromTime}:${gap.toTime}`,"missing interval detected",gap,12000);
+      repairMissingClosedCandles(tf,[gap],"forming-after-gap").catch(e => {
+        warnIntegrity(`gap-repair-failed:${tf}`,"REST gap repair failed",{tf,error:e && e.message ? e.message : String(e)},12000);
+      });
+    }
     const existing = state.formingKlineByTf[tf];
-    const sameOpenTime = existing && Number(existing.time) === Number(row.time);
+    if(existing && Number(normalized.time) < Number(existing.time)){
+      warnIntegrity(`stale-forming:${tf}:${normalized.time}`,"stale forming kline ignored",{tf,incoming:normalized,existing});
+      return existing;
+    }
+    const sameOpenTime = existing && Number(existing.time) === Number(normalized.time);
     // Live forming candles must preserve intrabar extremes. Same-open-time kline
     // packets are merged; a different open time starts a fresh forming candle.
     state.formingKlineByTf[tf] = sameOpenTime
-      ? mergeBufferRow(existing,{...row,final:false})
-      : {...row,final:false};
+      ? mergeBufferRow(existing,{...normalized,final:false})
+      : {...normalized,final:false};
     return state.formingKlineByTf[tf];
   }
-  function upsertClosedBuffer(tf,row,limitOverride){
+  function upsertClosedBuffer(tf,row,limitOverride,{source="ws"}={}){
     if(!tf || !row || !Number.isFinite(Number(row.time))) return;
+    const normalized = normalizeCandleRow(tf,row,{source,final:true});
+    if(!normalized) return;
     const arr = state.closedKlinesByTf[tf] || (state.closedKlinesByTf[tf] = []);
-    const closedRow = {...row,final:true};
-    const idx = arr.findIndex(x => x.time === row.time);
-    if(idx >= 0) arr[idx] = mergeBufferRow(arr[idx],closedRow);
+    const closedRow = {...normalized,final:true};
+    const idx = arr.findIndex(x => Number(x.time) === Number(closedRow.time));
+    if(idx >= 0){
+      warnIntegrity(`duplicate-closed-upsert:${tf}:${closedRow.time}`,"duplicate candle open times detected",{tf,time:closedRow.time,source});
+      if(source === "ws" || arr[idx].source !== "ws") arr[idx] = {...closedRow};
+    }
     else if(!arr.length || closedRow.time > arr[arr.length-1].time) arr.push(closedRow);
     else{
       arr.push(closedRow);
       arr.sort((a,b) => a.time - b.time);
     }
+    const forming = state.formingKlineByTf[tf];
+    if(forming && Number(forming.time) === Number(closedRow.time)) delete state.formingKlineByTf[tf];
     trimClosedBuffer(tf,limitOverride);
+    validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:`closed-${source}`});
   }
   function prependClosedBuffer(tf,rows,limitOverride,{trimFromRight=false}={}){
     if(!tf || !Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
     const existing = getClosedBuffer(tf);
     const merged = rows
-      .filter(row => row && Number.isFinite(Number(row.time)))
-      .map(cloneRow)
+      .map(row => normalizeCandleRow(tf,row,{source:row && row.source || "rest",final:true}))
+      .filter(Boolean)
       .concat(existing.map(cloneRow));
     merged.sort((a,b) => a.time - b.time);
     const deduped = [];
     for(const row of merged){
       const last = deduped[deduped.length-1];
-      if(last && Number(last.time) === Number(row.time)) deduped[deduped.length-1] = mergeBufferRow(last,row);
+      if(last && Number(last.time) === Number(row.time)){
+        warnIntegrity(`duplicate-prepend:${tf}:${row.time}`,"duplicate candle open times detected",{tf,time:row.time});
+        deduped[deduped.length-1] = row.source === "ws" ? row : (last.source === "ws" ? last : mergeBufferRow(last,row));
+      }
       else deduped.push(row);
     }
     state.closedKlinesByTf[tf] = deduped;
@@ -2677,6 +2814,7 @@ const marketDataHub = (() => {
     }else{
       trimClosedBuffer(tf,limitOverride || deduped.length);
     }
+    validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"prepend"});
     return getClosedBuffer(tf);
   }
   async function ensureOlderClosedCandles(tf,beforeTime,neededCount,retentionLimit){
@@ -2727,11 +2865,53 @@ const marketDataHub = (() => {
       noMore:terminalBatch && rows.length < target
     };
   }
+  async function repairMissingClosedCandles(tf,gaps,reason="gap"){
+    ensureBufferSymbol();
+    if(!tf || !Array.isArray(gaps) || !gaps.length) return {fetched:0,merged:0};
+    if(state.gapRepairInFlightByTf[tf]) return state.gapRepairInFlightByTf[tf];
+    const started = now();
+    const task = (async () => {
+      let fetched = 0;
+      let merged = 0;
+      for(const gap of gaps){
+        const count = Math.max(1,Math.min(KLINE_LIMIT,Number(gap.missingCount) || 1));
+        const endMs = (Number(gap.toTime) + ivSec(tf)) * 1000 - 1;
+        if(!Number.isFinite(endMs) || endMs <= 0) continue;
+        const rows = await klinesForInterval(tf,endMs,Math.min(KLINE_LIMIT,count + 2),cfg().symbol);
+        fetched += rows.length;
+        const wantedStart = Number(gap.fromTime);
+        const wantedEnd = Number(gap.toTime);
+        const closedRows = rows
+          .map(row => normalizeCandleRow(tf,row,{source:"rest",final:true}))
+          .filter(row =>
+            row &&
+            Number(row.time) >= wantedStart &&
+            Number(row.time) <= wantedEnd &&
+            !isFormingRow(tf,row)
+          );
+        const before = getClosedBuffer(tf).length;
+        for(const row of closedRows) upsertClosedBuffer(tf,row,intervalKeep(tf),{source:"rest"});
+        merged += Math.max(0,getClosedBuffer(tf).length - before);
+      }
+      state.lastGapRepairMsByTf[tf] = now();
+      if(tf === iv() && merged){
+        rehydrateActiveChartFromHub(tf,now(),"rest-gap-repair");
+      }
+      validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"post-gap-repair"});
+      return {fetched,merged,reason,started};
+    })().finally(() => {
+      state.gapRepairInFlightByTf[tf] = null;
+    });
+    state.gapRepairInFlightByTf[tf] = task;
+    return task;
+  }
   function ingestRestRows(tf,rows,{replace=false,limitOverride}={}){
     if(!Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
     const limit = Math.max(10, limitOverride || intervalKeep(tf));
     if(replace){
-      let closed = rows.map(row => ({...cloneRow(row),final:true}));
+      let closed = rows
+        .map(row => normalizeCandleRow(tf,row,{source:"rest",final:true}))
+        .filter(Boolean);
       let forming = null;
       const tail = closed[closed.length-1];
       if(isFormingRow(tf,tail)){
@@ -2739,14 +2919,19 @@ const marketDataHub = (() => {
         closed = closed.slice(0,-1);
       }
       state.closedKlinesByTf[tf] = closed.slice(-limit);
-      if(forming) setFormingCandle(tf,forming,{replace:true});
+      trimClosedBuffer(tf,limit);
+      if(forming) setFormingCandle(tf,forming,{replace:true,source:"rest"});
       else delete state.formingKlineByTf[tf];
+      validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:"rest-replace"});
       return getClosedBuffer(tf);
     }
     for(const row of rows){
-      if(isFormingRow(tf,row)) setFormingCandle(tf,{...row,final:false},{replace:true});
-      else upsertClosedBuffer(tf,{...row,final:true},limit);
+      const normalized = normalizeCandleRow(tf,row,{source:"rest",final:!isFormingRow(tf,row)});
+      if(!normalized) continue;
+      if(isFormingRow(tf,normalized)) setFormingCandle(tf,{...normalized,final:false},{replace:true,source:"rest"});
+      else upsertClosedBuffer(tf,{...normalized,final:true},limit,{source:"rest"});
     }
+    validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:"rest-merge"});
     return getClosedBuffer(tf);
   }
   async function seedBuffer(tf,count,force=false){
@@ -2866,10 +3051,11 @@ const marketDataHub = (() => {
     diag.lastKlineTickByTf[d.k.i] = Number((d && d.E) || d.k.t || now());
     if(d.k.x){
       row.final = true;
-      upsertClosedBuffer(d.k.i,row,intervalKeep(d.k.i));
-      delete state.formingKlineByTf[d.k.i];
+      upsertClosedBuffer(d.k.i,row,intervalKeep(d.k.i),{source:"ws"});
+      const forming = state.formingKlineByTf[d.k.i];
+      if(forming && Number(forming.time) === Number(row.time)) delete state.formingKlineByTf[d.k.i];
     }else{
-      setFormingCandle(d.k.i,row,{replace:true});
+      setFormingCandle(d.k.i,row,{replace:true,source:"ws"});
     }
     if(d.k.i === iv()){
       rehydrateActiveChartFromHub(d.k.i,Number((d && d.E) || d.k.t || now()),"ws");
@@ -2919,6 +3105,12 @@ const marketDataHub = (() => {
       state.restInFlight = false;
     }
   }
+  function repairKnownClosedGaps(reason="gap-check"){
+    ensureBufferSymbol();
+    requiredKlineTimeframes().forEach(tf => {
+      validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason});
+    });
+  }
   function connect(){
     state.desiredLive = true;
     ensureBufferSymbol();
@@ -2944,6 +3136,7 @@ const marketDataHub = (() => {
           if(token !== state.generation || ws == null) return;
           syncDiag({socketStatus:"open"});
           paintStatus("RECONNECTING","waiting for Binance tick");
+          repairKnownClosedGaps("ws reconnect");
         },
         onMessage:event => {
           if(token !== state.generation || !ws) return;
@@ -3012,6 +3205,7 @@ const marketDataHub = (() => {
     if(state.maStackVisible){
       ensureMaStackBuffers(false).catch(() => {});
     }
+    repairKnownClosedGaps("timeframe/requirements switch");
   }
   function runStatusLoop(){
     refreshConnectionStatus();
@@ -3019,6 +3213,7 @@ const marketDataHub = (() => {
     const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     const chartAge = activeChartAge();
     if((!socketOpen() || chartAge > ACTIVE_FEED_STALE_MS) && !state.restInFlight){
+      repairKnownClosedGaps("stale ws recovery");
       restSyncLatest("status loop stale");
     }
     if((!socketOpen() && globalAge > ACTIVE_FEED_STALE_MS) || globalAge > WS_RECONNECT_MS){
@@ -3064,6 +3259,7 @@ const marketDataHub = (() => {
   }
   function handleVisibilityReturn(){
     if(document.hidden) return;
+    repairKnownClosedGaps("visibility/focus return");
     restSyncLatest("visibility/focus return");
     if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
     if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
