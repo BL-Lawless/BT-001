@@ -986,27 +986,130 @@ function closedTradeStatusDay(ms){
   return pad(d.getDate()) + "/" + pad(d.getMonth() + 1);
 }
 
-function closedTradeExStats(rec){
-  const finalEx = [];
-  for(const m of rec && rec.markers || []){
-    if(m && m.role === "close" && !m.unresolved && m.isFinalExit && Number.isFinite(Number(m.time))){
-      finalEx.push(Number(m.time) * 1000);
-    }
-  }
-  finalEx.sort((a,b) => a - b);
-  return {
-    count:finalEx.length,
-    oldest:finalEx[0] || null,
-    newest:finalEx.length ? finalEx[finalEx.length - 1] : null
-  };
+function closedTradeNumber(v){
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function loadedClosedNetPnl(rec){
-  const links = Array.isArray(rec && rec.links) ? rec.links : [];
-  return links.reduce((sum,l) => {
-    const v = Number(l && l.netPnl);
-    return Number.isFinite(v) ? sum + v : sum;
+function closedTradeRealizedValue(row){
+  return closedTradeNumber(row && (row.binanceRealizedPnl ?? row.realizedPnl));
+}
+
+function closedTradeSignedFeeValue(v){
+  const n = closedTradeNumber(v);
+  return n > 0 ? -n : n;
+}
+
+function closedTradeFundingValue(row){
+  return closedTradeNumber(row && (row.income ?? row.fundingFee ?? row.funding));
+}
+
+function closedTradeParentFunding(markers,links,parentId){
+  const all = (markers || []).concat(links || []);
+  const times = all.map(x => closedTradeNumber(x && (x.time ?? x.entryTime ?? x.exitTime))).filter(Boolean);
+  if(!times.length) return 0;
+  const start = Math.min(...times);
+  const end = Math.max(...times);
+  const symbol = String(
+    (markers && markers[0] && markers[0].symbol) ||
+    (links && links[0] && links[0].symbol) ||
+    (typeof cfg === "function" ? cfg().symbol : "") ||
+    ""
+  ).toUpperCase();
+  let count = 0;
+  const sum = (fundingIncomeRows || []).reduce((total,row) => {
+    const rawTime = closedTradeNumber(row && row.time);
+    const t = rawTime > 1e12 ? Math.floor(rawTime / 1000) : rawTime;
+    const rowSym = String(row && row.symbol || symbol).toUpperCase();
+    if(t >= start && t <= end && (!symbol || rowSym === symbol)){
+      count++;
+      return total + closedTradeFundingValue(row);
+    }
+    return total;
   },0);
+  if(parentId && typeof window !== "undefined"){
+    const root = window.__v13Patch37CFundingStats || {fetchedRows:(fundingIncomeRows || []).length,matches:{}};
+    root.matches = root.matches || {};
+    root.matches[String(parentId)] = {count,sum,start,end,symbol};
+    window.__v13Patch37CFundingStats = root;
+  }
+  return sum;
+}
+
+function closedTradeParentTrades(rec){
+  const markerById = new Map((rec && rec.markers || []).map(m => [m && m.id,m]));
+  const groupedMarkers = new Map();
+  const groupedLinks = new Map();
+  const add = (map,id,item) => {
+    if(!id) return;
+    if(!map.has(id)) map.set(id,[]);
+    map.get(id).push(item);
+  };
+
+  for(const m of rec && rec.markers || []) add(groupedMarkers,stateChainId(m),m);
+  for(const l of rec && rec.links || []){
+    const id = stateChainId(l) || stateChainId(markerById.get(l && l.entryMarkerId)) || stateChainId(markerById.get(l && l.exitMarkerId));
+    add(groupedLinks,id,l);
+  }
+
+  const ids = new Set([...groupedMarkers.keys(),...groupedLinks.keys()]);
+  return [...ids].map(parentId => {
+    const markers = (groupedMarkers.get(parentId) || []).slice().sort((a,b) =>
+      closedTradeNumber(a && a.time) - closedTradeNumber(b && b.time)
+    );
+    const links = groupedLinks.get(parentId) || [];
+    const entries = markers.filter(m => m && m.role === "entry");
+    const exits = markers.filter(m => m && m.role === "close" && !m.unresolved);
+    const finalExit = exits.filter(m => m && (m.isFinalExit || String(m.letter || "").toUpperCase() === "EX")).slice(-1)[0] || null;
+    if(!finalExit || !entries.length) return null;
+    const realized = links.length
+      ? links.reduce((sum,l) => sum + closedTradeRealizedValue(l),0)
+      : exits.reduce((sum,m) => sum + closedTradeNumber(m && (m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl)),0);
+    const fees = links.length
+      ? links.reduce((sum,l) => sum + closedTradeSignedFeeValue(l && (l.fees ?? l.fee)),0)
+      : exits.reduce((sum,m) => sum + closedTradeSignedFeeValue(m && m.fee),0);
+    const funding = closedTradeParentFunding(markers,links,parentId);
+    return {
+      parentId,
+      markers,
+      links,
+      entries,
+      exits,
+      finalExit,
+      netTotal:realized + fees + funding
+    };
+  }).filter(Boolean).sort((a,b) =>
+    closedTradeNumber(a.finalExit && a.finalExit.time) - closedTradeNumber(b.finalExit && b.finalExit.time)
+  );
+}
+
+function closedTradeMoneyAbs(v){
+  return "$" + Math.abs(Number(v) || 0).toLocaleString("en-US",{
+    minimumFractionDigits:2,
+    maximumFractionDigits:2
+  });
+}
+
+function closedTradeSignedMoney(v){
+  const n = Number(v) || 0;
+  return (n < 0 ? "-" : "+") + closedTradeMoneyAbs(n);
+}
+
+function closedTradeLoadedSummary(rec){
+  const parents = closedTradeParentTrades(rec);
+  let wins = 0, losses = 0, profit = 0, loss = 0;
+  for(const trade of parents){
+    const net = Number(trade && trade.netTotal);
+    if(!Number.isFinite(net)) continue;
+    if(net > 0){
+      wins++;
+      profit += net;
+    }else if(net < 0){
+      losses++;
+      loss += net;
+    }
+  }
+  return {parents,wins,losses,profit,loss,net:profit + loss};
 }
 
 async function loadClosedTradesForPeriod(period,opt={}){
@@ -1047,8 +1150,8 @@ async function loadClosedTradesForPeriod(period,opt={}){
     });
 
     const rec = filterClosedReconstructionForPeriod(full,win);
-    const exStats = closedTradeExStats(rec);
-    const netPnl = loadedClosedNetPnl(rec);
+    const summary = closedTradeLoadedSummary(rec);
+    const netPnl = summary.net;
 
     CLOSED_TRADES_STATE.markers = rec.markers;
     CLOSED_TRADES_STATE.links = rec.links;
@@ -1061,10 +1164,15 @@ async function loadClosedTradesForPeriod(period,opt={}){
     syncLegacyTradeGlobalsFromOwners();
 
     closedTradeStatus(
-      "from: " + closedTradeStatusDay(win.start) +
-      " | to: " + closedTradeStatusDay(win.end) +
-      " | trades: " + exStats.count +
-      " | net P/L: " + fm(netPnl)
+      "From: " + closedTradeStatusDay(win.start) +
+      " | To: " + closedTradeStatusDay(win.end) +
+      " | Trades: " + summary.parents.length +
+      " | net P/L: " + closedTradeSignedMoney(netPnl) +
+      "\n" +
+      "Wins : " + summary.wins +
+      " , losses : " + summary.losses +
+      " | Profit : " + closedTradeMoneyAbs(summary.profit) +
+      " , Loss : " + closedTradeSignedMoney(summary.loss)
     );
 
     updatePositionStrip(candles.length ? candles[candles.length-1] : null);
@@ -16266,7 +16374,7 @@ If there is NO open position, use this Section 2 instead:
   /* Reload / Reset UI. */
   function installReloadReset(){
     const reload = $id("reload");
-    if(reload){ reload.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M20 4v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 10a8 8 0 1 0 2.2 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`; reload.title = "Reload data"; reload.setAttribute("aria-label","Reload data"); reload.classList.add("v33-reload-icon"); }
+    if(reload){ reload.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round"/><path d="M21 4v5.5h-5.5" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"/></svg>`; reload.title = "Reload data"; reload.setAttribute("aria-label","Reload data"); reload.classList.add("v33-reload-icon"); }
     const reset = $id("resetView");
     if(reset) reset.remove();
   }
@@ -16453,7 +16561,7 @@ If there is NO open position, use this Section 2 instead:
     function maLabelP(slots,i){
       const slot = slots && slots[i];
       if(!slot) return "MA" + (i + 1);
-      return `${slot.slotId} EMA${slot.period}`;
+      return `EMA ${slot.period}`;
     }
     function pairLabel(slots,i,j){ return `${maLabelP(slots,i)} / ${maLabelP(slots,j)}`; }
     function spreadScoreLabel(score){
@@ -16505,6 +16613,14 @@ If there is NO open position, use this Section 2 instead:
       const age = maPairAgeText(ev && ev.age);
       if(!ev || !age) return "No fresh event";
       return `${cleanMaPairPeriodText(ev)} ${cleanMaPairTypeText(ev)} | ${age}`;
+    }
+    function bounceSetupClassification(ev,ctx){
+      const type = String(ev && ev.type || "").toLowerCase().trim();
+      if(type !== "bounce/no-cross") return "";
+      if(!ctx || !ctx.setup || ctx.state === "mixed" || ctx.state === "transition" || ctx.state === "compression"){
+        return "mixed setup";
+      }
+      return Number(ev && ev.dir) === Number(ctx.setup) ? "supports setup" : "defies setup";
     }
     function maPairTooltipLine(ev){
       const text = freshMaPairEventText(ev);
@@ -16882,15 +16998,41 @@ If there is NO open position, use this Section 2 instead:
       const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + ":\\s*(.*)$","m"));
       return m ? m[1] : fallback;
     }
-    function compactEventText(text){
-      return String(text || "None").replace(/\s+(current candle|\d+ bars ago)$/,"");
-    }
     function stateText(r){
       const label = r.state === "up" ? "Up stack" : r.state === "down" ? "Down stack" : r.state === "compression" ? "Compression" : r.state === "transition" ? "Transition" : "Mixed";
       return `${label} / ${r.phase || "-"}`;
     }
-    function eventLine(r){
-      return r && r.eventDisplay ? r.eventDisplay : "Event - none";
+    function maPairTooltipSummary(ev,r){
+      const text = freshMaPairEventText(ev);
+      if(text === "No fresh event") return "MA Pair: No fresh event";
+      const bounceClass = bounceSetupClassification(ev,r);
+      return bounceClass ? `${text} | ${bounceClass}` : text;
+    }
+    function combinedDisplayScore(r){
+      const strength = Math.max(0,Math.min(100,Number(r && r.strength) || 0));
+      const quality = Math.max(0,Math.min(100,Number(r && r.quality) || 0));
+      return Math.max(0,Math.min(100,Math.round(strength * 0.6 + quality * 0.4)));
+    }
+    function stackButtonStyle(r){
+      const fill = combinedDisplayScore(r);
+      return ` style="--v33-stack-fill:${fill}%"`;
+    }
+    function rankVisualMeta(rank){
+      const labels = Array.isArray(rank && rank.labels) && rank.labels.length === 5 ? rank.labels : ["EMA 9","EMA 21","EMA 55","EMA 100","EMA 200"];
+      const ledStates = rank && rank.diagnostics && rank.diagnostics.ledStates ? rank.diagnostics.ledStates : {
+        MA1:!!(rank && rank.okByEma && rank.okByEma[0]),
+        MA2:!!(rank && rank.okByEma && rank.okByEma[1]),
+        MA3:!!(rank && rank.okByEma && rank.okByEma[2]),
+        MA4:!!(rank && rank.okByEma && rank.okByEma[3]),
+        MA5:!!(rank && rank.okByEma && rank.okByEma[4])
+      };
+      return [
+        {slotId:"MA5",label:labels[4] || "EMA 200",on:!!ledStates.MA5},
+        {slotId:"MA4",label:labels[3] || "EMA 100",on:!!ledStates.MA4},
+        {slotId:"MA3",label:labels[2] || "EMA 55",on:!!ledStates.MA3},
+        {slotId:"MA2",label:labels[1] || "EMA 21",on:!!ledStates.MA2},
+        {slotId:"MA1",label:labels[0] || "EMA 9",on:!!ledStates.MA1}
+      ];
     }
     function buildStackRank(vals,state,setup,slots,debugCtx){
       const safeSlots = Array.isArray(slots) && slots.length === 5
@@ -16902,7 +17044,7 @@ If there is NO open position, use this Section 2 instead:
         : [1,2,3,4,5].map(n => ({slot:n,slotId:"MA" + n,period:null}));
       const labels = safeSlots.map((slot,i) =>
         Number.isFinite(slot.period) && slot.period > 0
-          ? `${slot.slotId} EMA${slot.period}`
+          ? `EMA ${slot.period}`
           : `MA${i + 1}`
       );
       const slotIds = safeSlots.map(slot => slot.slotId);
@@ -17148,16 +17290,13 @@ If there is NO open position, use this Section 2 instead:
       return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)}</div>`+
         rows.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
         `<div class="v33-ma-stack-tip-spacer"></div>`+
-        `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipLine(r && r.maEvent))}</div>`+
-        `<div class="v33-ma-stack-tip-spacer"></div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(eventLine(r))}</div>`;
+        `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipSummary(r && r.maEvent,r))}</div>`;
     }
     function compactRankTooltipHtml(tf,r){
       const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
       const diag = rank && rank.diagnostics ? rank.diagnostics : null;
       const dbg = diag && diag.debug ? diag.debug : null;
-      const labelMap = Array.isArray(rank.labels) && rank.labels.length === 5 ? rank.labels : ["MA1","MA2","MA3","MA4","MA5"];
-      const slotIds = ["MA1","MA2","MA3","MA4","MA5"];
+      const labelMap = Array.isArray(rank.labels) && rank.labels.length === 5 ? rank.labels : ["EMA 9","EMA 21","EMA 55","EMA 100","EMA 200"];
       const side = rank.selectedRegime === "bullish" || rank.selectedRegime === "bearish" ? rank.selectedRegime : "mixed";
       const ledStates = diag && diag.ledStates ? diag.ledStates : {
         MA1:!!(rank.okByEma && rank.okByEma[0]),
@@ -17166,6 +17305,7 @@ If there is NO open position, use this Section 2 instead:
         MA4:!!(rank.okByEma && rank.okByEma[3]),
         MA5:!!(rank.okByEma && rank.okByEma[4])
       };
+      const visualMeta = rankVisualMeta(rank);
       const sideLabel = side === "bullish" ? "Selected regime: bullish" : side === "bearish" ? "Selected regime: bearish" : "Selected regime: transition/compression";
       const fastState = rank.fastPairState || rank.fastStack || "mixed";
       const slowState = rank.slowPairState || rank.slowStack || "mixed";
@@ -17174,7 +17314,7 @@ If there is NO open position, use this Section 2 instead:
       const hingeText = rank.hingeText || "mixed";
       const fastText = fastState === "mixed" ? "Fast pair: mixed 0/2" : `Fast pair: ${fastState} ${fastScore}/2`;
       const slowText = slowState === "mixed" ? "Slow pair: mixed 0/2" : `Slow pair: ${slowState} ${slowScore}/2`;
-      const rankRows = slotIds.map((slotId,idx) => `${labelMap[idx] || slotId}: ${ledStates[slotId] ? "OK" : "out"}`);
+      const rankRows = visualMeta.map(item => `${item.label}: ${item.on ? "OK" : "out"}`);
       const fmtDbg = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-US",{maximumFractionDigits:8}) : String(v);
       const showDebug = !!window.MA_SOURCE_DEBUG;
       const dbgLines = !showDebug
@@ -17266,7 +17406,7 @@ If there is NO open position, use this Section 2 instead:
       const tooltipHtmlByTf = new Map();
       const html = TFs.map(tf=>{
         const r=results[tf.key] || unavailable("Unavailable");
-        const style = bg(r.state,r.strength) ? ` style="background:${bg(r.state,r.strength)}"` : "";
+        const style = stackButtonStyle(r);
         const ev = r.blinkIntent === "green" ? "green" : r.blinkIntent === "red" ? "red" : "";
         const eventKey = eventIdentity(tf,r);
         tooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
@@ -17305,17 +17445,16 @@ If there is NO open position, use this Section 2 instead:
       const rankTooltipHtmlByTf = new Map();
       const html = TFs.map(tf=>{
         const r=results[tf.key] || unavailable("Unavailable");
-        const style = bg(r.state,r.strength) ? ` style="background:${bg(r.state,r.strength)}"` : "";
+        const style = stackButtonStyle(r);
         const ev = r.blinkIntent === "green" ? "green" : r.blinkIntent === "red" ? "red" : "";
         const eventKey = eventIdentity(tf,r);
         const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
-        const labels = Array.isArray(rank.labels) && rank.labels.length === 5 ? rank.labels : ["MA1","MA2","MA3","MA4","MA5"];
-        const slotIds = ["MA1","MA2","MA3","MA4","MA5"];
-        const leds = slotIds.map((slotId,idx) => {
-          const on = !!(rank.okByEma && rank.okByEma[idx]);
+        const visualMeta = rankVisualMeta(rank);
+        const leds = visualMeta.map(item => {
+          const on = item.on;
           const side = rank.selectedSide === "bullish" ? "bull" : rank.selectedSide === "bearish" ? "bear" : "off";
           const cls = on && side !== "off" ? `v33-rank-led is-on ${side}` : "v33-rank-led";
-          return `<span class="${cls}" data-ema="${labels[idx] || slotId}" aria-hidden="true"></span>`;
+          return `<span class="${cls}" data-ema="${item.label}" aria-hidden="true"></span>`;
         }).join("");
         summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
         rankTooltipHtmlByTf.set(tf.key,compactRankTooltipHtml(tf,r));
