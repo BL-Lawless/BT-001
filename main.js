@@ -366,6 +366,124 @@ let lastAreaH = 1;
 let currentPriceLineState = null;
 
 let overlayHitItems = [];
+let closedTradeHitItems = [];
+let openPositionHitItems = [];
+let otherOverlayHitItems = [];
+
+function resetOverlayHitOwnership(){
+  overlayHitItems = [];
+  closedTradeHitItems = [];
+  openPositionHitItems = [];
+  otherOverlayHitItems = [];
+}
+
+function ownerHasMarker(owner,id){
+  return !!(owner && Array.isArray(owner.markers) && owner.markers.some(m => m && m.id === id));
+}
+
+function ownerHasChain(owner,id){
+  return !!(id && owner && (
+    (Array.isArray(owner.markers) && owner.markers.some(m => stateChainId(m) === id)) ||
+    (Array.isArray(owner.links) && owner.links.some(l => stateChainId(l) === id)) ||
+    (Array.isArray(owner.openLotLinks) && owner.openLotLinks.some(l => stateChainId(l) === id)) ||
+    (Array.isArray(owner.boxes) && owner.boxes.some(b => stateChainId(b) === id))
+  ));
+}
+
+function overlayOwnerKind(it){
+  if(!it) return "other";
+  const cid = stateChainId(it);
+  if(it.open || it.kind === "box" || ownerHasMarker(OPEN_POSITION_STATE,it.markerId) || ownerHasChain(OPEN_POSITION_STATE,cid)){
+    return "open";
+  }
+  if(ownerHasMarker(CLOSED_TRADES_STATE,it.markerId) || ownerHasChain(CLOSED_TRADES_STATE,cid)){
+    return "closed";
+  }
+  return "other";
+}
+
+function syncOverlayHitOwnership(){
+  closedTradeHitItems = [];
+  openPositionHitItems = [];
+  otherOverlayHitItems = [];
+  for(const it of overlayHitItems || []){
+    const owner = overlayOwnerKind(it);
+    it.overlayOwner = owner;
+    if(owner === "closed") closedTradeHitItems.push(it);
+    else if(owner === "open") openPositionHitItems.push(it);
+    else otherOverlayHitItems.push(it);
+  }
+}
+
+function pushOverlayHitItem(it,owner){
+  if(!it || !Array.isArray(overlayHitItems)) return;
+  it.overlayOwner = owner || overlayOwnerKind(it);
+  overlayHitItems.push(it);
+  if(it.overlayOwner === "closed") closedTradeHitItems.push(it);
+  else if(it.overlayOwner === "open") openPositionHitItems.push(it);
+  else otherOverlayHitItems.push(it);
+}
+
+function closedTradeMarkersForRender(){
+  return CLOSED_TRADES_STATE.markers || [];
+}
+
+function closedTradeLinksForRender(){
+  return CLOSED_TRADES_STATE.links || [];
+}
+
+function openPositionMarkersForRender(){
+  return OPEN_POSITION_STATE.markers || [];
+}
+
+function openPositionLinksForRender(){
+  return OPEN_POSITION_STATE.links || [];
+}
+
+function openPositionConnectorsForRender(){
+  return OPEN_POSITION_STATE.openLotLinks || [];
+}
+
+function openPositionBoxesForRender(){
+  return OPEN_POSITION_STATE.boxes || [];
+}
+
+function suppressOpenPositionRenderState(){
+  const saved = {
+    ownerMarkers:OPEN_POSITION_STATE.markers,
+    ownerLinks:OPEN_POSITION_STATE.links,
+    ownerOpenLotLinks:OPEN_POSITION_STATE.openLotLinks,
+    ownerBoxes:OPEN_POSITION_STATE.boxes,
+    ownerEntryMarkerIds:OPEN_POSITION_STATE.entryMarkerIds,
+    ownerActiveParentChainIds:OPEN_POSITION_STATE.activeParentChainIds,
+    legacyOpenLotLinks:openLotLinks,
+    legacyOpenPositionBoxes:openPositionBoxes,
+    legacyOpenEntryMarkerIds:openEntryMarkerIds,
+    legacyActiveOpenParentChainIds:activeOpenParentChainIds
+  };
+  OPEN_POSITION_STATE.markers = [];
+  OPEN_POSITION_STATE.links = [];
+  OPEN_POSITION_STATE.openLotLinks = [];
+  OPEN_POSITION_STATE.boxes = [];
+  OPEN_POSITION_STATE.entryMarkerIds = new Set();
+  OPEN_POSITION_STATE.activeParentChainIds = new Set();
+  openLotLinks = [];
+  openPositionBoxes = [];
+  openEntryMarkerIds = new Set();
+  activeOpenParentChainIds = new Set();
+  return function restoreOpenPositionRenderState(){
+    OPEN_POSITION_STATE.markers = saved.ownerMarkers;
+    OPEN_POSITION_STATE.links = saved.ownerLinks;
+    OPEN_POSITION_STATE.openLotLinks = saved.ownerOpenLotLinks;
+    OPEN_POSITION_STATE.boxes = saved.ownerBoxes;
+    OPEN_POSITION_STATE.entryMarkerIds = saved.ownerEntryMarkerIds;
+    OPEN_POSITION_STATE.activeParentChainIds = saved.ownerActiveParentChainIds;
+    openLotLinks = saved.legacyOpenLotLinks;
+    openPositionBoxes = saved.legacyOpenPositionBoxes;
+    openEntryMarkerIds = saved.legacyOpenEntryMarkerIds;
+    activeOpenParentChainIds = saved.legacyActiveOpenParentChainIds;
+  };
+}
 
 
 /* =========================================================
@@ -4300,7 +4418,7 @@ function draw(){
   const w = surface.w;
   const h = surface.h;
 
-  overlayHitItems = [];
+  resetOverlayHitOwnership();
   ctx.clearRect(0,0,surface.clearW,surface.clearH);
 
   const r = range();
@@ -4920,7 +5038,10 @@ startTradeAuto();
 
   const n15 = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const cid15 = o => o && (o.parentTradeId || o.chainId || o.tradeChainId || null);
-  const marker15 = id => (Array.isArray(fillMarkers) ? fillMarkers.find(m => m.id === id) : null) || null;
+  const marker15 = id =>
+    (closedTradeMarkersForRender().find(m => m && m.id === id) ||
+     openPositionMarkersForRender().find(m => m && m.id === id) ||
+     null);
   const sideDir15 = side => String(side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
   const sortMarker15 = (a,b) => (n15(a.time)-n15(b.time)) || String(a.id||'').localeCompare(String(b.id||''));
   const isoOn15 = () => typeof isIsolateActive === 'function' && isIsolateActive();
@@ -4976,15 +5097,16 @@ startTradeAuto();
   function parentIdFromMarker15(markerId){
     const m = marker15(markerId);
     if(cid15(m)) return cid15(m);
-    const l = (resultLinks || []).find(x => x.entryMarkerId === markerId || x.exitMarkerId === markerId)
-      || (openLotLinks || []).find(x => x.entryMarkerId === markerId);
+    const l = closedTradeLinksForRender().find(x => x.entryMarkerId === markerId || x.exitMarkerId === markerId)
+      || openPositionLinksForRender().find(x => x.entryMarkerId === markerId || x.exitMarkerId === markerId)
+      || openPositionConnectorsForRender().find(x => x.entryMarkerId === markerId);
     return cid15(l);
   }
 
   function tradeRecord15(parentId){
     if(!parentId) return null;
-    const markers = (fillMarkers || []).filter(m => cid15(m) === parentId).slice().sort(sortMarker15);
-    const links = (resultLinks || []).filter(l => cid15(l) === parentId).slice();
+    const markers = closedTradeMarkersForRender().filter(m => cid15(m) === parentId).slice().sort(sortMarker15);
+    const links = closedTradeLinksForRender().filter(l => cid15(l) === parentId).slice();
     const entries = markers.filter(m => m.role === 'entry').sort(sortMarker15);
     const exits = markers.filter(m => m.role === 'close' && !m.unresolved).sort(sortMarker15).map(m => {
       const eventLinks = links.filter(l => l.exitMarkerId === m.id);
@@ -5032,7 +5154,7 @@ startTradeAuto();
     const out = {sum:0,count:0,start:s,end:e};
     if(!s || !e || e < s) return out;
     const symbol = String(sym || cfg().symbol || '').toUpperCase();
-    (fundingIncomeRows || []).forEach(row => {
+    (CLOSED_TRADES_STATE.fundingIncomeRows || []).forEach(row => {
       const t = normalizeTimeSec15(row && row.time);
       const rowSym = String(row && row.symbol || symbol).toUpperCase();
       if(t >= s && t <= e && (!symbol || rowSym === symbol)){
@@ -5042,10 +5164,10 @@ startTradeAuto();
     });
     if(parentId && typeof window !== 'undefined'){
       const root = window.__v13Patch37CFundingStats || {
-        fetchedRows:fundingIncomeFetchStats.rows || (fundingIncomeRows || []).length,
-        fetchStart:fundingIncomeFetchStats.start || 0,
-        fetchEnd:fundingIncomeFetchStats.end || 0,
-        symbol:fundingIncomeFetchStats.symbol || symbol,
+        fetchedRows:CLOSED_TRADES_STATE.fundingIncomeFetchStats.rows || (CLOSED_TRADES_STATE.fundingIncomeRows || []).length,
+        fetchStart:CLOSED_TRADES_STATE.fundingIncomeFetchStats.start || 0,
+        fetchEnd:CLOSED_TRADES_STATE.fundingIncomeFetchStats.end || 0,
+        symbol:CLOSED_TRADES_STATE.fundingIncomeFetchStats.symbol || symbol,
         matches:{}
       };
       root.matches[String(parentId)] = {count:out.count,sum:out.sum,start:s,end:e,symbol};
@@ -5058,13 +5180,13 @@ startTradeAuto();
   }
   function currentOpenRenderChainIds15(sym){
     const ids = new Set();
-    (openLotLinks || []).forEach(l => {
+    openPositionConnectorsForRender().forEach(l => {
       if(l && (!sym || l.symbol === sym)){
         const id = cid15(l);
         if(id) ids.add(id);
       }
     });
-    (openPositionBoxes || []).forEach(b => {
+    openPositionBoxesForRender().forEach(b => {
       if(b && (!sym || b.symbol === sym)){
         const id = cid15(b);
         if(id) ids.add(id);
@@ -5075,15 +5197,15 @@ startTradeAuto();
   function activeOpenChainIds15(sym){
     const ids = currentOpenRenderChainIds15(sym);
     if(!sym || sym === cfg().symbol){
-      (activeOpenParentChainIds || new Set()).forEach(id => { if(id) ids.add(id); });
+      (OPEN_POSITION_STATE.activeParentChainIds || new Set()).forEach(id => { if(id) ids.add(id); });
     }
     return ids;
   }
 
   function allParentTrades15(){
     const ids = new Set();
-    (fillMarkers || []).forEach(m => { const id = cid15(m); if(id) ids.add(id); });
-    (resultLinks || []).forEach(l => { const id = cid15(l); if(id) ids.add(id); });
+    closedTradeMarkersForRender().forEach(m => { const id = cid15(m); if(id) ids.add(id); });
+    closedTradeLinksForRender().forEach(l => { const id = cid15(l); if(id) ids.add(id); });
     return [...ids].map(tradeRecord15).filter(r => r && r.firstEntry && r.finalExit).sort((a,b) => n15(a.firstTime)-n15(b.firstTime));
   }
 
@@ -5188,7 +5310,7 @@ startTradeAuto();
 
   function pairLinks15(){
     const groups = new Map();
-    for(const l of resultLinks || []){
+    for(const l of closedTradeLinksForRender()){
       const em = marker15(l.entryMarkerId);
       const xm = marker15(l.exitMarkerId);
       if(!em || !xm) continue;
@@ -5259,12 +5381,12 @@ startTradeAuto();
     ctx.textBaseline = 'middle';
     ctx.fillText(txt,chosen.cx,chosen.cy+.5);
     if(opt.hit && Array.isArray(overlayHitItems)){
-      overlayHitItems.push({kind:'plbox',x1:chosen.cx-w/2,y1:chosen.cy-h/2,x2:chosen.cx+w/2,y2:chosen.cy+h/2,x:chosen.cx,y:chosen.cy,markerId:opt.hit.markerId,chainId:opt.hit.chainId,parentTradeId:opt.hit.parentTradeId});
+      pushOverlayHitItem({kind:'plbox',x1:chosen.cx-w/2,y1:chosen.cy-h/2,x2:chosen.cx+w/2,y2:chosen.cy+h/2,x:chosen.cx,y:chosen.cy,markerId:opt.hit.markerId,chainId:opt.hit.chainId,parentTradeId:opt.hit.parentTradeId},opt.hit.owner || 'closed');
     }
     ctx.restore();
   }
 
-  function drawMarker15(m,vis,mapX,mapY,slot,force=false){
+  function drawMarker15(m,vis,mapX,mapY,slot,force=false,owner='closed'){
     if(!m || (!force && !inTime(m.time,vis))) return;
     const x = markerTimeX(m,vis,mapX,slot);
     if(x === null || x < -50 || x > canvas.clientWidth + 50) return;
@@ -5278,7 +5400,7 @@ startTradeAuto();
     let col = m.side === 'SHORT' || m.letter === 'S' || m.letter === 'ES' ? '#f6465d' : '#0ecb81';
     if(m.role === 'close') col = m.unresolved ? '#f59e0b' : (m.side === 'SHORT' ? '#f6465d' : '#0ecb81');
     circle(ix(x),ix(y),m.letter,col,m.unresolved);
-    overlayHitItems.push({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:m.unresolved ? 11 : Math.max(9, String(m.letter||'').length > 1 ? 14 : 7),qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''});
+    pushOverlayHitItem({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:m.unresolved ? 11 : Math.max(9, String(m.letter||'').length > 1 ? 14 : 7),qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''},owner);
   }
 
   function drawSimplifiedTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
@@ -5302,10 +5424,10 @@ startTradeAuto();
       ctx.lineTo(px(s.x2),px(s.y2));
       ctx.stroke();
       ctx.globalAlpha = 1;
-      overlayHitItems.push({kind:'line',...s,id:'simple_'+rec.parentId,qty:rec.totalLots,side:rec.dir,open:false,chainId:rec.parentId,parentTradeId:rec.parentId});
+      pushOverlayHitItem({kind:'line',...s,id:'simple_'+rec.parentId,qty:rec.totalLots,side:rec.dir,open:false,chainId:rec.parentId,parentTradeId:rec.parentId},'closed');
       const mx = (s.x1 + s.x2) / 2;
       const my = (s.y1 + s.y2) / 2;
-      reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.netTotal):fm(rec.netTotal).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId}});
+      reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.netTotal):fm(rec.netTotal).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId,owner:'closed'}});
       if(showLots) reserveLabel15(fq(rec.totalLots),mx,my + 18,col,clip,placedLabels,{fixedX:true,offsets:[0,16,32,-16,-32,48,-48]});
       if(inTime(first.time,vis)) drawMarker15(first,vis,mapX,mapY,slot);
       if(inTime(ex.time,vis)) drawMarker15(ex,vis,mapX,mapY,slot);
@@ -5329,10 +5451,10 @@ startTradeAuto();
       ctx.lineTo(px(s.x2),px(s.y2));
       ctx.stroke();
       ctx.globalAlpha = 1;
-      overlayHitItems.push({kind:'line',...s,id:l.id,qty:l.qty,side:l.side,orderId:l.orderId,open:false,chainId:cid15(l),parentTradeId:cid15(l)});
+      pushOverlayHitItem({kind:'line',...s,id:l.id,qty:l.qty,side:l.side,orderId:l.orderId,open:false,chainId:cid15(l),parentTradeId:cid15(l)},'closed');
       if(showLots) reserveLabel15(fq(l.qty),(s.x1+s.x2)/2,(s.y1+s.y2)/2,col,clip,placedLabels);
     }
-    for(const m of fillMarkers || []){
+    for(const m of closedTradeMarkersForRender()){
       if(m.symbol !== cfg().symbol || !visibleByIsoMarker15(m.id)) continue;
       if(activeOpenChains.has(cid15(m))) continue;
       drawMarker15(m,vis,mapX,mapY,slot);
@@ -5361,30 +5483,30 @@ startTradeAuto();
     const openChains = currentOpenRenderChainIds15(sym);
 
     // Open round position icons: always visible regardless of closed-trade toggles.
-    for(const m of fillMarkers || []){
-      if(m.symbol !== sym || !openEntryMarkerIds || !openEntryMarkerIds.has(m.id)) continue;
+    for(const m of openPositionMarkersForRender()){
+      if(m.symbol !== sym || !OPEN_POSITION_STATE.entryMarkerIds || !OPEN_POSITION_STATE.entryMarkerIds.has(m.id)) continue;
       if(!inTime(m.time,vis)) continue;
-      drawMarker15(m,vis,mapX,mapY,slot,true);
+      drawMarker15(m,vis,mapX,mapY,slot,true,'open');
     }
 
     // Active-parent partial exits are live open-position visuals, independent of Trades / Positions.
-    for(const m of fillMarkers || []){
+    for(const m of openPositionMarkersForRender()){
       if(m.symbol !== sym || m.role !== 'close' || m.unresolved || !openChains.has(cid15(m))) continue;
       if(!inTime(m.time,vis)) continue;
       m.letter = 'P';
       m.isFinalExit = false;
-      drawMarker15(m,vis,mapX,mapY,slot,true);
+      drawMarker15(m,vis,mapX,mapY,slot,true,'open');
       const x = markerTimeX(m,vis,mapX,slot);
       if(x === null) continue;
       const y = mapY(n15(m.price));
-      const links = (resultLinks || []).filter(l => l.exitMarkerId === m.id);
+      const links = openPositionLinksForRender().filter(l => l.exitMarkerId === m.id);
       const val = links.length ? realizedSum15(links) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
       const col = val >= 0 ? '#1e88e5' : '#f6465d';
       reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y - 18,col,clip,placedLabels,{fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]});
     }
 
     // Open lot connectors and lot labels: independent of Trades / Positions / Lots.
-    for(const l of openLotLinks || []){
+    for(const l of openPositionConnectorsForRender()){
       if(l.symbol !== sym) continue;
       const em = marker15(l.entryMarkerId);
       const x1 = em ? markerTimeX(em,vis,mapX,slot) : eventX15(l.entryTime,vis,mapX);
@@ -5405,10 +5527,10 @@ startTradeAuto();
       ctx.setLineDash([]);
       ctx.restore();
       // PATCH_16: open-position connector keeps the line only; no floating lot-size tag on the chart.
-      overlayHitItems.push({kind:'line',x1,y1,x2,y2,qty:l.qty,side:l.side,entryPrice:l.entryPrice,exitPrice:latest.close,open:true,entryMarkerId:l.entryMarkerId,chainId:cid15(l),parentTradeId:cid15(l)});
+      pushOverlayHitItem({kind:'line',x1,y1,x2,y2,qty:l.qty,side:l.side,entryPrice:l.entryPrice,exitPrice:latest.close,open:true,entryMarkerId:l.entryMarkerId,chainId:cid15(l),parentTradeId:cid15(l)},'open');
     }
 
-    for(const b of openPositionBoxes || []){
+    for(const b of openPositionBoxesForRender()){
       if(b.symbol !== sym) continue;
       const y = mapY(n15(b.price));
       if(y < clip.top - 30 || y > clip.top + clip.height + 30) continue;
@@ -5456,7 +5578,7 @@ startTradeAuto();
       ctx.fillText(p2(b.price),clamp(lineRight+6,clip.left+2,clip.left+clip.width-74),y);
       ctx.restore();
       positionBoxMarker(ix(boxX),ix(y),boxText,boxCol,boxBg);
-      overlayHitItems.push({kind:'box',letter:b.letter,x:boxX,y,size:18,qty:b.qty,price:b.price,boxData:b,chainId:cid15(b),parentTradeId:cid15(b)});
+      pushOverlayHitItem({kind:'box',letter:b.letter,x:boxX,y,size:18,qty:b.qty,price:b.price,boxData:b,chainId:cid15(b),parentTradeId:cid15(b)},'open');
     }
   }
 
@@ -11480,13 +11602,11 @@ startTradeAuto();
       lastPositionSuccess14 = Date.now();
       const boxes = buildOpenBoxes([],risk,cfg().symbol);
       if(boxes.length){
-        openPositionBoxes = boxes;
+        OPEN_POSITION_STATE.boxes = boxes;
       }else{
-        openPositionBoxes = [];
-        openLotLinks = [];
-        openEntryMarkerIds = new Set();
-        activeOpenParentChainIds = new Set();
+        clearOpenPositionOwner();
       }
+      syncLegacyTradeGlobalsFromOwners();
       updatePositionStrip(candles.length ? candles[candles.length-1] : null);
       updateTabTitle();
       draw();
@@ -11516,7 +11636,10 @@ startTradeAuto();
 
   const n15 = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const cid15 = o => o && (o.parentTradeId || o.chainId || o.tradeChainId || null);
-  const marker15 = id => (Array.isArray(fillMarkers) ? fillMarkers.find(m => m.id === id) : null) || null;
+  const marker15 = id =>
+    (closedTradeMarkersForRender().find(m => m && m.id === id)
+      || openPositionMarkersForRender().find(m => m && m.id === id)
+      || null);
   const sideDir15 = side => String(side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
   const sortMarker15 = (a,b) => (n15(a.time)-n15(b.time)) || String(a.id||'').localeCompare(String(b.id||''));
   const isoOn15 = () => typeof isIsolateActive === 'function' && isIsolateActive();
@@ -11542,7 +11665,7 @@ startTradeAuto();
     ctx.fill();
     ctx.stroke();
     ctx.restore();
-    overlayHitItems.push({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:5,qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''});
+    pushOverlayHitItem({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:5,qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''}, 'closed');
   }
 
   function drawMode2DailyNetBoxes15(records,vis,mapX,slot,clip){
@@ -11631,15 +11754,16 @@ startTradeAuto();
   function parentIdFromMarker15(markerId){
     const m = marker15(markerId);
     if(cid15(m)) return cid15(m);
-    const l = (resultLinks || []).find(x => x.entryMarkerId === markerId || x.exitMarkerId === markerId)
-      || (openLotLinks || []).find(x => x.entryMarkerId === markerId);
+    const l = closedTradeLinksForRender().find(x => x.entryMarkerId === markerId || x.exitMarkerId === markerId)
+      || openPositionLinksForRender().find(x => x.entryMarkerId === markerId || x.exitMarkerId === markerId)
+      || openPositionConnectorsForRender().find(x => x.entryMarkerId === markerId);
     return cid15(l);
   }
 
   function tradeRecord15(parentId){
     if(!parentId) return null;
-    const markers = (fillMarkers || []).filter(m => cid15(m) === parentId).slice().sort(sortMarker15);
-    const links = (resultLinks || []).filter(l => cid15(l) === parentId).slice();
+    const markers = closedTradeMarkersForRender().filter(m => cid15(m) === parentId).slice().sort(sortMarker15);
+    const links = closedTradeLinksForRender().filter(l => cid15(l) === parentId).slice();
     const entries = markers.filter(m => m.role === 'entry').sort(sortMarker15);
     const exits = markers.filter(m => m.role === 'close' && !m.unresolved).sort(sortMarker15).map(m => {
       const eventLinks = links.filter(l => l.exitMarkerId === m.id);
@@ -11687,7 +11811,7 @@ startTradeAuto();
     const out = {sum:0,count:0,start:s,end:e};
     if(!s || !e || e < s) return out;
     const symbol = String(sym || cfg().symbol || '').toUpperCase();
-    (fundingIncomeRows || []).forEach(row => {
+    (CLOSED_TRADES_STATE.fundingIncomeRows || []).forEach(row => {
       const t = normalizeTimeSec15(row && row.time);
       const rowSym = String(row && row.symbol || symbol).toUpperCase();
       if(t >= s && t <= e && (!symbol || rowSym === symbol)){
@@ -11697,10 +11821,10 @@ startTradeAuto();
     });
     if(parentId && typeof window !== 'undefined'){
       const root = window.__v13Patch37CFundingStats || {
-        fetchedRows:fundingIncomeFetchStats.rows || (fundingIncomeRows || []).length,
-        fetchStart:fundingIncomeFetchStats.start || 0,
-        fetchEnd:fundingIncomeFetchStats.end || 0,
-        symbol:fundingIncomeFetchStats.symbol || symbol,
+        fetchedRows:CLOSED_TRADES_STATE.fundingIncomeFetchStats.rows || (CLOSED_TRADES_STATE.fundingIncomeRows || []).length,
+        fetchStart:CLOSED_TRADES_STATE.fundingIncomeFetchStats.start || 0,
+        fetchEnd:CLOSED_TRADES_STATE.fundingIncomeFetchStats.end || 0,
+        symbol:CLOSED_TRADES_STATE.fundingIncomeFetchStats.symbol || symbol,
         matches:{}
       };
       root.matches[String(parentId)] = {count:out.count,sum:out.sum,start:s,end:e,symbol};
@@ -11713,13 +11837,13 @@ startTradeAuto();
   }
   function currentOpenRenderChainIds15(sym){
     const ids = new Set();
-    (openLotLinks || []).forEach(l => {
+    openPositionConnectorsForRender().forEach(l => {
       if(l && (!sym || l.symbol === sym)){
         const id = cid15(l);
         if(id) ids.add(id);
       }
     });
-    (openPositionBoxes || []).forEach(b => {
+    openPositionBoxesForRender().forEach(b => {
       if(b && (!sym || b.symbol === sym)){
         const id = cid15(b);
         if(id) ids.add(id);
@@ -11730,20 +11854,20 @@ startTradeAuto();
   function activeOpenChainIds15(sym){
     const ids = currentOpenRenderChainIds15(sym);
     if(!sym || sym === cfg().symbol){
-      (activeOpenParentChainIds || new Set()).forEach(id => { if(id) ids.add(id); });
+      (OPEN_POSITION_STATE.activeParentChainIds || new Set()).forEach(id => { if(id) ids.add(id); });
     }
     return ids;
   }
 
   function allParentTrades15(){
     const ids = new Set();
-    (fillMarkers || []).forEach(m => { const id = cid15(m); if(id) ids.add(id); });
-    (resultLinks || []).forEach(l => { const id = cid15(l); if(id) ids.add(id); });
+    closedTradeMarkersForRender().forEach(m => { const id = cid15(m); if(id) ids.add(id); });
+    closedTradeLinksForRender().forEach(l => { const id = cid15(l); if(id) ids.add(id); });
     return [...ids].map(tradeRecord15).filter(r => r && r.firstEntry && r.finalExit).sort((a,b) => n15(a.firstTime)-n15(b.firstTime));
   }
 
   function entryContribution15(parentId,entryId){
-    return (resultLinks || [])
+    return closedTradeLinksForRender()
       .filter(l => cid15(l) === parentId && l.entryMarkerId === entryId)
       .reduce((a,l) => a + netValue15(l),0);
   }
@@ -11843,7 +11967,7 @@ startTradeAuto();
 
   function pairLinks15(){
     const groups = new Map();
-    for(const l of resultLinks || []){
+    for(const l of closedTradeLinksForRender()){
       const em = marker15(l.entryMarkerId);
       const xm = marker15(l.exitMarkerId);
       if(!em || !xm) continue;
@@ -11914,12 +12038,12 @@ startTradeAuto();
     ctx.textBaseline = 'middle';
     ctx.fillText(txt,chosen.cx,chosen.cy+.5);
     if(opt.hit && Array.isArray(overlayHitItems)){
-      overlayHitItems.push({kind:'plbox',x1:chosen.cx-w/2,y1:chosen.cy-h/2,x2:chosen.cx+w/2,y2:chosen.cy+h/2,x:chosen.cx,y:chosen.cy,markerId:opt.hit.markerId,chainId:opt.hit.chainId,parentTradeId:opt.hit.parentTradeId});
+      pushOverlayHitItem({kind:'plbox',x1:chosen.cx-w/2,y1:chosen.cy-h/2,x2:chosen.cx+w/2,y2:chosen.cy+h/2,x:chosen.cx,y:chosen.cy,markerId:opt.hit.markerId,chainId:opt.hit.chainId,parentTradeId:opt.hit.parentTradeId}, opt.hit.owner || 'closed');
     }
     ctx.restore();
   }
 
-  function drawMarker15(m,vis,mapX,mapY,slot,force=false){
+  function drawMarker15(m,vis,mapX,mapY,slot,force=false,owner='closed'){
     if(!m || (!force && !inTime(m.time,vis))) return;
     const x = markerTimeX(m,vis,mapX,slot);
     if(x === null || x < -50 || x > canvas.clientWidth + 50) return;
@@ -11928,7 +12052,7 @@ startTradeAuto();
     let col = m.side === 'SHORT' || m.letter === 'S' || m.letter === 'ES' ? '#f6465d' : '#0ecb81';
     if(m.role === 'close') col = m.unresolved ? '#f59e0b' : (m.side === 'SHORT' ? '#f6465d' : '#0ecb81');
     circle(ix(x),ix(y),m.letter,col,m.unresolved);
-    overlayHitItems.push({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:m.unresolved ? 11 : Math.max(9, String(m.letter||'').length > 1 ? 14 : 7),qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''});
+    pushOverlayHitItem({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:m.unresolved ? 11 : Math.max(9, String(m.letter||'').length > 1 ? 14 : 7),qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''}, owner);
   }
 
   function drawSimplifiedTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
@@ -11953,7 +12077,7 @@ startTradeAuto();
       ctx.lineTo(px(s.x2),px(s.y2));
       ctx.stroke();
       ctx.globalAlpha = 1;
-      overlayHitItems.push({kind:'line',...s,id:'simple_'+rec.parentId,qty:rec.totalLots,side:rec.dir,open:false,chainId:rec.parentId,parentTradeId:rec.parentId});
+      pushOverlayHitItem({kind:'line',...s,id:'simple_'+rec.parentId,qty:rec.totalLots,side:rec.dir,open:false,chainId:rec.parentId,parentTradeId:rec.parentId}, 'closed');
       const mx = (s.x1 + s.x2) / 2;
       const my = (s.y1 + s.y2) / 2;
       reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(rec.netTotal):fm(rec.netTotal).replace(/[+-]/,'')),mx,my - 18,col,clip,placedLabels,{fixedX:true,font:'bold 12px Arial',pad:6,h:20,offsets:[0,-18,-36,18,36,-54,54],hit:{markerId:ex.id,chainId:rec.parentId,parentTradeId:rec.parentId}});
@@ -11981,10 +12105,10 @@ startTradeAuto();
       ctx.lineTo(px(s.x2),px(s.y2));
       ctx.stroke();
       ctx.globalAlpha = 1;
-      overlayHitItems.push({kind:'line',...s,id:l.id,qty:l.qty,side:l.side,orderId:l.orderId,open:false,chainId:cid15(l),parentTradeId:cid15(l)});
+      pushOverlayHitItem({kind:'line',...s,id:l.id,qty:l.qty,side:l.side,orderId:l.orderId,open:false,chainId:cid15(l),parentTradeId:cid15(l)}, 'closed');
       if(showLots) reserveLabel15(fq(l.qty),(s.x1+s.x2)/2,(s.y1+s.y2)/2,col,clip,placedLabels);
     }
-    for(const m of fillMarkers || []){
+    for(const m of closedTradeMarkersForRender()){
       if(m.symbol !== cfg().symbol || !visibleByIsoMarker15(m.id)) continue;
       if(activeOpenChains.has(cid15(m))) continue;
       drawMarker15(m,vis,mapX,mapY,slot);
@@ -12013,30 +12137,30 @@ startTradeAuto();
     const openChains = currentOpenRenderChainIds15(sym);
 
     // Open round position icons: always visible regardless of closed-trade toggles.
-    for(const m of fillMarkers || []){
-      if(m.symbol !== sym || !openEntryMarkerIds || !openEntryMarkerIds.has(m.id)) continue;
+    for(const m of openPositionMarkersForRender()){
+      if(m.symbol !== sym || !OPEN_POSITION_STATE.entryMarkerIds || !OPEN_POSITION_STATE.entryMarkerIds.has(m.id)) continue;
       if(!inTime(m.time,vis)) continue;
-      drawMarker15(m,vis,mapX,mapY,slot,true);
+      drawMarker15(m,vis,mapX,mapY,slot,true,'open');
     }
 
     // Active-parent partial exits are live open-position visuals, independent of Trades / Positions.
-    for(const m of fillMarkers || []){
+    for(const m of openPositionMarkersForRender()){
       if(m.symbol !== sym || m.role !== 'close' || m.unresolved || !openChains.has(cid15(m))) continue;
       if(!inTime(m.time,vis)) continue;
       m.letter = 'P';
       m.isFinalExit = false;
-      drawMarker15(m,vis,mapX,mapY,slot,true);
+      drawMarker15(m,vis,mapX,mapY,slot,true,'open');
       const x = markerTimeX(m,vis,mapX,slot);
       if(x === null) continue;
       const y = mapY(n15(m.price));
-      const links = (resultLinks || []).filter(l => l.exitMarkerId === m.id);
+      const links = openPositionLinksForRender().filter(l => l.exitMarkerId === m.id);
       const val = links.length ? realizedSum15(links) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
       const col = val >= 0 ? '#1e88e5' : '#f6465d';
       reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y - 18,col,clip,placedLabels,{fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]});
     }
 
     // Open lot connectors and lot labels: independent of Trades / Positions / Lots.
-    for(const l of openLotLinks || []){
+    for(const l of openPositionConnectorsForRender()){
       if(l.symbol !== sym) continue;
       const em = marker15(l.entryMarkerId);
       const x1 = em ? markerTimeX(em,vis,mapX,slot) : eventX15(l.entryTime,vis,mapX);
@@ -12057,10 +12181,10 @@ startTradeAuto();
       ctx.setLineDash([]);
       ctx.restore();
       // PATCH_17: open-position lot tags removed from chart; breakdown is tooltip-only.
-      overlayHitItems.push({kind:'line',x1,y1,x2,y2,qty:l.qty,side:l.side,entryPrice:l.entryPrice,exitPrice:latest.close,open:true,entryMarkerId:l.entryMarkerId,chainId:cid15(l),parentTradeId:cid15(l)});
+      pushOverlayHitItem({kind:'line',x1,y1,x2,y2,qty:l.qty,side:l.side,entryPrice:l.entryPrice,exitPrice:latest.close,open:true,entryMarkerId:l.entryMarkerId,chainId:cid15(l),parentTradeId:cid15(l)}, 'open');
     }
 
-    for(const b of openPositionBoxes || []){
+    for(const b of openPositionBoxesForRender()){
       if(b.symbol !== sym) continue;
       const y = mapY(n15(b.price));
       if(y < clip.top - 30 || y > clip.top + clip.height + 30) continue;
@@ -12108,7 +12232,7 @@ startTradeAuto();
       ctx.fillText(p2(b.price),clamp(lineRight+6,clip.left+2,clip.left+clip.width-74),y);
       ctx.restore();
       positionBoxMarker(ix(boxX),ix(y),boxText,boxCol,boxBg);
-      overlayHitItems.push({kind:'box',letter:b.letter,x:boxX,y,size:18,qty:b.qty,price:b.price,boxData:b,chainId:cid15(b),parentTradeId:cid15(b)});
+      pushOverlayHitItem({kind:'box',letter:b.letter,x:boxX,y,size:18,qty:b.qty,price:b.price,boxData:b,chainId:cid15(b),parentTradeId:cid15(b)}, 'open');
     }
   }
 
@@ -12138,6 +12262,7 @@ startTradeAuto();
 
   hoverItem = function(){
     if(!mouse) return null;
+    syncOverlayHitOwnership();
     let best = null, bd = Infinity;
     for(const it of overlayHitItems || []){
       if(it.kind !== 'marker') continue;
@@ -12548,23 +12673,14 @@ startTradeAuto();
   if(prevTradeOverlays18){
     tradeOverlays = function(vis,mapX,mapY,slot,clip){
       const floatingOn = !tglFloatingPL18 || tglFloatingPL18.checked;
-      let savedBoxes, savedLinks, savedOpenIds;
+      let restoreOpenPositionRender = null;
       if(!floatingOn){
-        savedBoxes = openPositionBoxes;
-        savedLinks = openLotLinks;
-        savedOpenIds = openEntryMarkerIds;
-        openPositionBoxes = [];
-        openLotLinks = [];
-        openEntryMarkerIds = new Set();
+        restoreOpenPositionRender = suppressOpenPositionRenderState();
       }
       try{
         prevTradeOverlays18(vis,mapX,mapY,slot,clip);
       }finally{
-        if(!floatingOn){
-          openPositionBoxes = savedBoxes;
-          openLotLinks = savedLinks;
-          openEntryMarkerIds = savedOpenIds;
-        }
+        if(restoreOpenPositionRender) restoreOpenPositionRender();
       }
       // PATCH_19: no separate EX P/L tag; style the existing tag only.
     };
@@ -12756,23 +12872,14 @@ startTradeAuto();
     tradeOverlays = function(vis,mapX,mapY,slot,clip){
       const cb = document.getElementById('tglFloatingPL') || floatingToggle20;
       const floatingOn = !cb || cb.checked;
-      let savedBoxes, savedLinks, savedOpenIds;
+      let restoreOpenPositionRender = null;
       if(!floatingOn){
-        savedBoxes = openPositionBoxes;
-        savedLinks = openLotLinks;
-        savedOpenIds = openEntryMarkerIds;
-        openPositionBoxes = [];
-        openLotLinks = [];
-        openEntryMarkerIds = new Set();
+        restoreOpenPositionRender = suppressOpenPositionRenderState();
       }
       try{
         return prevTradeOverlays20(vis,mapX,mapY,slot,clip);
       }finally{
-        if(!floatingOn){
-          openPositionBoxes = savedBoxes;
-          openLotLinks = savedLinks;
-          openEntryMarkerIds = savedOpenIds;
-        }
+        if(restoreOpenPositionRender) restoreOpenPositionRender();
       }
     };
   }
@@ -12978,13 +13085,11 @@ startTradeAuto();
     if(boxes.length){
       const chain = (openPositionBoxes && openPositionBoxes[0] && cid21(openPositionBoxes[0])) || (openLotLinks && openLotLinks[0] && cid21(openLotLinks[0])) || null;
       boxes.forEach(b => { if(!cid21(b) && chain) b.chainId = chain; });
-      openPositionBoxes = boxes;
+      OPEN_POSITION_STATE.boxes = boxes;
     }else{
-      openPositionBoxes = [];
-      openLotLinks = [];
-      openEntryMarkerIds = new Set();
-      activeOpenParentChainIds = new Set();
+      clearOpenPositionOwner();
     }
+    syncLegacyTradeGlobalsFromOwners();
     try{ if(typeof updatePositionStrip === "function") updatePositionStrip(latest21()); }catch(e){}
     try{ if(typeof updateTabTitle === "function") updateTabTitle(); }catch(e){}
   }
@@ -18494,7 +18599,7 @@ If there is NO open position, use this Section 2 instead:
   }
 
   function marker36(id){
-    return (Array.isArray(fillMarkers) ? fillMarkers.find(m => m && m.id === id) : null) || null;
+    return closedTradeMarkersForRender().find(m => m && m.id === id) || null;
   }
 
   function resetTransientFlags36(){
@@ -18507,13 +18612,14 @@ If there is NO open position, use this Section 2 instead:
   }
 
   function openChainHas36(id){
-    return !!(id && Array.isArray(openLotLinks) && openLotLinks.some(l => cid36(l) === id));
+    return !!(id && ownerHasChain(OPEN_POSITION_STATE,id));
   }
 
   function isClosedTradePlLabel36(it){
     try{
       if(!it || it.kind !== "plbox" || !it.markerId) return false;
-      if(Array.isArray(overlayHitItems) && !overlayHitItems.includes(it)) return false;
+      syncOverlayHitOwnership();
+      if(!closedTradeHitItems.includes(it)) return false;
       if(typeof tglResults !== "undefined" && tglResults && !tglResults.checked) return false;
       const m = marker36(it.markerId);
       if(!m || m.role !== "close" || m.unresolved) return false;
@@ -18526,9 +18632,9 @@ If there is NO open position, use this Section 2 instead:
   }
 
   function plLabelHitAt36(x,y){
-    if(!Array.isArray(overlayHitItems)) return null;
-    for(let i = overlayHitItems.length - 1; i >= 0; i--){
-      const it = overlayHitItems[i];
+    syncOverlayHitOwnership();
+    for(let i = closedTradeHitItems.length - 1; i >= 0; i--){
+      const it = closedTradeHitItems[i];
       if(!isClosedTradePlLabel36(it)) continue;
       if(x >= it.x1 - 4 && x <= it.x2 + 4 && y >= it.y1 - 4 && y <= it.y2 + 4) return it;
     }
@@ -18544,8 +18650,8 @@ If there is NO open position, use this Section 2 instead:
     if(hinted) chainIds.add(hinted);
 
     if(chainIds.size){
-      (fillMarkers || []).forEach(x => { if(chainIds.has(cid36(x))) markerIds.add(x.id); });
-      (resultLinks || []).forEach(l => {
+      closedTradeMarkersForRender().forEach(x => { if(chainIds.has(cid36(x))) markerIds.add(x.id); });
+      closedTradeLinksForRender().forEach(l => {
         if(chainIds.has(cid36(l))){
           closedLinkIds.add(l.id);
           if(l.entryMarkerId) markerIds.add(l.entryMarkerId);
@@ -18557,7 +18663,7 @@ If there is NO open position, use this Section 2 instead:
       let changed = true;
       while(changed){
         changed = false;
-        (resultLinks || []).forEach(l => {
+        closedTradeLinksForRender().forEach(l => {
           if(markerIds.has(l.entryMarkerId) || markerIds.has(l.exitMarkerId)){
             if(!closedLinkIds.has(l.id)){ closedLinkIds.add(l.id); changed = true; }
             if(l.entryMarkerId && !markerIds.has(l.entryMarkerId)){ markerIds.add(l.entryMarkerId); changed = true; }
@@ -18590,7 +18696,9 @@ If there is NO open position, use this Section 2 instead:
     isolate36.lastHit = null;
     resetTransientFlags36();
     if(options.clearTargets && Array.isArray(overlayHitItems)){
-      overlayHitItems = overlayHitItems.filter(it => !it || it.kind !== "plbox");
+      syncOverlayHitOwnership();
+      overlayHitItems = overlayHitItems.filter(it => !it || it.kind !== "plbox" || it.overlayOwner !== "closed");
+      syncOverlayHitOwnership();
     }
     setVisibilityApi36();
     if(options.redraw !== false){
@@ -18634,8 +18742,8 @@ If there is NO open position, use this Section 2 instead:
   function focusIsolate36(){
     if(!isolate36.active || !Array.isArray(candles) || !candles.length) return;
     const times = [];
-    (fillMarkers || []).forEach(m => { if(isolate36.markerIds.has(m.id) && Number.isFinite(Number(m.time))) times.push(Number(m.time)); });
-    (resultLinks || []).forEach(l => {
+    closedTradeMarkersForRender().forEach(m => { if(isolate36.markerIds.has(m.id) && Number.isFinite(Number(m.time))) times.push(Number(m.time)); });
+    closedTradeLinksForRender().forEach(l => {
       if(isolate36.closedLinkIds.has(l.id)){
         if(Number.isFinite(Number(l.entryTime))) times.push(Number(l.entryTime));
         if(Number.isFinite(Number(l.exitTime))) times.push(Number(l.exitTime));
