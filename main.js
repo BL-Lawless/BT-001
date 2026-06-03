@@ -510,6 +510,7 @@ function parseCustomDate(value,endOfDay=false){
 
 function selectedReportPresetMs(){
   switch(reportWeeksEl.value){
+    case "1d": return 24 * 60 * 60 * 1000;
     case "2w": return 2 * WEEK_MS;
     case "3w": return 3 * WEEK_MS;
     case "4w": return 4 * WEEK_MS;
@@ -537,6 +538,7 @@ function reportRangeMs(){
 
 function weeks(){
   switch(reportWeeksEl.value){
+    case "1d": return 1 / 7;
     case "2w": return 2;
     case "3w": return 3;
     case "4w": return 4;
@@ -546,6 +548,7 @@ function weeks(){
 
 function reportLabel(){
   switch(reportWeeksEl.value){
+    case "1d": return "1D";
     case "2w": return "2W";
     case "3w": return "3W";
     case "4w": return "4W";
@@ -919,7 +922,8 @@ let closedTradesLoading = false;
 const CLOSED_TRADES_VISIBLE_MAX_MS = 14 * 24 * 60 * 60 * 1000;
 
 function selectedClosedTradePeriod(period){
-  const raw = String(period || (reportWeeksEl && reportWeeksEl.value) || "1w").toLowerCase();
+  const raw = String(period || (reportWeeksEl && reportWeeksEl.value) || "1d").toLowerCase();
+  if(raw === "1d" || raw === "today") return {value:"1d",weeks:1/7,label:"1D"};
   if(raw === "2w") return {value:"2w",weeks:2,label:"2W"};
   if(raw === "3w") return {value:"3w",weeks:3,label:"3W"};
   if(raw === "4w") return {value:"4w",weeks:4,label:"4W"};
@@ -997,6 +1001,14 @@ function closedTradeExStats(rec){
   };
 }
 
+function loadedClosedNetPnl(rec){
+  const links = Array.isArray(rec && rec.links) ? rec.links : [];
+  return links.reduce((sum,l) => {
+    const v = Number(l && l.netPnl);
+    return Number.isFinite(v) ? sum + v : sum;
+  },0);
+}
+
 async function loadClosedTradesForPeriod(period,opt={}){
   const silent = !!opt.silent;
   const key = apiKeyEl.value.trim();
@@ -1036,6 +1048,7 @@ async function loadClosedTradesForPeriod(period,opt={}){
 
     const rec = filterClosedReconstructionForPeriod(full,win);
     const exStats = closedTradeExStats(rec);
+    const netPnl = loadedClosedNetPnl(rec);
 
     CLOSED_TRADES_STATE.markers = rec.markers;
     CLOSED_TRADES_STATE.links = rec.links;
@@ -1048,9 +1061,10 @@ async function loadClosedTradesForPeriod(period,opt={}){
     syncLegacyTradeGlobalsFromOwners();
 
     closedTradeStatus(
-      "from: " + closedTradeStatusDay(win.start) + "\n" +
-      "to: " + closedTradeStatusDay(win.end) + "\n" +
-      "trades: " + exStats.count
+      "from: " + closedTradeStatusDay(win.start) +
+      " | to: " + closedTradeStatusDay(win.end) +
+      " | trades: " + exStats.count +
+      " | net P/L: " + fm(netPnl)
     );
 
     updatePositionStrip(candles.length ? candles[candles.length-1] : null);
@@ -11085,9 +11099,9 @@ startTradeAuto();
     const sel = document.getElementById('reportWeeks');
     if(!sel) return;
     const specs = [
-      ['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']
+      ['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']
     ];
-    const cur = sel.value || '1w';
+    const cur = sel.value || '1d';
     sel.innerHTML = '';
     for(const [v,t] of specs){
       const opt = document.createElement('option');
@@ -11095,7 +11109,7 @@ startTradeAuto();
       opt.textContent = t;
       sel.appendChild(opt);
     }
-    sel.value = specs.some(x => x[0] === cur) ? cur : '1w';
+    sel.value = specs.some(x => x[0] === cur) ? cur : '1d';
   }
   ensureReportOptions13();
 
@@ -11578,10 +11592,10 @@ startTradeAuto();
   const sortMarker14 = (a,b) => (n14(a.time)-n14(b.time)) || String(a.id||'').localeCompare(String(b.id||''));
   const showIso14 = () => typeof isIsolateActive === 'function' && isIsolateActive();
 
-  // 1W default for the loaded report period.
+  // 1D default for the loaded report period.
   try{
     if(reportWeeksEl){
-      reportWeeksEl.value = '1w';
+      reportWeeksEl.value = '1d';
       if(typeof syncCustomRangeVisibility === 'function') syncCustomRangeVisibility();
     }
   }catch(e){}
@@ -15792,12 +15806,12 @@ If there is NO open position, use this Section 2 instead:
 
   function installReportOptions(){
     const sel=$id('reportWeeks'); if(!sel) return;
-    const specs=[['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']];
+    const specs=[['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']];
     const saved=localStorage.getItem(K('reportPeriod'));
-    const current=(sel.value&&specs.some(x=>x[0]===sel.value)&&sel.value!=='1d')?sel.value:(saved||'1w');
+    const current=(sel.value&&specs.some(x=>x[0]===sel.value))?sel.value:(saved||'1d');
     sel.innerHTML='';
     specs.forEach(([v,t])=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); });
-    sel.value=specs.some(x=>x[0]===current)?current:'1w';
+    sel.value=specs.some(x=>x[0]===current)?current:'1d';
     localStorage.setItem(K('reportPeriod'),sel.value);
   }
   function startOfLocalDay(d=new Date()){ return new Date(d.getFullYear(),d.getMonth(),d.getDate(),0,0,0,0).getTime(); }
@@ -15830,6 +15844,7 @@ If there is NO open position, use this Section 2 instead:
 
   selectedReportPresetMs=function(){
     switch(reportWeeksEl.value){
+      case '1d': return 24*60*60*1000;
       case '2w': return 2*WEEK_MS;
       case '3w': return 3*WEEK_MS;
       case '4w': return 4*WEEK_MS;

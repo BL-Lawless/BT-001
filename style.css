@@ -164,7 +164,7 @@ button:hover{filter:brightness(1.04)}
   display:inline-block;
   color:var(--muted);
   font-size:12px;
-  white-space:pre-line;
+  white-space:nowrap;
   max-width:520px;
   overflow:hidden;
   text-overflow:ellipsis;
