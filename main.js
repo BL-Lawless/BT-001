@@ -152,6 +152,172 @@ let fundingIncomeRows = [];
 let fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
 let unresolvedCount = 0;
 
+const OPEN_POSITION_STATE = {
+  markers:[],
+  links:[],
+  openLotLinks:[],
+  boxes:[],
+  entryMarkerIds:new Set(),
+  activeParentChainIds:new Set(),
+  openLots:[]
+};
+
+const CLOSED_TRADES_STATE = {
+  markers:[],
+  links:[],
+  fundingIncomeRows:[],
+  fundingIncomeFetchStats:{rows:0,start:0,end:0,symbol:""},
+  unresolvedCount:0,
+  fullReconstruction:null,
+  reportProjection:null
+};
+
+function stateChainId(o){
+  return o && (o.parentTradeId || o.chainId || o.tradeChainId || null);
+}
+
+function syncLegacyTradeGlobalsFromOwners(){
+  fillMarkers = CLOSED_TRADES_STATE.markers.concat(OPEN_POSITION_STATE.markers).sort((a,b) =>
+    Number(a && a.time || 0) - Number(b && b.time || 0) ||
+    String(a && a.id || "").localeCompare(String(b && b.id || ""))
+  );
+  resultLinks = CLOSED_TRADES_STATE.links.concat(OPEN_POSITION_STATE.links).sort((a,b) =>
+    Number(a && a.entryTime || 0) - Number(b && b.entryTime || 0) ||
+    Number(a && a.exitTime || 0) - Number(b && b.exitTime || 0) ||
+    String(a && a.id || "").localeCompare(String(b && b.id || ""))
+  );
+  openLotLinks = OPEN_POSITION_STATE.openLotLinks;
+  openPositionBoxes = OPEN_POSITION_STATE.boxes;
+  openEntryMarkerIds = OPEN_POSITION_STATE.entryMarkerIds;
+  activeOpenParentChainIds = OPEN_POSITION_STATE.activeParentChainIds;
+  fundingIncomeRows = CLOSED_TRADES_STATE.fundingIncomeRows;
+  fundingIncomeFetchStats = CLOSED_TRADES_STATE.fundingIncomeFetchStats;
+  unresolvedCount = CLOSED_TRADES_STATE.unresolvedCount;
+}
+
+function clearClosedTradesOwner(){
+  CLOSED_TRADES_STATE.markers = [];
+  CLOSED_TRADES_STATE.links = [];
+  CLOSED_TRADES_STATE.fundingIncomeRows = [];
+  CLOSED_TRADES_STATE.fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
+  CLOSED_TRADES_STATE.unresolvedCount = 0;
+  CLOSED_TRADES_STATE.fullReconstruction = null;
+  CLOSED_TRADES_STATE.reportProjection = null;
+  syncLegacyTradeGlobalsFromOwners();
+}
+
+function clearOpenPositionOwner(){
+  OPEN_POSITION_STATE.markers = [];
+  OPEN_POSITION_STATE.links = [];
+  OPEN_POSITION_STATE.openLotLinks = [];
+  OPEN_POSITION_STATE.boxes = [];
+  OPEN_POSITION_STATE.entryMarkerIds = new Set();
+  OPEN_POSITION_STATE.activeParentChainIds = new Set();
+  OPEN_POSITION_STATE.openLots = [];
+  syncLegacyTradeGlobalsFromOwners();
+}
+
+function routeReconstructionToTradeOwners(full,reportRec,risk,symbol){
+  full = full || {};
+  reportRec = reportRec || {};
+  risk = Array.isArray(risk) ? risk : [];
+  const previousOpen = {
+    markers:OPEN_POSITION_STATE.markers.slice(),
+    links:OPEN_POSITION_STATE.links.slice(),
+    openLotLinks:OPEN_POSITION_STATE.openLotLinks.slice(),
+    boxes:OPEN_POSITION_STATE.boxes.slice(),
+    entryMarkerIds:new Set(OPEN_POSITION_STATE.entryMarkerIds),
+    activeParentChainIds:new Set(OPEN_POSITION_STATE.activeParentChainIds),
+    openLots:OPEN_POSITION_STATE.openLots.slice()
+  };
+  const activeRisk = risk.some(row =>
+    row &&
+    row.symbol === symbol &&
+    Math.abs(Number(row.positionAmt)) > 1e-12
+  );
+  const openLots = Array.isArray(full.openLots) ? full.openLots : [];
+  const openConnectors = Array.isArray(full.openConnectors) ? full.openConnectors : [];
+  const openMarkerIds = new Set(openLots.map(l => l && l.markerId).filter(Boolean));
+  const openChainIds = new Set(openLots.map(stateChainId).filter(Boolean));
+
+  openConnectors.forEach(l => {
+    if(l && l.entryMarkerId) openMarkerIds.add(l.entryMarkerId);
+    const cid = stateChainId(l);
+    if(cid) openChainIds.add(cid);
+  });
+
+  const allMarkers = Array.isArray(full.markers) ? full.markers : [];
+  const allLinks = Array.isArray(full.links) ? full.links : [];
+
+  const isOpenOwned = item => {
+    const cid = stateChainId(item);
+    return !!(cid && openChainIds.has(cid));
+  };
+
+  const openMarkers = allMarkers.filter(m => openMarkerIds.has(m && m.id) || isOpenOwned(m));
+  const openLinks = allLinks.filter(l =>
+    openMarkerIds.has(l && l.entryMarkerId) ||
+    openMarkerIds.has(l && l.exitMarkerId) ||
+    isOpenOwned(l)
+  );
+
+  const reportMarkers = Array.isArray(reportRec.markers) ? reportRec.markers : [];
+  const reportLinks = Array.isArray(reportRec.links) ? reportRec.links : [];
+
+  CLOSED_TRADES_STATE.markers = reportMarkers.filter(m => !openMarkerIds.has(m && m.id) && !isOpenOwned(m));
+  CLOSED_TRADES_STATE.links = reportLinks.filter(l =>
+    !openMarkerIds.has(l && l.entryMarkerId) &&
+    !openMarkerIds.has(l && l.exitMarkerId) &&
+    !isOpenOwned(l)
+  );
+  CLOSED_TRADES_STATE.fundingIncomeRows = fundingIncomeRows;
+  CLOSED_TRADES_STATE.fundingIncomeFetchStats = fundingIncomeFetchStats;
+  CLOSED_TRADES_STATE.unresolvedCount = CLOSED_TRADES_STATE.markers.filter(m => m && m.unresolved).length;
+  CLOSED_TRADES_STATE.fullReconstruction = full;
+  CLOSED_TRADES_STATE.reportProjection = {
+    ...reportRec,
+    markers:CLOSED_TRADES_STATE.markers,
+    links:CLOSED_TRADES_STATE.links,
+    unresolved:CLOSED_TRADES_STATE.unresolvedCount
+  };
+
+  OPEN_POSITION_STATE.markers = openMarkers;
+  OPEN_POSITION_STATE.links = openLinks;
+  OPEN_POSITION_STATE.openLotLinks = openConnectors;
+  OPEN_POSITION_STATE.boxes = buildOpenBoxes(openLots,risk || [],symbol);
+  OPEN_POSITION_STATE.entryMarkerIds = openMarkerIds;
+  OPEN_POSITION_STATE.activeParentChainIds = openChainIds;
+  OPEN_POSITION_STATE.openLots = openLots;
+
+  if(activeRisk && !openMarkers.length && !openConnectors.length){
+    const chainHint =
+      [...previousOpen.activeParentChainIds].find(Boolean) ||
+      previousOpen.openLotLinks.map(stateChainId).find(Boolean) ||
+      previousOpen.boxes.map(stateChainId).find(Boolean) ||
+      null;
+
+    OPEN_POSITION_STATE.markers = previousOpen.markers;
+    OPEN_POSITION_STATE.links = previousOpen.links;
+    OPEN_POSITION_STATE.openLotLinks = previousOpen.openLotLinks;
+    OPEN_POSITION_STATE.entryMarkerIds = previousOpen.entryMarkerIds;
+    OPEN_POSITION_STATE.activeParentChainIds = previousOpen.activeParentChainIds;
+    OPEN_POSITION_STATE.openLots = previousOpen.openLots;
+    OPEN_POSITION_STATE.boxes = buildOpenBoxes([],risk,symbol);
+    if(chainHint){
+      OPEN_POSITION_STATE.boxes.forEach(b => {
+        if(!stateChainId(b)) b.chainId = chainHint;
+      });
+    }
+  }
+
+  syncLegacyTradeGlobalsFromOwners();
+  return {
+    closed:CLOSED_TRADES_STATE,
+    open:OPEN_POSITION_STATE,
+    report:CLOSED_TRADES_STATE.reportProjection
+  };
+}
+
 let dailyState = null;
 let accountBalanceState = null;
 
@@ -3247,21 +3413,13 @@ async function loadTrades(opt={}){
 
     const full = reconstruct(rows,cfg().symbol);
     const rec = filterReconstructionForReport(full);
-
-    openEntryMarkerIds = new Set((full.openLots || []).map(l => l.markerId));
-    activeOpenParentChainIds = new Set((full.openLots || []).map(l => l && (l.parentTradeId || l.chainId || l.tradeChainId)).filter(Boolean));
-
-    fillMarkers = rec.markers;
-    resultLinks = rec.links;
-    openLotLinks = rec.openConnectors;
-    unresolvedCount = rec.unresolved || 0;
-    openPositionBoxes = buildOpenBoxes(full.openLots,risk,cfg().symbol);
+    const owners = routeReconstructionToTradeOwners(full,rec,risk,cfg().symbol);
     updatePositionStrip(candles.length ? candles[candles.length-1] : null);
     updateTabTitle();
 
     tradeCountEl.textContent =
-      "Fills:" + fillMarkers.length +
-      " Links:" + resultLinks.length +
+      "Fills:" + owners.closed.markers.length +
+      " Links:" + owners.closed.links.length +
       " Open:" + openPositionBoxes.length +
       (unresolvedCount ? " Unres:" + unresolvedCount : "") +
       " LB:" + RECON_LOOKBACK_WEEKS + "W";
@@ -3277,15 +3435,7 @@ async function loadTrades(opt={}){
 }
 
 function clearTrades(){
-  fillMarkers = [];
-  resultLinks = [];
-  openLotLinks = [];
-  openPositionBoxes = [];
-  activeOpenParentChainIds = new Set();
-  fundingIncomeRows = [];
-  fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
-  openEntryMarkerIds = new Set();
-  unresolvedCount = 0;
+  clearClosedTradesOwner();
   tradeCountEl.textContent = "Trades: 0";
   updatePositionStrip(candles.length ? candles[candles.length-1] : null);
   updateTabTitle();
