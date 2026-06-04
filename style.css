@@ -1867,6 +1867,21 @@ button:hover{filter:brightness(1.04)}
 .calc-module-row .calc-module-lot.calc-module-lot-binance-limit{
   background:#f9dc0543;
 }
+.calc-module-row .calc-module-level.calc-module-level-binance-limit{
+  background:#fff4cf;
+}
+.calc-module-row.calc-module-row-binance-entry{
+  border-left:2px solid rgba(208,145,29,.7);
+  padding-left:4px;
+}
+.calc-module-row.calc-module-row-manual-entry{
+  border-left:2px solid rgba(8,145,178,.68);
+  padding-left:4px;
+}
+.calc-module-row .calc-module-level.calc-module-level-manual-entry,
+.calc-module-row .calc-module-lot.calc-module-lot-manual-entry{
+  background:#eefcff;
+}
 .calc-module-row.calc-module-row-locked{
   opacity:.94;
 }
