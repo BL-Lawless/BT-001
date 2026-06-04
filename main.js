@@ -324,6 +324,8 @@ function routeReconstructionToTradeOwners(full,reportRec,risk,symbol){
 
 let dailyState = null;
 let accountBalanceState = null;
+let exchangeTimeOffsetMs = null;
+const EXCHANGE_CANDLE_CLOSE_BUFFER_MS = 350;
 
 let ws = null;
 let tradeAutoTimer = null;
@@ -1481,6 +1483,18 @@ function parseWsKline(k){
   };
 }
 
+function getExchangeNowMs(){
+  return Date.now() + (Number.isFinite(exchangeTimeOffsetMs) ? exchangeTimeOffsetMs : 0);
+}
+
+function candleCloseBoundaryMs(tf,row){
+  if(row && Number.isFinite(Number(row.closeTime)) && Number(row.closeTime) > 0){
+    return Number(row.closeTime) + 1;
+  }
+  if(!row || !Number.isFinite(Number(row.time))) return NaN;
+  return Number(row.time) * 1000 + ivSec(tf) * 1000;
+}
+
 function EMA(src,p){
   const out = [];
   let cur = null;
@@ -1719,16 +1733,46 @@ function canonicalChartMASeries(){
 ========================================================= */
 
 function updateDailyFromLive(c){
-  if(!dailyState || !c) return;
+  const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+  let rows = [];
+  if(hub && typeof hub.getChartBuffer === "function") rows = hub.getChartBuffer("1d") || [];
+  if((!Array.isArray(rows) || !rows.length) && typeof iv === "function" && iv() === "1d" && Array.isArray(candles)) rows = candles;
+  if((!Array.isArray(rows) || !rows.length) && hub && typeof hub.getClosedBuffer === "function") rows = hub.getClosedBuffer("1d") || [];
+  if(!Array.isArray(rows) || !rows.length) return;
 
-  dailyState.close = c.close;
-  dailyState.high = Math.max(dailyState.high, c.high, c.close);
-  dailyState.low = Math.min(dailyState.low, c.low, c.close);
+  const normalized = rows
+    .map(row => {
+      if(!row) return null;
+      const time = Number.isFinite(Number(row.time))
+        ? Number(row.time)
+        : (Number.isFinite(Number(row.openTime)) ? Math.floor(Number(row.openTime) / 1000) : NaN);
+      const open = Number(row.open);
+      const high = Number(row.high);
+      const low = Number(row.low);
+      const close = Number(row.close);
+      const volume = Number(row.volume ?? row.baseVolume);
+      return Number.isFinite(time) && Number.isFinite(open) && Number.isFinite(high) && Number.isFinite(low) && Number.isFinite(close) && Number.isFinite(volume)
+        ? {time,open,high,low,close,volume}
+        : null;
+    })
+    .filter(Boolean)
+    .sort((a,b) => a.time - b.time);
+  if(!normalized.length) return;
 
-  if(dailyState.prevClose > 0){
-    dailyState.changePct =
-      (dailyState.close - dailyState.prevClose) / dailyState.prevClose * 100;
-  }
+  const cur = normalized[normalized.length - 1];
+  const prev = normalized.length > 1 ? normalized[normalized.length - 2] : null;
+  dailyState = {
+    dayStart:cur.time,
+    open:cur.open,
+    high:cur.high,
+    low:cur.low,
+    close:cur.close,
+    volume:cur.volume,
+    prevClose:prev ? prev.close : (dailyState ? dailyState.prevClose : null),
+    changePct:(prev ? prev.close : (dailyState ? dailyState.prevClose : null)) > 0
+      ? (cur.close - (prev ? prev.close : dailyState.prevClose)) / (prev ? prev.close : dailyState.prevClose) * 100
+      : null
+  };
 }
 
 function metrics(c){
@@ -2480,9 +2524,11 @@ const marketDataHub = (() => {
   function cloneRow(row){
     return row ? {...row} : row;
   }
-  function isFormingRow(tf,row,refMs=Date.now()){
+  function isFormingRow(tf,row,refMs=getExchangeNowMs()){
     if(!row || !Number.isFinite(Number(row.time))) return false;
-    return (Number(row.time) + ivSec(tf)) * 1000 > refMs;
+    const boundaryMs = candleCloseBoundaryMs(tf,row);
+    if(!Number.isFinite(boundaryMs)) return false;
+    return boundaryMs + EXCHANGE_CANDLE_CLOSE_BUFFER_MS > refMs;
   }
   function trimClosedBuffer(tf,limitOverride){
     const limit = Math.max(10, limitOverride || intervalKeep(tf));
@@ -3603,12 +3649,17 @@ async function serverTime(){
     if(!r.ok) throw new Error("time HTTP " + r.status);
 
     const d = await r.json();
-    if(d && d.serverTime) return +d.serverTime;
+    if(d && d.serverTime){
+      const serverMs = +d.serverTime;
+      const localNow = Date.now();
+      exchangeTimeOffsetMs = serverMs - localNow;
+      return serverMs;
+    }
   }catch(e){
     console.error("Server time failed, using local",e);
   }
 
-  return Date.now();
+  return getExchangeNowMs();
 }
 
 async function signedGet(url,p,key,sec,off){
@@ -3637,7 +3688,10 @@ async function signedGet(url,p,key,sec,off){
 }
 
 async function timeOffset(){
-  return await serverTime() - Date.now();
+  const serverMs = await serverTime();
+  const offset = serverMs - Date.now();
+  if(Number.isFinite(offset)) exchangeTimeOffsetMs = offset;
+  return offset;
 }
 
 async function getTrades(key,sec,off){
