@@ -1162,7 +1162,7 @@ button:hover{filter:brightness(1.04)}
 .metric{
   padding:4px 6px !important;
 }
-/* Order: MA_STACK_STRIP → Assess → Account Balance. */
+/* Order: MA_STACK_STRIP → Assess → Balance. */
 .v29-assess-metric{
   margin-left:0 !important;
 }
@@ -1339,6 +1339,9 @@ button:hover{filter:brightness(1.04)}
 .v33-ma-stack-box[data-state="mixed"]{background:rgba(203,213,225,.70)}
 .v33-ma-stack-box[data-state="compression"]{background:rgba(203,213,225,.78)}
 .v33-ma-stack-box[data-state="transition"]{background:rgba(148,163,184,.62)}
+.v33-ma-stack-box[data-state="mixed"],
+.v33-ma-stack-box[data-state="compression"],
+.v33-ma-stack-box[data-state="transition"]{background:rgba(248,250,252,.96)}
 .v33-ma-stack-box.v33-flash-cross{animation:v33StackFlashCross 1s ease-in-out 1}
 .v33-ma-stack-box.v33-flash-bounce{animation:v33StackFlashBounce 1s ease-in-out 1}
 #v33MAStackTooltip{
@@ -1711,6 +1714,11 @@ button:hover{filter:brightness(1.04)}
 .calc-module-icon:hover{
   filter:brightness(1.04);
 }
+.calc-module-icon.calc-module-icon-notify{
+  border-color:#f59e0b;
+  background:#fff7df;
+  box-shadow:0 0 0 2px rgba(245,158,11,.22);
+}
 .calc-module-window{
   position:fixed;
   left:36px;
@@ -1847,6 +1855,31 @@ button:hover{filter:brightness(1.04)}
   gap:6px;
   align-items:center;
 }
+.calc-module-psl-head,
+.calc-module-row.calc-module-psl-row{
+  display:grid;
+  grid-template-columns:20px minmax(68px,1fr) 58px 72px 22px;
+  gap:6px;
+  align-items:center;
+}
+.calc-module-psl-head{
+  color:#707a8a;
+  font-size:10px;
+  font-weight:700;
+  text-transform:uppercase;
+  margin-bottom:3px;
+}
+.calc-module-psl-index{
+  color:#707a8a;
+  font-size:11px;
+  text-align:center;
+}
+.calc-module-psl-pl{
+  font-size:11px;
+  font-variant-numeric:tabular-nums;
+  text-align:right;
+  white-space:nowrap;
+}
 .calc-module-row-head{
   color:#707a8a;
   font-size:10px;
@@ -1889,6 +1922,13 @@ button:hover{filter:brightness(1.04)}
   border-left:2px solid rgba(224,187,64,.55);
   padding-left:4px;
 }
+.calc-module-row.calc-module-row-binance-partial-stop{
+  border-left:2px solid rgba(208,145,29,.7);
+  padding-left:4px;
+}
+.calc-module-row.calc-module-row-binance-partial-stop input{
+  background:#fff4cf;
+}
 .calc-module-row .calc-module-input-locked{
   background:#f4f6f8;
   color:#58606b;
@@ -1915,8 +1955,8 @@ button:hover{filter:brightness(1.04)}
   border-radius:8px;
   padding:6px 7px;
   display:grid;
-  grid-template-columns:auto 72px minmax(70px,1fr) 64px auto;
-  gap:8px;
+  grid-template-columns:62px minmax(76px,1fr) 30px 64px minmax(68px,max-content);
+  gap:6px;
   align-items:center;
 }
 .calc-module-stop label{
@@ -1924,6 +1964,20 @@ button:hover{filter:brightness(1.04)}
   color:#707a8a;
   font-weight:700;
   text-transform:uppercase;
+}
+.calc-module-stop-pl{
+  font-size:11px;
+  font-variant-numeric:tabular-nums;
+  font-weight:700;
+  text-align:right;
+  white-space:nowrap;
+}
+.calc-module-partial-stop-head{
+  margin-top:6px;
+}
+.calc-module-add-partial-stop{
+  width:100%;
+  margin:6px 0;
 }
 .calc-module-panel{
   margin-top:6px;
@@ -1985,7 +2039,7 @@ button:hover{filter:brightness(1.04)}
 .calc-module-binance-flat{
   margin-top:6px;
 }
-.calc-module-binance-actions{display:grid;grid-template-columns:1fr 1fr auto 1fr auto;gap:6px;align-items:center}
+.calc-module-binance-actions{display:grid;grid-template-columns:1fr 1fr auto 1fr;gap:6px;align-items:center}
 .calc-module-binance-actions button{
   height:30px;
   margin:0;
@@ -1999,6 +2053,12 @@ button:hover{filter:brightness(1.04)}
   cursor:not-allowed;
 }
 .calc-module-express-row{
+  margin-top:6px;
+  display:flex;
+  align-items:center;
+  justify-content:flex-start;
+}
+.calc-module-cbs-row{
   margin-top:6px;
   display:flex;
   align-items:center;
@@ -2070,29 +2130,10 @@ button:hover{filter:brightness(1.04)}
   height:12px;
   accent-color:#6b7280;
 }
-.calc-module-sl-line-toggle{
-  min-width:0;
-  height:auto;
-  padding:0;
-  gap:0;
-  border:0;
-  background:transparent;
-  box-shadow:none;
-  border-radius:0;
-}
-.calc-module-sl-line-toggle.is-on,
-.calc-module-sl-line-toggle.is-off{
-  box-shadow:none;
-  opacity:1;
-}
-.calc-module-sl-line-toggle input{
-  width:14px;
-  height:14px;
-}
 #calcModuleStopDistance{
-  width:88px;
-  max-width:88px;
-  justify-self:start;
+  width:100%;
+  max-width:64px;
+  justify-self:stretch;
 }
 .calc-module-status{
   min-height:15px;
@@ -2194,7 +2235,6 @@ button:hover{filter:brightness(1.04)}
 .calc-module-send-table col.calc-col-new-price{width:72px}
 .calc-module-send-table col.calc-col-old-qty{width:68px}
 .calc-module-send-table col.calc-col-new-qty{width:68px}
-.calc-module-send-table col.calc-col-order-id{width:100px}
 .calc-module-send-table col.calc-col-status{width:64px}
 .calc-module-send-table th,
 .calc-module-send-table td{
@@ -2295,6 +2335,6 @@ button:hover{filter:brightness(1.04)}
     min-width:320px;
   }
   .calc-module-grid{grid-template-columns:1fr}
-  .calc-module-stop{grid-template-columns:auto 72px 1fr}
+  .calc-module-stop{grid-template-columns:62px minmax(74px,1fr) 30px 64px minmax(66px,max-content)}
   .calc-module-binance-actions{grid-template-columns:1fr 1fr 1fr}
 }

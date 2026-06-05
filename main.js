@@ -14619,6 +14619,22 @@ startTradeAuto();
     const qty = n21(b && b.qty);
     return side === "SHORT" ? (entry - level) * qty : (level - entry) * qty;
   }
+  function calculatorStopRiskForBox21(b,masterLevel){
+    try{
+      const calc = window.CALCULATOR_MODULE;
+      if(!calc || typeof calc.getStopMath !== "function") return null;
+      const math = calc.getStopMath();
+      const entry = n21(b && b.price);
+      const qty = n21(b && b.qty);
+      if(!math || n21(math.total) == null) return null;
+      if(n21(math.masterLevel) != null && n21(masterLevel) != null && Math.abs(n21(math.masterLevel) - n21(masterLevel)) > 1e-8) return null;
+      if(n21(math.entryAvg) != null && entry != null && Math.abs(n21(math.entryAvg) - entry) > 1e-8) return null;
+      if(n21(math.entryQty) != null && qty != null && Math.abs(n21(math.entryQty) - qty) > 1e-9) return null;
+      return n21(math.total);
+    }catch(_e){
+      return null;
+    }
+  }
   function drawSlForBox21(b,vis,mapX,mapY,slot,clip){
     const latest = latest21();
     if(!latest || !b || b.symbol !== currentSymbol21()) return;
@@ -14645,7 +14661,8 @@ startTradeAuto();
     if(y < clip.top - 30 || y > clip.top + clip.height + 30) return;
     const markerW = 24;
     const markerH = 15;
-    const pnl = pnlAtLevel21(b,sl);
+    const combinedRisk = calculatorStopRiskForBox21(b,sl);
+    const pnl = combinedRisk == null ? pnlAtLevel21(b,sl) : combinedRisk;
     const margin = typeof openBoxMargin === "function" ? openBoxMargin(b) : null;
     const marginPct = margin && Number.isFinite(Number(margin)) && Number(margin) !== 0 ? pnl / Number(margin) * 100 : null;
     const details = "\u0394 " + fdAbs21(n21(latest.close) - sl) + " | " + fm(pnl) + " | " + (marginPct == null ? "--" : pct(marginPct));
