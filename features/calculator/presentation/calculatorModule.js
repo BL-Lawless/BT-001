@@ -347,7 +347,7 @@
             <div class="calc-module-stop">
               <label for="calcModuleStopLevel">Master SL</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" placeholder="Level">
               <label for="calcModuleStopDistance">SL Δ</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" placeholder="Distance">
-              <span class="calc-module-stop-pl" id="calcModuleStopPl">PL @ SL -</span>
+              <span class="calc-module-stop-pl" id="calcModuleStopPl">Risk -</span>
             </div>
             <button class="calc-module-add calc-module-add-partial-stop" id="calcModuleAddPartialStop" type="button">Add Partial Stop</button>
             <div class="calc-module-psl-head calc-module-partial-stop-head"><div>#</div><div>Level</div><div>Lot</div><div>PL @ PSL</div><div></div></div>
@@ -479,6 +479,42 @@
       qtyExceeds
     };
   }
+  function visualLevelDistanceSort(list,referenceLevel){
+    const ref = num(referenceLevel);
+    const dir = direction === "SHORT" ? "SHORT" : "LONG";
+    return (Array.isArray(list) ? list.slice() : []).sort((a,b) => {
+      const al = num(a && a.level);
+      const bl = num(b && b.level);
+      if(al == null && bl == null) return 0;
+      if(al == null) return 1;
+      if(bl == null) return -1;
+      if(ref != null){
+        const ad = Math.abs(al - ref);
+        const bd = Math.abs(bl - ref);
+        if(!approxEqual(ad,bd,1e-9)) return ad - bd;
+      }
+      return dir === "SHORT" ? al - bl : bl - al;
+    });
+  }
+  function sortContainerRowsByLevel(containerId,referenceLevel){
+    const container = q(containerId);
+    if(!container) return;
+    const sorted = visualLevelDistanceSort(rows(containerId).map((row,index) => ({
+      row,
+      level:num(levelInput(row)?.value),
+      index
+    })),referenceLevel);
+    sorted.forEach(item => {
+      if(item && item.row) container.appendChild(item.row);
+    });
+    refreshPartialStopRowNumbers();
+  }
+  function sortCalculatorRowsForRead(){
+    const ref = readEntry().avg;
+    sortContainerRowsByLevel("calcModuleEntryRows",ref);
+    sortContainerRowsByLevel("calcModuleExitRows",ref);
+    sortContainerRowsByLevel("calcModulePartialStopRows",ref);
+  }
   function capExitLots(maxQty){
     let remaining = Math.max(0,Number(maxQty) || 0);
     rows("calcModuleExitRows").forEach(row => {
@@ -556,8 +592,8 @@
     });
     const stopPlNode = q("calcModuleStopPl");
     if(stopPlNode){
-      stopPlNode.textContent = "PL @ SL " + fmtMoney(stopMath.masterPl);
-      stopPlNode.style.color = moneyColor(stopMath.masterPl);
+      stopPlNode.textContent = "Risk " + fmtMoney(stopMath.total);
+      stopPlNode.style.color = moneyColor(stopMath.total);
     }
     const summary = app && typeof app.buildSummary === "function"
       ? app.buildSummary(domain || {},direction,entry.rows,exits,stop)
@@ -1588,15 +1624,19 @@
     })).filter(item => item.level != null && item.lot != null && item.lot > 0);
   }
   function currentOverlayRows(){
-    const entries = usableOverlayRows("calcModuleEntryRows");
-    const exits = usableOverlayRows("calcModuleExitRows");
+    const rawEntries = usableOverlayRows("calcModuleEntryRows");
+    const rawExits = usableOverlayRows("calcModuleExitRows");
     const slLevel = num(q("calcModuleStopLevel")?.value);
     const entryState = readEntry();
     const stopMath = calculateStopMath(entryState,slLevel,readPartialStops());
     const entryQty = entryState.qty || 0;
     const entryAvg = entryState.avg;
-    let entryLabelNumber = 0;
-    const manualEntryCount = entries.filter(item => !isOpenPositionRow(item.row)).length;
+    const entries = visualLevelDistanceSort(rawEntries,entryAvg);
+    const exits = visualLevelDistanceSort(rawExits,entryAvg);
+    const manualEntryNumbers = new Map();
+    entries.filter(item => !isOpenPositionRow(item.row)).forEach((item,index) => {
+      if(item && item.row) manualEntryNumbers.set(item.row,index + 1);
+    });
     const entryRows = entries.map(item => {
       const openPosition = isOpenPositionRow(item.row);
       const sourceStyle = openPosition
@@ -1604,7 +1644,6 @@
         : String(item.row && item.row.dataset ? item.row.dataset.source || "" : "") === "binance-limit"
           ? "binance-existing"
           : "manual-entry";
-      if(!openPosition) entryLabelNumber++;
       return {
         type:"entry",
         level:item.level,
@@ -1614,7 +1653,7 @@
         sourceStyle,
         text:openPosition
           ? "Open Position | " + Number(item.lot).toFixed(3)
-          : ((manualEntryCount > 1 ? ("Entry " + entryLabelNumber) : "Entry") + " | " + Number(item.lot).toFixed(3))
+          : "Entry " + (manualEntryNumbers.get(item.row) || 1)
       };
     });
     const exitRows = exits.map((item,index) => {
@@ -1641,7 +1680,7 @@
       sourceStyle:"sl",
       text:"Master SL | " + fmtLot(stopMath.remainingQty || 0) + " | " + fmtChartMoney(stopMath.masterPl)
     } : null;
-    const partialStopRows = stopMath.partialStops.map(item => ({
+    const partialStopRows = visualLevelDistanceSort(stopMath.partialStops,entryAvg).map((item,index) => ({
       type:"partial-sl",
       level:item.level,
       lot:item.lot,
@@ -1649,7 +1688,7 @@
       openPosition:false,
       sourceStyle:"partial-sl",
       pl:item.pl,
-      text:"PSL " + (item.index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + fmtChartMoney(item.pl)
+      text:"PSL " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + fmtChartMoney(item.pl)
     }));
     const openEntryRow = entryRows.find(item => item && item.openPosition);
     const extraEntryCount = entryRows.filter(item => item && !item.openPosition).length;
@@ -3631,6 +3670,7 @@
         lastStopEdit = "level";
         syncStopFromLevel(pos.entry);
       }
+      sortCalculatorRowsForRead();
       if(snapshot){
         lastReadStateSnapshot = buildReadStateSnapshot(pos,snapshot,{
           ...(mapped || {entryRows:[],exitRows:[],diagnostic:{}}),

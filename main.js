@@ -674,6 +674,45 @@ function ip(x){
   if(!isFinite(x)) return "-";
   return Math.round(x).toLocaleString("en-US");
 }
+function drawHoverPriceOnRightAxis(cursorPrice,mouseY,layout){
+  if(!ctx || cursorPrice == null || !isFinite(cursorPrice) || !layout) return null;
+  const chartRight = Number(layout.chartRight);
+  const axisRight = Number(layout.axisRight);
+  const topY = Number(layout.top);
+  const priceH = Number(layout.priceH);
+  if(!isFinite(chartRight) || !isFinite(axisRight) || !isFinite(topY) || !isFinite(priceH) || priceH <= 0) return null;
+  const rightW = Math.max(0,axisRight - chartRight);
+  const labelH = 18;
+  const txt = ip(cursorPrice);
+  ctx.save();
+  ctx.font = "bold 12px Arial";
+  const boxW = Math.min(Math.max(34,rightW - 6),Math.max(38,ctx.measureText(txt).width + 10));
+  const x = axisRight - boxW - 2;
+  let y = clamp(Number(mouseY) - labelH / 2,topY,topY + priceH - labelH);
+  const currentY = Number(currentPriceLineState && currentPriceLineState.priceY);
+  if(isFinite(currentY)){
+    const avoidTop = currentY - 21;
+    const avoidBottom = currentY + 21;
+    if(y < avoidBottom && y + labelH > avoidTop){
+      const above = avoidTop - labelH - 2;
+      const below = avoidBottom + 2;
+      if(above >= topY) y = above;
+      else if(below + labelH <= topY + priceH) y = below;
+    }
+  }
+  y = clamp(y,topY,topY + priceH - labelH);
+  ctx.fillStyle = "rgba(255,255,255,.98)";
+  ctx.strokeStyle = "#d9dce1";
+  ctx.lineWidth = 1;
+  ctx.fillRect(x,y,boxW,labelH);
+  ctx.strokeRect(x,y,boxW,labelH);
+  ctx.fillStyle = "#111";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(txt,x + boxW / 2,y + labelH / 2);
+  ctx.restore();
+  return {x,y,w:boxW,h:labelH,chartRight,axisRight,top:topY,priceH};
+}
 
 function p2(x){
   x = Number(x);
@@ -5685,25 +5724,7 @@ function draw(){
 
     if(mouse.x >= left && mouse.x <= w-right && mouse.y >= top && mouse.y <= top+priceH){
       const cursorPrice = maxP - ((mouse.y-top)/priceH) * (maxP-minP);
-      const txt = ip(cursorPrice);
-      const tw = ctx.measureText(txt).width + 10;
-      const tx = w-right-tw-4;
-      const ty = mouse.y-10;
-
-      ctx.save();
-
-      ctx.fillStyle = "rgba(255,255,255,.96)";
-      ctx.strokeStyle = "#d9dce1";
-      ctx.fillRect(tx,ty,tw,18);
-      ctx.strokeRect(tx,ty,tw,18);
-
-      ctx.fillStyle = "#111";
-      ctx.font = "bold 12px Arial";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(txt,tx+tw/2,ty+9);
-
-      ctx.restore();
+      drawHoverPriceOnRightAxis(cursorPrice,mouse.y,{chartRight:w-right,axisRight:w,top,priceH});
     }
 
     const idx = Math.floor((mouse.x-left)/slot);
@@ -10497,9 +10518,7 @@ startTradeAuto();
       ctx.beginPath(); ctx.moveTo(px(left),px(mouse.y)); ctx.lineTo(px(w-right),px(mouse.y)); ctx.stroke();
       if(mouse.x >= left && mouse.x <= w-right && mouse.y >= top && mouse.y <= top+priceH){
         const cursorPrice = maxP - ((mouse.y-top)/priceH) * (maxP-minP);
-        const txt = ip(cursorPrice); const tw = ctx.measureText(txt).width + 10; const tx = w-right-tw-4; const ty = mouse.y-10;
-        ctx.save(); ctx.fillStyle = 'rgba(255,255,255,.96)'; ctx.strokeStyle = '#d9dce1'; ctx.fillRect(tx,ty,tw,18); ctx.strokeRect(tx,ty,tw,18);
-        ctx.fillStyle = '#111'; ctx.font = 'bold 12px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt,tx+tw/2,ty+9); ctx.restore();
+        const hoverAxisBox = drawHoverPriceOnRightAxis(cursorPrice,mouse.y,{chartRight:w-right,axisRight:w,top,priceH});
         /* PATCH_35: passive expected P/L label under right-axis cursor price marker. */
         const tglFloat = document.getElementById("tglFloatingPL");
         const floatOn = !tglFloat || !!tglFloat.checked;
@@ -10509,9 +10528,13 @@ startTradeAuto();
           : null;
         if(floatOn && hasOpen && Number.isFinite(exp)){
           const line = "Expected P/L: " + fm(exp);
-          const pw = Math.max(tw,ctx.measureText(line).width + 10);
-          const pxBox = w-right-pw-4;
-          const pyBox = ty + 20;
+          ctx.save();
+          ctx.font = 'bold 11px Arial';
+          const axisW = hoverAxisBox ? Math.max(0,hoverAxisBox.axisRight - hoverAxisBox.chartRight) : right;
+          const pw = Math.min(Math.max(34,axisW - 6),Math.max(hoverAxisBox ? hoverAxisBox.w : 34,ctx.measureText(line).width + 10));
+          const pxBox = hoverAxisBox ? hoverAxisBox.axisRight - pw - 2 : w - pw - 2;
+          let pyBox = hoverAxisBox ? hoverAxisBox.y + hoverAxisBox.h + 2 : mouse.y + 10;
+          if(hoverAxisBox && pyBox + 18 > hoverAxisBox.top + hoverAxisBox.priceH) pyBox = hoverAxisBox.y - 20;
           ctx.save();
           ctx.fillStyle = 'rgba(255,255,255,.96)';
           ctx.strokeStyle = '#d9dce1';
@@ -10522,6 +10545,7 @@ startTradeAuto();
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(line,pxBox+pw/2,pyBox+9);
+          ctx.restore();
           ctx.restore();
         }
       }
