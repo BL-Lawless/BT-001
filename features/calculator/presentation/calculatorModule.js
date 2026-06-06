@@ -55,6 +55,8 @@
   let autoSyncBaselineSignature = "";
   let structuralWarningActive = false;
   let calculatorOwnedRefreshDepth = 0;
+  let lastEditedPartialStopLotInput = null;
+  let lastKnownLiveOpenPositionQty = null;
   const notifiedExecutionKeys = new Set();
 
   function q(id){ return document.getElementById(id); }
@@ -651,11 +653,28 @@
       return total + qty;
     },0);
   }
-  function refreshLiveStopsValidity(livePos){
+  function clearPartialStopLotInvalidState(){
+    rows("calcModulePartialStopRows").forEach(row => {
+      const input = lotInput(row);
+      if(!input) return;
+      input.classList.remove("calc-module-psl-lot-invalid");
+      delete input.dataset.pslLotInvalid;
+      delete row.dataset.pslLotInvalid;
+    });
+  }
+  function refreshLiveStopsValidity(livePos,liveStateKnown=false){
     const liveQty = num(livePos && livePos.qty);
-    const qty = liveQty == null ? liveCachedOpenPositionQty() : liveQty;
+    if(liveStateKnown) lastKnownLiveOpenPositionQty = liveQty == null ? 0 : Math.max(0,liveQty);
+    const cachedQty = liveCachedOpenPositionQty();
+    const qty = lastKnownLiveOpenPositionQty == null ? cachedQty : lastKnownLiveOpenPositionQty;
     const invalid = totalPartialStopLots() > qty + 1e-9;
-    q("calcModuleStopsTitle")?.classList.toggle("calc-module-stops-invalid",invalid);
+    clearPartialStopLotInvalidState();
+    if(invalid && lastEditedPartialStopLotInput && lastEditedPartialStopLotInput.isConnected){
+      lastEditedPartialStopLotInput.classList.add("calc-module-psl-lot-invalid");
+      lastEditedPartialStopLotInput.dataset.pslLotInvalid = "1";
+      const row = lastEditedPartialStopLotInput.closest(".calc-module-row");
+      if(row) row.dataset.pslLotInvalid = "1";
+    }
     return !invalid;
   }
   function currentFloatingPl(){
@@ -1209,14 +1228,30 @@
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",() => {
       if(input.classList.contains("calc-module-lot")) normalizeLotInput(input);
       if(input.classList.contains("calc-module-level")) normalizeLevelInput(input);
+      if(isPartialStop && input.classList.contains("calc-module-lot")) lastEditedPartialStopLotInput = input;
       markSendPlanStale("Row edited after preflight.");
       calculate();
     },false));
+    if(isPartialStop){
+      lotInput(row)?.addEventListener("focus",e => {
+        lastEditedPartialStopLotInput = e.currentTarget;
+        refreshLiveStopsValidity(null);
+      },false);
+      lotInput(row)?.addEventListener("change",e => {
+        lastEditedPartialStopLotInput = e.currentTarget;
+        refreshLiveStopsValidity(null);
+      },false);
+      lotInput(row)?.addEventListener("blur",() => {
+        refreshLiveStopsValidity(null);
+      },false);
+    }
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
       markSendPlanStale("Row removed after preflight.");
       clearBinanceMetaOnRow(row);
       clearPartialStopMetaOnRow(row);
+      if(lastEditedPartialStopLotInput && row.contains(lastEditedPartialStopLotInput)) lastEditedPartialStopLotInput = null;
       row.remove();
+      clearPartialStopLotInvalidState();
       refreshEntryRowNumbers();
       refreshPartialStopRowNumbers();
       refreshExitRowNumbers(readEntry().avg);
@@ -1267,6 +1302,8 @@
     if(exitRows) exitRows.innerHTML = "";
     const partialStopRows = q("calcModulePartialStopRows");
     if(partialStopRows) partialStopRows.innerHTML = "";
+    lastEditedPartialStopLotInput = null;
+    lastKnownLiveOpenPositionQty = null;
     const stopLevel = q("calcModuleStopLevel");
     const stopDistance = q("calcModuleStopDistance");
     if(stopLevel) stopLevel.value = "";
@@ -3961,11 +3998,14 @@
   }
   async function validateLivePartialStopQuantity(plan){
     const total = totalPartialStopLots();
-    if(total <= 0) return true;
+    if(total <= 0){
+      clearPartialStopLotInvalidState();
+      return true;
+    }
     const livePos = await signedPosition();
     const liveQty = num(livePos && livePos.qty) || 0;
     if(total <= liveQty + 1e-9){
-      refreshLiveStopsValidity(livePos);
+      refreshLiveStopsValidity(livePos,true);
       return true;
     }
     plan.blocked = true;
@@ -3985,7 +4025,7 @@
       writable:false,
       mode:"blocked"
     });
-    refreshLiveStopsValidity(livePos);
+    refreshLiveStopsValidity(livePos,true);
     return false;
   }
   async function executeSendPlan(plan,options={}){
@@ -4165,7 +4205,7 @@
       });
       const livePos = preflightState.livePos;
       const liveSnapshot = preflightState.liveSnapshot;
-      refreshLiveStopsValidity(livePos);
+      refreshLiveStopsValidity(livePos,true);
       updateAutoSyncBaseline(livePos,liveSnapshot);
       if(!lastReadStateSnapshot) lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
       clearStructuralWarning();
@@ -4290,7 +4330,7 @@
       });
       const livePos = preflightState.livePos;
       const liveSnapshot = preflightState.liveSnapshot;
-      refreshLiveStopsValidity(livePos);
+      refreshLiveStopsValidity(livePos,true);
       updateAutoSyncBaseline(livePos,liveSnapshot);
       if(!lastReadStateSnapshot) lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
       sendPlanState = applyExpressPayloadSafeguards(buildPlanFromCurrentRows(livePos,liveSnapshot));
@@ -4555,7 +4595,7 @@
       if(source === "userRead") enableAutoSyncDetection();
       suppressCalculatorOverlayDraw = false;
       calculate();
-      refreshLiveStopsValidity(pos);
+      refreshLiveStopsValidity(pos,true);
       if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
       }else if(diag.openOrdersReadStatus === "error"){

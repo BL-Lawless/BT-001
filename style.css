@@ -2103,9 +2103,11 @@ button:hover{filter:brightness(1.04)}
   font-weight:700;
 }
 .calc-module-collapsed{display:none}
-@keyframes calcModuleStopsInvalid{0%,100%{color:#111}50%{color:#f6465d}}
-.calc-module-section-title.calc-module-stops-invalid .calc-module-section-main{
-  animation:calcModuleStopsInvalid 1.2s ease-in-out infinite;
+.calc-module-row .calc-module-lot.calc-module-psl-lot-invalid{
+  background:#fee2e2!important;
+  border-color:#f6465d!important;
+  color:#991b1b!important;
+  box-shadow:0 0 0 1px rgba(246,70,93,.18);
 }
 @keyframes calcModuleLotHeartbeat{0%,100%{color:inherit}45%{color:#f6465d}60%{color:inherit}75%{color:#f6465d}}
 .calc-module-underfilled{animation:calcModuleLotHeartbeat 2.4s ease-in-out infinite}
