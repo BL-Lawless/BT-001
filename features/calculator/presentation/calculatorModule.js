@@ -25,6 +25,10 @@
   let cbsEnabled = false;
   let expressModeEnabled = false;
   let ordersVisible = true;
+  let otfEnabled = false;
+  let otfSelection = null;
+  let otfSelectionAnimation = 0;
+  const otfPendingOrderKeys = new Set();
   let binanceLimitRowSeq = 0;
   const binanceLimitRowMetaByRowId = new Map();
   let binancePartialStopRowSeq = 0;
@@ -35,7 +39,7 @@
   let lastOverlayDiagnostic = null;
   let lastSendDiagnostic = null;
   let overlayLevelBoxes = [];
-  let overlayDrag = {active:false,row:null,target:"row"};
+  let overlayDrag = {active:false,row:null,target:"row",moved:false,otf:false};
   let suppressNextOverlayClick = false;
   let suppressCalculatorOverlayDraw = false;
   const confirmedOrderBlinkByKey = new Map();
@@ -196,11 +200,85 @@
   }
   async function toggleOrdersVisible(){
     const next = !ordersVisible;
+    if(!next) saveOtfEnabled(false);
     saveOrdersVisible(next);
     if(!next || hasLoadedCalculatorOrderState()) return;
     try{
       await readBinance({preserveSendPlan:true,source:"ordersToggleLoad"});
     }catch(_e){}
+  }
+  function otfSelectionMatches(item){
+    return !!(otfSelection && item && otfSelection.row === item.row && otfSelection.type === item.type);
+  }
+  function animateOtfSelection(){
+    if(otfSelectionAnimation || !otfSelection) return;
+    const animate = () => {
+      if(!otfSelection){
+        otfSelectionAnimation = 0;
+        return;
+      }
+      try{ if(typeof draw === "function") draw(); }catch(_e){}
+      otfSelectionAnimation = requestAnimationFrame(animate);
+    };
+    otfSelectionAnimation = requestAnimationFrame(animate);
+  }
+  function clearOtfSelection(){
+    otfSelection = null;
+    if(otfSelectionAnimation){
+      cancelAnimationFrame(otfSelectionAnimation);
+      otfSelectionAnimation = 0;
+    }
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+  }
+  function selectOtfBox(box){
+    if(!box || !["exit","partial-sl","master-sl"].includes(box.type) || (box.type !== "master-sl" && !box.row)) return false;
+    const pendingKey = otfBoxPendingKey(box);
+    if(pendingKey && otfPendingOrderKeys.has(pendingKey)){
+      setStatus("OTF update already pending for this order.");
+      return false;
+    }
+    otfSelection = {
+      row:box.row || null,
+      type:box.type,
+      orderKey:String(box.orderKey || ""),
+      originalLevel:box.type === "master-sl" ? num(q("calcModuleStopLevel")?.value) : num(levelInput(box.row)?.value),
+      selectedAt:Date.now(),
+      sending:false
+    };
+    setStatus(box.type === "partial-sl"
+      ? "OTF PSL selected. Drag to send on release."
+      : box.type === "master-sl"
+        ? "OTF Master SL selected. Drag to send on release."
+        : "OTF Exit selected. Drag to send on release.");
+    animateOtfSelection();
+    return true;
+  }
+  function saveOtfEnabled(next){
+    otfEnabled = !!next;
+    const btn = q("calcModuleOtfToggle");
+    if(btn){
+      btn.classList.toggle("is-on",otfEnabled);
+      btn.classList.toggle("is-off",!otfEnabled);
+      btn.setAttribute("aria-pressed",otfEnabled ? "true" : "false");
+    }
+    if(!otfEnabled) clearOtfSelection();
+  }
+  function toggleOtfEnabled(){
+    if(!otfEnabled && !ordersVisible){
+      saveOtfEnabled(false);
+      setStatus("Turn Orders ON before enabling OTF.");
+      return;
+    }
+    saveOtfEnabled(!otfEnabled);
+  }
+  function otfBoxPendingKey(box){
+    if(!box) return "";
+    const orderKey = String(box.orderKey || "").trim();
+    if(orderKey) return orderKey;
+    if(box.type === "master-sl") return "master-sl";
+    const row = box.row;
+    if(!row) return "";
+    return String(row.dataset && (row.dataset.calcRowId || row.dataset.calcPartialStopRowId) || "");
   }
   function saveLevelsVisible(next){
     levelsVisible = !!next;
@@ -367,6 +445,29 @@
     }
     return btn;
   }
+  function alignOrdersOtfButtons(){
+    const btn = q("calcModuleOrdersToggle");
+    const otfBtn = q("calcModuleOtfToggle");
+    const wrap = canvas && canvas.parentElement;
+    if(!btn || !otfBtn || !wrap) return;
+    try{
+      const wrapRect = wrap.getBoundingClientRect();
+      const stackButtons = [...document.querySelectorAll(".v33-ma-stack-box")].filter(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      const rightmostStack = stackButtons.reduce((best,node) =>
+        !best || node.getBoundingClientRect().right > best.getBoundingClientRect().right ? node : best
+      ,null);
+      const stackRight = rightmostStack ? rightmostStack.getBoundingClientRect().right - wrapRect.left : null;
+      const ordersRight = stackRight == null
+        ? (typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84) + 8
+        : Math.max(8,wrapRect.width - stackRight);
+      btn.style.right = ordersRight + "px";
+      otfBtn.style.width = btn.offsetWidth + "px";
+      otfBtn.style.right = (ordersRight + btn.offsetWidth + 6) + "px";
+    }catch(_e){}
+  }
   function ensureOrdersToggle(){
     if(!canvas || !canvas.parentNode) return null;
     let wrap = canvas.parentElement;
@@ -389,9 +490,22 @@
       btn.setAttribute("aria-label","Orders");
       wrap.appendChild(btn);
     }
-    try{ btn.style.right = ((typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84) + 8) + "px"; }catch(_e){}
     btn.onclick = toggleOrdersVisible;
     saveOrdersVisible(ordersVisible);
+    let otfBtn = q("calcModuleOtfToggle");
+    if(!otfBtn){
+      otfBtn = document.createElement("button");
+      otfBtn.id = "calcModuleOtfToggle";
+      otfBtn.type = "button";
+      otfBtn.className = "calc-module-orders-toggle calc-module-otf-toggle";
+      otfBtn.textContent = "OTF";
+      otfBtn.title = "On-the-fly chart order adjustment";
+      otfBtn.setAttribute("aria-label","OTF");
+      wrap.appendChild(otfBtn);
+    }
+    alignOrdersOtfButtons();
+    otfBtn.onclick = toggleOtfEnabled;
+    saveOtfEnabled(otfEnabled);
     return btn;
   }
 
@@ -1948,6 +2062,170 @@
     markSendPlanStale("Chart drag changed a row level after preflight.");
     calculate();
   }
+  function otfBoxEligible(box){
+    return !!(otfEnabled && box && ["exit","partial-sl","master-sl"].includes(box.type) && (box.type === "master-sl" || box.row));
+  }
+  function binanceWriteConfirmed(resp){
+    return !!(resp && (
+      resp.orderId != null ||
+      resp.clientOrderId != null ||
+      resp.origClientOrderId != null ||
+      resp.algoId != null ||
+      resp.clientAlgoId != null ||
+      resp.success === true ||
+      resp.code === 0 ||
+      toUpper(resp.status) === "NEW" ||
+      toUpper(resp.status) === "PARTIALLY_FILLED" ||
+      toUpper(resp.status) === "CANCELED" ||
+      toUpper(resp.status) === "CANCELLED"
+    ));
+  }
+  async function confirmOtfSelection(){
+    const selected = otfSelection;
+    if(!selected || selected.sending || (selected.row && !selected.row.isConnected)) return;
+    const pendingKey = otfBoxPendingKey(selected);
+    if(pendingKey && otfPendingOrderKeys.has(pendingKey)){
+      setStatus("OTF update already pending for this order.");
+      clearOtfSelection();
+      return;
+    }
+    const level = selected.type === "master-sl" ? num(q("calcModuleStopLevel")?.value) : num(levelInput(selected.row)?.value);
+    if(level == null || level <= 0){
+      setStatus("OTF blocked: price level is invalid.");
+      return;
+    }
+    if(selected.originalLevel != null && approxEqual(level,selected.originalLevel,1e-8)){
+      setStatus("OTF unchanged: drag the selected level before sending.");
+      return;
+    }
+    selected.sending = true;
+    if(pendingKey) otfPendingOrderKeys.add(pendingKey);
+    clearOtfSelection();
+    const selectedLabel = selected.type === "partial-sl" ? "PSL" : selected.type === "master-sl" ? "Master SL" : "Exit";
+    setStatus("OTF confirming " + selectedLabel + " Binance update...");
+    try{
+      const liveSnapshot = await readOpenOrdersSnapshot();
+      let out = null;
+      let restoreOnUnconfirmed = null;
+      if(selected.type === "exit"){
+        const meta = selected.row.__binanceLimitOrderMeta || (selected.row.dataset && selected.row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(selected.row.dataset.calcRowId) : null);
+        const key = orderKeyFromMeta(meta);
+        if(!meta || !key || !(meta.orderId != null || String(meta.clientOrderId || "").trim())){
+          throw new Error("OTF Exit is missing required Binance order metadata.");
+        }
+        const baseMap = lastReadStateSnapshot && lastReadStateSnapshot.mappedLimitOrderMap instanceof Map ? lastReadStateSnapshot.mappedLimitOrderMap : null;
+        const baseOrder = baseMap ? baseMap.get(key) : null;
+        const liveOrder = collectLiveLimitOrdersByKey(liveSnapshot).get(key);
+        const plan = {rows:[],blocked:false};
+        prepareExistingRowPlan(plan,selected.row,"exit",meta,baseOrder,liveOrder);
+        const rowPlan = plan.rows.find(row => row && row.mode === "modify" && row.writable);
+        if(!rowPlan) throw new Error(plan.rows.map(row => row && row.response).filter(Boolean).join(" ") || "OTF Exit update is not safely writable.");
+        restoreOnUnconfirmed = () => applyRowSourceAndMeta(selected.row,{
+          source:"binance-limit",
+          meta,
+          rowId:selected.row.dataset && selected.row.dataset.calcRowId ? selected.row.dataset.calcRowId : null
+        });
+        out = await runPlanWriteRow(rowPlan,inferDirectionForSend(null));
+      }else if(selected.type === "partial-sl"){
+        const meta = selected.row.__binancePartialStopMeta || (selected.row.dataset && selected.row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(selected.row.dataset.calcPartialStopRowId) : null);
+        const key = orderKeyFromMeta(meta);
+        if(!meta || !key || !(meta.algoId != null || String(meta.clientAlgoId || "").trim())){
+          throw new Error("OTF PSL is missing required Binance order metadata.");
+        }
+        if(!liveOrderKeySet(liveSnapshot).has(key)) throw new Error("OTF PSL is no longer present in live Binance orders. Click Read.");
+        const livePos = await signedPosition();
+        if(!livePos) throw new Error("OTF PSL blocked: no open position.");
+        const stopMath = calculateStopMath(readEntry(),num(q("calcModuleStopLevel")?.value),readPartialStops());
+        if(stopMath.totalPartialQty > (num(livePos.qty) || 0) + 1e-9) throw new Error("OTF PSL blocked: Partial Stop quantity exceeds open position quantity.");
+        const lot = num(lotInput(selected.row)?.value);
+        if(lot == null || lot < 0.001) throw new Error("OTF PSL quantity is invalid.");
+        const side = toUpper(meta.side) || (livePos.side === "SHORT" ? "BUY" : "SELL");
+        const cancelPlan = {
+          writable:true,
+          mode:"psl-cancel",
+          payload:{
+            symbol:meta.symbol || currentSymbol(),
+            algoId:meta.algoId != null ? meta.algoId : null,
+            clientAlgoId:meta.clientAlgoId ? String(meta.clientAlgoId) : "",
+            meta
+          }
+        };
+        const createPlan = {
+          writable:true,
+          mode:"psl-create",
+          rowRef:selected.row,
+          payload:{
+            symbol:meta.symbol || currentSymbol(),
+            side,
+            triggerPrice:level,
+            quantity:lot,
+            positionSide:toUpper(meta.positionSide || livePos.positionSide || ""),
+            workingType:meta.workingType || null
+          }
+        };
+        const cancelled = await runPlanWriteRow(cancelPlan,inferDirectionForSend(livePos));
+        if(!binanceWriteConfirmed(cancelled && cancelled.response)) throw new Error("OTF PSL cancel returned an unexpected Binance response.");
+        try{
+          out = await runPlanWriteRow(createPlan,inferDirectionForSend(livePos));
+        }catch(e){
+          clearPartialStopMetaOnRow(selected.row);
+          throw e;
+        }
+      }else{
+        const meta = currentStopAlgoMeta;
+        const key = orderKeyFromMeta(meta);
+        if(!meta || !key || !(meta.algoId != null || String(meta.clientAlgoId || "").trim())){
+          throw new Error("OTF Master SL is missing required Binance order metadata.");
+        }
+        if(!liveOrderKeySet(liveSnapshot).has(key)) throw new Error("OTF Master SL is no longer present in live Binance orders. Click Read.");
+        const livePos = await signedPosition();
+        if(!livePos) throw new Error("OTF Master SL blocked: no open position.");
+        const cancelPlan = {
+          writable:true,
+          mode:"sl-cancel",
+          payload:{
+            symbol:meta.symbol || currentSymbol(),
+            algoId:meta.algoId != null ? meta.algoId : null,
+            clientAlgoId:meta.clientAlgoId ? String(meta.clientAlgoId) : "",
+            meta
+          }
+        };
+        const createPlan = {
+          writable:true,
+          mode:"sl-create",
+          payload:{
+            symbol:meta.symbol || currentSymbol(),
+            side:toUpper(meta.side) || (livePos.side === "SHORT" ? "BUY" : "SELL"),
+            triggerPrice:level,
+            positionSide:toUpper(meta.positionSide || livePos.positionSide || ""),
+            workingType:meta.workingType || null
+          }
+        };
+        const cancelled = await runPlanWriteRow(cancelPlan,inferDirectionForSend(livePos));
+        if(!binanceWriteConfirmed(cancelled && cancelled.response)) throw new Error("OTF Master SL cancel returned an unexpected Binance response.");
+        currentStopAlgoMeta = null;
+        out = await runPlanWriteRow(createPlan,inferDirectionForSend(livePos));
+      }
+      if(!binanceWriteConfirmed(out && out.response)){
+        if(restoreOnUnconfirmed) restoreOnUnconfirmed();
+        if(selected.type === "partial-sl") clearPartialStopMetaOnRow(selected.row);
+        if(selected.type === "master-sl") currentStopAlgoMeta = null;
+        throw new Error("OTF update returned an unexpected Binance response.");
+      }
+      const blinkKey = out && out.blinkKey ? out.blinkKey : "";
+      setStatus("OTF " + selectedLabel + " update confirmed.");
+      calculate();
+      if(blinkKey) triggerConfirmedOrderBlink(blinkKey);
+      if(!otfSelection && otfPendingOrderKeys.size <= 1){
+        try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_e){}
+      }
+    }catch(e){
+      selected.sending = false;
+      setStatus("OTF " + selectedLabel + " failed: " + (e && e.message ? e.message : String(e)));
+    }finally{
+      if(pendingKey) otfPendingOrderKeys.delete(pendingKey);
+    }
+  }
   function setStopLevelFromClientY(clientY){
     const rect = canvas.getBoundingClientRect();
     const y = clientY - rect.top;
@@ -1964,6 +2242,7 @@
     calculate();
   }
   function drawCalculatorLevelsOverlay(){
+    alignOrdersOtfButtons();
     overlayLevelBoxes = [];
     const calculatorOpen = calculatorWindowVisible();
     if(calculatorOpen && !levelsVisible) return;
@@ -2087,6 +2366,21 @@
       const isBinanceExisting = p.item.sourceStyle === "binance-existing";
       const isManualEntry = p.item.sourceStyle === "manual-entry";
       const isPendingManual = !!p.item.pendingSend && !p.item.binanceBacked;
+      const isOtfSelected = otfSelectionMatches(p.item);
+      const otfPulse = isOtfSelected ? 0.35 + Math.pow(Math.sin(Date.now() / 900),2) * 0.65 : 0;
+      const derivedStrokeStyle = isSl
+        ? "rgba(180,126,38,0.70)"
+        : isPartialSl
+          ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(4,120,87,0.86)" : "rgba(127,29,29,0.90)")
+        : isExit
+          ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(4,120,87,0.86)" : "rgba(127,29,29,0.90)")
+        : isNewAverage
+          ? "rgba(37,99,235,0.72)"
+          : isBinanceExisting
+            ? "rgba(208,145,29,0.72)"
+            : isManualEntry
+              ? "rgba(8,145,178,0.72)"
+              : "rgba(112,122,138,0.70)";
       ctx.fillStyle = blinkOn
         ? "rgba(255,214,10," + (0.18 + blinkOn * 0.78).toFixed(3) + ")"
         : isOpenPos
@@ -2108,22 +2402,25 @@
                 : "rgba(255,255,255,0.94)";
       ctx.strokeStyle = blinkOn
         ? "rgba(255,106,0," + (0.30 + blinkOn * 0.68).toFixed(3) + ")"
-        : isSl
-        ? "rgba(180,126,38,0.70)"
-        : isPartialSl
-          ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(4,120,87,0.86)" : "rgba(127,29,29,0.90)")
-        : isExit
-          ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(4,120,87,0.86)" : "rgba(127,29,29,0.90)")
-        : isNewAverage
-          ? "rgba(37,99,235,0.72)"
-          : isBinanceExisting
-            ? "rgba(208,145,29,0.72)"
-            : isManualEntry
-              ? "rgba(8,145,178,0.72)"
-              : "rgba(112,122,138,0.70)";
-      ctx.lineWidth = 1;
+        : derivedStrokeStyle;
+      ctx.lineWidth = isOtfSelected && !blinkOn ? 2 : 1;
       ctx.fillRect(ix(x),ix(y),p.w,p.h);
-      ctx.strokeRect(px(x),px(y),p.w,p.h);
+      if(isOtfSelected && !blinkOn){
+        ctx.save();
+        ctx.fillStyle = derivedStrokeStyle;
+        ctx.globalAlpha = 0.025 + otfPulse * 0.045;
+        ctx.fillRect(ix(x),ix(y),p.w,p.h);
+        ctx.restore();
+        ctx.save();
+        ctx.strokeStyle = derivedStrokeStyle;
+        ctx.globalAlpha = 0.30 + otfPulse * 0.42;
+        ctx.shadowColor = derivedStrokeStyle;
+        ctx.shadowBlur = 4 + otfPulse * 6;
+        ctx.strokeRect(px(x),px(y),p.w,p.h);
+        ctx.restore();
+      }else{
+        ctx.strokeRect(px(x),px(y),p.w,p.h);
+      }
       if(p.item.pendingSend){
         ctx.fillStyle = "#16a34a";
         ctx.beginPath();
@@ -2166,6 +2463,8 @@
         y2:y + p.h,
         row:p.item.row,
         type:p.item.type,
+        orderKey:p.item.orderKey,
+        binanceBacked:!!p.item.binanceBacked,
         openPosition:isOpenPos,
         draggable:(!isOpenPos && p.item.type !== "master-sl" && calcLevelsInteractive()) || (p.item.type === "master-sl" && calcSlInteractive())
       });
@@ -2216,13 +2515,37 @@
     if(!canvas || canvas.__calculatorOverlayDragHooks) return;
     canvas.__calculatorOverlayDragHooks = true;
     canvas.addEventListener("mousedown",e => {
-      if(!calcLevelsInteractive()) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
+      if(otfEnabled){
+        if(!otfBoxEligible(hit)){
+          if(otfSelection) clearOtfSelection();
+          return;
+        }
+        if(!otfSelectionMatches({row:hit.row,type:hit.type})){
+          selectOtfBox(hit);
+          suppressNextOverlayClick = true;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          return;
+        }
+        overlayDrag.active = true;
+        overlayDrag.row = hit.row || null;
+        overlayDrag.target = hit.type === "master-sl" ? "sl" : "row";
+        overlayDrag.moved = false;
+        overlayDrag.otf = true;
+        canvas.style.cursor = "pointer";
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      if(!calcLevelsInteractive()) return;
       if(!hit || !hit.draggable) return;
       if(hit.type !== "master-sl" && !hit.row) return;
       overlayDrag.active = true;
       overlayDrag.row = hit.row || null;
       overlayDrag.target = hit.type === "master-sl" ? "sl" : "row";
+      overlayDrag.moved = false;
+      overlayDrag.otf = false;
       if(overlayDrag.target === "sl") setStopLevelFromClientY(e.clientY);
       else setRowLevelFromClientY(hit.row,e.clientY);
       canvas.style.cursor = "pointer";
@@ -2231,32 +2554,95 @@
     },true);
     canvas.addEventListener("mousemove",e => {
       if(overlayDrag.active){
+        overlayDrag.moved = true;
         if(overlayDrag.target === "sl") setStopLevelFromClientY(e.clientY);
         else setRowLevelFromClientY(overlayDrag.row,e.clientY);
         canvas.style.cursor = "pointer";
+        if(overlayDrag.otf){
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
         return;
       }
       if(dragChart || dragAxis) return;
-      if(!calcLevelsInteractive()) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if(hit && hit.draggable) canvas.style.cursor = "pointer";
+      if((otfEnabled && otfBoxEligible(hit)) || (calcLevelsInteractive() && hit && hit.draggable)) canvas.style.cursor = "pointer";
     },false);
     window.addEventListener("mouseup",e => {
       if(!overlayDrag.active) return;
+      const moved = !!overlayDrag.moved;
+      const wasOtf = !!overlayDrag.otf;
       overlayDrag.active = false;
       overlayDrag.row = null;
       overlayDrag.target = "row";
-      suppressNextOverlayClick = true;
+      overlayDrag.moved = false;
+      overlayDrag.otf = false;
+      suppressNextOverlayClick = wasOtf ? moved : true;
       e.preventDefault();
       e.stopImmediatePropagation();
       if(canvas) canvas.style.cursor = "crosshair";
+      if(wasOtf && moved) confirmOtfSelection();
     },true);
     canvas.addEventListener("click",e => {
-      if(!suppressNextOverlayClick) return;
-      suppressNextOverlayClick = false;
+      if(suppressNextOverlayClick){
+        suppressNextOverlayClick = false;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      if(!otfEnabled) return;
+      const hit = overlayBoxAtClient(e.clientX,e.clientY);
+      if(!otfBoxEligible(hit)){
+        if(otfSelection) clearOtfSelection();
+        return;
+      }
+      if(!otfSelectionMatches({row:hit.row,type:hit.type})){
+        selectOtfBox(hit);
+      }
       e.preventDefault();
       e.stopImmediatePropagation();
     },true);
+    canvas.addEventListener("touchstart",e => {
+      if(!otfEnabled || !e.touches || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const hit = overlayBoxAtClient(touch.clientX,touch.clientY);
+      if(!otfBoxEligible(hit)){
+        if(otfSelection) clearOtfSelection();
+        return;
+      }
+      if(!otfSelectionMatches({row:hit.row,type:hit.type})){
+        selectOtfBox(hit);
+      }else{
+        overlayDrag.active = true;
+        overlayDrag.row = hit.row || null;
+        overlayDrag.target = hit.type === "master-sl" ? "sl" : "row";
+        overlayDrag.moved = false;
+        overlayDrag.otf = true;
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },{capture:true,passive:false});
+    canvas.addEventListener("touchmove",e => {
+      if(!overlayDrag.active || !overlayDrag.otf || !e.touches || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      overlayDrag.moved = true;
+      if(overlayDrag.target === "sl") setStopLevelFromClientY(touch.clientY);
+      else setRowLevelFromClientY(overlayDrag.row,touch.clientY);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },{capture:true,passive:false});
+    canvas.addEventListener("touchend",e => {
+      if(!overlayDrag.active || !overlayDrag.otf) return;
+      const moved = !!overlayDrag.moved;
+      overlayDrag.active = false;
+      overlayDrag.row = null;
+      overlayDrag.target = "row";
+      overlayDrag.moved = false;
+      overlayDrag.otf = false;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if(moved) confirmOtfSelection();
+    },{capture:true,passive:false});
   }
   async function readOpenOrdersSnapshot(){
     const sym = currentSymbol();
@@ -4184,6 +4570,10 @@
     ensureOrdersToggle();
     installDrawOverlayHook();
     installOverlayDragHooks();
+    document.addEventListener("click",e => {
+      if(!otfSelection || e.target === canvas || (e.target.closest && e.target.closest("#calcModuleOtfToggle"))) return;
+      clearOtfSelection();
+    },false);
 
     function showCalculator(){
       win.classList.remove("hidden");

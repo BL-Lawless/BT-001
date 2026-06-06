@@ -155,6 +155,7 @@ let fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
 let unresolvedCount = 0;
 let closedTradesLoadedSummaryText = tradeCountEl ? String(tradeCountEl.textContent || "") : "";
 let closedTradesOperationalText = "";
+let closedTradesLoadedSummaryStats = {wins:0,losses:0,profit:0,loss:0};
 
 const OPEN_POSITION_STATE = {
   markers:[],
@@ -1021,6 +1022,56 @@ function renderClosedTradeStatus(){
   tradeCountEl.style.display = text ? "inline-block" : "none";
 }
 
+function closedTradesTooltipLines(){
+  const stats = closedTradesLoadedSummaryStats || {};
+  const wins = Math.max(0,closedTradeNumber(stats.wins));
+  const losses = Math.max(0,closedTradeNumber(stats.losses));
+  const profit = closedTradeNumber(stats.profit);
+  const loss = closedTradeNumber(stats.loss);
+  return [
+    "Wins: " + wins,
+    "Losses: " + losses,
+    "",
+    "T. Profit: " + closedTradeMoneyAbs(profit),
+    "T. Loss: " + (loss < 0 ? closedTradeSignedMoney(loss) : closedTradeMoneyAbs(0)),
+    "",
+    "Average Win Value : " + closedTradeMoneyAbs(wins > 0 ? profit / wins : 0),
+    "Average Loss value : " + (losses > 0 ? closedTradeSignedMoney(loss / losses) : closedTradeMoneyAbs(0))
+  ];
+}
+
+function ensureClosedTradesTooltip(){
+  const label = tglResults && tglResults.closest ? tglResults.closest("label") : null;
+  if(!label || label.__closedTradesTooltipBound) return;
+  label.__closedTradesTooltipBound = true;
+  const tip = document.createElement("div");
+  tip.className = "trades-summary-tooltip";
+  document.body.appendChild(tip);
+  const render = () => {
+    tip.innerHTML = "";
+    closedTradesTooltipLines().forEach(line => {
+      const row = document.createElement("div");
+      row.className = line ? "trades-summary-tooltip-row" : "trades-summary-tooltip-gap";
+      row.textContent = line;
+      tip.appendChild(row);
+    });
+  };
+  const move = e => {
+    const pad = 12;
+    const left = Math.min(e.clientX + pad,window.innerWidth - tip.offsetWidth - 8);
+    const top = Math.min(e.clientY + pad,window.innerHeight - tip.offsetHeight - 8);
+    tip.style.left = Math.max(8,left) + "px";
+    tip.style.top = Math.max(8,top) + "px";
+  };
+  label.addEventListener("mouseenter",e => {
+    render();
+    tip.classList.add("is-visible");
+    move(e);
+  },false);
+  label.addEventListener("mousemove",move,false);
+  label.addEventListener("mouseleave",() => tip.classList.remove("is-visible"),false);
+}
+
 function closedTradeStatus(text,options={}){
   const mode = options && options.mode === "summary" ? "summary" : "operational";
   if(mode === "summary") closedTradesLoadedSummaryText = text || "";
@@ -1030,6 +1081,7 @@ function closedTradeStatus(text,options={}){
 
 function syncClosedTradesSummaryVisibility(){
   renderClosedTradeStatus();
+  ensureClosedTradesTooltip();
 }
 
 function closedTradeStatusTime(ms){
@@ -1214,6 +1266,12 @@ async function loadClosedTradesForPeriod(period,opt={}){
     const rec = filterClosedReconstructionForPeriod(full,win);
     const summary = closedTradeLoadedSummary(rec);
     const netPnl = summary.net;
+    closedTradesLoadedSummaryStats = {
+      wins:summary.wins,
+      losses:summary.losses,
+      profit:summary.profit,
+      loss:summary.loss
+    };
 
     CLOSED_TRADES_STATE.markers = rec.markers;
     CLOSED_TRADES_STATE.links = rec.links;
@@ -1231,12 +1289,7 @@ async function loadClosedTradesForPeriod(period,opt={}){
         "From: " + closedTradeStatusDay(win.start) +
         " | To: " + closedTradeStatusDay(win.end) +
         " | Trades: " + summary.parents.length +
-        " | net P/L: " + closedTradeSignedMoney(netPnl) +
-        "\n" +
-        "Wins : " + summary.wins +
-        " , losses : " + summary.losses +
-        " | Profit : " + closedTradeMoneyAbs(summary.profit) +
-        " , Loss : " + closedTradeSignedMoney(summary.loss),
+        " | net P/L: " + closedTradeSignedMoney(netPnl),
         {mode:"summary"}
       );
     }else{
@@ -4635,6 +4688,7 @@ async function loadTrades(opt={}){
 
 function clearTrades(){
   clearClosedTradesOwner();
+  closedTradesLoadedSummaryStats = {wins:0,losses:0,profit:0,loss:0};
   closedTradeStatus("",{mode:"operational"});
   closedTradeStatus("Trades: 0",{mode:"summary"});
   updatePositionStrip(candles.length ? candles[candles.length-1] : null);
@@ -6352,31 +6406,41 @@ startTradeAuto();
     ctx.font = '12px Arial';
     const pad = 12;
     const lh = 17;
-    const w = Math.max(...safe.map(s => ctx.measureText(s).width),0) + pad*2;
-    const h = safe.length * lh + pad*2;
-    let tx = x + 14;
-    let ty = y + 14;
-    if(tx + w > canvas.clientWidth - RIGHT_AXIS) tx = x - w - 14;
-    if(ty + h > canvas.clientHeight - 10) ty = y - h - 14;
+    const gap = 18;
+    const right = canvas.clientWidth - RIGHT_AXIS - 6;
+    const bottom = canvas.clientHeight - 6;
+    const maxRows = Math.max(1,Math.floor((bottom - 6 - pad*2) / lh));
+    const colCount = Math.max(1,Math.ceil(safe.length / maxRows));
+    const rowsPerCol = Math.max(1,Math.ceil(safe.length / colCount));
+    const columns = Array.from({length:colCount},(_,col) => safe.slice(col*rowsPerCol,(col+1)*rowsPerCol));
+    const widths = columns.map(col => Math.max(...col.map(s => ctx.measureText(s).width),0));
+    const w = widths.reduce((sum,value) => sum + value,0) + pad*2 + gap*Math.max(0,colCount-1);
+    const h = Math.max(...columns.map(col => col.length),0) * lh + pad*2;
+    let tx = clamp(x + 14,6,Math.max(6,right - w));
+    let ty = clamp(y + 14,6,Math.max(6,bottom - h));
     ctx.fillStyle = 'rgba(255,255,255,.98)';
     ctx.strokeStyle = '#d9dce1';
     ctx.fillRect(tx,ty,w,h);
     ctx.strokeRect(tx,ty,w,h);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    safe.forEach((line,i) => {
-      const yLine = ty + pad + i*lh;
-      const parsed = colorTooltipValue15(line);
-      ctx.font = '12px Arial';
-      if(!parsed){
+    let xCol = tx + pad;
+    columns.forEach((column,colIndex) => {
+      column.forEach((line,rowIndex) => {
+        const yLine = ty + pad + rowIndex*lh;
+        const parsed = colorTooltipValue15(line);
+        ctx.font = '12px Arial';
+        if(!parsed){
+          ctx.fillStyle = '#111827';
+          ctx.fillText(line,xCol,yLine);
+          return;
+        }
         ctx.fillStyle = '#111827';
-        ctx.fillText(line,tx+pad,yLine);
-        return;
-      }
-      ctx.fillStyle = '#111827';
-      ctx.fillText(parsed.prefix,tx+pad,yLine);
-      ctx.fillStyle = parsed.color;
-      ctx.fillText(parsed.value,tx+pad+ctx.measureText(parsed.prefix).width,yLine);
+        ctx.fillText(parsed.prefix,xCol,yLine);
+        ctx.fillStyle = parsed.color;
+        ctx.fillText(parsed.value,xCol+ctx.measureText(parsed.prefix).width,yLine);
+      });
+      xCol += widths[colIndex] + gap;
     });
     ctx.restore();
   }
@@ -6541,7 +6605,7 @@ startTradeAuto();
           const isExLabel15 = !!(m.isFinalExit || m.letter === 'EX');
           const labelColor15 = val >= 0 ? '#1e88e5' : '#f6465d';
           const labelOpt15 = isExLabel15
-            ? {fixedX:false,edge:(val >= 0 ? 'top' : 'bottom'),edgeMargin:(val >= 0 ? 46 : 28),xShift:8,font:'bold 13px Arial',pad:7,h:22,bg:(val >= 0 ? '#eaf3ff' : '#ffe8ec'),offsets:(val >= 0 ? [0,10,20,30,40,50,60,70,80] : [0,-10,-20,-30,-40,-50,-60,-70,-80]),hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}}
+            ? {fixedX:false,edge:(val >= 0 ? 'top' : 'bottom'),edgeMargin:(val >= 0 ? 66 : 28),xShift:8,font:'bold 13px Arial',pad:7,h:22,bg:(val >= 0 ? '#eaf3ff' : '#ffe8ec'),offsets:(val >= 0 ? [0,10,20,30,40,50,60,70,80] : [0,-10,-20,-30,-40,-50,-60,-70,-80]),hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}}
             : {fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]};
           reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(val):fm(val).replace(/[+-]/,'')),x,y,labelColor15,clip,placedLabels,labelOpt15);
         }
@@ -12762,7 +12826,7 @@ startTradeAuto();
       const h = 22;
       const w = Math.ceil(ctx.measureText(txt).width + pad * 2);
       const x = xRight - w;
-      const y = total > 0 ? clip.top + 2 : clip.top + clip.height - h - 2;
+      const y = total > 0 ? clip.top + 48 : clip.top + clip.height - h - 2;
       ctx.fillStyle = bg;
       ctx.strokeStyle = col;
       ctx.lineWidth = typeof hairline === 'function' ? hairline() : 1;
@@ -13007,31 +13071,41 @@ startTradeAuto();
     ctx.font = '12px Arial';
     const pad = 12;
     const lh = 17;
-    const w = Math.max(...safe.map(s => ctx.measureText(s).width),0) + pad*2;
-    const h = safe.length * lh + pad*2;
-    let tx = x + 14;
-    let ty = y + 14;
-    if(tx + w > canvas.clientWidth - RIGHT_AXIS) tx = x - w - 14;
-    if(ty + h > canvas.clientHeight - 10) ty = y - h - 14;
+    const gap = 18;
+    const right = canvas.clientWidth - RIGHT_AXIS - 6;
+    const bottom = canvas.clientHeight - 6;
+    const maxRows = Math.max(1,Math.floor((bottom - 6 - pad*2) / lh));
+    const colCount = Math.max(1,Math.ceil(safe.length / maxRows));
+    const rowsPerCol = Math.max(1,Math.ceil(safe.length / colCount));
+    const columns = Array.from({length:colCount},(_,col) => safe.slice(col*rowsPerCol,(col+1)*rowsPerCol));
+    const widths = columns.map(col => Math.max(...col.map(s => ctx.measureText(s).width),0));
+    const w = widths.reduce((sum,value) => sum + value,0) + pad*2 + gap*Math.max(0,colCount-1);
+    const h = Math.max(...columns.map(col => col.length),0) * lh + pad*2;
+    let tx = clamp(x + 14,6,Math.max(6,right - w));
+    let ty = clamp(y + 14,6,Math.max(6,bottom - h));
     ctx.fillStyle = 'rgba(255,255,255,.98)';
     ctx.strokeStyle = '#d9dce1';
     ctx.fillRect(tx,ty,w,h);
     ctx.strokeRect(tx,ty,w,h);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    safe.forEach((line,i) => {
-      const yLine = ty + pad + i*lh;
-      const parsed = colorTooltipValue15(line);
-      ctx.font = '12px Arial';
-      if(!parsed){
+    let xCol = tx + pad;
+    columns.forEach((column,colIndex) => {
+      column.forEach((line,rowIndex) => {
+        const yLine = ty + pad + rowIndex*lh;
+        const parsed = colorTooltipValue15(line);
+        ctx.font = '12px Arial';
+        if(!parsed){
+          ctx.fillStyle = '#111827';
+          ctx.fillText(line,xCol,yLine);
+          return;
+        }
         ctx.fillStyle = '#111827';
-        ctx.fillText(line,tx+pad,yLine);
-        return;
-      }
-      ctx.fillStyle = '#111827';
-      ctx.fillText(parsed.prefix,tx+pad,yLine);
-      ctx.fillStyle = parsed.color;
-      ctx.fillText(parsed.value,tx+pad+ctx.measureText(parsed.prefix).width,yLine);
+        ctx.fillText(parsed.prefix,xCol,yLine);
+        ctx.fillStyle = parsed.color;
+        ctx.fillText(parsed.value,xCol+ctx.measureText(parsed.prefix).width,yLine);
+      });
+      xCol += widths[colIndex] + gap;
     });
     ctx.restore();
   }
@@ -13193,7 +13267,7 @@ startTradeAuto();
           const isExLabel15 = !!(m.isFinalExit || m.letter === 'EX');
           const labelColor15 = val >= 0 ? '#1e88e5' : '#f6465d';
           const labelOpt15 = isExLabel15
-            ? {fixedX:false,edge:(val >= 0 ? 'top' : 'bottom'),edgeMargin:(val >= 0 ? 46 : 28),xShift:8,font:'bold 13px Arial',pad:7,h:22,bg:(val >= 0 ? '#eaf3ff' : '#ffe8ec'),offsets:(val >= 0 ? [0,10,20,30,40,50,60,70,80] : [0,-10,-20,-30,-40,-50,-60,-70,-80]),hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}}
+            ? {fixedX:false,edge:(val >= 0 ? 'top' : 'bottom'),edgeMargin:(val >= 0 ? 66 : 28),xShift:8,font:'bold 13px Arial',pad:7,h:22,bg:(val >= 0 ? '#eaf3ff' : '#ffe8ec'),offsets:(val >= 0 ? [0,10,20,30,40,50,60,70,80] : [0,-10,-20,-30,-40,-50,-60,-70,-80]),hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}}
             : {fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]};
           reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(val):fm(val).replace(/[+-]/,'')),x,y,labelColor15,clip,placedLabels,labelOpt15);
         }
@@ -15619,32 +15693,40 @@ startTradeAuto();
     ctx.save();
     const pad = 12;
     const lh = 17;
-    let w = 0;
-    for(const line of lines) w = Math.max(w, measureLine25(ctx,line));
-    w += pad * 2;
-    const h = lines.length * lh + pad * 2;
-    let tx = x + 14;
-    let ty = y + 14;
+    const gap = 18;
     const rightAxisW = typeof RIGHT_AXIS !== "undefined" ? RIGHT_AXIS : 76;
-    if(tx + w > canvas.clientWidth - rightAxisW) tx = x - w - 14;
-    if(ty + h > canvas.clientHeight - 10) ty = y - h - 14;
+    const right = canvas.clientWidth - rightAxisW - 6;
+    const bottom = canvas.clientHeight - 6;
+    const maxRows = Math.max(1,Math.floor((bottom - 6 - pad*2) / lh));
+    const colCount = Math.max(1,Math.ceil(lines.length / maxRows));
+    const rowsPerCol = Math.max(1,Math.ceil(lines.length / colCount));
+    const columns = Array.from({length:colCount},(_,col) => lines.slice(col*rowsPerCol,(col+1)*rowsPerCol));
+    const widths = columns.map(column => Math.max(...column.map(line => measureLine25(ctx,line)),0));
+    const w = widths.reduce((sum,value) => sum + value,0) + pad*2 + gap*Math.max(0,colCount-1);
+    const h = Math.max(...columns.map(column => column.length),0) * lh + pad*2;
+    const tx = clamp(x + 14,6,Math.max(6,right - w));
+    const ty = clamp(y + 14,6,Math.max(6,bottom - h));
     ctx.fillStyle = "rgba(255,255,255,.98)";
     ctx.strokeStyle = BORDER25;
     ctx.fillRect(tx,ty,w,h);
     ctx.strokeRect(tx,ty,w,h);
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    lines.forEach((line,i) => {
-      const yLine = ty + pad + i*lh;
-      let xLine = tx + pad;
-      const parts = Array.isArray(line) ? line : [{text:String(line || ""),color:BLACK25,bold:false}];
-      for(const part of parts){
-        const text = String(part && part.text || "");
-        ctx.font = partFont25(part);
-        ctx.fillStyle = part.color || BLACK25;
-        ctx.fillText(text,xLine,yLine);
-        xLine += ctx.measureText(text).width;
-      }
+    let xCol = tx + pad;
+    columns.forEach((column,colIndex) => {
+      column.forEach((line,rowIndex) => {
+        const yLine = ty + pad + rowIndex*lh;
+        let xLine = xCol;
+        const parts = Array.isArray(line) ? line : [{text:String(line || ""),color:BLACK25,bold:false}];
+        for(const part of parts){
+          const text = String(part && part.text || "");
+          ctx.font = partFont25(part);
+          ctx.fillStyle = part.color || BLACK25;
+          ctx.fillText(text,xLine,yLine);
+          xLine += ctx.measureText(text).width;
+        }
+      });
+      xCol += widths[colIndex] + gap;
     });
     ctx.restore();
   }
@@ -20355,4 +20437,58 @@ If there is NO open position, use this Section 2 instead:
     },
     getAllDiagnostics(){ return {...data}; }
   };
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "V13_UI_OTF_TOOLTIP_LAYOUT_AND_PLBOX_HOVER";
+  if(typeof hoverItem !== "function" || typeof drawHoverTooltip !== "function" || window.__v13TooltipPlBoxHoverFinal) return;
+  window.__v13TooltipPlBoxHoverFinal = true;
+
+  function closedPlBoxAtMouse(){
+    if(!mouse || !Array.isArray(overlayHitItems)) return null;
+    if(typeof syncOverlayHitOwnership === "function") syncOverlayHitOwnership();
+    for(let i=overlayHitItems.length-1;i>=0;i--){
+      const item = overlayHitItems[i];
+      if(!item || item.kind !== "plbox" || item.overlayOwner !== "closed") continue;
+      if(mouse.x >= item.x1-4 && mouse.x <= item.x2+4 && mouse.y >= item.y1-4 && mouse.y <= item.y2+4) return item;
+    }
+    return null;
+  }
+
+  const previousHover = hoverItem;
+  hoverItem = window.hoverItem = function(){
+    const plBox = closedPlBoxAtMouse();
+    if(plBox) return plBox;
+    const item = previousHover.apply(this,arguments);
+    if(item && item.kind === "marker" && item.overlayOwner === "closed" && String(item.letter || "").toUpperCase() === "EX") return null;
+    if(item && item.kind === "line" && !item.open) return null;
+    return item;
+  };
+
+  const previousDrawHover = drawHoverTooltip;
+  drawHoverTooltip = window.drawHoverTooltip = function(){
+    const item = hoverItem();
+    if(!item || !mouse) return;
+    if(item.kind !== "plbox") return previousDrawHover.apply(this,arguments);
+    const activeHover = hoverItem;
+    hoverItem = window.hoverItem = () => ({
+      kind:"marker",
+      markerId:item.markerId,
+      x:item.x,
+      y:item.y,
+      letter:"EX",
+      role:"close",
+      chainId:item.chainId,
+      parentTradeId:item.parentTradeId,
+      overlayOwner:"closed"
+    });
+    try{
+      return previousDrawHover.apply(this,arguments);
+    }finally{
+      hoverItem = window.hoverItem = activeHover;
+    }
+  };
+
+  window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
 })();

@@ -169,6 +169,31 @@ button:hover{filter:brightness(1.04)}
   max-width:620px;
   margin-right:18px;
 }
+.trades-summary-tooltip{
+  position:fixed;
+  z-index:260;
+  display:none;
+  min-width:210px;
+  padding:9px 11px;
+  border:1px solid #d9dce1;
+  border-radius:6px;
+  background:rgba(255,255,255,.98);
+  color:#1e2329;
+  box-shadow:0 8px 24px rgba(0,0,0,.14);
+  font-size:12px;
+  line-height:1.35;
+  pointer-events:none;
+  white-space:nowrap;
+}
+.trades-summary-tooltip.is-visible{
+  display:block;
+}
+.trades-summary-tooltip-row{
+  min-height:16px;
+}
+.trades-summary-tooltip-gap{
+  height:7px;
+}
 
 #customRange{
   display:none !important;
@@ -1739,6 +1764,11 @@ button:hover{filter:brightness(1.04)}
 }
 .calc-module-orders-toggle.is-off{
   opacity:.55;
+}
+.calc-module-orders-toggle.calc-module-otf-toggle.is-on{
+  border-color:#dc2626;
+  background:rgba(220,38,38,.12);
+  opacity:1;
 }
 .calc-module-window{
   position:fixed;
