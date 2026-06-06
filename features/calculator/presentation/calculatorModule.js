@@ -90,6 +90,11 @@
     node.textContent = fmtMoney(value);
     node.style.color = moneyColor(value);
   }
+  function setMargin(node,value){
+    if(!node) return;
+    const n = num(value);
+    node.textContent = n == null ? "-" : "$" + Math.abs(n).toFixed(2);
+  }
   function setStatus(text){
     const el = q("calcModuleStatus");
     if(el){
@@ -531,43 +536,46 @@
         </div>
       </div>
       <div class="calc-module-body" id="calcModuleBody">
-        <div class="calc-module-grid">
-          <div class="calc-module-col">
-            <div class="calc-module-col-head">
-              <div class="calc-module-col-title"><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></div>
-              <button class="calc-module-add" id="calcModuleAddEntry" type="button">Add</button>
-            </div>
-            <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
-            <div id="calcModuleEntryRows"></div>
+        <div class="calc-module-panel">
+          <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleEntriesTitle">
+            <span class="calc-module-section-main">Entries <button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></span>
+            <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddEntry" type="button">Add Entry</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedEntryAvg">-</span><span id="calcModuleCollapsedEntryFloating">-</span></span><span class="calc-module-caret" id="calcModuleEntriesCaret">▾</span></span>
           </div>
-          <div class="calc-module-col">
-            <div class="calc-module-col-head">
-              <div class="calc-module-col-title">EXITS <span class="calc-module-title-sum" id="calcModuleExitSum">0.000</span></div>
-              <button class="calc-module-add" id="calcModuleAddExit" type="button">Add</button>
-            </div>
-            <div class="calc-module-row-head"><div>Level</div><div>Lot</div><div></div></div>
-            <div id="calcModuleExitRows"></div>
+          <div id="calcModuleEntriesBody">
+            <div class="calc-module-row-head"><div>#</div><div>Level</div><div>Lot</div><div>Margin</div><div>x</div></div>
+            <div id="calcModuleEntryRows"></div>
           </div>
         </div>
         <div class="calc-module-panel">
-          <div class="calc-module-section-title is-toggle" id="calcModuleStopsTitle">Stops <span class="calc-module-caret" id="calcModuleStopsCaret">v</span></div>
+          <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleStopsTitle">
+            <span class="calc-module-section-main">Stops <span class="calc-module-title-sum" id="calcModuleStopSum">0.000</span></span>
+            <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddPartialStop" type="button">Add Partial Stop</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedStopRisk">-</span></span><span class="calc-module-caret" id="calcModuleStopsCaret">▾</span></span>
+          </div>
           <div id="calcModuleStopsBody">
             <div class="calc-module-stop">
               <label for="calcModuleStopLevel">Master SL</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" min="0" placeholder="Level">
               <label for="calcModuleStopDistance">SL Δ</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" min="0" placeholder="Distance">
-              <span class="calc-module-stop-pl" id="calcModuleStopPl">Risk -</span>
+              <span class="calc-module-stop-pl" id="calcModuleStopPl">-</span>
             </div>
-            <button class="calc-module-add calc-module-add-partial-stop" id="calcModuleAddPartialStop" type="button">Add Partial Stop</button>
-            <div class="calc-module-psl-head calc-module-partial-stop-head"><div>#</div><div>Level</div><div>Lot</div><div>PL @ PSL</div><div></div></div>
+            <div class="calc-module-psl-head calc-module-partial-stop-head"><div>#</div><div>Level</div><div>Lot</div><div>PL</div><div>x</div></div>
             <div id="calcModulePartialStopRows"></div>
           </div>
         </div>
         <div class="calc-module-panel">
-          <div class="calc-module-section-title is-toggle" id="calcModulePlTitle">PL @ Exits <span class="calc-module-caret" id="calcModulePlCaret">v</span></div>
-          <div id="calcModuleExitPlRows"></div>
+          <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleExitsTitle">
+            <span class="calc-module-section-main">Exits <span class="calc-module-title-sum" id="calcModuleExitSum">0.000</span></span>
+            <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddExit" type="button">Add Exit</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedExitPl">-</span></span><span class="calc-module-caret" id="calcModuleExitsCaret">▾</span></span>
+          </div>
+          <div id="calcModuleExitsBody">
+            <div class="calc-module-exit-head"><div>#</div><div>Level</div><div>Lot</div><div>PL</div><div>x</div></div>
+            <div id="calcModuleExitRows"></div>
+          </div>
         </div>
         <div class="calc-module-panel">
-          <div class="calc-module-section-title is-toggle" id="calcModuleSummaryTitle">Summary <span class="calc-module-caret" id="calcModuleSummaryCaret">v</span></div>
+          <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleSummaryTitle">
+            <span class="calc-module-section-main">Summary</span>
+            <span class="calc-module-section-actions"><span class="calc-module-caret" id="calcModuleSummaryCaret">▾</span></span>
+          </div>
           <div id="calcModuleSummaryBody">
             <div class="calc-module-summary-row"><div class="calc-module-label">Total lots</div><div class="calc-module-value" id="calcModuleEntrySize">-</div></div>
             <div class="calc-module-summary-row"><div class="calc-module-label">Average Entry</div><div class="calc-module-value" id="calcModuleAvgEntry">-</div></div>
@@ -626,6 +634,58 @@
   }
   function readPartialStops(){
     return readRows("calcModulePartialStopRows");
+  }
+  function totalPartialStopLots(){
+    return rows("calcModulePartialStopRows").reduce((total,row) => {
+      const lot = num(lotInput(row)?.value);
+      return total + (lot != null && lot > 0 ? lot : 0);
+    },0);
+  }
+  function currentPositionBoxesForCalculator(){
+    if(typeof openPositionBoxes === "undefined" || !Array.isArray(openPositionBoxes)) return [];
+    return openPositionBoxes.filter(box => box && (!box.symbol || box.symbol === currentSymbol()));
+  }
+  function liveCachedOpenPositionQty(){
+    return currentPositionBoxesForCalculator().reduce((total,box) => {
+      const qty = Math.abs(num(box && box.qty) || 0);
+      return total + qty;
+    },0);
+  }
+  function refreshLiveStopsValidity(livePos){
+    const liveQty = num(livePos && livePos.qty);
+    const qty = liveQty == null ? liveCachedOpenPositionQty() : liveQty;
+    const invalid = totalPartialStopLots() > qty + 1e-9;
+    q("calcModuleStopsTitle")?.classList.toggle("calc-module-stops-invalid",invalid);
+    return !invalid;
+  }
+  function currentFloatingPl(){
+    const price = currentPriceReference();
+    if(price == null || typeof openBoxFloating !== "function") return null;
+    let total = 0;
+    let found = false;
+    currentPositionBoxesForCalculator().forEach(box => {
+      const value = num(openBoxFloating(box,price));
+      if(value == null) return;
+      total += value;
+      found = true;
+    });
+    return found ? total : null;
+  }
+  function currentCalculatorLeverage(){
+    const box = currentPositionBoxesForCalculator().find(item => num(item && item.leverage) > 0);
+    return box ? num(box.leverage) : null;
+  }
+  function entryRowMargin(row,level,lot){
+    if(isOpenPositionRow(row)){
+      const margins = currentPositionBoxesForCalculator()
+        .map(box => typeof openBoxMargin === "function" ? num(openBoxMargin(box)) : null)
+        .filter(value => value != null && value > 0);
+      if(margins.length) return margins.reduce((sum,value) => sum + value,0);
+    }
+    const leverage = currentCalculatorLeverage();
+    return leverage != null && leverage > 0 && level != null && lot != null
+      ? level * lot / leverage
+      : null;
   }
   function isPartialStopBeforeMaster(side,partialLevel,masterLevel){
     const p = num(partialLevel);
@@ -726,6 +786,7 @@
     sorted.forEach(item => {
       if(item && item.row) container.appendChild(item.row);
     });
+    refreshEntryRowNumbers();
     refreshPartialStopRowNumbers();
   }
   function sortCalculatorRowsForRead(){
@@ -781,10 +842,8 @@
     const exits = readRows("calcModuleExitRows");
     let exitQty = 0;
     let reward = 0;
-    const plRows = q("calcModuleExitPlRows");
-    if(plRows) plRows.innerHTML = "";
 
-    exits.forEach((row,index) => {
+    exits.forEach((row) => {
       exitQty += row.lot;
       const pl = domain && typeof domain.estimatePl === "function"
         ? domain.estimatePl(direction,entry.avg,row.level,row.lot)
@@ -794,12 +853,12 @@
             ? (row.level - entry.avg) * row.lot
             : (entry.avg - row.level) * row.lot;
       if(pl != null) reward += pl;
-      const line = document.createElement("div");
-      line.className = "calc-module-summary-row calc-module-exit-pl";
-      line.innerHTML = `<div class="calc-module-label">PL @ Ex ${index + 1}</div><div class="calc-module-value"></div>`;
-      setMoney(line.querySelector(".calc-module-value"),pl);
-      plRows?.appendChild(line);
+      setMoney(row.row && row.row.querySelector(".calc-module-exit-row-pl"),pl);
     });
+    rows("calcModuleExitRows").forEach(row => {
+      if(!exits.some(item => item.row === row)) setMoney(row.querySelector(".calc-module-exit-row-pl"),null);
+    });
+    refreshExitRowNumbers(entry.avg);
 
     syncStopForAvg(entry.avg);
     const stop = num(q("calcModuleStopLevel")?.value);
@@ -811,7 +870,7 @@
     });
     const stopPlNode = q("calcModuleStopPl");
     if(stopPlNode){
-      stopPlNode.textContent = "Risk " + fmtMoney(stopMath.total);
+      stopPlNode.textContent = fmtMoney(stopMath.total);
       stopPlNode.style.color = moneyColor(stopMath.total);
     }
     const summary = app && typeof app.buildSummary === "function"
@@ -821,15 +880,25 @@
     const rewardValue = summary ? summary.reward : (exits.length ? reward : null);
 
     q("calcModuleEntrySum").textContent = fmtLot(entry.qty || 0);
+    q("calcModuleStopSum").textContent = fmtLot(totalPartialStopLots());
     q("calcModuleExitSum").textContent = fmtLot(exitQty || 0);
     q("calcModuleExitSum").classList.toggle("calc-module-underfilled",entry.qty > 0 && exitQty < entry.qty);
     q("calcModuleEntrySize").textContent = entry.qty > 0 ? fmtLot(entry.qty) : "-";
     q("calcModuleAvgEntry").textContent = entry.avg != null ? fmtPrice(entry.avg) : "-";
+    q("calcModuleCollapsedEntryAvg").textContent = entry.avg != null ? fmtPrice(entry.avg) : "-";
+    setMoney(q("calcModuleCollapsedEntryFloating"),currentFloatingPl());
+    setMoney(q("calcModuleCollapsedStopRisk"),risk);
+    setMoney(q("calcModuleCollapsedExitPl"),rewardValue);
+    refreshLiveStopsValidity(null);
+    rows("calcModuleEntryRows").forEach(row => {
+      setMargin(
+        row.querySelector(".calc-module-entry-margin"),
+        entryRowMargin(row,num(levelInput(row)?.value),num(lotInput(row)?.value))
+      );
+    });
+    refreshEntryRowNumbers();
     setMoney(q("calcModuleRisk"),risk);
     setMoney(q("calcModuleReward"),rewardValue);
-    const statusEl = q("calcModuleStatus");
-    if(stopMath.qtyExceeds) setStatus("Partial Stop quantity exceeds open position quantity.");
-    else if(statusEl && statusEl.textContent === "Partial Stop quantity exceeds open position quantity.") setStatus("");
     refreshPendingSendVisualState();
     if(!suppressCalculatorOverlayDraw){
       try{ if(typeof draw === "function") draw(); }catch(_e){}
@@ -1082,14 +1151,36 @@
       if(idx) idx.textContent = String(index + 1);
     });
   }
+  function refreshEntryRowNumbers(){
+    let index = 0;
+    rows("calcModuleEntryRows").forEach(row => {
+      const idx = row.querySelector(".calc-module-entry-index");
+      if(!idx) return;
+      if(isOpenPositionRow(row)) idx.textContent = "M";
+      else idx.textContent = String(++index);
+    });
+  }
+  function refreshExitRowNumbers(referenceLevel){
+    const sorted = visualLevelDistanceSort(rows("calcModuleExitRows").map((row,index) => ({
+      row,
+      level:num(levelInput(row)?.value),
+      index
+    })),referenceLevel);
+    sorted.forEach((item,index) => {
+      const idx = item.row && item.row.querySelector(".calc-module-exit-index");
+      if(idx) idx.textContent = String(index + 1);
+    });
+  }
   function addRow(containerId,level="",lot="",options){
     const container = q(containerId);
     if(!container) return null;
     const opts = options || {};
     const isPartialStop = containerId === "calcModulePartialStopRows";
+    const isExit = containerId === "calcModuleExitRows";
+    const isEntry = containerId === "calcModuleEntryRows";
     if(lot === "" && !opts.preserveEmptyDefaults) lot = defaultLotForRow();
     const row = document.createElement("div");
-    row.className = isPartialStop ? "calc-module-row calc-module-psl-row" : "calc-module-row";
+    row.className = isPartialStop ? "calc-module-row calc-module-psl-row" : isExit ? "calc-module-row calc-module-exit-row" : isEntry ? "calc-module-row calc-module-entry-row" : "calc-module-row";
     if(opts.manual) row.dataset.manualDraft = "1";
     row.innerHTML = isPartialStop
       ? `
@@ -1098,9 +1189,18 @@
       <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Lot" value="${lot}">
       <span class="calc-module-psl-pl">-</span>
       <button class="calc-module-remove" type="button" title="Remove">x</button>`
-      : `
+      : isExit
+      ? `
+      <span class="calc-module-exit-index">1</span>
       <input class="calc-module-level" type="number" inputmode="decimal" step="10" min="0" placeholder="Level" value="${level}">
       <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Lot" value="${lot}">
+      <span class="calc-module-exit-row-pl">-</span>
+      <button class="calc-module-remove" type="button" title="Remove">x</button>`
+      : `
+      <span class="calc-module-entry-index">1</span>
+      <input class="calc-module-level" type="number" inputmode="decimal" step="10" min="0" placeholder="Level" value="${level}">
+      <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Lot" value="${lot}">
+      <span class="calc-module-entry-margin">-</span>
       <button class="calc-module-remove" type="button" title="Remove">x</button>`;
     applyRowSourceAndMeta(row,opts);
     applyPartialStopSourceAndMeta(row,opts);
@@ -1117,12 +1217,16 @@
       clearBinanceMetaOnRow(row);
       clearPartialStopMetaOnRow(row);
       row.remove();
+      refreshEntryRowNumbers();
       refreshPartialStopRowNumbers();
+      refreshExitRowNumbers(readEntry().avg);
       calculate();
     },false);
     container.appendChild(row);
     refreshEntryRowVisualState(row);
+    refreshEntryRowNumbers();
     refreshPartialStopRowNumbers();
+    refreshExitRowNumbers(readEntry().avg);
     refreshPendingSendVisualState();
     calculate();
     return row;
@@ -2136,7 +2240,7 @@
         const livePos = await signedPosition();
         if(!livePos) throw new Error("OTF PSL blocked: no open position.");
         const stopMath = calculateStopMath(readEntry(),num(q("calcModuleStopLevel")?.value),readPartialStops());
-        if(stopMath.totalPartialQty > (num(livePos.qty) || 0) + 1e-9) throw new Error("OTF PSL blocked: Partial Stop quantity exceeds open position quantity.");
+        if(stopMath.totalPartialQty > (num(livePos.qty) || 0) + 1e-9) throw new Error("OTF PSL blocked: PSL lots exceed live position size.");
         const lot = num(lotInput(selected.row)?.value);
         if(lot == null || lot < 0.001) throw new Error("OTF PSL quantity is invalid.");
         const side = toUpper(meta.side) || (livePos.side === "SHORT" ? "BUY" : "SELL");
@@ -3054,7 +3158,7 @@
           newQty:formatPlanValue(stopMath.totalPartialQty,"qty"),
           orderId:"-",
           status:"Blocked",
-          response:"Partial Stop quantity exceeds open position quantity.",
+          response:"Stops blocked — PSL lots exceed live position size.",
           writable:false,
           mode:"blocked"
         });
@@ -3855,10 +3959,52 @@
   function planNeedsSendResultReview(plan){
     return !!(plan && Array.isArray(plan.rows) && plan.rows.some(rowNeedsSendResultReview));
   }
+  async function validateLivePartialStopQuantity(plan){
+    const total = totalPartialStopLots();
+    if(total <= 0) return true;
+    const livePos = await signedPosition();
+    const liveQty = num(livePos && livePos.qty) || 0;
+    if(total <= liveQty + 1e-9){
+      refreshLiveStopsValidity(livePos);
+      return true;
+    }
+    plan.blocked = true;
+    plan.canConfirm = false;
+    addPlanRow(plan,{
+      section:"SL Operation",
+      action:"Blocked",
+      type:"PSL",
+      side:"-",
+      oldPrice:"-",
+      newPrice:"-",
+      oldQty:formatPlanValue(liveQty,"qty"),
+      newQty:formatPlanValue(total,"qty"),
+      orderId:"-",
+      status:"Blocked",
+      response:"Stops blocked — PSL lots exceed live position size.",
+      writable:false,
+      mode:"blocked"
+    });
+    refreshLiveStopsValidity(livePos);
+    return false;
+  }
   async function executeSendPlan(plan,options={}){
     if(!plan || !Array.isArray(plan.rows)) return;
     if(!plan.canConfirm){
       setStatus(options.blockedStatus || "Confirm Send blocked. Run Send preflight again.");
+      renderSendPlanTable();
+      return;
+    }
+    try{
+      if(!await validateLivePartialStopQuantity(plan)){
+        setStatus(options.blockedStatus || "Confirm Send blocked. Review Stops.");
+        renderSendPlanTable();
+        return;
+      }
+    }catch(e){
+      plan.blocked = true;
+      plan.canConfirm = false;
+      setStatus("Confirm Send blocked. Live position validation failed.");
       renderSendPlanTable();
       return;
     }
@@ -4019,6 +4165,7 @@
       });
       const livePos = preflightState.livePos;
       const liveSnapshot = preflightState.liveSnapshot;
+      refreshLiveStopsValidity(livePos);
       updateAutoSyncBaseline(livePos,liveSnapshot);
       if(!lastReadStateSnapshot) lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
       clearStructuralWarning();
@@ -4143,6 +4290,7 @@
       });
       const livePos = preflightState.livePos;
       const liveSnapshot = preflightState.liveSnapshot;
+      refreshLiveStopsValidity(livePos);
       updateAutoSyncBaseline(livePos,liveSnapshot);
       if(!lastReadStateSnapshot) lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
       sendPlanState = applyExpressPayloadSafeguards(buildPlanFromCurrentRows(livePos,liveSnapshot));
@@ -4407,6 +4555,7 @@
       if(source === "userRead") enableAutoSyncDetection();
       suppressCalculatorOverlayDraw = false;
       calculate();
+      refreshLiveStopsValidity(pos);
       if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
       }else if(diag.openOrdersReadStatus === "error"){
@@ -4629,20 +4778,31 @@
       syncStopFromDistance(readEntry().avg);
       calculate();
     },false);
-    q("calcModulePlTitle").addEventListener("click",() => {
-      const body = q("calcModuleExitPlRows");
+    q("calcModuleEntriesTitle").addEventListener("click",e => {
+      if(e.target.closest("#calcModuleAddEntry") || e.target.closest("#calcModuleDir")) return;
+      const body = q("calcModuleEntriesBody");
       const closed = body.classList.toggle("calc-module-collapsed");
-      q("calcModulePlCaret").textContent = closed ? ">" : "v";
+      q("calcModuleEntriesTitle").classList.toggle("is-collapsed",closed);
+      q("calcModuleEntriesCaret").textContent = closed ? "▸" : "▾";
     },false);
-    q("calcModuleStopsTitle").addEventListener("click",() => {
+    q("calcModuleExitsTitle").addEventListener("click",e => {
+      if(e.target.closest("#calcModuleAddExit")) return;
+      const body = q("calcModuleExitsBody");
+      const closed = body.classList.toggle("calc-module-collapsed");
+      q("calcModuleExitsTitle").classList.toggle("is-collapsed",closed);
+      q("calcModuleExitsCaret").textContent = closed ? "▸" : "▾";
+    },false);
+    q("calcModuleStopsTitle").addEventListener("click",e => {
+      if(e.target.closest("#calcModuleAddPartialStop")) return;
       const body = q("calcModuleStopsBody");
       const closed = body.classList.toggle("calc-module-collapsed");
-      q("calcModuleStopsCaret").textContent = closed ? ">" : "v";
+      q("calcModuleStopsTitle").classList.toggle("is-collapsed",closed);
+      q("calcModuleStopsCaret").textContent = closed ? "▸" : "▾";
     },false);
     q("calcModuleSummaryTitle").addEventListener("click",() => {
       const body = q("calcModuleSummaryBody");
       const closed = body.classList.toggle("calc-module-collapsed");
-      q("calcModuleSummaryCaret").textContent = closed ? ">" : "v";
+      q("calcModuleSummaryCaret").textContent = closed ? "▸" : "▾";
     },false);
     q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
     q("calcModuleRead").addEventListener("click",() => readBinance({userRead:true}),false);
