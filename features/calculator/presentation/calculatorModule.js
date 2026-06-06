@@ -2354,7 +2354,7 @@
     const drawnBoxes = [];
     placed.forEach(p => {
       const laneOffset = p.lane ? Math.min(p.lane * 22,Math.max(0,chartRight - left - p.w - 10)) : 0;
-      const pendingArrowSpace = p.item.pendingSend ? 12 : 0;
+      const pendingArrowSpace = p.item.pendingSend ? 14 : 0;
       const x = clamp(chartRight - p.w - 8 - laneOffset,left + 2 + pendingArrowSpace,chartRight - p.w - 2);
       const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
       const blinkOn = blinkActiveForKey(p.item.orderKey);
@@ -2422,11 +2422,14 @@
         ctx.strokeRect(px(x),px(y),p.w,p.h);
       }
       if(p.item.pendingSend){
+        const triHeight = 12;
+        const triHalf = triHeight / 2;
+        const triWidth = Math.round(0.875 * triHeight);
         ctx.fillStyle = "#16a34a";
         ctx.beginPath();
-        ctx.moveTo(ix(x - 9),ix(y + p.h / 2 - 4));
-        ctx.lineTo(ix(x - 2),ix(y + p.h / 2));
-        ctx.lineTo(ix(x - 9),ix(y + p.h / 2 + 4));
+        ctx.moveTo(ix(x - (1 + triWidth)), ix(y + p.h / 2 - triHalf));
+        ctx.lineTo(ix(x - 1), ix(y + p.h / 2));
+        ctx.lineTo(ix(x - (1 + triWidth)), ix(y + p.h / 2 + triHalf));
         ctx.closePath();
         ctx.fill();
       }
