@@ -1897,7 +1897,7 @@ button:hover{filter:brightness(1.04)}
   text-align:center;
 }
 .calc-module-psl-pl{
-  font-size:12px;
+  font-size:13px;
   font-variant-numeric:tabular-nums;
   text-align:right;
   white-space:nowrap;
@@ -1935,7 +1935,13 @@ button:hover{filter:brightness(1.04)}
 }
 .calc-module-row .calc-module-level.calc-module-level-manual-entry,
 .calc-module-row .calc-module-lot.calc-module-lot-manual-entry{
-  background:#fff;
+  background:#eefbf1;
+}
+.calc-module-row.calc-module-row-pending-send:not(.calc-module-row-binance-limit):not(.calc-module-row-binance-partial-stop) input{
+  background:#eefbf1;
+}
+.calc-module-input-pending-send{
+  background:#eefbf1!important;
 }
 .calc-module-row.calc-module-row-locked{
   opacity:.94;
@@ -1988,9 +1994,9 @@ button:hover{filter:brightness(1.04)}
   text-transform:uppercase;
 }
 .calc-module-stop-pl{
-  font-size:12px;
+  font-size:13px;
   font-variant-numeric:tabular-nums;
-  font-weight:700;
+  font-weight:400;
   text-align:right;
   white-space:nowrap;
 }

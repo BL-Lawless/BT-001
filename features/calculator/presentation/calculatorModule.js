@@ -187,6 +187,21 @@
     }
     try{ if(typeof draw === "function") draw(); }catch(_e){}
   }
+  function hasLoadedCalculatorOrderState(){
+    if(lastReadStateSnapshot) return true;
+    if(currentStopAlgoMeta) return true;
+    return ["calcModuleEntryRows","calcModuleExitRows","calcModulePartialStopRows"].some(containerId =>
+      rows(containerId).some(row => String(row.dataset && row.dataset.source || "").startsWith("binance-"))
+    );
+  }
+  async function toggleOrdersVisible(){
+    const next = !ordersVisible;
+    saveOrdersVisible(next);
+    if(!next || hasLoadedCalculatorOrderState()) return;
+    try{
+      await readBinance({preserveSendPlan:true,source:"ordersToggleLoad"});
+    }catch(_e){}
+  }
   function saveLevelsVisible(next){
     levelsVisible = !!next;
     const adapter = infra();
@@ -275,12 +290,30 @@
     return !levelVal && !lotVal;
   }
   function defaultLotForRow(){ return "0.000"; }
-  function normalizeLotInput(input){
+  function normalizeNonNegativeDecimalInput(input,maxDecimals){
     if(!input) return;
     const raw = String(input.value || "").trim();
     if(raw === "") return;
-    const n = num(raw);
+    if(!/^\d+(?:\.\d*)?$/.test(raw)){
+      input.value = "";
+      return;
+    }
+    const parts = raw.split(".");
+    if(parts.length > 1 && parts[1].length > maxDecimals){
+      input.value = parts[0] + "." + parts[1].slice(0,maxDecimals);
+    }
+    const n = num(input.value);
+    if(n == null || n < 0) input.value = "";
+  }
+  function normalizeLotInput(input){
+    if(!input) return;
+    normalizeNonNegativeDecimalInput(input,3);
+    if(String(input.value || "").trim() === "") return;
+    const n = num(input.value);
     if(n == null || n < 0) input.value = "0.000";
+  }
+  function normalizeLevelInput(input){
+    normalizeNonNegativeDecimalInput(input,8);
   }
   function validClipboardPriceLevel(text){
     const cleaned = String(text == null ? "" : text).trim().replace(/[$,\s]/g,"");
@@ -357,7 +390,7 @@
       wrap.appendChild(btn);
     }
     try{ btn.style.right = ((typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84) + 8) + "px"; }catch(_e){}
-    btn.onclick = () => saveOrdersVisible(!ordersVisible);
+    btn.onclick = toggleOrdersVisible;
     saveOrdersVisible(ordersVisible);
     return btn;
   }
@@ -406,8 +439,8 @@
           <div class="calc-module-section-title is-toggle" id="calcModuleStopsTitle">Stops <span class="calc-module-caret" id="calcModuleStopsCaret">v</span></div>
           <div id="calcModuleStopsBody">
             <div class="calc-module-stop">
-              <label for="calcModuleStopLevel">Master SL</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" placeholder="Level">
-              <label for="calcModuleStopDistance">SL Δ</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" placeholder="Distance">
+              <label for="calcModuleStopLevel">Master SL</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" min="0" placeholder="Level">
+              <label for="calcModuleStopDistance">SL Δ</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" min="0" placeholder="Distance">
               <span class="calc-module-stop-pl" id="calcModuleStopPl">Risk -</span>
             </div>
             <button class="calc-module-add calc-module-add-partial-stop" id="calcModuleAddPartialStop" type="button">Add Partial Stop</button>
@@ -683,7 +716,10 @@
     const statusEl = q("calcModuleStatus");
     if(stopMath.qtyExceeds) setStatus("Partial Stop quantity exceeds open position quantity.");
     else if(statusEl && statusEl.textContent === "Partial Stop quantity exceeds open position quantity.") setStatus("");
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
+    refreshPendingSendVisualState();
+    if(!suppressCalculatorOverlayDraw){
+      try{ if(typeof draw === "function") draw(); }catch(_e){}
+    }
   }
   function clearBinanceMetaOnRow(row){
     if(!row) return;
@@ -778,6 +814,32 @@
       else if(manualEntry) lot.title = "Manual unsent entry";
     }
   }
+  function rowPendingSend(row){
+    if(!row || isOpenPositionRow(row) || isRowEmpty(row)) return false;
+    const source = String(row.dataset && row.dataset.source || "");
+    const level = num(levelInput(row)?.value);
+    const lot = num(lotInput(row)?.value);
+    if(source === "binance-limit"){
+      const meta = row.__binanceLimitOrderMeta || (row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
+      return !meta || !approxEqual(level,meta.price,1e-8) || !approxEqual(lot,meta.origQty,1e-10);
+    }
+    if(source === "binance-partial-stop"){
+      const meta = row.__binancePartialStopMeta || (row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null);
+      return !meta || !approxEqual(level,meta.triggerPrice,1e-8) || !approxEqual(lot,meta.origQty,1e-10);
+    }
+    return true;
+  }
+  function masterStopPendingSend(){
+    const level = num(q("calcModuleStopLevel")?.value);
+    if(level == null || level <= 0) return false;
+    return !currentStopAlgoMeta || !approxEqual(level,currentStopAlgoMeta.triggerPrice,1e-8);
+  }
+  function refreshPendingSendVisualState(){
+    ["calcModuleEntryRows","calcModuleExitRows","calcModulePartialStopRows"].forEach(containerId => {
+      rows(containerId).forEach(row => row.classList.toggle("calc-module-row-pending-send",rowPendingSend(row)));
+    });
+    q("calcModuleStopLevel")?.classList.toggle("calc-module-input-pending-send",masterStopPendingSend());
+  }
   function applyRowSourceAndMeta(row,opts){
     if(!row) return row;
     const source = opts && opts.source ? String(opts.source) : "";
@@ -796,6 +858,7 @@
       binanceLimitRowMetaByRowId.set(rowId,meta);
     }
     refreshEntryRowVisualState(row);
+    refreshPendingSendVisualState();
     return row;
   }
   function applyPartialStopSourceAndMeta(row,opts){
@@ -917,12 +980,12 @@
     row.innerHTML = isPartialStop
       ? `
       <span class="calc-module-psl-index">1</span>
-      <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
+      <input class="calc-module-level" type="number" inputmode="decimal" step="10" min="0" placeholder="Level" value="${level}">
       <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Lot" value="${lot}">
       <span class="calc-module-psl-pl">-</span>
       <button class="calc-module-remove" type="button" title="Remove">x</button>`
       : `
-      <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
+      <input class="calc-module-level" type="number" inputmode="decimal" step="10" min="0" placeholder="Level" value="${level}">
       <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Lot" value="${lot}">
       <button class="calc-module-remove" type="button" title="Remove">x</button>`;
     applyRowSourceAndMeta(row,opts);
@@ -931,6 +994,7 @@
     setRowLocked(row,!!opts.locked,{keepRemoveEnabled:!!opts.keepRemoveEnabled});
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",() => {
       if(input.classList.contains("calc-module-lot")) normalizeLotInput(input);
+      if(input.classList.contains("calc-module-level")) normalizeLevelInput(input);
       markSendPlanStale("Row edited after preflight.");
       calculate();
     },false));
@@ -945,6 +1009,7 @@
     container.appendChild(row);
     refreshEntryRowVisualState(row);
     refreshPartialStopRowNumbers();
+    refreshPendingSendVisualState();
     calculate();
     return row;
   }
@@ -989,6 +1054,7 @@
     if(stopLevel) stopLevel.value = "";
     if(stopDistance) stopDistance.value = "";
     currentStopAlgoMeta = null;
+    lastReadStateSnapshot = null;
     setStatus("Calculator cleared locally.");
     calculate();
   }
@@ -1197,26 +1263,28 @@
   function triggerConfirmedOrderBlink(key){
     const id = String(key || "").trim();
     if(!id) return;
-    confirmedOrderBlinkByKey.set(id,Date.now() + 1400);
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
-    [240,480,720,960,1200,1440].forEach(delay => {
-      setTimeout(() => {
-        if(confirmedOrderBlinkByKey.has(id)){
-          try{ if(typeof draw === "function") draw(); }catch(_e){}
-        }
-      },delay);
-    });
+    const start = Date.now();
+    confirmedOrderBlinkByKey.set(id,{start,until:start + 1200});
+    const animate = () => {
+      const state = confirmedOrderBlinkByKey.get(id);
+      if(!state) return;
+      try{ if(typeof draw === "function") draw(); }catch(_e){}
+      if(Date.now() < state.until) requestAnimationFrame(animate);
+      else confirmedOrderBlinkByKey.delete(id);
+    };
+    requestAnimationFrame(animate);
   }
   function blinkActiveForKey(key){
     const id = String(key || "").trim();
-    if(!id) return false;
-    const until = confirmedOrderBlinkByKey.get(id);
-    if(!until) return false;
-    if(Date.now() > until){
+    if(!id) return 0;
+    const state = confirmedOrderBlinkByKey.get(id);
+    if(!state) return 0;
+    if(Date.now() > state.until){
       confirmedOrderBlinkByKey.delete(id);
-      return false;
+      return 0;
     }
-    return Math.floor((until - Date.now()) / 175) % 2 === 0;
+    const progress = clamp((Date.now() - state.start) / Math.max(1,state.until - state.start),0,1);
+    return Math.pow(Math.sin(progress * Math.PI * 2),2);
   }
   function partialStopFallbackKey(side,level,lot){
     const levelNum = num(level);
@@ -1787,6 +1855,7 @@
         row:item.row,
         openPosition,
         binanceBacked:sourceStyle === "binance-existing",
+        pendingSend:rowPendingSend(item.row),
         orderKey:orderKeyFromMeta(meta),
         sourceStyle,
         text:openPosition
@@ -1811,8 +1880,10 @@
         row:item.row,
         openPosition:false,
         binanceBacked:sourceStyle === "binance-existing",
+        pendingSend:rowPendingSend(item.row),
         orderKey:orderKeyFromMeta(meta),
         sourceStyle,
+        pl,
         text:"Ext " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + fmtChartMoney(pl)
       };
     });
@@ -1822,6 +1893,7 @@
       row:null,
       openPosition:false,
       binanceBacked:!!currentStopAlgoMeta,
+      pendingSend:masterStopPendingSend(),
       orderKey:orderKeyFromMeta(currentStopAlgoMeta),
       sourceStyle:"sl",
       text:"Master SL | " + fmtLot(stopMath.remainingQty || 0) + " | " + fmtChartMoney(stopMath.total)
@@ -1834,6 +1906,7 @@
       lot:item.lot,
       row:item.row,
       openPosition:false,
+      pendingSend:rowPendingSend(item.row),
       sourceStyle:"partial-sl",
       pl:item.pl,
       text:"PSL " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + fmtChartMoney(item.pl)
@@ -1912,7 +1985,7 @@
       overlayRows.partialStops || [],
       overlayRows.newAverage ? [overlayRows.newAverage] : []
     )
-      .filter(item => item && (calculatorOpen ? levelsVisible : (item.binanceBacked && ordersVisible)))
+      .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && ordersVisible)))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
         return { ...item, y };
@@ -1948,10 +2021,12 @@
       const y = px(item.y);
       const blinkOn = blinkActiveForKey(item.orderKey);
       ctx.strokeStyle = blinkOn
-        ? "rgba(255,106,0,0.98)"
+        ? "rgba(255,106,0," + (0.30 + blinkOn * 0.68).toFixed(3) + ")"
         : item.type === "master-sl"
         ? "rgba(180,126,38,0.70)"
         : item.type === "partial-sl"
+          ? (num(item.pl) == null || num(item.pl) >= 0 ? "rgba(4,120,87,0.82)" : "rgba(127,29,29,0.86)")
+        : item.type === "exit"
           ? (num(item.pl) == null || num(item.pl) >= 0 ? "rgba(4,120,87,0.82)" : "rgba(127,29,29,0.86)")
         : item.type === "new-average"
           ? "rgba(37,99,235,0.70)"
@@ -2000,35 +2075,44 @@
     const drawnBoxes = [];
     placed.forEach(p => {
       const laneOffset = p.lane ? Math.min(p.lane * 22,Math.max(0,chartRight - left - p.w - 10)) : 0;
-      const x = clamp(chartRight - p.w - 8 - laneOffset,left + 2,chartRight - p.w - 2);
+      const pendingArrowSpace = p.item.pendingSend ? 12 : 0;
+      const x = clamp(chartRight - p.w - 8 - laneOffset,left + 2 + pendingArrowSpace,chartRight - p.w - 2);
       const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
       const blinkOn = blinkActiveForKey(p.item.orderKey);
       const isOpenPos = !!p.item.openPosition;
       const isSl = p.item.type === "master-sl";
       const isPartialSl = p.item.type === "partial-sl";
+      const isExit = p.item.type === "exit";
       const isNewAverage = p.item.type === "new-average";
       const isBinanceExisting = p.item.sourceStyle === "binance-existing";
       const isManualEntry = p.item.sourceStyle === "manual-entry";
+      const isPendingManual = !!p.item.pendingSend && !p.item.binanceBacked;
       ctx.fillStyle = blinkOn
-        ? "rgba(255,214,10,0.98)"
+        ? "rgba(255,214,10," + (0.18 + blinkOn * 0.78).toFixed(3) + ")"
         : isOpenPos
         ? "rgba(255,247,204,0.95)"
         : isSl
           ? "rgba(255,243,214,0.96)"
-          : isPartialSl
+        : isPartialSl
             ? "rgba(255,255,255,0.96)"
+          : isExit
+            ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(236,253,245,0.96)" : "rgba(254,242,242,0.96)")
           : isNewAverage
             ? "rgba(232,240,255,0.96)"
             : isBinanceExisting
               ? "rgba(255,247,214,0.96)"
+              : isPendingManual
+                ? "rgba(238,251,241,0.97)"
               : isManualEntry
                 ? "rgba(236,253,255,0.96)"
                 : "rgba(255,255,255,0.94)";
       ctx.strokeStyle = blinkOn
-        ? "rgba(255,106,0,0.98)"
+        ? "rgba(255,106,0," + (0.30 + blinkOn * 0.68).toFixed(3) + ")"
         : isSl
         ? "rgba(180,126,38,0.70)"
         : isPartialSl
+          ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(4,120,87,0.86)" : "rgba(127,29,29,0.90)")
+        : isExit
           ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(4,120,87,0.86)" : "rgba(127,29,29,0.90)")
         : isNewAverage
           ? "rgba(37,99,235,0.72)"
@@ -2040,11 +2124,22 @@
       ctx.lineWidth = 1;
       ctx.fillRect(ix(x),ix(y),p.w,p.h);
       ctx.strokeRect(px(x),px(y),p.w,p.h);
+      if(p.item.pendingSend){
+        ctx.fillStyle = "#16a34a";
+        ctx.beginPath();
+        ctx.moveTo(ix(x - 9),ix(y + p.h / 2 - 4));
+        ctx.lineTo(ix(x - 2),ix(y + p.h / 2));
+        ctx.lineTo(ix(x - 9),ix(y + p.h / 2 + 4));
+        ctx.closePath();
+        ctx.fill();
+      }
       ctx.fillStyle = blinkOn
         ? "#111"
         : isSl
         ? "#8b5e14"
         : isPartialSl
+          ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "#047857" : "#7f1d1d")
+        : isExit
           ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "#047857" : "#7f1d1d")
         : isNewAverage
           ? "#1d4ed8"
@@ -3263,7 +3358,8 @@
         origQty:send.quantity,
         timeInForce:send.timeInForce
       });
-      return {ok:true,response:resp};
+      const meta = rowPlan.rowRef && rowPlan.rowRef.__binanceLimitOrderMeta ? rowPlan.rowRef.__binanceLimitOrderMeta : null;
+      return {ok:true,response:resp,blinkKey:orderKeyFromMeta(meta)};
     }
     return {ok:true,skip:true};
   }
@@ -3279,9 +3375,45 @@
     return 40;
   }
   function orderedExecutionRows(plan,mode){
-    const rows = Array.isArray(plan && plan.rows) ? plan.rows.slice() : [];
-    if(mode !== "express") return rows;
-    return rows.sort((a,b) => expressExecutionPriority(a) - expressExecutionPriority(b));
+    const rowsList = Array.isArray(plan && plan.rows) ? plan.rows.map((row,index) => ({row,index})) : [];
+    const current = currentPriceReference();
+    const targetGroup = row => {
+      if(!row) return "";
+      if(row.section === "SL Operation" && ["sl-cancel","sl-create","psl-cancel","psl-create"].includes(String(row.mode || ""))) return "stop";
+      if(row.type === "Exit" && ["new","modify"].includes(String(row.mode || ""))) return "exit";
+      return "";
+    };
+    const targetLevel = row => {
+      const payload = row && row.payload || {};
+      const meta = payload.meta || {};
+      for(const value of [payload.triggerPrice,payload.price,payload.level,meta.triggerPrice,meta.price,row && row.newPrice,row && row.oldPrice]){
+        const cleaned = typeof value === "string" ? value.replace(/,/g,"") : value;
+        const n = num(cleaned);
+        if(n != null && n >= 0) return n;
+      }
+      return null;
+    };
+    const modeRank = row => String(row && row.mode || "").includes("cancel") ? 0 : 1;
+    rowsList.sort((a,b) => {
+      if(mode === "express"){
+        const priorityDiff = expressExecutionPriority(a.row) - expressExecutionPriority(b.row);
+        if(priorityDiff) return priorityDiff;
+      }
+      const ag = targetGroup(a.row);
+      const bg = targetGroup(b.row);
+      if(ag && ag === bg && current != null){
+        const al = targetLevel(a.row);
+        const bl = targetLevel(b.row);
+        if(al != null && bl != null){
+          const distanceDiff = Math.abs(al - current) - Math.abs(bl - current);
+          if(Math.abs(distanceDiff) > 1e-9) return distanceDiff;
+          const rankDiff = modeRank(a.row) - modeRank(b.row);
+          if(rankDiff) return rankDiff;
+        }
+      }
+      return a.index - b.index;
+    });
+    return rowsList.map(item => item.row);
   }
   function rememberConfirmedPartialStopCancels(plan){
     const rowsList = Array.isArray(plan && plan.rows) ? plan.rows : [];
@@ -3395,7 +3527,7 @@
               rowPlan.status = "Confirmed";
               rowPlan.unexpectedResponse = false;
               rowPlan.response = binanceResponseText(resp);
-              if(out && out.blinkKey && (rowPlan.mode === "modify" || ((rowPlan.mode === "sl-create" || rowPlan.mode === "psl-create") && rowPlan.action === "Replace"))){
+              if(out && out.blinkKey && (rowPlan.mode === "new" || rowPlan.mode === "modify" || ((rowPlan.mode === "sl-create" || rowPlan.mode === "psl-create") && rowPlan.action === "Replace"))){
                 triggerConfirmedOrderBlink(out.blinkKey);
               }
             }else{
@@ -4091,12 +4223,14 @@
       await addManualRow("calcModulePartialStopRows");
     },false);
     q("calcModuleStopLevel").addEventListener("input",() => {
+      normalizeLevelInput(q("calcModuleStopLevel"));
       markSendPlanStale("SL level changed after preflight.");
       lastStopEdit = "level";
       syncStopFromLevel(readEntry().avg);
       calculate();
     },false);
     q("calcModuleStopDistance").addEventListener("input",() => {
+      normalizeLevelInput(q("calcModuleStopDistance"));
       markSendPlanStale("SL Δ changed after preflight.");
       lastStopEdit = "distance";
       syncStopFromDistance(readEntry().avg);
