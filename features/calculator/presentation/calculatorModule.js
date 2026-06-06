@@ -11,6 +11,7 @@
   const SL_SEND_ENABLED_KEY = STORE + "sl_send_enabled";
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
   const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
+  const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
   const STRUCTURAL_WARNING_TEXT = "Position/orders changed \u2014 re-check math";
   const AUTO_SYNC_POLL_MS = 2000;
   const AUTO_SYNC_DEBOUNCE_MS = 800;
@@ -23,6 +24,7 @@
   let slSendEnabled = false;
   let cbsEnabled = false;
   let expressModeEnabled = false;
+  let ordersVisible = true;
   let binanceLimitRowSeq = 0;
   const binanceLimitRowMetaByRowId = new Map();
   let binancePartialStopRowSeq = 0;
@@ -35,6 +37,8 @@
   let overlayLevelBoxes = [];
   let overlayDrag = {active:false,row:null,target:"row"};
   let suppressNextOverlayClick = false;
+  let suppressCalculatorOverlayDraw = false;
+  const confirmedOrderBlinkByKey = new Map();
   let sendPopupDrag = null;
   let lastReadStateSnapshot = null;
   let sendPlanState = null;
@@ -163,6 +167,26 @@
       return false;
     }
   }
+  function loadOrdersVisible(){
+    try{
+      const raw = localStorage.getItem(ORDERS_VISIBLE_KEY);
+      if(raw == null) return true;
+      return raw !== "0";
+    }catch(_e){
+      return true;
+    }
+  }
+  function saveOrdersVisible(next){
+    ordersVisible = !!next;
+    try{ localStorage.setItem(ORDERS_VISIBLE_KEY,ordersVisible ? "1" : "0"); }catch(_e){}
+    const btn = q("calcModuleOrdersToggle");
+    if(btn){
+      btn.classList.toggle("is-on",ordersVisible);
+      btn.classList.toggle("is-off",!ordersVisible);
+      btn.setAttribute("aria-pressed",ordersVisible ? "true" : "false");
+    }
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+  }
   function saveLevelsVisible(next){
     levelsVisible = !!next;
     const adapter = infra();
@@ -178,7 +202,9 @@
       box.classList.toggle("is-on",levelsVisible);
       box.classList.toggle("is-off",!levelsVisible);
     }
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
+    if(!suppressCalculatorOverlayDraw){
+      try{ if(typeof draw === "function") draw(); }catch(_e){}
+    }
   }
   function saveSlSendEnabled(next){
     slSendEnabled = true;
@@ -230,6 +256,14 @@
       return !!(levelsVisible && winVisible);
     }catch(_e){ return !!levelsVisible; }
   }
+  function calculatorWindowVisible(){
+    try{
+      const win = q("calcModuleWindow");
+      return !!(win && !win.classList.contains("hidden"));
+    }catch(_e){
+      return false;
+    }
+  }
   function calcSlInteractive(){
     return calcLevelsInteractive();
   }
@@ -240,13 +274,13 @@
     const lotVal = String(lotInput(row)?.value || "").trim();
     return !levelVal && !lotVal;
   }
-  function defaultLotForRow(){ return "0.001"; }
+  function defaultLotForRow(){ return "0.000"; }
   function normalizeLotInput(input){
     if(!input) return;
     const raw = String(input.value || "").trim();
     if(raw === "") return;
     const n = num(raw);
-    if(n == null || n < 0.001) input.value = "0.001";
+    if(n == null || n < 0) input.value = "0.000";
   }
   function validClipboardPriceLevel(text){
     const cleaned = String(text == null ? "" : text).trim().replace(/[$,\s]/g,"");
@@ -298,6 +332,33 @@
     }else{
       document.querySelector(".metrics")?.appendChild(wrap);
     }
+    return btn;
+  }
+  function ensureOrdersToggle(){
+    if(!canvas || !canvas.parentNode) return null;
+    let wrap = canvas.parentElement;
+    if(!wrap) return null;
+    if(!wrap.classList.contains("chart-wrap")){
+      const nextWrap = document.createElement("div");
+      nextWrap.className = "chart-wrap";
+      canvas.parentNode.insertBefore(nextWrap,canvas);
+      nextWrap.appendChild(canvas);
+      wrap = nextWrap;
+    }
+    let btn = q("calcModuleOrdersToggle");
+    if(!btn){
+      btn = document.createElement("button");
+      btn.id = "calcModuleOrdersToggle";
+      btn.type = "button";
+      btn.className = "calc-module-orders-toggle";
+      btn.textContent = "Orders";
+      btn.title = "Orders";
+      btn.setAttribute("aria-label","Orders");
+      wrap.appendChild(btn);
+    }
+    try{ btn.style.right = ((typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84) + 8) + "px"; }catch(_e){}
+    btn.onclick = () => saveOrdersVisible(!ordersVisible);
+    saveOrdersVisible(ordersVisible);
     return btn;
   }
 
@@ -460,9 +521,8 @@
       };
     });
     const qtyExceeds = totalPartialQty > entryQty + 1e-9;
-    const cappedValidQty = Math.min(validPartialQty,entryQty);
-    const remainingQty = Math.max(0,entryQty - cappedValidQty);
-    const masterPl = entryAvg != null && master != null && entryQty > 0
+    const remainingQty = qtyExceeds ? null : Math.max(0,entryQty - validPartialQty);
+    const masterPl = entryAvg != null && master != null && entryQty > 0 && remainingQty != null
       ? estimate(direction,entryAvg,master,remainingQty)
       : null;
     const total = masterPl == null && !partialPlCount ? null : partialPl + (masterPl == null ? 0 : masterPl);
@@ -472,7 +532,7 @@
       masterLevel:master,
       partialStops:rowsWithPl,
       totalPartialQty,
-      validPartialQty:cappedValidQty,
+      validPartialQty,
       remainingQty,
       masterPl,
       total,
@@ -496,6 +556,18 @@
       return dir === "SHORT" ? al - bl : bl - al;
     });
   }
+  function currentPriceReference(){
+    const candidates = [
+      lastMarkPrice,
+      candles && candles.length ? candles[candles.length - 1].close : null,
+      mClose && mClose.textContent ? String(mClose.textContent).replace(/[$,]/g,"") : null
+    ];
+    for(const value of candidates){
+      const n = num(value);
+      if(n != null && n > 0) return n;
+    }
+    return null;
+  }
   function sortContainerRowsByLevel(containerId,referenceLevel){
     const container = q(containerId);
     if(!container) return;
@@ -513,7 +585,7 @@
     const ref = readEntry().avg;
     sortContainerRowsByLevel("calcModuleEntryRows",ref);
     sortContainerRowsByLevel("calcModuleExitRows",ref);
-    sortContainerRowsByLevel("calcModulePartialStopRows",ref);
+    sortContainerRowsByLevel("calcModulePartialStopRows",currentPriceReference());
   }
   function capExitLots(maxQty){
     let remaining = Math.max(0,Number(maxQty) || 0);
@@ -777,6 +849,22 @@
     const container = q(containerId);
     if(!container || !item) return null;
     const allRows = rows(containerId);
+    if(item.source === "binance-limit"){
+      const itemKey = orderKeyFromMeta(item.meta);
+      const matched = itemKey ? allRows.find(row => {
+        const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
+        return orderKeyFromMeta(meta) === itemKey;
+      }) : null;
+      if(matched){
+        const lvl = levelInput(matched);
+        const lot = lotInput(matched);
+        if(lvl) lvl.value = item.level == null ? "" : Math.round(item.level);
+        if(lot) lot.value = item.lot == null ? "" : Number(item.lot).toFixed(3);
+        setOpenPositionRow(matched,false);
+        applyRowSourceAndMeta(matched,item);
+        return matched;
+      }
+    }
     if(containerId === "calcModulePartialStopRows"){
       const itemKey = partialStopKeyFromItem(item,item.side);
       const matched = itemKey ? allRows.find(row => {
@@ -830,12 +918,12 @@
       ? `
       <span class="calc-module-psl-index">1</span>
       <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
-      <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0.001" placeholder="Lot" value="${lot}">
+      <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Lot" value="${lot}">
       <span class="calc-module-psl-pl">-</span>
       <button class="calc-module-remove" type="button" title="Remove">x</button>`
       : `
       <input class="calc-module-level" type="number" inputmode="decimal" step="10" placeholder="Level" value="${level}">
-      <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0.001" placeholder="Lot" value="${lot}">
+      <input class="calc-module-lot" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Lot" value="${lot}">
       <button class="calc-module-remove" type="button" title="Remove">x</button>`;
     applyRowSourceAndMeta(row,opts);
     applyPartialStopSourceAndMeta(row,opts);
@@ -1040,6 +1128,29 @@
     });
     refreshPartialStopRowNumbers();
   }
+  function pruneMappedLimitRows(containerId,activeKeys){
+    if(!(activeKeys instanceof Set)) return;
+    rows(containerId).forEach(row => {
+      if(row.dataset.source !== "binance-limit") return;
+      const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
+      const key = orderKeyFromMeta(meta);
+      if(key && activeKeys.has(key)) return;
+      clearBinanceMetaOnRow(row);
+      row.remove();
+    });
+  }
+  function pruneMappedPartialStopRows(activeKeys){
+    if(!(activeKeys instanceof Set)) return;
+    rows("calcModulePartialStopRows").forEach(row => {
+      if(row.dataset.source !== "binance-partial-stop") return;
+      const meta = row.__binancePartialStopMeta || (row.dataset && row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null);
+      const key = partialStopKeyFromMeta(meta,null);
+      if(key && activeKeys.has(key)) return;
+      clearPartialStopMetaOnRow(row);
+      row.remove();
+    });
+    refreshPartialStopRowNumbers();
+  }
   function publishReadDiagnostic(diag){
     lastReadDiagnostic = diag || null;
     window.__calculatorReadDiagnostic = lastReadDiagnostic;
@@ -1082,6 +1193,30 @@
     const caid = String(meta.clientAlgoId || "").trim();
     if(caid) return "calgo:" + caid;
     return "";
+  }
+  function triggerConfirmedOrderBlink(key){
+    const id = String(key || "").trim();
+    if(!id) return;
+    confirmedOrderBlinkByKey.set(id,Date.now() + 1400);
+    try{ if(typeof draw === "function") draw(); }catch(_e){}
+    [240,480,720,960,1200,1440].forEach(delay => {
+      setTimeout(() => {
+        if(confirmedOrderBlinkByKey.has(id)){
+          try{ if(typeof draw === "function") draw(); }catch(_e){}
+        }
+      },delay);
+    });
+  }
+  function blinkActiveForKey(key){
+    const id = String(key || "").trim();
+    if(!id) return false;
+    const until = confirmedOrderBlinkByKey.get(id);
+    if(!until) return false;
+    if(Date.now() > until){
+      confirmedOrderBlinkByKey.delete(id);
+      return false;
+    }
+    return Math.floor((until - Date.now()) / 175) % 2 === 0;
   }
   function partialStopFallbackKey(side,level,lot){
     const levelNum = num(level);
@@ -1639,6 +1774,7 @@
     });
     const entryRows = entries.map(item => {
       const openPosition = isOpenPositionRow(item.row);
+      const meta = item.row && item.row.__binanceLimitOrderMeta ? item.row.__binanceLimitOrderMeta : (item.row && item.row.dataset && item.row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(item.row.dataset.calcRowId) : null);
       const sourceStyle = openPosition
         ? "open-position"
         : String(item.row && item.row.dataset ? item.row.dataset.source || "" : "") === "binance-limit"
@@ -1650,13 +1786,19 @@
         lot:item.lot,
         row:item.row,
         openPosition,
+        binanceBacked:sourceStyle === "binance-existing",
+        orderKey:orderKeyFromMeta(meta),
         sourceStyle,
         text:openPosition
           ? "Open Position | " + Number(item.lot).toFixed(3)
-          : "Entry " + (manualEntryNumbers.get(item.row) || 1)
+          : "Entry " + (manualEntryNumbers.get(item.row) || 1) + " | " + Number(item.lot).toFixed(3)
       };
     });
     const exitRows = exits.map((item,index) => {
+      const meta = item.row && item.row.__binanceLimitOrderMeta ? item.row.__binanceLimitOrderMeta : (item.row && item.row.dataset && item.row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(item.row.dataset.calcRowId) : null);
+      const sourceStyle = String(item.row && item.row.dataset ? item.row.dataset.source || "" : "") === "binance-limit"
+        ? "binance-existing"
+        : "exit";
       const pl = entryAvg == null
         ? null
         : direction === "LONG"
@@ -1668,7 +1810,9 @@
         lot:item.lot,
         row:item.row,
         openPosition:false,
-        sourceStyle:"exit",
+        binanceBacked:sourceStyle === "binance-existing",
+        orderKey:orderKeyFromMeta(meta),
+        sourceStyle,
         text:"Ext " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + fmtChartMoney(pl)
       };
     });
@@ -1677,10 +1821,14 @@
       level:slLevel,
       row:null,
       openPosition:false,
+      binanceBacked:!!currentStopAlgoMeta,
+      orderKey:orderKeyFromMeta(currentStopAlgoMeta),
       sourceStyle:"sl",
-      text:"Master SL | " + fmtLot(stopMath.remainingQty || 0) + " | " + fmtChartMoney(stopMath.masterPl)
+      text:"Master SL | " + fmtLot(stopMath.remainingQty || 0) + " | " + fmtChartMoney(stopMath.total)
     } : null;
-    const partialStopRows = visualLevelDistanceSort(stopMath.partialStops,entryAvg).map((item,index) => ({
+    const partialStopRows = visualLevelDistanceSort(stopMath.partialStops,currentPriceReference()).map((item,index) => ({
+      orderKey:partialStopKeyFromMeta(item.row && item.row.__binancePartialStopMeta ? item.row.__binancePartialStopMeta : (item.row && item.row.dataset && item.row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(item.row.dataset.calcPartialStopRowId) : null),null),
+      binanceBacked:!!(item.row && item.row.dataset && item.row.dataset.source === "binance-partial-stop"),
       type:"partial-sl",
       level:item.level,
       lot:item.lot,
@@ -1744,7 +1892,9 @@
   }
   function drawCalculatorLevelsOverlay(){
     overlayLevelBoxes = [];
-    if(!levelsVisible) return;
+    const calculatorOpen = calculatorWindowVisible();
+    if(calculatorOpen && !levelsVisible) return;
+    if(!calculatorOpen && !ordersVisible) return;
     if(!canvas || !ctx) return;
     const state = currentPriceLineState || {};
     const top = num(state.top);
@@ -1762,6 +1912,7 @@
       overlayRows.partialStops || [],
       overlayRows.newAverage ? [overlayRows.newAverage] : []
     )
+      .filter(item => item && (calculatorOpen ? levelsVisible : (item.binanceBacked && ordersVisible)))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
         return { ...item, y };
@@ -1795,7 +1946,10 @@
     ctx.setLineDash([5,2]);
     items.forEach(item => {
       const y = px(item.y);
-      ctx.strokeStyle = item.type === "master-sl"
+      const blinkOn = blinkActiveForKey(item.orderKey);
+      ctx.strokeStyle = blinkOn
+        ? "rgba(255,106,0,0.98)"
+        : item.type === "master-sl"
         ? "rgba(180,126,38,0.70)"
         : item.type === "partial-sl"
           ? (num(item.pl) == null || num(item.pl) >= 0 ? "rgba(4,120,87,0.82)" : "rgba(127,29,29,0.86)")
@@ -1817,6 +1971,7 @@
     const sorted = items.slice().sort((a,b) => a.y - b.y);
     sorted.forEach(item => {
       const textW = Math.ceil(ctx.measureText(item.text).width) + padX * 2;
+      const overlapLane = placed.filter(prev => Math.abs(prev.item.y - item.y) < labelH + gap).length;
       const minY = top + labelH / 2;
       const maxY = chartBottom - labelH / 2;
       let cy = clamp(item.y,minY,maxY);
@@ -1829,7 +1984,8 @@
         item,
         w:Math.min(textW,Math.max(56,chartRight - left - 8)),
         h:labelH,
-        cy
+        cy,
+        lane:overlapLane
       });
     });
     for(let i=placed.length - 1;i>=0;i--){
@@ -1843,15 +1999,19 @@
     }
     const drawnBoxes = [];
     placed.forEach(p => {
-      const x = chartRight - p.w - 8;
+      const laneOffset = p.lane ? Math.min(p.lane * 22,Math.max(0,chartRight - left - p.w - 10)) : 0;
+      const x = clamp(chartRight - p.w - 8 - laneOffset,left + 2,chartRight - p.w - 2);
       const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
+      const blinkOn = blinkActiveForKey(p.item.orderKey);
       const isOpenPos = !!p.item.openPosition;
       const isSl = p.item.type === "master-sl";
       const isPartialSl = p.item.type === "partial-sl";
       const isNewAverage = p.item.type === "new-average";
       const isBinanceExisting = p.item.sourceStyle === "binance-existing";
       const isManualEntry = p.item.sourceStyle === "manual-entry";
-      ctx.fillStyle = isOpenPos
+      ctx.fillStyle = blinkOn
+        ? "rgba(255,214,10,0.98)"
+        : isOpenPos
         ? "rgba(255,247,204,0.95)"
         : isSl
           ? "rgba(255,243,214,0.96)"
@@ -1864,7 +2024,9 @@
               : isManualEntry
                 ? "rgba(236,253,255,0.96)"
                 : "rgba(255,255,255,0.94)";
-      ctx.strokeStyle = isSl
+      ctx.strokeStyle = blinkOn
+        ? "rgba(255,106,0,0.98)"
+        : isSl
         ? "rgba(180,126,38,0.70)"
         : isPartialSl
           ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "rgba(4,120,87,0.86)" : "rgba(127,29,29,0.90)")
@@ -1878,7 +2040,9 @@
       ctx.lineWidth = 1;
       ctx.fillRect(ix(x),ix(y),p.w,p.h);
       ctx.strokeRect(px(x),px(y),p.w,p.h);
-      ctx.fillStyle = isSl
+      ctx.fillStyle = blinkOn
+        ? "#111"
+        : isSl
         ? "#8b5e14"
         : isPartialSl
           ? (num(p.item.pl) == null || num(p.item.pl) >= 0 ? "#047857" : "#7f1d1d")
@@ -2193,7 +2357,7 @@
         reduceOnlyOverride:rowType === "exit"
       }
     };
-    if(level == null || level <= 0 || lot == null || lot <= 0){
+    if(level == null || level <= 0 || lot == null || lot < 0.001){
       base.action = "Blocked";
       base.status = "Blocked";
       base.response = "Any writable row has invalid price or quantity.";
@@ -2237,7 +2401,7 @@
       addPlanRow(plan,rowPlan);
       return;
     }
-    if(level == null || level <= 0 || lot == null || lot <= 0){
+    if(level == null || level <= 0 || lot == null || lot < 0.001){
       rowPlan.action = "Blocked";
       rowPlan.status = "Blocked";
       rowPlan.response = "Any writable row has invalid price or quantity.";
@@ -2359,7 +2523,41 @@
     if(true){
       const stopLevel = num(q("calcModuleStopLevel")?.value);
       const stopMath = calculateStopMath(readEntry(),stopLevel,readPartialStops());
-      if(stopMath.qtyExceeds){
+      if(!livePos){
+        addPlanRow(plan,{
+          section:"SL Operation",
+          action:"Skip",
+          type:"Master SL",
+          side:"-",
+          oldPrice:"-",
+          newPrice:formatPlanValue(stopLevel,"price"),
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Skipped",
+          response:"Skipped stops — no open position",
+          writable:false,
+          mode:"skip"
+        });
+        partialStopRows.forEach((row,index) => {
+          if(isRowEmpty(row)) return;
+          addPlanRow(plan,{
+            section:"SL Operation",
+            action:"Skip",
+            type:"PSL " + (index + 1),
+            side:"-",
+            oldPrice:"-",
+            newPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+            oldQty:"-",
+            newQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+            orderId:"-",
+            status:"Skipped",
+            response:"Skipped stops — no open position",
+            writable:false,
+            mode:"skip"
+          });
+        });
+      }else if(stopMath.totalPartialQty > (num(livePos && livePos.qty) || 0) + 1e-9){
         plan.blocked = true;
         addPlanRow(plan,{
           section:"SL Operation",
@@ -2373,24 +2571,6 @@
           orderId:"-",
           status:"Blocked",
           response:"Partial Stop quantity exceeds open position quantity.",
-          writable:false,
-          mode:"blocked"
-        });
-      }
-      if(!livePos){
-        plan.blocked = true;
-        addPlanRow(plan,{
-          section:"SL Operation",
-          action:"Blocked",
-          type:"Master SL",
-          side:"-",
-          oldPrice:"-",
-          newPrice:formatPlanValue(stopLevel,"price"),
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"No live open position. Stops send requires an open position.",
           writable:false,
           mode:"blocked"
         });
@@ -2549,7 +2729,7 @@
           const oldQty = num(meta && meta.origQty);
           const side = livePos.side === "SHORT" ? "BUY" : "SELL";
           const ps = toUpper(livePos.positionSide || "");
-          const invalid = level == null || level <= 0 || lot == null || lot <= 0;
+          const invalid = level == null || level <= 0 || lot == null || lot < 0.001;
           if(invalid){
             plan.blocked = true;
             addPlanRow(plan,{
@@ -2997,7 +3177,8 @@
         quantity:send.quantity,
         workingType:send.workingType
       });
-      return {ok:true,response:resp};
+      const meta = rowPlan.rowRef && rowPlan.rowRef.__binancePartialStopMeta ? rowPlan.rowRef.__binancePartialStopMeta : null;
+      return {ok:true,response:resp,blinkKey:partialStopKeyFromMeta(meta,send.side)};
     }
     if(rowPlan.mode === "sl-create"){
       const p = rowPlan.payload || {};
@@ -3013,7 +3194,18 @@
       const ps = toUpper(p.positionSide || "");
       if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
       const resp = await signedAlgoOrderWrite("POST",send);
-      return {ok:true,response:resp};
+      currentStopAlgoMeta = buildAlgoOrderMeta(Object.assign({
+        symbol:send.symbol,
+        side:send.side,
+        positionSide:send.positionSide || "",
+        type:send.type,
+        algoType:send.algoType,
+        triggerPrice:send.triggerPrice,
+        closePosition:"true",
+        workingType:send.workingType
+      },resp || {}));
+      const blinkKey = orderKeyFromMeta(currentStopAlgoMeta);
+      return {ok:true,response:resp,blinkKey};
     }
     if(rowPlan.mode === "limit-cancel-cbs"){
       const p = rowPlan.payload || {};
@@ -3044,7 +3236,8 @@
       if(p.reduceOnly === true || String(p.reduceOnly).toLowerCase() === "true") send.reduceOnly = "true";
       const resp = await signedOrderWrite("PUT",send);
       applyWriteSuccessToRow(rowPlan.rowRef,resp,p.meta && p.meta.rawOrder ? p.meta.rawOrder : p.meta);
-      return {ok:true,response:resp};
+      const meta = rowPlan.rowRef && rowPlan.rowRef.__binanceLimitOrderMeta ? rowPlan.rowRef.__binanceLimitOrderMeta : null;
+      return {ok:true,response:resp,blinkKey:orderKeyFromMeta(meta)};
     }
     if(rowPlan.mode === "new"){
       const p = rowPlan.payload || {};
@@ -3202,6 +3395,9 @@
               rowPlan.status = "Confirmed";
               rowPlan.unexpectedResponse = false;
               rowPlan.response = binanceResponseText(resp);
+              if(out && out.blinkKey && (rowPlan.mode === "modify" || ((rowPlan.mode === "sl-create" || rowPlan.mode === "psl-create") && rowPlan.action === "Replace"))){
+                triggerConfirmedOrderBlink(out.blinkKey);
+              }
             }else{
               rowPlan.status = "Failed";
               rowPlan.unexpectedResponse = true;
@@ -3590,6 +3786,7 @@
       partialStopsFound:0,
       openOrdersReadStatus:"not-requested"
     };
+    suppressCalculatorOverlayDraw = true;
     try{
       const preservedEntryRows = snapshotManualRows("calcModuleEntryRows");
       const readState = isOwnedRefresh
@@ -3612,15 +3809,12 @@
         clearOpenPositionRows();
       }
 
-      clearMappedLimitRows("calcModuleEntryRows");
-      clearMappedLimitRows("calcModuleExitRows");
       purgeSuppressedPartialStopRows();
-      clearMappedPartialStopRows();
-      binanceLimitRowMetaByRowId.clear();
-      binancePartialStopMetaByRowId.clear();
 
       let snapshot = null;
       let mapped = null;
+      let activeLimitKeys = new Set();
+      let activePartialStopKeys = new Set();
       try{
         snapshot = isOwnedRefresh
           ? await withCalculatorOwnedRefresh(source,() => readOpenOrdersSnapshot())
@@ -3641,8 +3835,11 @@
         diag.ignoredAlgoOrders = mapped.diagnostic.ignoredAlgoOrders;
         diag.ignoredNonLimitOrders = mapped.diagnostic.ignoredNonLimitOrders;
         diag.ignoredByPositionSide = mapped.diagnostic.ignoredByPositionSide;
+        activeLimitKeys = new Set([].concat(mapped.entryRows || [], mapped.exitRows || []).map(item => orderKeyFromMeta(item && item.meta)).filter(Boolean));
         mapped.entryRows.forEach(item => applyMappedRow("calcModuleEntryRows",item));
         mapped.exitRows.forEach(item => applyMappedRow("calcModuleExitRows",item));
+        pruneMappedLimitRows("calcModuleEntryRows",activeLimitKeys);
+        pruneMappedLimitRows("calcModuleExitRows",activeLimitKeys);
       }
 
       let stop = null;
@@ -3656,8 +3853,10 @@
             const key = partialStopKeyFromItem(item,item.side);
             return !key || !suppressedPartialStopKeys.has(key);
           });
+          activePartialStopKeys = new Set(visiblePartialStops.map(item => partialStopKeyFromItem(item,item.side)).filter(Boolean));
           diag.partialStopsFound = visiblePartialStops.length;
           visiblePartialStops.forEach(item => applyMappedRow("calcModulePartialStopRows",item));
+          pruneMappedPartialStopRows(activePartialStopKeys);
           dedupePartialStopRows();
         }
         const bestStop = stopMapped && stopMapped.master ? stopMapped.master : (snapshot ? findStopOrderForPosition(pos,snapshot,false) : null);
@@ -3685,6 +3884,7 @@
         updateAutoSyncBaseline(pos,{symbol:currentSymbol(),normalOrders:[]});
       }
       if(source === "userRead") enableAutoSyncDetection();
+      suppressCalculatorOverlayDraw = false;
       calculate();
       if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
@@ -3700,6 +3900,7 @@
       }
       publishReadDiagnostic(diag);
     }catch(e){
+      suppressCalculatorOverlayDraw = false;
       console.warn(MODULE + " Binance read failed",e);
       setStatus("Read failed.");
       lastReadStateSnapshot = null;
@@ -3843,10 +4044,12 @@
     slSendEnabled = loadSlSendEnabled();
     cbsEnabled = loadCbsEnabled();
     expressModeEnabled = loadExpressModeEnabled();
+    ordersVisible = loadOrdersVisible();
     saveLevelsVisible(levelsVisible);
     saveSlSendEnabled(slSendEnabled);
     saveCbsEnabled(cbsEnabled);
     saveExpressModeEnabled(expressModeEnabled);
+    ensureOrdersToggle();
     installDrawOverlayHook();
     installOverlayDragHooks();
 
@@ -3939,8 +4142,6 @@
       },false);
     }
     setDirection("LONG");
-    addRow("calcModuleEntryRows");
-    addRow("calcModuleExitRows");
     installContextMenu();
     window.CALCULATOR_MODULE = {
       version:MODULE,

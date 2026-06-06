@@ -1719,6 +1719,27 @@ button:hover{filter:brightness(1.04)}
   background:#fff7df;
   box-shadow:0 0 0 2px rgba(245,158,11,.22);
 }
+.calc-module-orders-toggle{
+  position:absolute;
+  top:8px;
+  right:92px;
+  z-index:18;
+  height:22px;
+  padding:0 8px;
+  border:1px solid #d9dce1;
+  border-radius:6px;
+  background:rgba(255,255,255,.92);
+  color:#39414a;
+  font-size:11px;
+  font-weight:700;
+  text-transform:none;
+}
+.calc-module-orders-toggle.is-on{
+  background:rgba(245,190,55,.18);
+}
+.calc-module-orders-toggle.is-off{
+  opacity:.55;
+}
 .calc-module-window{
   position:fixed;
   left:36px;
@@ -1868,6 +1889,7 @@ button:hover{filter:brightness(1.04)}
   font-weight:700;
   text-transform:uppercase;
   margin-bottom:3px;
+  text-align:center;
 }
 .calc-module-psl-index{
   color:#707a8a;
@@ -1875,7 +1897,7 @@ button:hover{filter:brightness(1.04)}
   text-align:center;
 }
 .calc-module-psl-pl{
-  font-size:11px;
+  font-size:12px;
   font-variant-numeric:tabular-nums;
   text-align:right;
   white-space:nowrap;
@@ -1887,14 +1909,14 @@ button:hover{filter:brightness(1.04)}
   text-transform:uppercase;
   margin-bottom:3px;
 }
-.calc-module-row{margin-bottom:4px}
+.calc-module-row{margin-bottom:2px}
 .calc-module-row input,
 .calc-module-stop input{
   width:100%;
   min-width:0;
   margin:0;
   background:#fff;
-  padding:5px 6px;
+  padding:4px 6px;
   font-size:12px;
 }
 .calc-module-row .calc-module-lot.calc-module-lot-binance-limit{
@@ -1913,7 +1935,7 @@ button:hover{filter:brightness(1.04)}
 }
 .calc-module-row .calc-module-level.calc-module-level-manual-entry,
 .calc-module-row .calc-module-lot.calc-module-lot-manual-entry{
-  background:#eefcff;
+  background:#fff;
 }
 .calc-module-row.calc-module-row-locked{
   opacity:.94;
@@ -1966,7 +1988,7 @@ button:hover{filter:brightness(1.04)}
   text-transform:uppercase;
 }
 .calc-module-stop-pl{
-  font-size:11px;
+  font-size:12px;
   font-variant-numeric:tabular-nums;
   font-weight:700;
   text-align:right;
@@ -2054,13 +2076,14 @@ button:hover{filter:brightness(1.04)}
 }
 .calc-module-express-row{
   margin-top:6px;
-  display:flex;
+  display:inline-flex;
   align-items:center;
   justify-content:flex-start;
+  margin-right:8px;
 }
 .calc-module-cbs-row{
   margin-top:6px;
-  display:flex;
+  display:inline-flex;
   align-items:center;
   justify-content:flex-start;
 }
