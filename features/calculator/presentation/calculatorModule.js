@@ -2464,10 +2464,15 @@
       const textW = Math.ceil(ctx.measureText(item.text).width) + padX * 2;
       const w = Math.min(textW,Math.max(56,chartRight - left - 8));
       const cy = item.y;
-      const x = clamp(chartRight - w - 8,left + 2,chartRight - w - 2);
+      const normalX = clamp(chartRight - w - 8,left + 2,chartRight - w - 2);
       const y = cy - labelH / 2;
-      const collides = placed.some(prev => x < prev.x + prev.w && x + w > prev.x && y < prev.y + prev.h && y + labelH > prev.y);
-      if(y < top || y + labelH > chartBottom || collides) return;
+      const collides = placed.some(prev => normalX < prev.x + prev.w && normalX + w > prev.x && y < prev.y + prev.h && y + labelH > prev.y);
+      const hiddenByStandardRule = y < top || y + labelH > chartBottom || collides;
+      const ordersOpenPositionException = !calculatorOpen && ordersVisible && !!item.openPosition && hiddenByStandardRule;
+      if(hiddenByStandardRule && !ordersOpenPositionException) return;
+      const x = ordersOpenPositionException
+        ? clamp(normalX - w * 1.2,left + 2,chartRight - w - 2)
+        : normalX;
       placed.push({
         item,
         w,

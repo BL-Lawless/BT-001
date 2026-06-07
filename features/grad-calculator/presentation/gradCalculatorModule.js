@@ -1,14 +1,13 @@
 (() => {
   "use strict";
 
-  const MODULE = "GR_COMMIT_V8";
+  const MODULE = "GR_COMMIT_V10";
   const OWNER = "GR";
   const STORE_KEY = "bt001_gr_commit_v5_orders";
   const ORDER_URL = "https://fapi.binance.com/fapi/v1/order";
   const ALGO_URL = "https://fapi.binance.com/fapi/v1/algoOrder";
   const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
   const OPEN_ALGO_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
-  const ALL_ORDERS_URL = "https://fapi.binance.com/fapi/v1/allOrders";
   const sections = ["entry","protection","exit"];
   const state = {
     active:"entry",
@@ -108,6 +107,15 @@
     const otherSymbols=storedRecords().filter(record=>record.symbol!==currentSymbol());
     try{localStorage.setItem(STORE_KEY,JSON.stringify(otherSymbols.concat(records)));}catch(_e){}
   }
+  function purgeStoredEntryRecords(){
+    try{
+      const records=JSON.parse(localStorage.getItem(STORE_KEY)||"[]");
+      const retained=Array.isArray(records)?records.filter(record=>!(record&&record.section==="entry"&&record.symbol===currentSymbol())):[];
+      localStorage.setItem(STORE_KEY,JSON.stringify(retained));
+    }catch(_e){
+      try{localStorage.removeItem(STORE_KEY);}catch(_e2){}
+    }
+  }
   function orderMetadata(section,data={}){
     return {
       owner:data.owner || OWNER,module:data.module || data.owner || OWNER,section,
@@ -139,6 +147,17 @@
     calculate();
     persistRows();
     setStatus(sectionTitle(section) + " cleared locally.");
+  }
+  function flushEntryHistory(){
+    const before=rows("entry").length;
+    state.rows.entry=[];
+    state.loadedMode.entry=false;
+    state.generators.entry={start:"",end:"",step:"",lot:"0.000",count:"3",lastEdited:"end"};
+    if(state.preflight&&state.preflight.section==="entry"){q("gradPreflight")?.classList.add("hidden");state.preflight=null;}
+    writeGenerator("entry");
+    purgeStoredEntryRecords();
+    renderSection("entry");calculate();persistRows();
+    setStatus("GR Entry Flush removed "+before+" local/internal record(s). Click Read to load currently open GR_ENTRY_ orders.");
   }
   function clearAll(){
     sections.forEach(section => {state.rows[section]=[];renderSection(section);});
@@ -188,6 +207,7 @@
     const valueTitle=section==="entry" ? "Margin" : section==="protection" ? "Risk" : "PL";
     return `<section class="grad-calc-tab-panel" id="gradPanel${section}">
       <div class="grad-calc-tab-actions">
+        ${section==="entry"?`<button id="gradentryFlush" type="button">Flush</button>`:""}
         <button id="grad${section}Clear" type="button">Clear</button>
         <button id="grad${section}Read" type="button">Read</button>
         <button id="grad${section}Show" class="is-on" type="button">Show</button>
@@ -207,7 +227,7 @@
     win=document.createElement("div");
     win.id="gradCalcWindow";
     win.className="grad-calc-window hidden";
-    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V8</div><button id="gradCalcClose" type="button">x</button></div>
+    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V10</div><button id="gradCalcClose" type="button">x</button></div>
       <div class="grad-calc-body">
         <div class="grad-calc-tabs">${sections.map(section=>`<button id="gradTab${section}" type="button">${sectionTitle(section)}</button>`).join("")}</div>
         <div class="grad-calc-tab-stage">${sections.map(panelMarkup).join("")}</div>
@@ -238,7 +258,7 @@
       wrap=document.createElement("div");
       wrap.id="gradCalcMetric";
       wrap.className="grad-calc-metric";
-      wrap.innerHTML=`<button class="grad-calc-icon" id="gradCalcOpen" type="button" title="GR Commit">GR</button>`;
+      wrap.innerHTML=`<button class="grad-calc-icon" id="gradCalcOpen" type="button" title="GR Commit" aria-label="Open GR"><svg viewBox="0 0 24 24" class="grad-levels-icon" aria-hidden="true"><path d="M4 6.5h16M4 12h16M4 17.5h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8" cy="6.5" r="1.7" fill="currentColor"/><circle cx="15.5" cy="12" r="1.7" fill="currentColor"/><circle cx="11" cy="17.5" r="1.7" fill="currentColor"/></svg></button>`;
       document.querySelector(".metrics")?.appendChild(wrap);
     }
     arrangeMetricButtons();
@@ -427,14 +447,11 @@
   async function ownedOrders(section){
     if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
     const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
-    const normal=section==="entry"
-      ? await signedGet(ALL_ORDERS_URL,{symbol:currentSymbol(),limit:"1000"},key,secret,offset).catch(()=>[])
-      : await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
+    const normal=await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     return [].concat(Array.isArray(normal)?normal:[],Array.isArray(algo)?algo:[]).filter(order=>{
       if(!ownedClientId(order)||orderSection(order)!==section)return false;
-      const status=String(order.status||order.orderStatus||"").toUpperCase();
-      return section!=="entry"||["NEW","PARTIALLY_FILLED","FILLED"].includes(status);
+      return true;
     });
   }
   async function universalMasterSlOrder(){
@@ -705,6 +722,7 @@
   function bind(){
     const win=ensureWindow(),open=ensureButton();ensurePreflight();restorePersistentState();
     sections.forEach(section=>{bindGenerator(section);q(`gradTab${section}`).onclick=()=>setActive(section);q(`grad${section}Clear`).onclick=()=>clearSection(section);q(`grad${section}Read`).onclick=()=>readSection(section);q(`grad${section}Show`).onclick=()=>showSection(section,!state.visible[section]);q(`grad${section}Send`).onclick=()=>openPreflight(section);renderSection(section);});
+    q("gradentryFlush").onclick=flushEntryHistory;
     bindMasterSl();q("gradCalcClearAll").onclick=clearAll;q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
     installWindowDrag(win);installWindowResize(win);installDrawHook();installDrag();installPositionWatcher();setActive("entry");calculate();
     window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:openPreflight,setVisible:showSection,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row}))).concat(state.masterSl?[{...state.masterSl}]:[]);}};
