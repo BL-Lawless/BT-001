@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const MODULE = "GR_COMMIT_V7";
+  const MODULE = "GR_COMMIT_V8";
   const OWNER = "GR";
   const STORE_KEY = "bt001_gr_commit_v5_orders";
   const ORDER_URL = "https://fapi.binance.com/fapi/v1/order";
@@ -207,7 +207,7 @@
     win=document.createElement("div");
     win.id="gradCalcWindow";
     win.className="grad-calc-window hidden";
-    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V7</div><button id="gradCalcClose" type="button">x</button></div>
+    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V8</div><button id="gradCalcClose" type="button">x</button></div>
       <div class="grad-calc-body">
         <div class="grad-calc-tabs">${sections.map(section=>`<button id="gradTab${section}" type="button">${sectionTitle(section)}</button>`).join("")}</div>
         <div class="grad-calc-tab-stage">${sections.map(panelMarkup).join("")}</div>
@@ -228,13 +228,9 @@
     return win;
   }
   function arrangeMetricButtons(){
-    const gr=q("gradCalcMetric"), assess=q("v29AssessMetric"), floating=q("mFloatPL")?.closest(".metric"), account=q("mBalance")?.closest(".metric");
-    if(!gr || !account || !account.parentNode) return;
-    account.insertAdjacentElement("beforebegin",gr);
-    if(assess){
-      if(floating && floating.parentNode) floating.insertAdjacentElement("afterend",assess);
-      else gr.insertAdjacentElement("afterend",assess);
-    }
+    const gr=q("gradCalcMetric"),calc=q("calcModuleMetric"),assess=q("v29AssessMetric"),floating=q("mFloatPL")?.closest(".metric"),account=q("mBalance")?.closest(".metric"),parent=account&&account.parentNode;
+    if(!gr||!calc||!account||!floating||!parent)return;
+    [gr,calc,account,floating,assess].filter(Boolean).forEach(node=>parent.appendChild(node));
   }
   function ensureButton(){
     let wrap=q("gradCalcMetric");
@@ -617,15 +613,23 @@
     sections.forEach(section=>{if(state.visible[section])sortedRows(section).forEach((row,index)=>{if(number(row.level)>0&&number(row.lot)>=.001)items.push({section,row,index});});});
     if(state.visible.protection&&state.masterSl&&number(state.masterSl.level)>0)items.push({section:"protection",row:state.masterSl,index:-1,master:true});
     ctx.save();ctx.font="11px Arial";ctx.textBaseline="middle";
-    items.forEach(item=>{
+    const prepared=items.map(item=>{
       const level=number(item.row.level),y=top+((max-level)/(max-min))*height;
-      if(y<top||y>top+height)return;
+      if(y<top||y>top+height)return null;
       const value=item.section==="entry"?null:rowPl(item.section,item.row);
       const text=item.master?"G SL | "+fmtLot(item.row.lot)+" | "+fmtMoney(value):item.section==="entry"?rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot):rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot)+" | "+fmtMoney(value);
       const w=Math.ceil(ctx.measureText(text).width)+12,color=item.section==="entry"?"#374151":item.section==="protection"?moneyColor(value):"#047857",sectionRows=sortedRows(item.section).filter(row=>row.status!=="executed"&&number(row.level)>0&&number(row.lot)>=.001),boundary=!item.master&&item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);
-      let x=Math.max(8,right-w-12);
-      while(drawnBoxes.some(box=>x<box.x2&&x+w>box.x1&&y-8<box.y2&&y+8>box.y1)&&x>8)x=Math.max(8,x-w-6);
-      ctx.setLineDash([5,2]);ctx.strokeStyle=color;ctx.globalAlpha=.62;ctx.beginPath();ctx.moveTo(8,y);ctx.lineTo(right,y);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=.96;ctx.fillStyle="#fff";ctx.fillRect(x,y-8,w,16);ctx.strokeStyle=color;ctx.lineWidth=boundary?2:1;ctx.strokeRect(x,y-8,w,16);ctx.lineWidth=1;ctx.fillStyle=color;ctx.globalAlpha=1;ctx.fillText(text,x+6,y+.5);
+      return {item,y,value,text,w,color,boundary,x:Math.max(8,right-w-12)};
+    }).filter(Boolean);
+    prepared.forEach(entry=>{
+      ctx.setLineDash([5,2]);ctx.strokeStyle=entry.color;ctx.globalAlpha=.62;ctx.beginPath();ctx.moveTo(8,entry.y);ctx.lineTo(right,entry.y);ctx.stroke();
+    });
+    ctx.setLineDash([]);
+    prepared.sort((a,b)=>Number(!!b.boundary)-Number(!!a.boundary)).forEach(entry=>{
+      const {item,y,text,w,color,boundary,x}=entry;
+      if(y-8<top||y+8>top+height)return;
+      if(drawnBoxes.some(box=>x<box.x2&&x+w>box.x1&&y-8<box.y2&&y+8>box.y1))return;
+      ctx.globalAlpha=.96;ctx.fillStyle="#fff";ctx.fillRect(x,y-8,w,16);ctx.strokeStyle=color;ctx.lineWidth=boundary?2:1;ctx.strokeRect(x,y-8,w,16);ctx.lineWidth=1;ctx.fillStyle=color;ctx.globalAlpha=1;ctx.fillText(text,x+6,y+.5);
       const box={owner:item.master?"UNIVERSAL":OWNER,module:item.master?"UNIVERSAL":OWNER,section:item.section,localRowId:item.row.localRowId,binanceOrderId:item.row.binanceOrderId,status:item.row.status,boundary,x1:x,y1:y-8,x2:x+w,y2:y+8,row:item.row};
       drawnBoxes.push(box);state.overlayBoxes.push(box);
     });

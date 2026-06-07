@@ -420,7 +420,6 @@
 
   function ensureButton(){
     const account = q("mBalance") && q("mBalance").closest(".metric");
-    const assess = q("v29AssessMetric");
     let wrap = q("calcModuleMetric");
     let btn = q("calcOpenBtn");
     if(btn && wrap) return btn;
@@ -443,9 +442,7 @@
     btn.setAttribute("aria-label","Open position calculator");
     btn.setAttribute("aria-pressed","false");
     btn.innerHTML = `<svg viewBox="0 0 24 24" class="ui-btn-icon" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="8" y="6.5" width="8" height="3.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="9.5" cy="12.5" r="1" fill="currentColor"/><circle cx="13.5" cy="12.5" r="1" fill="currentColor"/><circle cx="9.5" cy="16" r="1" fill="currentColor"/><circle cx="13.5" cy="16" r="1" fill="currentColor"/></svg>`;
-    if(assess && assess.parentNode){
-      assess.insertAdjacentElement("afterend",wrap);
-    }else if(account && account.parentNode){
+    if(account && account.parentNode){
       account.insertAdjacentElement("beforebegin",wrap);
     }else{
       document.querySelector(".metrics")?.appendChild(wrap);
@@ -2427,7 +2424,6 @@
 
     const padX = 6;
     const labelH = 16;
-    const gap = 2;
     const chartBottom = top + priceH;
     ctx.save();
     ctx.beginPath();
@@ -2466,38 +2462,25 @@
     const sorted = items.slice().sort((a,b) => a.y - b.y);
     sorted.forEach(item => {
       const textW = Math.ceil(ctx.measureText(item.text).width) + padX * 2;
-      const overlapLane = placed.filter(prev => Math.abs(prev.item.y - item.y) < labelH + gap).length;
-      const minY = top + labelH / 2;
-      const maxY = chartBottom - labelH / 2;
-      let cy = clamp(item.y,minY,maxY);
-      if(placed.length){
-        const prev = placed[placed.length - 1];
-        const minCy = prev.cy + labelH + gap;
-        if(cy < minCy) cy = minCy;
-      }
+      const w = Math.min(textW,Math.max(56,chartRight - left - 8));
+      const cy = item.y;
+      const x = clamp(chartRight - w - 8,left + 2,chartRight - w - 2);
+      const y = cy - labelH / 2;
+      const collides = placed.some(prev => x < prev.x + prev.w && x + w > prev.x && y < prev.y + prev.h && y + labelH > prev.y);
+      if(y < top || y + labelH > chartBottom || collides) return;
       placed.push({
         item,
-        w:Math.min(textW,Math.max(56,chartRight - left - 8)),
+        w,
         h:labelH,
         cy,
-        lane:overlapLane
+        x,
+        y
       });
     });
-    for(let i=placed.length - 1;i>=0;i--){
-      const cur = placed[i];
-      const maxCy = chartBottom - labelH / 2 - (placed.length - 1 - i) * (labelH + gap);
-      cur.cy = Math.min(cur.cy,maxCy);
-      if(i > 0){
-        const prev = placed[i - 1];
-        if(prev.cy > cur.cy - (labelH + gap)) prev.cy = cur.cy - (labelH + gap);
-      }
-    }
     const drawnBoxes = [];
     placed.forEach(p => {
-      const laneOffset = p.lane ? Math.min(p.lane * 22,Math.max(0,chartRight - left - p.w - 10)) : 0;
-      const pendingArrowSpace = p.item.pendingSend ? 14 : 0;
-      const x = clamp(chartRight - p.w - 8 - laneOffset,left + 2 + pendingArrowSpace,chartRight - p.w - 2);
-      const y = clamp(p.cy,top + p.h / 2,chartBottom - p.h / 2) - p.h / 2;
+      const x = p.x;
+      const y = p.y;
       const blinkOn = blinkActiveForKey(p.item.orderKey);
       const isOpenPos = !!p.item.openPosition;
       const isSl = p.item.type === "master-sl";
