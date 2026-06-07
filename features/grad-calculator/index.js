@@ -34,6 +34,6 @@
     }
   }
 
-  window.GradCalculatorFeature = {version:"GR_COMMIT_V5",start};
+  window.GradCalculatorFeature = {version:"GR_COMMIT_V6",start};
   start();
 })();

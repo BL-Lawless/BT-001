@@ -40,14 +40,14 @@
     return {levels,step:distance,end:last};
   }
   function distributeLots(total,count){
-    const qty = Math.max(0,number(total) || 0);
+    const units = Math.max(0,Math.round((number(total) || 0) * 1000));
     const size = Math.max(1,Math.floor(number(count) || 1));
-    const each = Math.floor((qty / size) * 1000) / 1000;
-    let remaining = Math.round(qty * 1000) / 1000;
+    const eachUnits = Math.floor(units / size);
+    let remainingUnits = units;
     return Array.from({length:size},(_,index) => {
-      const lot = index === size - 1 ? remaining : Math.min(each,remaining);
-      remaining = Math.round((remaining - lot) * 1000) / 1000;
-      return lot;
+      const lotUnits = index === size - 1 ? remainingUnits : Math.min(eachUnits,remainingUnits);
+      remainingUnits -= lotUnits;
+      return lotUnits / 1000;
     });
   }
 
