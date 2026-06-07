@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const MODULE = "GR_COMMIT_V6";
+  const MODULE = "GR_COMMIT_V7";
   const OWNER = "GR";
   const STORE_KEY = "bt001_gr_commit_v5_orders";
   const ORDER_URL = "https://fapi.binance.com/fapi/v1/order";
@@ -17,6 +17,7 @@
     masterSl:null,
     positionBasis:{protection:null,exit:null},
     stale:{protection:false,exit:false},
+    loadedMode:{entry:false,protection:false,exit:false},
     rows:{entry:[],protection:[],exit:[]},
     visible:{entry:true,protection:true,exit:true},
     generators:{
@@ -53,6 +54,14 @@
   const redraw = () => { try{if(typeof draw === "function") draw();}catch(_e){} };
   const setStatus = text => { const node=q("gradCalcStatus"); if(node) node.textContent=text || ""; };
   const rows = section => state.rows[section];
+  const sortedRows = section => rows(section).slice().sort((a,b)=>{
+    const price=currentPrice(),aLevel=number(a.level),bLevel=number(b.level);
+    if(price!=null&&aLevel!=null&&bLevel!=null){
+      const distance=Math.abs(aLevel-price)-Math.abs(bLevel-price);
+      if(Math.abs(distance)>1e-9)return distance;
+    }
+    return (aLevel??Infinity)-(bLevel??Infinity);
+  });
   const validRows = section => rows(section).filter(row => number(row.level) > 0 && number(row.lot) >= .001);
   const weighted = section => domain().weightedAverage(validRows(section));
   const referenceEntry = () => weighted("entry").average || number(state.livePosition && state.livePosition.entry);
@@ -101,7 +110,7 @@
   }
   function orderMetadata(section,data={}){
     return {
-      owner:OWNER,module:OWNER,section,
+      owner:data.owner || OWNER,module:data.module || data.owner || OWNER,section,
       localRowId:data.localRowId || createRowId(section),
       clientOrderId:data.clientOrderId || null,
       binanceOrderId:data.binanceOrderId || null,
@@ -123,6 +132,7 @@
   }
   function clearSection(section){
     state.rows[section]=[];
+    state.loadedMode[section]=false;
     if(section==="protection")state.masterSl=null;
     if(section!=="entry"){state.positionBasis[section]=null;state.stale[section]=false;}
     renderSection(section);
@@ -136,6 +146,7 @@
     state.masterSl=null;
     state.positionBasis={protection:null,exit:null};
     state.stale={protection:false,exit:false};
+    state.loadedMode={entry:false,protection:false,exit:false};
     calculate();
     persistRows();
     setStatus("All GR local state cleared.");
@@ -160,7 +171,7 @@
       ${section==="entry" ? `<label>Direction<select id="${prefix}Direction"><option>LONG</option><option>SHORT</option></select></label>` : ""}
       <label>Start level<input id="${prefix}Start" type="number" min="0" step="10"></label>
       <label>End level<input id="${prefix}End" type="number" min="0" step="10"></label>
-      <label>Step<input id="${prefix}Step" type="text" inputmode="decimal"></label>
+      <label>Step<span class="grad-step-control"><input id="${prefix}Step" type="text" inputmode="decimal"><span class="grad-step-buttons"><button id="${prefix}StepUp" type="button">▲</button><button id="${prefix}StepDown" type="button">▼</button></span></span></label>
       <label>Total lot<input id="${prefix}Lot" type="number" min="0.001" step="0.001" value="0.000"></label>
       <label>Count<input id="${prefix}Count" type="number" min="1" step="1" value="${section==="protection" ? 2 : 3}"></label>
     </div>`;
@@ -196,7 +207,7 @@
     win=document.createElement("div");
     win.id="gradCalcWindow";
     win.className="grad-calc-window hidden";
-    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V6</div><button id="gradCalcClose" type="button">x</button></div>
+    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V7</div><button id="gradCalcClose" type="button">x</button></div>
       <div class="grad-calc-body">
         <div class="grad-calc-tabs">${sections.map(section=>`<button id="gradTab${section}" type="button">${sectionTitle(section)}</button>`).join("")}</div>
         <div class="grad-calc-tab-stage">${sections.map(panelMarkup).join("")}</div>
@@ -262,7 +273,8 @@
     const container=q(`grad${section}Rows`);
     if(!container) return;
     container.innerHTML="";
-    rows(section).forEach((model,index)=>{
+    const displayRows=sortedRows(section);
+    displayRows.forEach((model,index)=>{
       const node=document.createElement("div");
       node.className="grad-calc-row";
       Object.assign(node.dataset,{owner:OWNER,module:OWNER,section,localRowId:model.localRowId,status:model.status});
@@ -288,8 +300,9 @@
   function updateRowValues(section){
     const total=validRows(section).reduce((sum,row)=>sum+(number(row.lot)||0),0);
     const exceedsPosition=section!=="entry"&&state.livePosition&&total>state.livePosition.qty+1e-9;
+    const displayRows=sortedRows(section);
     q(`grad${section}Rows`)?.querySelectorAll(".grad-calc-row").forEach((node,index)=>{
-      const row=rows(section)[index];
+      const row=displayRows[index];
       const value=section==="entry" ? rowMargin(row) : rowPl(section,row);
       const valueNode=node.querySelector(".grad-calc-value");
       valueNode.textContent=fmtMoney(value);
@@ -353,10 +366,11 @@
     generator.step=step;generator.end=levels[levels.length-1];generator.count=count;
     const lots=domain().distributeLots(totalLot,count);
     state.rows[section]=levels.map((level,index)=>rowModel(section,{level,lot:lots[index]}));
+    state.loadedMode[section]=false;
     writeGenerator(section);renderSection(section);calculate();persistRows();
   }
   function syncGeneratorFromRows(section){
-    const list=rows(section).filter(row=>row.status!=="executed");
+    const list=sortedRows(section).filter(row=>row.status!=="executed");
     if(!list.length) return;
     const generator=state.generators[section];
     generator.start=number(list[0].level);generator.end=number(list[list.length-1].level);generator.count=list.length;
@@ -366,7 +380,7 @@
     writeGenerator(section);
   }
   function redistributeFromBoundaries(section,boundary,level){
-    const list=rows(section).filter(row=>row.status!=="executed"),generator=state.generators[section],start=boundary==="start"?number(level):number(generator.start),end=boundary==="end"?number(level):number(generator.end);
+    const list=sortedRows(section).filter(row=>row.status!=="executed"),generator=state.generators[section],start=boundary==="start"?number(level):number(generator.start),end=boundary==="end"?number(level):number(generator.end);
     if(list.length<2||start==null||end==null||start<=0||end<=0)return false;
     const sign=generatorDirection(section);
     if((end-start)*sign<0)return false;
@@ -375,6 +389,11 @@
     generator.start=start;generator.end=end;generator.step=step;generator.count=list.length;generator.lastEdited="end";
     writeGenerator(section);renderSection(section);calculate();persistRows();
     return true;
+  }
+  function redistributeLotsOnly(section,total){
+    const list=sortedRows(section).filter(row=>row.status!=="executed"),lots=domain().distributeLots(total,list.length);
+    list.forEach((row,index)=>{row.lot=fmtLot(lots[index]);row.status=row.binanceOrderId?"modified":"local";});
+    renderSection(section);calculate();persistRows();
   }
 
   async function signedWrite(url,method,params){
@@ -422,26 +441,37 @@
       return section!=="entry"||["NEW","PARTIALLY_FILLED","FILLED"].includes(status);
     });
   }
+  async function universalMasterSlOrder(){
+    if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
+    const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
+    const normal=await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
+    const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
+    const side=state.livePosition&&state.livePosition.side==="SHORT"?"BUY":"SELL";
+    return [].concat(Array.isArray(normal)?normal:[],Array.isArray(algo)?algo:[]).filter(order=>{
+      const type=String(order&& (order.type||order.orderType) || "").toUpperCase();
+      const orderSide=String(order&&order.side||"").toUpperCase();
+      return !clientIdOf(order).startsWith("GR_PROT_")&&["STOP","STOP_MARKET"].includes(type)&&orderSide===side;
+    }).sort((a,b)=>(number(b.origQty||b.quantity||b.qty)||0)-(number(a.origQty||a.quantity||a.qty)||0))[0]||null;
+  }
   function fromBinanceOrder(section,order){
     const status=String(order.status||order.orderStatus||"").toUpperCase()==="FILLED"?"executed":"sent";
     const lot=order.executedQty&&status==="executed"?order.executedQty:order.origQty||order.quantity||order.qty;
     return rowModel(section,{localRowId:`gr_owned_${order.orderId||order.algoId||clientIdOf(order)}`,binanceOrderId:order.orderId||order.algoId||null,clientOrderId:clientIdOf(order)||null,status,symbol:order.symbol||currentSymbol(),side:order.side||null,orderType:order.type||order.orderType||null,role:isMasterSlOrder(order)?"masterSl":section==="protection"?"psl":section,level:orderLevel(section,order),price:number(order.price)>0?order.price:null,stopPrice:number(order.stopPrice)>0?order.stopPrice:number(order.triggerPrice)>0?order.triggerPrice:null,lot,originalLot:lot});
   }
   function importOwned(section,ordersList){
-    const local=rows(section).filter(row=>row.status==="local"||row.status==="modified");
     const imported=ordersList.filter(order=>!isMasterSlOrder(order)).map(order=>fromBinanceOrder(section,order));
-    const importedIds=new Set(imported.map(row=>row.clientOrderId).filter(Boolean));
-    state.rows[section]=imported.concat(local.filter(row=>!row.clientOrderId||!importedIds.has(row.clientOrderId)));
-    if(section==="protection"){
-      const masterOrder=ordersList.find(isMasterSlOrder);
-      state.masterSl=masterOrder?fromBinanceOrder(section,masterOrder):state.masterSl&&state.masterSl.status==="local"?state.masterSl:null;
-    }
+    state.rows[section]=imported;
+    state.loadedMode[section]=true;
     renderSection(section);syncGeneratorFromRows(section);calculate();
     persistRows();
   }
   async function readSection(section){
     setStatus("Reading GR "+sectionTitle(section)+"...");
     try{
+      state.rows[section]=[];
+      state.loadedMode[section]=false;
+      if(section==="protection")state.masterSl=null;
+      renderSection(section);calculate();redraw();
       if(section==="entry"){
         importOwned(section,await ownedOrders(section));
       }else{
@@ -451,7 +481,11 @@
         state.generators[section].lot=state.livePosition.qty;
         q(`grad${section}Lot`).value=fmtLot(state.livePosition.qty);
         importOwned(section,await ownedOrders(section));
-        if(section==="protection"&&state.masterSl){calculate();persistRows();}
+        if(section==="protection"){
+          const universal=await universalMasterSlOrder();
+          state.masterSl=universal?rowModel("protection",{localRowId:`universal_sl_${universal.algoId||universal.orderId||clientIdOf(universal)}`,binanceOrderId:universal.algoId||universal.orderId||null,clientOrderId:clientIdOf(universal)||null,status:"sent",symbol:universal.symbol||currentSymbol(),side:universal.side||null,orderType:universal.type||universal.orderType||"STOP_MARKET",role:"masterSl",level:orderLevel("protection",universal),stopPrice:orderLevel("protection",universal),lot:universal.origQty||universal.quantity||universal.qty||state.livePosition.qty,owner:"UNIVERSAL",module:"UNIVERSAL"}):null;
+          calculate();persistRows();
+        }
       }
       setStatus(sectionTitle(section)+" Read complete.");
     }catch(error){setStatus(error.message||String(error));}
@@ -480,7 +514,6 @@
     if(section==="protection"&&state.masterSl){
       if(number(state.masterSl.level)==null||number(state.masterSl.level)<=0)errors.push("Master SL level is invalid.");
       if(number(state.masterSl.lot)<.001)errors.push("Master SL has no remaining protected lot.");
-      if(state.masterSl.binanceOrderId!=null&&!ownedClientId(state.masterSl))errors.push("Master SL ownership cannot be proven.");
     }
     const ids=allRows.concat(section==="protection"&&state.masterSl?[state.masterSl]:[]).map(clientIdOf).filter(Boolean);
     if(new Set(ids).size!==ids.length)errors.push("Duplicate GR clientOrderIds detected.");
@@ -530,7 +563,7 @@
       list.forEach(row=>{row.binanceOrderId=null;row.clientOrderId=null;row.status="local";});
     }
     for(let index=0;index<list.length;index++){
-      const row=list[index],isMaster=row===state.masterSl,clientId=freshClientId(isMaster?"GR_PROT_SL_":clientPrefix(section),row);
+      const row=list[index],isMaster=row===state.masterSl,clientId=freshClientId(isMaster?"UNIV_SL_":clientPrefix(section),row);
       let sentSide=null,sentType=null;
       if(section==="protection"){
         const side=state.livePosition.side==="SHORT"?"BUY":"SELL";
@@ -548,7 +581,7 @@
         if(row.status==="modified"&&row.binanceOrderId!=null){delete payload.newClientOrderId;payload.orderId=String(row.binanceOrderId);response=await signedWrite(ORDER_URL,"PUT",payload);}else response=await signedWrite(ORDER_URL,"POST",payload);
         row.binanceOrderId=response.orderId||null;row.clientOrderId=response.clientOrderId||row.clientOrderId||clientId;
       }
-      Object.assign(row,{owner:OWNER,module:OWNER,section,clientOrderId:row.clientOrderId||clientId,symbol:currentSymbol(),side:sentSide,orderType:sentType,price:section==="protection"?null:fmtLevelInput(row.level),stopPrice:section==="protection"?fmtLevelInput(row.level):null,originalLot:fmtLot(row.lot),status:"sent"});
+      Object.assign(row,{owner:isMaster?"UNIVERSAL":OWNER,module:isMaster?"UNIVERSAL":OWNER,section,clientOrderId:row.clientOrderId||clientId,symbol:currentSymbol(),side:sentSide,orderType:sentType,price:section==="protection"?null:fmtLevelInput(row.level),stopPrice:section==="protection"?fmtLevelInput(row.level):null,originalLot:fmtLot(row.lot),status:"sent"});
       persistRows();
     }
   }
@@ -580,11 +613,22 @@
     if(typeof canvas==="undefined"||!canvas||typeof ctx==="undefined"||!ctx)return;
     const s=typeof currentPriceLineState!=="undefined"?currentPriceLineState||{}:{},top=number(s.top)??8,height=number(s.priceH)??lastAreaH,min=number(s.minP)??lastYMin,max=number(s.maxP)??lastYMax;
     if(!(height>0)||min==null||max==null||!(max>min))return;
-    const right=canvas.clientWidth-(typeof RIGHT_AXIS==="number"?RIGHT_AXIS:84),items=[];
-    sections.forEach(section=>{if(state.visible[section])rows(section).forEach((row,index)=>{if(number(row.level)>0&&number(row.lot)>=.001)items.push({section,row,index});});});
+    const right=canvas.clientWidth-(typeof RIGHT_AXIS==="number"?RIGHT_AXIS:84),items=[],drawnBoxes=[];
+    sections.forEach(section=>{if(state.visible[section])sortedRows(section).forEach((row,index)=>{if(number(row.level)>0&&number(row.lot)>=.001)items.push({section,row,index});});});
     if(state.visible.protection&&state.masterSl&&number(state.masterSl.level)>0)items.push({section:"protection",row:state.masterSl,index:-1,master:true});
     ctx.save();ctx.font="11px Arial";ctx.textBaseline="middle";
-    items.forEach((item,index)=>{const level=number(item.row.level),y=top+((max-level)/(max-min))*height;if(y<top||y>top+height)return;const value=item.section==="entry"?rowMargin(item.row):rowPl(item.section,item.row),text=(item.master?"G SL":rowLabel(item.section,item.index))+" | "+fmtLot(item.row.lot)+" | "+fmtMoney(value),w=Math.ceil(ctx.measureText(text).width)+12,x=Math.max(8,right-w-12-(index%3)*18),color=item.section==="entry"?"#2563eb":item.section==="protection"?moneyColor(value):"#047857",sectionRows=validRows(item.section).filter(row=>row.status!=="executed"),boundary=!item.master&&item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);ctx.setLineDash([5,2]);ctx.strokeStyle=color;ctx.globalAlpha=.62;ctx.beginPath();ctx.moveTo(8,y);ctx.lineTo(right,y);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=.96;ctx.fillStyle="#fff";ctx.fillRect(x,y-8,w,16);ctx.strokeStyle=color;ctx.lineWidth=boundary?2:1;ctx.strokeRect(x,y-8,w,16);ctx.lineWidth=1;ctx.fillStyle=color;ctx.globalAlpha=1;ctx.fillText(text,x+6,y+.5);state.overlayBoxes.push({owner:OWNER,module:OWNER,section:item.section,localRowId:item.row.localRowId,binanceOrderId:item.row.binanceOrderId,status:item.row.status,boundary,x1:x,y1:y-8,x2:x+w,y2:y+8,row:item.row});});
+    items.forEach(item=>{
+      const level=number(item.row.level),y=top+((max-level)/(max-min))*height;
+      if(y<top||y>top+height)return;
+      const value=item.section==="entry"?null:rowPl(item.section,item.row);
+      const text=item.master?"G SL | "+fmtLot(item.row.lot)+" | "+fmtMoney(value):item.section==="entry"?rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot):rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot)+" | "+fmtMoney(value);
+      const w=Math.ceil(ctx.measureText(text).width)+12,color=item.section==="entry"?"#374151":item.section==="protection"?moneyColor(value):"#047857",sectionRows=sortedRows(item.section).filter(row=>row.status!=="executed"&&number(row.level)>0&&number(row.lot)>=.001),boundary=!item.master&&item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);
+      let x=Math.max(8,right-w-12);
+      while(drawnBoxes.some(box=>x<box.x2&&x+w>box.x1&&y-8<box.y2&&y+8>box.y1)&&x>8)x=Math.max(8,x-w-6);
+      ctx.setLineDash([5,2]);ctx.strokeStyle=color;ctx.globalAlpha=.62;ctx.beginPath();ctx.moveTo(8,y);ctx.lineTo(right,y);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=.96;ctx.fillStyle="#fff";ctx.fillRect(x,y-8,w,16);ctx.strokeStyle=color;ctx.lineWidth=boundary?2:1;ctx.strokeRect(x,y-8,w,16);ctx.lineWidth=1;ctx.fillStyle=color;ctx.globalAlpha=1;ctx.fillText(text,x+6,y+.5);
+      const box={owner:item.master?"UNIVERSAL":OWNER,module:item.master?"UNIVERSAL":OWNER,section:item.section,localRowId:item.row.localRowId,binanceOrderId:item.row.binanceOrderId,status:item.row.status,boundary,x1:x,y1:y-8,x2:x+w,y2:y+8,row:item.row};
+      drawnBoxes.push(box);state.overlayBoxes.push(box);
+    });
     ctx.restore();
   }
   function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}return result;};}
@@ -592,11 +636,25 @@
   function installDrag(){if(typeof canvas==="undefined"||!canvas||canvas.__gradV4Drag)return;canvas.__gradV4Drag=true;canvas.addEventListener("mousedown",event=>{const box=hit(event.clientX,event.clientY);if(!box||!box.boundary)return;state.drag=box;event.preventDefault();event.stopImmediatePropagation();},true);window.addEventListener("mousemove",event=>{if(!state.drag)return;const level=priceFromY(event.clientY);if(level==null||level<=0)return;redistributeFromBoundaries(state.drag.section,state.drag.boundary,level);event.preventDefault();},true);window.addEventListener("mouseup",event=>{if(!state.drag)return;state.drag=null;event.preventDefault();},true);}
   function bindGenerator(section){
     const prefix=`grad${section}`;
-    ["Start","End","Lot","Count"].forEach(name=>q(prefix+name).addEventListener("input",()=>{const generator=state.generators[section];if(name==="End")generator.lastEdited="end";readGenerator(section);if(number(q(prefix+"Start").value)>0)generate(section);},false));
+    ["Start","End","Lot","Count"].forEach(name=>q(prefix+name).addEventListener("input",()=>{
+      const generator=state.generators[section];
+      if(name==="End")generator.lastEdited="end";
+      readGenerator(section);
+      if(state.loadedMode[section]&&(name==="Lot"||name==="Count")){
+        if(name==="Count"){state.generators[section].count=rows(section).length||1;q(prefix+"Count").value=String(state.generators[section].count);}
+        if(name==="Lot")redistributeLotsOnly(section,state.generators[section].lot);
+        setStatus(sectionTitle(section)+" loaded-order mode: levels remain fixed until boundary edit or regeneration.");
+        return;
+      }
+      if(name==="Start"||name==="End")state.loadedMode[section]=false;
+      if(number(q(prefix+"Start").value)>0)generate(section);
+    },false));
     const step=q(prefix+"Step");
     step.addEventListener("input",()=>{state.generators[section].step=step.value;state.generators[section].lastEdited="step";},false);
-    const commitStep=()=>{const value=number(step.value);if(value==null||value<0){step.value=state.generators[section].step===""?"":fmtStep(state.generators[section].step);return;}state.generators[section].step=value;state.generators[section].lastEdited="step";step.value=fmtStep(value);readGenerator(section);if(number(q(prefix+"Start").value)>0)generate(section);};
+    const commitStep=()=>{const value=number(step.value);if(value==null||value<0){step.value=state.generators[section].step===""?"":fmtStep(state.generators[section].step);return;}state.loadedMode[section]=false;state.generators[section].step=value;state.generators[section].lastEdited="step";step.value=fmtStep(value);readGenerator(section);if(number(q(prefix+"Start").value)>0)generate(section);};
     step.addEventListener("blur",commitStep,false);step.addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();step.blur();}},false);
+    const nudgeStep=delta=>{const base=number(step.value)??number(state.generators[section].step)??0;step.value=(Math.max(0,base+delta)).toFixed(1);commitStep();};
+    q(prefix+"StepUp").onclick=()=>nudgeStep(.1);q(prefix+"StepDown").onclick=()=>nudgeStep(-.1);
     if(section==="entry")q(prefix+"Direction").addEventListener("change",()=>{readGenerator(section);generate(section);},false);
   }
   function installWindowDrag(win){const head=q("gradCalcHead");let drag=null;head.addEventListener("pointerdown",event=>{if(event.target.closest("button"))return;const rect=win.getBoundingClientRect();drag={x:event.clientX,y:event.clientY,left:rect.left,top:rect.top};head.setPointerCapture(event.pointerId);});head.addEventListener("pointermove",event=>{if(!drag)return;win.style.left=Math.max(0,drag.left+event.clientX-drag.x)+"px";win.style.top=Math.max(0,drag.top+event.clientY-drag.y)+"px";});head.addEventListener("pointerup",event=>{drag=null;try{head.releasePointerCapture(event.pointerId);}catch(_e){}});}
@@ -622,7 +680,7 @@
   }
   function restorePersistentState(){
     const records=storedRecords().filter(record=>record.symbol===currentSymbol()&&sections.includes(record.section)&&(["local"].includes(record.status)||ownedClientId(record)));
-    sections.forEach(section=>{state.rows[section]=records.filter(record=>record.section===section&&record.role!=="masterSl").map(record=>rowModel(section,record));});
+    sections.forEach(section=>{state.rows[section]=records.filter(record=>record.section===section&&record.role!=="masterSl").map(record=>rowModel(section,record));state.loadedMode[section]=state.rows[section].some(row=>row.status==="sent"||row.status==="executed");});
     const master=records.find(record=>record.section==="protection"&&record.role==="masterSl");
     state.masterSl=master?rowModel("protection",master):null;
   }
