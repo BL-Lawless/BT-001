@@ -58,6 +58,14 @@
   let lastEditedExitLotInput = null;
   let lastKnownLiveOpenPositionQty = null;
   let positionSizeNoticeTimer = null;
+  let openPositionReconcileTimer = null;
+  let pendingOpenPositionChange = null;
+  let lastOpenPositionReconcileSignature = "";
+  let binanceStateReconcileTimer = null;
+  let pendingBinanceStateChange = null;
+  let lastBinanceStateEventSignature = "";
+  let binanceSyncPreserveKeys = new Set();
+  let binanceSyncPreservedRows = [];
   const notifiedExecutionKeys = new Set();
 
   function q(id){ return document.getElementById(id); }
@@ -128,6 +136,172 @@
     clearTimeout(positionSizeNoticeTimer);
     positionSizeNoticeTimer = null;
     q("calcOpenBtn")?.classList.remove("calc-module-icon-notify");
+  }
+  function openPositionChangeSignature(detail){
+    const current = detail && detail.current;
+    if(!current) return "flat";
+    return [
+      String(current.symbol || currentSymbol()),
+      current.side === "SHORT" ? "SHORT" : "LONG",
+      Number(current.qty || 0).toFixed(10),
+      Number(current.avg || 0).toFixed(8)
+    ].join(":");
+  }
+  function eventOpenPosition(detail){
+    const current = detail && detail.current;
+    if(!current || !(num(current.qty) > 0) || !(num(current.avg) > 0)) return null;
+    return {
+      side:current.side === "SHORT" ? "SHORT" : "LONG",
+      qty:Math.abs(num(current.qty)),
+      entry:num(current.avg),
+      source:"openPositionChangeEvent"
+    };
+  }
+  function reconcileOpenPositionRow(detail){
+    const signature = openPositionChangeSignature(detail);
+    if(signature === lastOpenPositionReconcileSignature) return;
+    lastOpenPositionReconcileSignature = signature;
+    const position = eventOpenPosition(detail);
+    const container = q("calcModuleEntryRows");
+    if(!container) return;
+    const openRows = rows("calcModuleEntryRows").filter(isOpenPositionRow);
+    if(position){
+      setDirection(position.side);
+      let row = openRows.shift() || null;
+      openRows.forEach(extra => extra.remove());
+      if(!row){
+        row = addRow("calcModuleEntryRows",Math.round(position.entry),Number(position.qty).toFixed(3),{
+          locked:true,
+          openPosition:true,
+          keepRemoveEnabled:true,
+          preserveEmptyDefaults:true
+        });
+      }else{
+        const level = levelInput(row);
+        const lot = lotInput(row);
+        if(level) level.value = String(Math.round(position.entry));
+        if(lot) lot.value = Number(position.qty).toFixed(3);
+        setOpenPositionRow(row,true);
+        setRowLocked(row,true,{keepRemoveEnabled:true});
+      }
+      if(row && container.firstElementChild !== row) container.insertBefore(row,container.firstElementChild);
+    }else{
+      openRows.forEach(row => row.remove());
+    }
+    lastKnownLiveOpenPositionQty = position ? position.qty : 0;
+    refreshLiveStopsValidity(position,true);
+    refreshLiveExitsValidity(position,true);
+    if(lastReadStateSnapshot){
+      lastReadStateSnapshot.openPosition = position ? {
+        side:position.side,
+        qty:position.qty,
+        entry:position.entry,
+        positionSide:""
+      } : null;
+      lastReadStateSnapshot.direction = position ? position.side : null;
+    }
+    updateAutoSyncBaseline(position,{
+      symbol:currentSymbol(),
+      normalOrders:Array.isArray(window.v13OpenOrders21) ? window.v13OpenOrders21 : [],
+      algoOrders:Array.isArray(window.v13OpenAlgoOrders21) ? window.v13OpenAlgoOrders21 : []
+    });
+    markSendPlanStale("Live open position changed after preflight.");
+    calculate();
+    if(detail && detail.sizeChanged) setCalculatorPositionSizeNotice();
+  }
+  function scheduleOpenPositionReconcile(detail){
+    pendingOpenPositionChange = detail || null;
+    clearTimeout(openPositionReconcileTimer);
+    openPositionReconcileTimer = setTimeout(() => {
+      openPositionReconcileTimer = null;
+      const next = pendingOpenPositionChange;
+      pendingOpenPositionChange = null;
+      reconcileOpenPositionRow(next);
+    },250);
+  }
+  function markBinanceRowNeedsReview(row,reason){
+    if(!row) return;
+    row.classList.add("calc-module-row-needs-review");
+    row.dataset.needsReview = "1";
+    row.title = reason || "Binance state changed while this row had local edits. Review before Send.";
+  }
+  function clearBinanceRowNeedsReview(row){
+    if(!row) return;
+    row.classList.remove("calc-module-row-needs-review");
+    delete row.dataset.needsReview;
+  }
+  function rowBinanceKey(row){
+    if(!row) return "";
+    if(String(row.dataset && row.dataset.source || "") === "binance-limit"){
+      const meta = row.__binanceLimitOrderMeta || (row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
+      return orderKeyFromMeta(meta);
+    }
+    if(String(row.dataset && row.dataset.source || "") === "binance-partial-stop"){
+      const meta = row.__binancePartialStopMeta || (row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null);
+      return partialStopKeyFromMeta(meta,meta && meta.side);
+    }
+    return "";
+  }
+  function snapshotEditedBinanceRows(){
+    const active = document.activeElement;
+    const preserved = [];
+    ["calcModuleEntryRows","calcModuleExitRows","calcModulePartialStopRows"].forEach(containerId => {
+      rows(containerId).forEach(row => {
+        const key = rowBinanceKey(row);
+        if(!key) return;
+        const activelyEditing = !!(active && row.contains(active));
+        if(!activelyEditing && !rowPendingSend(row)) return;
+        preserved.push({
+          containerId,
+          key,
+          level:String(levelInput(row)?.value || ""),
+          lot:String(lotInput(row)?.value || ""),
+          source:String(row.dataset && row.dataset.source || ""),
+          limitMeta:row.__binanceLimitOrderMeta || (row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null),
+          partialMeta:row.__binancePartialStopMeta || (row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null)
+        });
+        markBinanceRowNeedsReview(row,"Binance state changed while this row has local edits. Local values were preserved; review before Send.");
+      });
+    });
+    return preserved;
+  }
+  function restoreEditedBinanceRows(preserved){
+    (Array.isArray(preserved) ? preserved : []).forEach(item => {
+      let row = rows(item.containerId).find(candidate => rowBinanceKey(candidate) === item.key);
+      if(!row){
+        row = addRow(item.containerId,item.level,item.lot,item.source === "binance-partial-stop"
+          ? {source:"binance-partial-stop",meta:item.partialMeta}
+          : {source:"binance-limit",meta:item.limitMeta});
+      }
+      const level = levelInput(row);
+      const lot = lotInput(row);
+      if(level) level.value = item.level;
+      if(lot) lot.value = item.lot;
+      markBinanceRowNeedsReview(row,"Binance state changed while this row has local edits. Local values were preserved; review before Send.");
+    });
+  }
+  function scheduleBinanceStateReconcile(detail){
+    const signature = String(detail && detail.signature || "");
+    if(!signature || signature === lastBinanceStateEventSignature) return;
+    lastBinanceStateEventSignature = signature;
+    pendingBinanceStateChange = detail;
+    markSendPlanStale("Binance state changed after preflight.");
+    clearTimeout(binanceStateReconcileTimer);
+    binanceStateReconcileTimer = setTimeout(async() => {
+      binanceStateReconcileTimer = null;
+      if(autoSyncRefreshing){
+        pendingBinanceStateChange = null;
+        return;
+      }
+      const change = pendingBinanceStateChange;
+      pendingBinanceStateChange = null;
+      autoSyncRefreshing = true;
+      try{
+        await readBinance({preserveSendPlan:true,autoSync:true,source:"binanceStateWatcher",binanceStateChange:change});
+      }finally{
+        autoSyncRefreshing = false;
+      }
+    },500);
   }
   function showStructuralWarning(){
     structuralWarningActive = true;
@@ -1187,6 +1361,11 @@
         return orderKeyFromMeta(meta) === itemKey;
       }) : null;
       if(matched){
+        if(itemKey && binanceSyncPreserveKeys.has(itemKey)){
+          markBinanceRowNeedsReview(matched,"Binance state changed while this row has local edits. Local values were preserved; review before Send.");
+          return matched;
+        }
+        clearBinanceRowNeedsReview(matched);
         const lvl = levelInput(matched);
         const lot = lotInput(matched);
         if(lvl) lvl.value = item.level == null ? "" : Math.round(item.level);
@@ -1203,6 +1382,11 @@
         return partialStopKeyFromMeta(meta,item.side) === itemKey;
       }) : null;
       if(matched){
+        if(itemKey && binanceSyncPreserveKeys.has(itemKey)){
+          markBinanceRowNeedsReview(matched,"Binance state changed while this row has local edits. Local values were preserved; review before Send.");
+          return matched;
+        }
+        clearBinanceRowNeedsReview(matched);
         const lvl = levelInput(matched);
         const lot = lotInput(matched);
         if(lvl) lvl.value = item.level == null ? "" : Math.round(item.level);
@@ -1543,6 +1727,10 @@
       const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
       const key = orderKeyFromMeta(meta);
       if(key && activeKeys.has(key)) return;
+      if(key && binanceSyncPreserveKeys.has(key)){
+        markBinanceRowNeedsReview(row,"This locally edited Binance-backed row is no longer confirmed open. Review before Send.");
+        return;
+      }
       clearBinanceMetaOnRow(row);
       row.remove();
     });
@@ -1554,6 +1742,10 @@
       const meta = row.__binancePartialStopMeta || (row.dataset && row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null);
       const key = partialStopKeyFromMeta(meta,null);
       if(key && activeKeys.has(key)) return;
+      if(key && binanceSyncPreserveKeys.has(key)){
+        markBinanceRowNeedsReview(row,"This locally edited Binance-backed PSL is no longer confirmed open. Review before Send.");
+        return;
+      }
       clearPartialStopMetaOnRow(row);
       row.remove();
     });
@@ -2184,9 +2376,12 @@
     });
     const entryRows = entries.map(item => {
       const openPosition = isOpenPositionRow(item.row);
+      const needsReview = !!(item.row && item.row.dataset && item.row.dataset.needsReview === "1");
       const meta = item.row && item.row.__binanceLimitOrderMeta ? item.row.__binanceLimitOrderMeta : (item.row && item.row.dataset && item.row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(item.row.dataset.calcRowId) : null);
       const sourceStyle = openPosition
         ? "open-position"
+        : needsReview
+          ? "needs-review"
         : String(item.row && item.row.dataset ? item.row.dataset.source || "" : "") === "binance-limit"
           ? "binance-existing"
           : "manual-entry";
@@ -2206,8 +2401,11 @@
       };
     });
     const exitRows = exits.map((item,index) => {
+      const needsReview = !!(item.row && item.row.dataset && item.row.dataset.needsReview === "1");
       const meta = item.row && item.row.__binanceLimitOrderMeta ? item.row.__binanceLimitOrderMeta : (item.row && item.row.dataset && item.row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(item.row.dataset.calcRowId) : null);
-      const sourceStyle = String(item.row && item.row.dataset ? item.row.dataset.source || "" : "") === "binance-limit"
+      const sourceStyle = needsReview
+        ? "needs-review"
+        : String(item.row && item.row.dataset ? item.row.dataset.source || "" : "") === "binance-limit"
         ? "binance-existing"
         : "exit";
       const pl = entryAvg == null
@@ -2242,7 +2440,7 @@
     } : null;
     const partialStopRows = visualLevelDistanceSort(stopMath.partialStops,currentPriceReference()).map((item,index) => ({
       orderKey:partialStopKeyFromMeta(item.row && item.row.__binancePartialStopMeta ? item.row.__binancePartialStopMeta : (item.row && item.row.dataset && item.row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(item.row.dataset.calcPartialStopRowId) : null),null),
-      binanceBacked:!!(item.row && item.row.dataset && item.row.dataset.source === "binance-partial-stop"),
+      binanceBacked:!!(item.row && item.row.dataset && item.row.dataset.source === "binance-partial-stop" && item.row.dataset.needsReview !== "1"),
       type:"partial-sl",
       level:item.level,
       lot:item.lot,
@@ -4772,6 +4970,9 @@
     };
     suppressCalculatorOverlayDraw = true;
     try{
+      const preserveLocalBinanceEdits = !!opts.autoSync || source === "binanceStateWatcher" || source === "autoWatch";
+      binanceSyncPreservedRows = preserveLocalBinanceEdits ? snapshotEditedBinanceRows() : [];
+      binanceSyncPreserveKeys = new Set(binanceSyncPreservedRows.map(item => item.key).filter(Boolean));
       const preservedEntryRows = snapshotManualRows("calcModuleEntryRows");
       const readState = isOwnedRefresh
         ? await withCalculatorOwnedRefresh(source,async() => ({pos:await signedPosition() || openBoxPosition()}))
@@ -4853,6 +5054,7 @@
         lastStopEdit = "level";
         syncStopFromLevel(pos.entry);
       }
+      restoreEditedBinanceRows(binanceSyncPreservedRows);
       sortCalculatorRowsForRead();
       if(snapshot){
         lastReadStateSnapshot = buildReadStateSnapshot(pos,snapshot,{
@@ -4883,8 +5085,12 @@
         clearStructuralWarning();
       }
       publishReadDiagnostic(diag);
+      binanceSyncPreserveKeys = new Set();
+      binanceSyncPreservedRows = [];
     }catch(e){
       suppressCalculatorOverlayDraw = false;
+      binanceSyncPreserveKeys = new Set();
+      binanceSyncPreservedRows = [];
       console.warn(MODULE + " Binance read failed",e);
       setStatus("Read failed.");
       lastReadStateSnapshot = null;
@@ -5170,8 +5376,21 @@
       getCbsEnabled(){ return !!cbsEnabled; },
       getStopMath(){
         return calculateStopMath(readEntry(),num(q("calcModuleStopLevel")?.value),readPartialStops());
-      }
+      },
+      reconcileOpenPositionChange:reconcileOpenPositionRow
     };
+    if(!window.__calculatorOpenPositionReconcileBound){
+      window.__calculatorOpenPositionReconcileBound = true;
+      window.addEventListener("v13:open-position-change",event => {
+        scheduleOpenPositionReconcile(event && event.detail);
+      },false);
+    }
+    if(!window.__calculatorBinanceStateReconcileBound){
+      window.__calculatorBinanceStateReconcileBound = true;
+      window.addEventListener("v14:binance-state-change",event => {
+        scheduleBinanceStateReconcile(event && event.detail);
+      },false);
+    }
   }
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",bindCalculator,{once:true});

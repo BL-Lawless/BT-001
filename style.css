@@ -2126,6 +2126,7 @@ button:hover{filter:brightness(1.04)}
 }
 @keyframes calcModuleLotHeartbeat{0%,100%{color:inherit}45%{color:#f6465d}60%{color:inherit}75%{color:#f6465d}}
 .calc-module-underfilled{animation:calcModuleLotHeartbeat 2.4s ease-in-out infinite}
+.calc-module-row-needs-review{box-shadow:inset 0 0 0 2px rgba(245,158,11,.55);background:#fff9df}
 .calc-module-summary-row{
   display:grid;
   grid-template-columns:1fr minmax(80px,max-content);

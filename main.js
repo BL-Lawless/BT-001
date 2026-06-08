@@ -894,6 +894,7 @@ async function refreshAccountBalance(opt={}){
 
 let openPositionLoading = false;
 let lastOpenPositionRetrievalSig = null;
+let lastOpenPositionRetrievalState = null;
 function openPositionRetrievalSig(active){
   if(!active) return "";
   return [
@@ -904,13 +905,53 @@ function openPositionRetrievalSig(active){
   ].join(":");
 }
 
-function maybeRefreshBalanceForPositionChange(nextSig,off){
+function openPositionRetrievalState(active){
+  if(!active) return null;
+  return {
+    symbol:String(active.symbol || ""),
+    side:active.side === "SHORT" ? "SHORT" : "LONG",
+    qty:Math.abs(Number(active.qty) || 0),
+    avg:Number(active.avg) || 0
+  };
+}
+
+function maybeRefreshBalanceForPositionChange(nextSig,off,active){
   const prevSig = lastOpenPositionRetrievalSig;
+  const previous = lastOpenPositionRetrievalState;
+  const current = openPositionRetrievalState(active);
   lastOpenPositionRetrievalSig = nextSig;
-  if(prevSig === null) return;
+  lastOpenPositionRetrievalState = current;
+  if(prevSig === null) return null;
   if(prevSig !== nextSig){
     refreshAccountBalance({silent:true,off}).catch(e => console.warn("Balance refresh after position change failed",e));
+    return {
+      previous,
+      current,
+      sizeChanged:(Math.abs(Number(previous && previous.qty) || 0)).toFixed(8) !== (Math.abs(Number(current && current.qty) || 0)).toFixed(8),
+      sideChanged:String(previous && previous.side || "") !== String(current && current.side || ""),
+      averageEntryChanged:Number(previous && previous.avg || 0).toFixed(8) !== Number(current && current.avg || 0).toFixed(8),
+      opened:!previous && !!current,
+      closed:!!previous && !current
+    };
   }
+  return null;
+}
+
+function publishOpenPositionChange(change){
+  if(!change) return;
+  try{
+    window.dispatchEvent(new CustomEvent("v13:open-position-change",{
+      detail:{...change,at:Date.now(),source:"refreshOpenPosition"}
+    }));
+  }catch(e){
+    console.warn("Open position change event failed",e);
+  }
+}
+if(typeof window !== "undefined" && !window.__v13OpenPositionTitleSyncBound){
+  window.__v13OpenPositionTitleSyncBound = true;
+  window.addEventListener("v13:open-position-change",() => {
+    try{ updateTabTitle(); }catch(e){ console.warn("Tab title position reconcile failed",e); }
+  },false);
 }
 
 async function refreshOpenPosition(opt={}){
@@ -934,10 +975,11 @@ async function refreshOpenPosition(opt={}){
     if(!active){
       clearOpenPositionOwner();
       clearActiveParentCache(cfg().symbol);
-      maybeRefreshBalanceForPositionChange("",off);
+      const positionChange = maybeRefreshBalanceForPositionChange("",off,null);
       updatePositionStrip(candles.length ? candles[candles.length-1] : null);
       updateTabTitle();
       draw();
+      publishOpenPositionChange(positionChange);
       return {risk,active:null,off};
     }
 
@@ -949,10 +991,11 @@ async function refreshOpenPosition(opt={}){
       applyOpenPositionRiskOnly(risk,cfg().symbol);
     }
 
-    maybeRefreshBalanceForPositionChange(openPositionRetrievalSig(active),off);
+    const positionChange = maybeRefreshBalanceForPositionChange(openPositionRetrievalSig(active),off,active);
     updatePositionStrip(candles.length ? candles[candles.length-1] : null);
     updateTabTitle();
     draw();
+    publishOpenPositionChange(positionChange);
     return {risk,active,loaded,off};
   }catch(e){
     if(!silent) console.error("Open position refresh failed",e);
@@ -5984,6 +6027,8 @@ function handleReloadClick(){
 function handleMarketChange(){
   clearTrades();
   clearOpenPositionOwner();
+  lastOpenPositionRetrievalSig = null;
+  lastOpenPositionRetrievalState = null;
   loadChart();
 
   setTimeout(() => {
@@ -14571,10 +14616,53 @@ startTradeAuto();
     window.v13OpenOrdersTs21 = Date.now();
     window.v13StopSourcesChecked21 = normalOk && algoOk;
     window.v13OpenOrdersStatus21 = normalOk && algoOk ? "ok" : (normalOk || algoOk ? "partial" : "error");
+    return {normalOk,algoOk};
+  }
+  function orderStateSig21(rows){
+    return (Array.isArray(rows) ? rows : [])
+      .filter(o => o && String(o.symbol || "") === currentSymbol21())
+      .map(o => [
+        String(o.algoId != null ? "algo:" + o.algoId : o.orderId != null ? "order:" + o.orderId : o.clientAlgoId || o.clientOrderId || ""),
+        String(o.status || o.orderStatus || ""),
+        String(o.type || o.origType || o.orderType || o.algoType || ""),
+        String(o.side || ""),
+        String(o.positionSide || ""),
+        Number(o.price || 0).toFixed(8),
+        Number(o.stopPrice || o.triggerPrice || o.activatePrice || 0).toFixed(8),
+        Number(o.origQty || o.quantity || o.qty || 0).toFixed(10),
+        Number(o.executedQty || 0).toFixed(10),
+        String(o.reduceOnly || ""),
+        String(o.closePosition || "")
+      ].join(":"))
+      .sort()
+      .join("|");
+  }
+  function binanceStateSig21(positionSig){
+    return [
+      positionSig || "",
+      orderStateSig21(window.v13OpenOrders21),
+      orderStateSig21(window.v13OpenAlgoOrders21)
+    ].join("||");
+  }
+  function publishBinanceStateChange21(signature,previousSignature){
+    try{
+      window.dispatchEvent(new CustomEvent("v14:binance-state-change",{
+        detail:{
+          signature,
+          previousSignature,
+          symbol:currentSymbol21(),
+          detectedAt:Date.now(),
+          source:"position-order-rest-watcher"
+        }
+      }));
+    }catch(e){
+      console.warn("PATCH_21 Binance-state event failed",e);
+    }
   }
 
   let busy21 = false;
   let lastSig21 = null;
+  let lastBinanceStateSig21 = null;
   let pendingOpenRisk21 = null;
   let openVisualSyncTimer21 = null;
   async function applyOpenPositionVisualSync21(risk,auth){
@@ -14614,12 +14702,18 @@ startTradeAuto();
       const openPositionChanged = sig !== lastSig21;
       lastSig21 = sig;
 
-      if(sig) await fetchOpenOrders21(key,sec,off);
-      else{
-        window.v13OpenOrders21 = [];
-        window.v13OpenAlgoOrders21 = [];
-        window.v13StopSourcesChecked21 = true;
-        window.v13OpenOrdersStatus21 = "flat";
+      const orderRead = await fetchOpenOrders21(key,sec,off);
+      const binanceSig = binanceStateSig21(sig);
+      if(!orderRead || !orderRead.normalOk || !orderRead.algoOk){
+        if(!openPositionChanged) try{ if(typeof draw === "function") draw(); }catch(e){}
+        return;
+      }
+      if(lastBinanceStateSig21 === null){
+        lastBinanceStateSig21 = binanceSig;
+      }else if(binanceSig !== lastBinanceStateSig21){
+        const previousBinanceSig = lastBinanceStateSig21;
+        lastBinanceStateSig21 = binanceSig;
+        publishBinanceStateChange21(binanceSig,previousBinanceSig);
       }
 
       if(!openPositionChanged) try{ if(typeof draw === "function") draw(); }catch(e){}
