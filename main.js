@@ -1352,7 +1352,9 @@ function updatePositionStrip(c){
 function updateTabTitle(){
   const price = candles.length ? candles[candles.length-1].close : lastMarkPrice;
   const flt = openBoxesFloating(price);
-  document.title = titlePrice(price) + " | " + titlePL(flt, !!(openPositionBoxes && openPositionBoxes.length));
+  const lot = (openPositionBoxes || []).reduce((total,box) => total + Math.abs(Number(box && box.qty) || 0),0);
+  const symbol = typeof cfg === "function" && cfg() ? String(cfg().symbol || "") : "";
+  document.title = (symbol ? symbol + " " : "") + titlePrice(price) + " | " + lot.toFixed(3) + " | " + titlePL(flt, !!(openPositionBoxes && openPositionBoxes.length));
 }
 
 function startTitleUpdater(){
@@ -15632,6 +15634,19 @@ startTradeAuto();
     rows.sort((a,b) => (n25(a.entryTime) - n25(b.entryTime)) || String(a.entryMarkerId || "").localeCompare(String(b.entryMarkerId || "")));
     return rows;
   }
+  function partialCloseSum25(box){
+    const sym = box && box.symbol ? box.symbol : currentSymbol25();
+    const chain = cid25(box);
+    const links = typeof openPositionLinksForRender === "function" ? openPositionLinksForRender() : [];
+    return (Array.isArray(links) ? links : []).filter(link => {
+      if(!link || !link.exitMarkerId || (sym && link.symbol && link.symbol !== sym)) return false;
+      const linkChain = cid25(link);
+      return !chain || !linkChain || linkChain === chain;
+    }).reduce((sum,link) => {
+      const value = Number(link.binanceRealizedPnl ?? link.realizedPnl);
+      return sum + (Number.isFinite(value) ? value : 0);
+    },0);
+  }
 
   function openBoxTooltipLines25(it){
     const box = it && it.boxData ? it.boxData : {};
@@ -15664,6 +15679,11 @@ startTradeAuto();
         ]);
       });
     }
+    const partialCloseSum = partialCloseSum25(box);
+    lines.push([
+      {text:"Partial closes: ",color:BLACK25,bold:false},
+      {text:typeof fm === "function" ? fm(partialCloseSum) : String(partialCloseSum),color:pnlColor25(partialCloseSum),bold:true}
+    ]);
     if(floating != null){
       lines.push([
         {text:"Floating P/L: ",color:BLACK25,bold:false},

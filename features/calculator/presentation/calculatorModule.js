@@ -56,6 +56,7 @@
   let structuralWarningActive = false;
   let calculatorOwnedRefreshDepth = 0;
   let lastEditedPartialStopLotInput = null;
+  let lastEditedExitLotInput = null;
   let lastKnownLiveOpenPositionQty = null;
   const notifiedExecutionKeys = new Set();
 
@@ -640,6 +641,12 @@
       return total + (lot != null && lot > 0 ? lot : 0);
     },0);
   }
+  function totalExitLots(){
+    return rows("calcModuleExitRows").reduce((total,row) => {
+      const lot = num(lotInput(row)?.value);
+      return total + (lot != null && lot > 0 ? lot : 0);
+    },0);
+  }
   function currentPositionBoxesForCalculator(){
     if(typeof openPositionBoxes === "undefined" || !Array.isArray(openPositionBoxes)) return [];
     return openPositionBoxes.filter(box => box && (!box.symbol || box.symbol === currentSymbol()));
@@ -659,6 +666,15 @@
       delete row.dataset.pslLotInvalid;
     });
   }
+  function clearExitLotInvalidState(){
+    rows("calcModuleExitRows").forEach(row => {
+      const input = lotInput(row);
+      if(!input) return;
+      input.classList.remove("calc-module-exit-lot-invalid");
+      delete input.dataset.exitLotInvalid;
+      delete row.dataset.exitLotInvalid;
+    });
+  }
   function refreshLiveStopsValidity(livePos,liveStateKnown=false){
     const liveQty = num(livePos && livePos.qty);
     if(liveStateKnown) lastKnownLiveOpenPositionQty = liveQty == null ? 0 : Math.max(0,liveQty);
@@ -671,6 +687,21 @@
       lastEditedPartialStopLotInput.dataset.pslLotInvalid = "1";
       const row = lastEditedPartialStopLotInput.closest(".calc-module-row");
       if(row) row.dataset.pslLotInvalid = "1";
+    }
+    return !invalid;
+  }
+  function refreshLiveExitsValidity(livePos,liveStateKnown=false){
+    const liveQty = num(livePos && livePos.qty);
+    if(liveStateKnown) lastKnownLiveOpenPositionQty = liveQty == null ? 0 : Math.max(0,liveQty);
+    const cachedQty = liveCachedOpenPositionQty();
+    const qty = lastKnownLiveOpenPositionQty == null ? cachedQty : lastKnownLiveOpenPositionQty;
+    const invalid = totalExitLots() > qty + 1e-9;
+    clearExitLotInvalidState();
+    if(invalid && lastEditedExitLotInput && lastEditedExitLotInput.isConnected){
+      lastEditedExitLotInput.classList.add("calc-module-exit-lot-invalid");
+      lastEditedExitLotInput.dataset.exitLotInvalid = "1";
+      const row = lastEditedExitLotInput.closest(".calc-module-row");
+      if(row) row.dataset.exitLotInvalid = "1";
     }
     return !invalid;
   }
@@ -811,17 +842,6 @@
     sortContainerRowsByLevel("calcModuleExitRows",ref);
     sortContainerRowsByLevel("calcModulePartialStopRows",currentPriceReference());
   }
-  function capExitLots(maxQty){
-    let remaining = Math.max(0,Number(maxQty) || 0);
-    rows("calcModuleExitRows").forEach(row => {
-      const input = row.querySelector(".calc-module-lot");
-      const lot = num(input?.value);
-      if(!input || lot == null || lot <= 0) return;
-      const capped = Math.max(0,Math.min(lot,remaining));
-      if(Math.abs(capped - lot) > 1e-9) input.value = capped > 0 ? capped.toFixed(3) : "";
-      remaining -= capped;
-    });
-  }
   function setDirection(next){
     direction = next === "SHORT" ? "SHORT" : "LONG";
     const btn = q("calcModuleDir");
@@ -854,7 +874,6 @@
   function calculate(){
     const {domain,app} = getArchitectureServices();
     const entry = readEntry();
-    capExitLots(entry.qty);
     const exits = readRows("calcModuleExitRows");
     let exitQty = 0;
     let reward = 0;
@@ -906,6 +925,7 @@
     setMoney(q("calcModuleCollapsedStopRisk"),risk);
     setMoney(q("calcModuleCollapsedExitPl"),rewardValue);
     refreshLiveStopsValidity(null);
+    refreshLiveExitsValidity(null);
     rows("calcModuleEntryRows").forEach(row => {
       setMargin(
         row.querySelector(".calc-module-entry-margin"),
@@ -1035,9 +1055,29 @@
   }
   function refreshPendingSendVisualState(){
     ["calcModuleEntryRows","calcModuleExitRows","calcModulePartialStopRows"].forEach(containerId => {
-      rows(containerId).forEach(row => row.classList.toggle("calc-module-row-pending-send",rowPendingSend(row)));
+      rows(containerId).forEach(row => {
+        row.classList.toggle("calc-module-row-pending-send",rowPendingSend(row));
+        refreshModifiedBinanceFieldState(row);
+      });
     });
     q("calcModuleStopLevel")?.classList.toggle("calc-module-input-pending-send",masterStopPendingSend());
+  }
+  function refreshModifiedBinanceFieldState(row){
+    if(!row) return;
+    const containerId = row.parentElement && row.parentElement.id;
+    const isExit = containerId === "calcModuleExitRows";
+    const isPartialStop = containerId === "calcModulePartialStopRows";
+    const source = String(row.dataset && row.dataset.source || "");
+    const meta = isExit
+      ? (row.__binanceLimitOrderMeta || (row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null))
+      : isPartialStop
+        ? (row.__binancePartialStopMeta || (row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null))
+        : null;
+    const binanceBacked = (isExit && source === "binance-limit") || (isPartialStop && source === "binance-partial-stop");
+    const originalLevel = isExit ? num(meta && meta.price) : num(meta && meta.triggerPrice);
+    const originalLot = num(meta && meta.origQty);
+    levelInput(row)?.classList.toggle("calc-module-input-pending-send",!!(binanceBacked && meta && !approxEqual(num(levelInput(row)?.value),originalLevel,1e-8)));
+    lotInput(row)?.classList.toggle("calc-module-input-pending-send",!!(binanceBacked && meta && !approxEqual(num(lotInput(row)?.value),originalLot,1e-10)));
   }
   function applyRowSourceAndMeta(row,opts){
     if(!row) return row;
@@ -1226,6 +1266,7 @@
       if(input.classList.contains("calc-module-lot")) normalizeLotInput(input);
       if(input.classList.contains("calc-module-level")) normalizeLevelInput(input);
       if(isPartialStop && input.classList.contains("calc-module-lot")) lastEditedPartialStopLotInput = input;
+      if(isExit && input.classList.contains("calc-module-lot")) lastEditedExitLotInput = input;
       markSendPlanStale("Row edited after preflight.");
       calculate();
     },false));
@@ -1242,13 +1283,28 @@
         refreshLiveStopsValidity(null);
       },false);
     }
+    if(isExit){
+      lotInput(row)?.addEventListener("focus",e => {
+        lastEditedExitLotInput = e.currentTarget;
+        refreshLiveExitsValidity(null);
+      },false);
+      lotInput(row)?.addEventListener("change",e => {
+        lastEditedExitLotInput = e.currentTarget;
+        refreshLiveExitsValidity(null);
+      },false);
+      lotInput(row)?.addEventListener("blur",() => {
+        refreshLiveExitsValidity(null);
+      },false);
+    }
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
       markSendPlanStale("Row removed after preflight.");
       clearBinanceMetaOnRow(row);
       clearPartialStopMetaOnRow(row);
       if(lastEditedPartialStopLotInput && row.contains(lastEditedPartialStopLotInput)) lastEditedPartialStopLotInput = null;
+      if(lastEditedExitLotInput && row.contains(lastEditedExitLotInput)) lastEditedExitLotInput = null;
       row.remove();
       clearPartialStopLotInvalidState();
+      clearExitLotInvalidState();
       refreshEntryRowNumbers();
       refreshPartialStopRowNumbers();
       refreshExitRowNumbers(readEntry().avg);
@@ -1300,6 +1356,7 @@
     const partialStopRows = q("calcModulePartialStopRows");
     if(partialStopRows) partialStopRows.innerHTML = "";
     lastEditedPartialStopLotInput = null;
+    lastEditedExitLotInput = null;
     lastKnownLiveOpenPositionQty = null;
     const stopLevel = q("calcModuleStopLevel");
     const stopDistance = q("calcModuleStopDistance");
@@ -2405,7 +2462,10 @@
       .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && ordersVisible)))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
-        return { ...item, y };
+        const text = !calculatorOpen && ordersVisible && item.openPosition
+          ? direction.toUpperCase() + " | " + Number(item.lot).toFixed(3)
+          : item.text;
+        return { ...item, text, y };
       })
       .filter(item => item.y >= top - 2 && item.y <= top + priceH + 2);
     publishOverlayDiagnostic({
@@ -2461,6 +2521,7 @@
     const placed = [];
     const sorted = items.slice().sort((a,b) => a.y - b.y);
     sorted.forEach(item => {
+      if(item.type === "new-average") return;
       const textW = Math.ceil(ctx.measureText(item.text).width) + padX * 2;
       const w = Math.min(textW,Math.max(56,chartRight - left - 8));
       const cy = item.y;
@@ -2601,21 +2662,40 @@
         draggable:(!isOpenPos && p.item.type !== "master-sl" && calcLevelsInteractive()) || (p.item.type === "master-sl" && calcSlInteractive())
       });
     });
-    const openBox = drawnBoxes.find(box => box && box.item && box.item.openPosition);
-    const avgBox = drawnBoxes.find(box => box && box.item && box.item.type === "new-average");
-    if(openBox && avgBox){
+    ctx.restore();
+    const axisItems = [];
+    const ordersOpenPosition = items.find(item => item && item.openPosition && !calculatorOpen && ordersVisible);
+    const newAverage = items.find(item => item && item.type === "new-average");
+    if(ordersOpenPosition) axisItems.push({item:ordersOpenPosition,color:"rgba(112,122,138,0.82)",fill:"rgba(255,247,204,0.98)"});
+    if(newAverage) axisItems.push({item:newAverage,color:"rgba(37,99,235,0.78)",fill:"rgba(232,240,255,0.98)"});
+    if(axisItems.length){
+      const axisLeft = chartRight + 2;
+      const axisRight = canvas.clientWidth - 2;
+      const axisWidth = Math.max(22,axisRight - axisLeft);
       ctx.save();
-      ctx.setLineDash([4,3]);
-      ctx.strokeStyle = "rgba(37,99,235,0.72)";
-      ctx.lineWidth = 1;
-      const startX = px(openBox.cx);
-      const startY = px(avgBox.cy > openBox.cy ? (openBox.y + openBox.h) : openBox.cy);
-      const endX = px(avgBox.cx);
-      const endY = px(avgBox.cy);
-      ctx.beginPath();
-      ctx.moveTo(startX,startY);
-      ctx.lineTo(endX,endY);
-      ctx.stroke();
+      ctx.font = "bold 11px Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      axisItems.forEach(({item,color,fill}) => {
+        const text = fmtPrice(item.level);
+        const boxWidth = Math.max(34,Math.min(axisWidth - 2,Math.ceil(ctx.measureText(text).width) + 10));
+        const boxX = axisLeft + Math.max(0,(axisWidth - boxWidth) / 2);
+        const boxY = clamp(item.y - labelH / 2,top,chartBottom - labelH);
+        ctx.strokeStyle = color;
+        ctx.setLineDash([5,2]);
+        ctx.beginPath();
+        ctx.moveTo(px(chartRight),px(item.y));
+        ctx.lineTo(px(boxX),px(item.y));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = color;
+        ctx.fillStyle = fill;
+        ctx.lineWidth = 1;
+        ctx.fillRect(boxX,boxY,boxWidth,labelH);
+        ctx.strokeRect(boxX,boxY,boxWidth,labelH);
+        ctx.fillStyle = color;
+        ctx.fillText(text,boxX + boxWidth / 2,boxY + labelH / 2 + 0.5);
+      });
       ctx.restore();
     }
     publishOverlayDiagnostic({
@@ -2630,7 +2710,6 @@
       boxes:overlayLevelBoxes.length,
       dragActive:!!overlayDrag.active
     });
-    ctx.restore();
   }
   function installDrawOverlayHook(){
     if(window.__calcLevelsDrawWrapped) return;
@@ -3132,6 +3211,26 @@
       const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
       limitRowRecords.push({row,rowType:"exit",meta});
     });
+    const livePositionQty = num(livePos && livePos.qty) || 0;
+    const combinedExitQty = totalExitLots();
+    if(combinedExitQty > livePositionQty + 1e-9){
+      plan.blocked = true;
+      addPlanRow(plan,{
+        section:"LIMIT Orders",
+        action:"Blocked",
+        type:"Exit",
+        side:"-",
+        oldPrice:"-",
+        newPrice:"-",
+        oldQty:formatPlanValue(livePositionQty,"qty"),
+        newQty:formatPlanValue(combinedExitQty,"qty"),
+        orderId:"-",
+        status:"Blocked",
+        response:"Exits blocked — total Exit lots exceed live position size.",
+        writable:false,
+        mode:"blocked"
+      });
+    }
 
     if(true){
       const stopLevel = num(q("calcModuleStopLevel")?.value);
@@ -4016,6 +4115,38 @@
     refreshLiveStopsValidity(livePos,true);
     return false;
   }
+  async function validateLiveExitQuantity(plan){
+    const total = totalExitLots();
+    if(total <= 0){
+      clearExitLotInvalidState();
+      return true;
+    }
+    const livePos = await signedPosition();
+    const liveQty = num(livePos && livePos.qty) || 0;
+    if(total <= liveQty + 1e-9){
+      refreshLiveExitsValidity(livePos,true);
+      return true;
+    }
+    plan.blocked = true;
+    plan.canConfirm = false;
+    addPlanRow(plan,{
+      section:"LIMIT Orders",
+      action:"Blocked",
+      type:"Exit",
+      side:"-",
+      oldPrice:"-",
+      newPrice:"-",
+      oldQty:formatPlanValue(liveQty,"qty"),
+      newQty:formatPlanValue(total,"qty"),
+      orderId:"-",
+      status:"Blocked",
+      response:"Exits blocked — total Exit lots exceed live position size.",
+      writable:false,
+      mode:"blocked"
+    });
+    refreshLiveExitsValidity(livePos,true);
+    return false;
+  }
   async function executeSendPlan(plan,options={}){
     if(!plan || !Array.isArray(plan.rows)) return;
     if(!plan.canConfirm){
@@ -4024,6 +4155,11 @@
       return;
     }
     try{
+      if(!await validateLiveExitQuantity(plan)){
+        setStatus(options.blockedStatus || "Confirm Send blocked. Review Exits.");
+        renderSendPlanTable();
+        return;
+      }
       if(!await validateLivePartialStopQuantity(plan)){
         setStatus(options.blockedStatus || "Confirm Send blocked. Review Stops.");
         renderSendPlanTable();
@@ -4194,6 +4330,7 @@
       const livePos = preflightState.livePos;
       const liveSnapshot = preflightState.liveSnapshot;
       refreshLiveStopsValidity(livePos,true);
+      refreshLiveExitsValidity(livePos,true);
       updateAutoSyncBaseline(livePos,liveSnapshot);
       if(!lastReadStateSnapshot) lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
       clearStructuralWarning();
@@ -4319,6 +4456,7 @@
       const livePos = preflightState.livePos;
       const liveSnapshot = preflightState.liveSnapshot;
       refreshLiveStopsValidity(livePos,true);
+      refreshLiveExitsValidity(livePos,true);
       updateAutoSyncBaseline(livePos,liveSnapshot);
       if(!lastReadStateSnapshot) lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
       sendPlanState = applyExpressPayloadSafeguards(buildPlanFromCurrentRows(livePos,liveSnapshot));
@@ -4584,6 +4722,7 @@
       suppressCalculatorOverlayDraw = false;
       calculate();
       refreshLiveStopsValidity(pos,true);
+      refreshLiveExitsValidity(pos,true);
       if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
       }else if(diag.openOrdersReadStatus === "error"){

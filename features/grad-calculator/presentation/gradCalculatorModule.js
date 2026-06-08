@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const MODULE = "GR_COMMIT_V10";
+  const MODULE = "GR_COMMIT_V11";
   const OWNER = "GR";
   const STORE_KEY = "bt001_gr_commit_v5_orders";
   const ORDER_URL = "https://fapi.binance.com/fapi/v1/order";
@@ -13,7 +13,6 @@
     active:"entry",
     direction:"LONG",
     livePosition:null,
-    masterSl:null,
     positionBasis:{protection:null,exit:null},
     stale:{protection:false,exit:false},
     loadedMode:{entry:false,protection:false,exit:false},
@@ -70,8 +69,6 @@
     return entry == null ? null : domain().estimatePl(positionDirection(),entry,row.level,row.lot);
   };
   const totalPl = section => validRows(section).reduce((sum,row) => sum + (rowPl(section,row) || 0),0);
-  const protectionLots = () => validRows("protection").reduce((sum,row)=>sum+(number(row.lot)||0),0);
-  const masterRemainingLot = () => Math.max(0,(number(state.livePosition&&state.livePosition.qty)||0)-protectionLots());
   const leverage = () => {
     const list = typeof openPositionBoxes !== "undefined" && Array.isArray(openPositionBoxes) ? openPositionBoxes : [];
     const box = list.find(item => item && (!item.symbol || item.symbol === currentSymbol()) && number(item.leverage) > 0);
@@ -91,7 +88,6 @@
     if(id.startsWith("GR_EXIT_")) return "exit";
     return null;
   };
-  const isMasterSlOrder = order => clientIdOf(order).startsWith("GR_PROT_SL_");
   const orderLevel = (section,order) => {
     const candidates=section==="protection"?[order&&order.stopPrice,order&&order.triggerPrice,order&&order.price]:[order&&order.price,order&&order.stopPrice,order&&order.triggerPrice];
     return candidates.map(number).find(value=>value!=null&&value>0)||null;
@@ -103,7 +99,7 @@
     try{return JSON.parse(localStorage.getItem(STORE_KEY)||"[]").filter(record=>record&&record.owner===OWNER);}catch(_e){return [];}
   }
   function persistRows(){
-    const records=sections.flatMap(section=>rows(section)).concat(state.masterSl?[state.masterSl]:[]).map(row=>({...row}));
+    const records=sections.flatMap(section=>rows(section)).map(row=>({...row}));
     const otherSymbols=storedRecords().filter(record=>record.symbol!==currentSymbol());
     try{localStorage.setItem(STORE_KEY,JSON.stringify(otherSymbols.concat(records)));}catch(_e){}
   }
@@ -141,7 +137,6 @@
   function clearSection(section){
     state.rows[section]=[];
     state.loadedMode[section]=false;
-    if(section==="protection")state.masterSl=null;
     if(section!=="entry"){state.positionBasis[section]=null;state.stale[section]=false;}
     renderSection(section);
     calculate();
@@ -162,7 +157,6 @@
   function clearAll(){
     sections.forEach(section => {state.rows[section]=[];renderSection(section);});
     state.livePosition=null;
-    state.masterSl=null;
     state.positionBasis={protection:null,exit:null};
     state.stale={protection:false,exit:false};
     state.loadedMode={entry:false,protection:false,exit:false};
@@ -195,14 +189,6 @@
       <label>Count<input id="${prefix}Count" type="number" min="1" step="1" value="${section==="protection" ? 2 : 3}"></label>
     </div>`;
   }
-  function masterSlMarkup(){
-    return `<div class="grad-master-sl">
-      <label>Master SL level<input id="gradMasterSlLevel" type="number" min="0" step="10"></label>
-      <label>Lot<input id="gradMasterSlLot" type="number" min="0.001" step="0.001" readonly></label>
-      <span id="gradMasterSlRisk">-</span>
-      <button id="gradMasterSlClear" type="button">x</button>
-    </div>`;
-  }
   function panelMarkup(section){
     const valueTitle=section==="entry" ? "Margin" : section==="protection" ? "Risk" : "PL";
     return `<section class="grad-calc-tab-panel" id="gradPanel${section}">
@@ -213,7 +199,6 @@
         <button id="grad${section}Show" class="is-on" type="button">Show</button>
         <button id="grad${section}Send" type="button">Send</button>
       </div>
-      ${section==="protection"?masterSlMarkup():""}
       ${generatorMarkup(section)}
       <div class="grad-calc-table-head"><div>#</div><div>Level</div><div>Lot</div><div>${valueTitle}</div><div>x</div></div>
       <div id="grad${section}Rows"></div>
@@ -227,7 +212,7 @@
     win=document.createElement("div");
     win.id="gradCalcWindow";
     win.className="grad-calc-window hidden";
-    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V10</div><button id="gradCalcClose" type="button">x</button></div>
+    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V11</div><button id="gradCalcClose" type="button">x</button></div>
       <div class="grad-calc-body">
         <div class="grad-calc-tabs">${sections.map(section=>`<button id="gradTab${section}" type="button">${sectionTitle(section)}</button>`).join("")}</div>
         <div class="grad-calc-tab-stage">${sections.map(panelMarkup).join("")}</div>
@@ -329,11 +314,6 @@
     });
   }
   function calculate(){
-    if(state.masterSl){
-      const remaining=fmtLot(masterRemainingLot());
-      if(state.masterSl.lot!==remaining&&state.masterSl.binanceOrderId)state.masterSl.status="modified";
-      state.masterSl.lot=remaining;
-    }
     sections.forEach(updateRowValues);
     const entry=weighted("entry"), protection=weighted("protection"), exit=weighted("exit");
     const risk=totalPl("protection"), projected=totalPl("exit");
@@ -343,12 +323,6 @@
     q("gradSummaryEntryLots").textContent=fmtLot(entry.quantity);q("gradSummaryEntryAvg").textContent=fmtPrice(entry.average);
     q("gradSummaryRisk").textContent=fmtMoney(risk);q("gradSummaryRisk").style.color=moneyColor(risk);
     q("gradSummaryPl").textContent=fmtMoney(projected);q("gradSummaryPl").style.color=moneyColor(projected);
-    if(q("gradMasterSlLevel")){
-      q("gradMasterSlLevel").value=state.masterSl?fmtLevelInput(state.masterSl.level):"";
-      q("gradMasterSlLot").value=state.masterSl?fmtLot(state.masterSl.lot):fmtLot(masterRemainingLot());
-      const masterRisk=state.masterSl?rowPl("protection",state.masterSl):null;
-      q("gradMasterSlRisk").textContent=fmtMoney(masterRisk);q("gradMasterSlRisk").style.color=moneyColor(masterRisk);
-    }
     ["protection","exit"].forEach(section=>q(`gradPanel${section}`)?.classList.toggle("is-stale",state.stale[section]));
     redraw();
   }
@@ -451,28 +425,17 @@
     const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     return [].concat(Array.isArray(normal)?normal:[],Array.isArray(algo)?algo:[]).filter(order=>{
       if(!ownedClientId(order)||orderSection(order)!==section)return false;
+      if(section==="protection"&&!clientIdOf(order).startsWith("GR_PROT_PSL_"))return false;
       return true;
     });
-  }
-  async function universalMasterSlOrder(){
-    if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
-    const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
-    const normal=await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
-    const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
-    const side=state.livePosition&&state.livePosition.side==="SHORT"?"BUY":"SELL";
-    return [].concat(Array.isArray(normal)?normal:[],Array.isArray(algo)?algo:[]).filter(order=>{
-      const type=String(order&& (order.type||order.orderType) || "").toUpperCase();
-      const orderSide=String(order&&order.side||"").toUpperCase();
-      return !clientIdOf(order).startsWith("GR_PROT_")&&["STOP","STOP_MARKET"].includes(type)&&orderSide===side;
-    }).sort((a,b)=>(number(b.origQty||b.quantity||b.qty)||0)-(number(a.origQty||a.quantity||a.qty)||0))[0]||null;
   }
   function fromBinanceOrder(section,order){
     const status=String(order.status||order.orderStatus||"").toUpperCase()==="FILLED"?"executed":"sent";
     const lot=order.executedQty&&status==="executed"?order.executedQty:order.origQty||order.quantity||order.qty;
-    return rowModel(section,{localRowId:`gr_owned_${order.orderId||order.algoId||clientIdOf(order)}`,binanceOrderId:order.orderId||order.algoId||null,clientOrderId:clientIdOf(order)||null,status,symbol:order.symbol||currentSymbol(),side:order.side||null,orderType:order.type||order.orderType||null,role:isMasterSlOrder(order)?"masterSl":section==="protection"?"psl":section,level:orderLevel(section,order),price:number(order.price)>0?order.price:null,stopPrice:number(order.stopPrice)>0?order.stopPrice:number(order.triggerPrice)>0?order.triggerPrice:null,lot,originalLot:lot});
+    return rowModel(section,{localRowId:`gr_owned_${order.orderId||order.algoId||clientIdOf(order)}`,binanceOrderId:order.orderId||order.algoId||null,clientOrderId:clientIdOf(order)||null,status,symbol:order.symbol||currentSymbol(),side:order.side||null,orderType:order.type||order.orderType||null,role:section==="protection"?"psl":section,level:orderLevel(section,order),price:number(order.price)>0?order.price:null,stopPrice:number(order.stopPrice)>0?order.stopPrice:number(order.triggerPrice)>0?order.triggerPrice:null,lot,originalLot:lot});
   }
   function importOwned(section,ordersList){
-    const imported=ordersList.filter(order=>!isMasterSlOrder(order)).map(order=>fromBinanceOrder(section,order));
+    const imported=ordersList.map(order=>fromBinanceOrder(section,order));
     state.rows[section]=imported;
     state.loadedMode[section]=true;
     renderSection(section);syncGeneratorFromRows(section);calculate();
@@ -483,7 +446,6 @@
     try{
       state.rows[section]=[];
       state.loadedMode[section]=false;
-      if(section==="protection")state.masterSl=null;
       renderSection(section);calculate();redraw();
       if(section==="entry"){
         importOwned(section,await ownedOrders(section));
@@ -494,18 +456,13 @@
         state.generators[section].lot=state.livePosition.qty;
         q(`grad${section}Lot`).value=fmtLot(state.livePosition.qty);
         importOwned(section,await ownedOrders(section));
-        if(section==="protection"){
-          const universal=await universalMasterSlOrder();
-          state.masterSl=universal?rowModel("protection",{localRowId:`universal_sl_${universal.algoId||universal.orderId||clientIdOf(universal)}`,binanceOrderId:universal.algoId||universal.orderId||null,clientOrderId:clientIdOf(universal)||null,status:"sent",symbol:universal.symbol||currentSymbol(),side:universal.side||null,orderType:universal.type||universal.orderType||"STOP_MARKET",role:"masterSl",level:orderLevel("protection",universal),stopPrice:orderLevel("protection",universal),lot:universal.origQty||universal.quantity||universal.qty||state.livePosition.qty,owner:"UNIVERSAL",module:"UNIVERSAL"}):null;
-          calculate();persistRows();
-        }
       }
       setStatus(sectionTitle(section)+" Read complete.");
     }catch(error){setStatus(error.message||String(error));}
   }
   function validateSection(section){
     const allRows=rows(section).filter(row=>row.status!=="executed"),list=validRows(section).filter(row=>row.status!=="executed"),errors=[];
-    if(!list.length&&!(section==="protection"&&state.masterSl&&number(state.masterSl.level)>0)) errors.push("No valid rows.");
+    if(!list.length) errors.push("No valid rows.");
     if(section==="entry"){
       const market=currentPrice();
       if(market==null) errors.push("Current market price unavailable.");
@@ -524,17 +481,12 @@
       else if(Math.abs(lot*1000-Math.round(lot*1000))>1e-7)errors.push("Lot must follow the 0.001 increment.");
       if(row.binanceOrderId!=null&&!ownedClientId(row))errors.push("GR ownership cannot be proven.");
     });
-    if(section==="protection"&&state.masterSl){
-      if(number(state.masterSl.level)==null||number(state.masterSl.level)<=0)errors.push("Master SL level is invalid.");
-      if(number(state.masterSl.lot)<.001)errors.push("Master SL has no remaining protected lot.");
-    }
-    const ids=allRows.concat(section==="protection"&&state.masterSl?[state.masterSl]:[]).map(clientIdOf).filter(Boolean);
+    const ids=allRows.map(clientIdOf).filter(Boolean);
     if(new Set(ids).size!==ids.length)errors.push("Duplicate GR clientOrderIds detected.");
     return [...new Set(errors)];
   }
   function actionableRows(section){
     const list=validRows(section).filter(row=>row.status==="local"||row.status==="modified");
-    if(section==="protection"&&state.masterSl&&["local","modified"].includes(state.masterSl.status))list.unshift(state.masterSl);
     return list;
   }
   function exitQuantityChanged(liveOrders){
@@ -558,7 +510,7 @@
     const side=section==="entry"?(state.direction==="LONG"?"BUY":"SELL"):(state.livePosition&&state.livePosition.side==="SHORT"?"BUY":"SELL");
     q("gradPreflightRows").innerHTML=`<tr class="calc-module-send-section"><td colspan="9">GR ${sectionTitle(section)}</td></tr>`+list.map(row=>{
       const action=section==="exit"&&exitFullRecreate?"Recreate":row.binanceOrderId?"Modify":"Create",type=section==="protection"?"STOP_MARKET":"LIMIT";
-      return `<tr class="is-writable"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row.binanceOrderId?fmtLevelInput(row.price||row.stopPrice||row.level):"-"}</td><td>${fmtLevelInput(row.level)}</td><td>${row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row.lot)}</td><td>Ready</td><td class="calc-module-send-response">GR-owned ${row===state.masterSl?"Master SL":sectionTitle(section)} order</td></tr>`;
+      return `<tr class="is-writable"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row.binanceOrderId?fmtLevelInput(row.price||row.stopPrice||row.level):"-"}</td><td>${fmtLevelInput(row.level)}</td><td>${row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row.lot)}</td><td>Ready</td><td class="calc-module-send-response">GR-owned ${sectionTitle(section)} order</td></tr>`;
     }).join("");
     q("gradPreflightConfirm").parentElement.style.display=state.preflight.valid?"flex":"none";
     q("gradPreflightConfirm").disabled=!state.preflight.valid;
@@ -576,7 +528,7 @@
       list.forEach(row=>{row.binanceOrderId=null;row.clientOrderId=null;row.status="local";});
     }
     for(let index=0;index<list.length;index++){
-      const row=list[index],isMaster=row===state.masterSl,clientId=freshClientId(isMaster?"UNIV_SL_":clientPrefix(section),row);
+      const row=list[index],clientId=freshClientId(clientPrefix(section),row);
       let sentSide=null,sentType=null;
       if(section==="protection"){
         const side=state.livePosition.side==="SHORT"?"BUY":"SELL";
@@ -594,7 +546,7 @@
         if(row.status==="modified"&&row.binanceOrderId!=null){delete payload.newClientOrderId;payload.orderId=String(row.binanceOrderId);response=await signedWrite(ORDER_URL,"PUT",payload);}else response=await signedWrite(ORDER_URL,"POST",payload);
         row.binanceOrderId=response.orderId||null;row.clientOrderId=response.clientOrderId||row.clientOrderId||clientId;
       }
-      Object.assign(row,{owner:isMaster?"UNIVERSAL":OWNER,module:isMaster?"UNIVERSAL":OWNER,section,clientOrderId:row.clientOrderId||clientId,symbol:currentSymbol(),side:sentSide,orderType:sentType,price:section==="protection"?null:fmtLevelInput(row.level),stopPrice:section==="protection"?fmtLevelInput(row.level):null,originalLot:fmtLot(row.lot),status:"sent"});
+      Object.assign(row,{owner:OWNER,module:OWNER,section,clientOrderId:row.clientOrderId||clientId,symbol:currentSymbol(),side:sentSide,orderType:sentType,price:section==="protection"?null:fmtLevelInput(row.level),stopPrice:section==="protection"?fmtLevelInput(row.level):null,originalLot:fmtLot(row.lot),status:"sent"});
       persistRows();
     }
   }
@@ -628,14 +580,13 @@
     if(!(height>0)||min==null||max==null||!(max>min))return;
     const right=canvas.clientWidth-(typeof RIGHT_AXIS==="number"?RIGHT_AXIS:84),items=[],drawnBoxes=[];
     sections.forEach(section=>{if(state.visible[section])sortedRows(section).forEach((row,index)=>{if(number(row.level)>0&&number(row.lot)>=.001)items.push({section,row,index});});});
-    if(state.visible.protection&&state.masterSl&&number(state.masterSl.level)>0)items.push({section:"protection",row:state.masterSl,index:-1,master:true});
     ctx.save();ctx.font="11px Arial";ctx.textBaseline="middle";
     const prepared=items.map(item=>{
       const level=number(item.row.level),y=top+((max-level)/(max-min))*height;
       if(y<top||y>top+height)return null;
       const value=item.section==="entry"?null:rowPl(item.section,item.row);
-      const text=item.master?"G SL | "+fmtLot(item.row.lot)+" | "+fmtMoney(value):item.section==="entry"?rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot):rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot)+" | "+fmtMoney(value);
-      const w=Math.ceil(ctx.measureText(text).width)+12,color=item.section==="entry"?"#374151":item.section==="protection"?moneyColor(value):"#047857",sectionRows=sortedRows(item.section).filter(row=>row.status!=="executed"&&number(row.level)>0&&number(row.lot)>=.001),boundary=!item.master&&item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);
+      const text=item.section==="entry"?rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot):rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot)+" | "+fmtMoney(value);
+      const w=Math.ceil(ctx.measureText(text).width)+12,color=item.section==="entry"?"#374151":item.section==="protection"?moneyColor(value):"#047857",sectionRows=sortedRows(item.section).filter(row=>row.status!=="executed"&&number(row.level)>0&&number(row.lot)>=.001),boundary=item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);
       return {item,y,value,text,w,color,boundary,x:Math.max(8,right-w-12)};
     }).filter(Boolean);
     prepared.forEach(entry=>{
@@ -647,7 +598,7 @@
       if(y-8<top||y+8>top+height)return;
       if(drawnBoxes.some(box=>x<box.x2&&x+w>box.x1&&y-8<box.y2&&y+8>box.y1))return;
       ctx.globalAlpha=.96;ctx.fillStyle="#fff";ctx.fillRect(x,y-8,w,16);ctx.strokeStyle=color;ctx.lineWidth=boundary?2:1;ctx.strokeRect(x,y-8,w,16);ctx.lineWidth=1;ctx.fillStyle=color;ctx.globalAlpha=1;ctx.fillText(text,x+6,y+.5);
-      const box={owner:item.master?"UNIVERSAL":OWNER,module:item.master?"UNIVERSAL":OWNER,section:item.section,localRowId:item.row.localRowId,binanceOrderId:item.row.binanceOrderId,status:item.row.status,boundary,x1:x,y1:y-8,x2:x+w,y2:y+8,row:item.row};
+      const box={owner:OWNER,module:OWNER,section:item.section,localRowId:item.row.localRowId,binanceOrderId:item.row.binanceOrderId,status:item.row.status,boundary,x1:x,y1:y-8,x2:x+w,y2:y+8,row:item.row};
       drawnBoxes.push(box);state.overlayBoxes.push(box);
     });
     ctx.restore();
@@ -707,30 +658,14 @@
   function restorePersistentState(){
     const records=storedRecords().filter(record=>record.symbol===currentSymbol()&&sections.includes(record.section)&&(["local"].includes(record.status)||ownedClientId(record)));
     sections.forEach(section=>{state.rows[section]=records.filter(record=>record.section===section&&record.role!=="masterSl").map(record=>rowModel(section,record));state.loadedMode[section]=state.rows[section].some(row=>row.status==="sent"||row.status==="executed");});
-    const master=records.find(record=>record.section==="protection"&&record.role==="masterSl");
-    state.masterSl=master?rowModel("protection",master):null;
-  }
-  function bindMasterSl(){
-    const level=q("gradMasterSlLevel"),clear=q("gradMasterSlClear");
-    if(!level||!clear)return;
-    level.addEventListener("change",()=>{
-      const next=number(level.value);
-      if(next==null||next<=0){state.masterSl=null;}
-      else{
-        const previous=state.masterSl||{};
-        state.masterSl=rowModel("protection",{...previous,role:"masterSl",level:next,lot:state.livePosition&&state.livePosition.qty||previous.lot||0,status:previous.binanceOrderId?"modified":"local"});
-      }
-      calculate();persistRows();
-    });
-    clear.onclick=()=>{state.masterSl=null;calculate();persistRows();};
   }
   function bind(){
     const win=ensureWindow(),open=ensureButton();ensurePreflight();restorePersistentState();
     sections.forEach(section=>{bindGenerator(section);q(`gradTab${section}`).onclick=()=>setActive(section);q(`grad${section}Clear`).onclick=()=>clearSection(section);q(`grad${section}Read`).onclick=()=>readSection(section);q(`grad${section}Show`).onclick=()=>showSection(section,!state.visible[section]);q(`grad${section}Send`).onclick=()=>openPreflight(section);renderSection(section);});
     q("gradentryFlush").onclick=flushEntryHistory;
-    bindMasterSl();q("gradCalcClearAll").onclick=clearAll;q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
+    q("gradCalcClearAll").onclick=clearAll;q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
     installWindowDrag(win);installWindowResize(win);installDrawHook();installDrag();installPositionWatcher();setActive("entry");calculate();
-    window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:openPreflight,setVisible:showSection,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row}))).concat(state.masterSl?[{...state.masterSl}]:[]);}};
+    window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:openPreflight,setVisible:showSection,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row})));}};
   }
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",bind,{once:true});else bind();
 })();
