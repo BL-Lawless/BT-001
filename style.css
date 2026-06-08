@@ -1743,7 +1743,9 @@ button:hover{filter:brightness(1.04)}
   border-color:#f59e0b;
   background:#fff7df;
   box-shadow:0 0 0 2px rgba(245,158,11,.22);
+  animation:calcModulePositionSizeBlink .8s ease-in-out infinite alternate;
 }
+@keyframes calcModulePositionSizeBlink{from{filter:brightness(1);opacity:1}to{filter:brightness(1.14);opacity:.48}}
 .calc-module-orders-toggle{
   position:absolute;
   top:8px;
@@ -1926,6 +1928,13 @@ button:hover{filter:brightness(1.04)}
   color:#707a8a;
   font-size:11px;
   text-align:center;
+}
+.calc-module-row.calc-module-row-marked-delete .calc-module-entry-index,
+.calc-module-row.calc-module-row-marked-delete .calc-module-psl-index{
+  background:#ff1f1f;
+  color:#fff;
+  border-radius:4px;
+  font-weight:800;
 }
 .calc-module-entry-margin,
 .calc-module-exit-row-pl,

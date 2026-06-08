@@ -12,7 +12,6 @@
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
   const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
   const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
-  const STRUCTURAL_WARNING_TEXT = "Position/orders changed \u2014 re-check math";
   const AUTO_SYNC_POLL_MS = 2000;
   const AUTO_SYNC_DEBOUNCE_MS = 800;
   const CALC_OWNED_REFRESH_SOURCES = new Set(["preflightRead","sendConfirm","postSendRefresh","resultWindowClose"]);
@@ -58,6 +57,7 @@
   let lastEditedPartialStopLotInput = null;
   let lastEditedExitLotInput = null;
   let lastKnownLiveOpenPositionQty = null;
+  let positionSizeNoticeTimer = null;
   const notifiedExecutionKeys = new Set();
 
   function q(id){ return document.getElementById(id); }
@@ -102,7 +102,7 @@
     const el = q("calcModuleStatus");
     if(el){
       el.textContent = text || "";
-      el.classList.toggle("is-warning",text === STRUCTURAL_WARNING_TEXT);
+      el.classList.remove("is-warning");
     }
   }
   function calculatorIsOpen(){
@@ -112,17 +112,25 @@
   function setCalculatorExecutionNotice(message){
     if(calculatorIsOpen()){
       setStatus(message || "Calculator-related order execution detected.");
-      return;
     }
-    const btn = q("calcOpenBtn");
-    if(btn) btn.classList.add("calc-module-icon-notify");
+  }
+  function setCalculatorPositionSizeNotice(){
+    const button = q("calcOpenBtn");
+    if(!button) return;
+    clearTimeout(positionSizeNoticeTimer);
+    button.classList.add("calc-module-icon-notify");
+    positionSizeNoticeTimer = setTimeout(() => {
+      button.classList.remove("calc-module-icon-notify");
+      positionSizeNoticeTimer = null;
+    },2400);
   }
   function clearCalculatorExecutionNotice(){
+    clearTimeout(positionSizeNoticeTimer);
+    positionSizeNoticeTimer = null;
     q("calcOpenBtn")?.classList.remove("calc-module-icon-notify");
   }
   function showStructuralWarning(){
     structuralWarningActive = true;
-    setStatus(STRUCTURAL_WARNING_TEXT);
   }
   function clearStructuralWarning(){
     structuralWarningActive = false;
@@ -548,7 +556,7 @@
         </div>
         <div class="calc-module-panel">
           <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleStopsTitle">
-            <span class="calc-module-section-main">Stops <span class="calc-module-title-sum" id="calcModuleStopSum">0.000</span></span>
+            <span class="calc-module-section-main">Stops <span class="calc-module-title-sum" id="calcModuleStopSum">0.000/0.000</span></span>
             <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddPartialStop" type="button">Add Partial Stop</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedStopRisk">-</span></span><span class="calc-module-caret" id="calcModuleStopsCaret">▾</span></span>
           </div>
           <div id="calcModuleStopsBody">
@@ -563,7 +571,7 @@
         </div>
         <div class="calc-module-panel">
           <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleExitsTitle">
-            <span class="calc-module-section-main">Exits <span class="calc-module-title-sum" id="calcModuleExitSum">0.000</span></span>
+            <span class="calc-module-section-main">Exits <span class="calc-module-title-sum" id="calcModuleExitSum">0.000/0.000</span></span>
             <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddExit" type="button">Add Exit</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedExitPl">-</span></span><span class="calc-module-caret" id="calcModuleExitsCaret">▾</span></span>
           </div>
           <div id="calcModuleExitsBody">
@@ -915,9 +923,10 @@
     const rewardValue = summary ? summary.reward : (exits.length ? reward : null);
 
     q("calcModuleEntrySum").textContent = fmtLot(entry.qty || 0);
-    q("calcModuleStopSum").textContent = fmtLot(totalPartialStopLots());
-    q("calcModuleExitSum").textContent = fmtLot(exitQty || 0);
-    q("calcModuleExitSum").classList.toggle("calc-module-underfilled",entry.qty > 0 && exitQty < entry.qty);
+    const coverageQty = lastKnownLiveOpenPositionQty == null ? liveCachedOpenPositionQty() : lastKnownLiveOpenPositionQty;
+    q("calcModuleStopSum").textContent = fmtLot(totalPartialStopLots()) + "/" + fmtLot(coverageQty || 0);
+    q("calcModuleExitSum").textContent = fmtLot(exitQty || 0) + "/" + fmtLot(coverageQty || 0);
+    q("calcModuleExitSum").classList.toggle("calc-module-underfilled",coverageQty > 0 && exitQty < coverageQty);
     q("calcModuleEntrySize").textContent = entry.qty > 0 ? fmtLot(entry.qty) : "-";
     q("calcModuleAvgEntry").textContent = entry.avg != null ? fmtPrice(entry.avg) : "-";
     q("calcModuleCollapsedEntryAvg").textContent = entry.avg != null ? fmtPrice(entry.avg) : "-";
@@ -974,6 +983,26 @@
     const lot = lotInput(row);
     if(lvl) lvl.title = "";
     if(lot) lot.title = "";
+  }
+  function isRowMarkedForDeletion(row){
+    return !!(row && row.dataset && row.dataset.markedForDeletion === "1");
+  }
+  function setRowMarkedForDeletion(row,marked){
+    if(!row) return;
+    const on = !!marked;
+    row.dataset.markedForDeletion = on ? "1" : "0";
+    row.classList.toggle("calc-module-row-marked-delete",on);
+    const remove = row.querySelector(".calc-module-remove");
+    if(remove) remove.title = on ? "Unmark Binance cancellation" : "Mark Binance order for cancellation";
+    markSendPlanStale(on ? "Binance-backed row marked for deletion after preflight." : "Binance-backed deletion unmarked after preflight.");
+    calculate();
+  }
+  function isStagedDeletionEligible(row){
+    if(!row || isOpenPositionRow(row)) return false;
+    const source = String(row.dataset && row.dataset.source || "");
+    const containerId = row.parentElement && row.parentElement.id;
+    return (containerId === "calcModuleEntryRows" && source === "binance-limit")
+      || (containerId === "calcModulePartialStopRows" && source === "binance-partial-stop");
   }
   function isOpenPositionRow(row){
     return !!(row && row.dataset && row.dataset.openPosition === "1");
@@ -1297,6 +1326,10 @@
       },false);
     }
     row.querySelector(".calc-module-remove").addEventListener("click",() => {
+      if(isStagedDeletionEligible(row)){
+        setRowMarkedForDeletion(row,!isRowMarkedForDeletion(row));
+        return;
+      }
       markSendPlanStale("Row removed after preflight.");
       clearBinanceMetaOnRow(row);
       clearPartialStopMetaOnRow(row);
@@ -1802,8 +1835,6 @@
   }
   function scheduleAutoSyncRefresh(){
     if(!autoSyncEnabled || autoSyncRefreshing) return;
-    showStructuralWarning();
-    markSendPlanStale(STRUCTURAL_WARNING_TEXT);
     clearTimeout(autoSyncDebounceTimer);
     autoSyncDebounceTimer = setTimeout(async() => {
       if(!autoSyncEnabled || autoSyncRefreshing) return;
@@ -1819,7 +1850,6 @@
       try{
         await readBinance({preserveSendPlan:true,autoSync:true,source:"autoWatch"});
       }finally{
-        showStructuralWarning();
         autoSyncRefreshing = false;
       }
     },AUTO_SYNC_DEBOUNCE_MS);
@@ -1831,6 +1861,9 @@
       const live = await readStructuralStateForAutoSync();
       if(!live || !live.signature) return;
       if(live.signature !== autoSyncBaselineSignature){
+        if(openPositionSizeChanged(lastReadStateSnapshot && lastReadStateSnapshot.openPosition,live.position)){
+          setCalculatorPositionSizeNotice();
+        }
         if(isCalculatorOwnedRefreshActive()){
           updateAutoSyncBaseline(live.position,live.snapshot);
           clearStructuralWarning();
@@ -2109,7 +2142,7 @@
     if(summaryEl){
       const staleReason = sendPlanState.staleReason || "Calculator changed after preflight.";
       const staleText = stale ? " | STALE: " + staleReason : "";
-      summaryEl.textContent = stale && staleReason === STRUCTURAL_WARNING_TEXT ? STRUCTURAL_WARNING_TEXT : summary + staleText;
+      summaryEl.textContent = summary + staleText;
       summaryEl.classList.toggle("is-stale",stale);
     }
     const bodyEl = q("calcModuleSendBody");
@@ -2462,7 +2495,7 @@
       .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && ordersVisible)))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
-        const text = !calculatorOpen && ordersVisible && item.openPosition
+        const text = item.openPosition
           ? direction.toUpperCase() + " | " + Number(item.lot).toFixed(3)
           : item.text;
         return { ...item, text, y };
@@ -2664,7 +2697,7 @@
     });
     ctx.restore();
     const axisItems = [];
-    const ordersOpenPosition = items.find(item => item && item.openPosition && !calculatorOpen && ordersVisible);
+    const ordersOpenPosition = items.find(item => item && item.openPosition);
     const newAverage = items.find(item => item && item.type === "new-average");
     if(ordersOpenPosition) axisItems.push({item:ordersOpenPosition,color:"rgba(112,122,138,0.82)",fill:"rgba(255,247,204,0.98)"});
     if(newAverage) axisItems.push({item:newAverage,color:"rgba(37,99,235,0.78)",fill:"rgba(232,240,255,0.98)"});
@@ -2719,6 +2752,7 @@
     window.draw = draw = function(){
       const result = prevDraw.apply(this,arguments);
       try{ drawCalculatorLevelsOverlay(); }catch(e){ console.warn(MODULE + " levels overlay draw failed",e); }
+      try{ window.CANDLE_CLOSE_COUNTDOWN?.draw?.(); }catch(_e){}
       return result;
     };
   }
@@ -3008,6 +3042,11 @@
     }
     return null;
   }
+  function openPositionSizeChanged(referencePos,livePos){
+    const refQty = Math.abs(num(referencePos && referencePos.qty) || 0);
+    const liveQty = Math.abs(num(livePos && livePos.qty) || 0);
+    return !approxEqual(refQty,liveQty,1e-9);
+  }
   function buildExternalChangeReason(baseOrder,liveOrder){
     if(!baseOrder) return "Missing baseline metadata from last Read.";
     if(!liveOrder) return "Existing Binance LIMIT order disappeared from live open orders.";
@@ -3211,6 +3250,57 @@
       const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
       limitRowRecords.push({row,rowType:"exit",meta});
     });
+    limitRowRecords.filter(record => isRowMarkedForDeletion(record.row)).forEach(record => {
+      const row = record.row;
+      const meta = record.meta;
+      const key = orderKeyFromMeta(meta);
+      const baseOrder = key ? baseMap.get(key) : null;
+      const liveOrder = key ? liveLimitMap.get(key) : null;
+      if(key) presentBinanceKeys.add(key);
+      if(!key || !baseOrder || !liveOrder){
+        plan.blocked = true;
+        addPlanRow(plan,{
+          section:"LIMIT Orders",
+          action:"Blocked",
+          type:"Entry",
+          side:"-",
+          oldPrice:formatPlanValue(num(levelInput(row)?.value),"price"),
+          newPrice:"-",
+          oldQty:formatPlanValue(num(lotInput(row)?.value),"qty"),
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"Marked Binance Entry is missing required live order metadata.",
+          writable:false,
+          mode:"blocked",
+          rowRef:row
+        });
+        return;
+      }
+      addPlanRow(plan,{
+        section:"LIMIT Orders",
+        action:"Cancel/Delete",
+        type:"Entry",
+        side:toUpper(baseOrder.side) || "-",
+        oldPrice:formatPlanValue(baseOrder.price,"price"),
+        newPrice:"-",
+        oldQty:formatPlanValue(baseOrder.origQty,"qty"),
+        newQty:"-",
+        orderId:meta.orderId != null ? String(meta.orderId) : String(meta.clientOrderId || "-"),
+        status:"Planned",
+        response:"Marked for deletion; Binance cancellation occurs on Confirm.",
+        writable:true,
+        mode:"limit-cancel-cbs",
+        rowRef:row,
+        payload:{
+          symbol:meta.symbol || baseOrder.symbol || currentSymbol(),
+          orderId:meta.orderId != null ? meta.orderId : null,
+          origClientOrderId:meta.clientOrderId ? String(meta.clientOrderId) : "",
+          meta
+        }
+      });
+    });
+    const activeLimitRowRecords = limitRowRecords.filter(record => !isRowMarkedForDeletion(record.row));
     const livePositionQty = num(livePos && livePos.qty) || 0;
     const combinedExitQty = totalExitLots();
     if(combinedExitQty > livePositionQty + 1e-9){
@@ -3418,6 +3508,51 @@
           const meta = row.__binancePartialStopMeta || (row.dataset && row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null);
           const pslKey = orderKeyFromMeta(meta);
           if(pslKey) presentPartialStopKeys.add(pslKey);
+          if(isRowMarkedForDeletion(row)){
+            if(!meta || !pslKey || !liveKeys.has(pslKey)){
+              plan.blocked = true;
+              addPlanRow(plan,{
+                section:"SL Operation",
+                action:"Blocked",
+                type:"PSL " + (index + 1),
+                side:livePos.side === "SHORT" ? "BUY" : "SELL",
+                oldPrice:formatPlanValue(num(meta && meta.triggerPrice),"price"),
+                newPrice:"-",
+                oldQty:formatPlanValue(num(meta && meta.origQty),"qty"),
+                newQty:"-",
+                orderId:meta && meta.algoId != null ? String(meta.algoId) : String(meta && meta.clientAlgoId || "-"),
+                status:"Blocked",
+                response:"Marked Binance PSL is missing required live order metadata.",
+                writable:false,
+                mode:"blocked",
+                rowRef:row
+              });
+              return;
+            }
+            addPlanRow(plan,{
+              section:"SL Operation",
+              action:"Cancel/Delete",
+              type:"PSL " + (index + 1),
+              side:toUpper(meta.side) || (livePos.side === "SHORT" ? "BUY" : "SELL"),
+              oldPrice:formatPlanValue(meta.triggerPrice,"price"),
+              newPrice:"-",
+              oldQty:formatPlanValue(meta.origQty,"qty"),
+              newQty:"-",
+              orderId:meta.algoId != null ? String(meta.algoId) : String(meta.clientAlgoId || "-"),
+              status:"Planned",
+              response:"Marked for deletion; Binance cancellation occurs on Confirm.",
+              writable:true,
+              mode:"psl-cancel",
+              rowRef:row,
+              payload:{
+                symbol:plan.symbol,
+                algoId:meta.algoId != null ? meta.algoId : null,
+                clientAlgoId:meta.clientAlgoId ? String(meta.clientAlgoId) : "",
+                meta
+              }
+            });
+            return;
+          }
           if(meta && pslKey && !liveKeys.has(pslKey)){
             plan.blocked = true;
             addPlanRow(plan,{
@@ -3559,7 +3694,7 @@
     if(cbsEnabled){
       const cancelAdded = new Set();
       const cbsBlockedRows = new Set();
-      limitRowRecords.forEach(record => {
+      activeLimitRowRecords.forEach(record => {
         const row = record.row;
         const rowType = record.rowType;
         const meta = record.meta;
@@ -3637,12 +3772,12 @@
           }
         }
       });
-      limitRowRecords.forEach(record => {
+      activeLimitRowRecords.forEach(record => {
         if(cbsBlockedRows.has(record.row)) return;
         prepareManualRowPlan(plan,record.row,record.rowType,contextDirection);
       });
     }else{
-      limitRowRecords.forEach(record => {
+      activeLimitRowRecords.forEach(record => {
         const row = record.row;
         const rowType = record.rowType;
         const meta = record.meta;
@@ -3700,11 +3835,11 @@
       });
     }
 
-    const hasManualWritableRows = limitRowRecords.some(record => {
+    const hasManualWritableRows = activeLimitRowRecords.some(record => {
       const row = record && record.row;
       return row && !isRowEmpty(row) && !isOpenPositionRow(row) && !(record.meta && row.dataset && row.dataset.source === "binance-limit");
     });
-    const hasExistingBinanceRows = limitRowRecords.some(record => {
+    const hasExistingBinanceRows = activeLimitRowRecords.some(record => {
       const row = record && record.row;
       return !!(record && record.meta && row && row.dataset && row.dataset.source === "binance-limit");
     });
@@ -4041,6 +4176,19 @@
       if(key) suppressedPartialStopKeys.add(key);
     });
   }
+  function purgeConfirmedMarkedDeletionRows(plan){
+    (Array.isArray(plan && plan.rows) ? plan.rows : []).forEach(rowPlan => {
+      const row = rowPlan && rowPlan.rowRef;
+      if(!row || rowPlan.status !== "Confirmed" || !isRowMarkedForDeletion(row)) return;
+      if(rowPlan.mode === "psl-cancel") clearPartialStopMetaOnRow(row);
+      else if(rowPlan.mode === "limit-cancel-cbs") clearBinanceMetaOnRow(row);
+      else return;
+      row.remove();
+    });
+    refreshEntryRowNumbers();
+    refreshPartialStopRowNumbers();
+    calculate();
+  }
   function purgeSuppressedPartialStopRows(){
     if(!suppressedPartialStopKeys.size) return;
     rows("calcModulePartialStopRows").forEach(row => {
@@ -4260,6 +4408,7 @@
     plan.canConfirm = false;
     plan.showPopup = executionMode === "express" ? planNeedsSendResultReview(plan) : true;
     rememberConfirmedPartialStopCancels(plan);
+    purgeConfirmedMarkedDeletionRows(plan);
     purgeSuppressedPartialStopRows();
     try{
       await readBinance({preserveSendPlan:true,source:"postSendRefresh"});
@@ -4732,8 +4881,6 @@
       }
       if(isOwnedRefresh){
         clearStructuralWarning();
-      }else if(isAutoWatch || structuralWarningActive){
-        setStatus(STRUCTURAL_WARNING_TEXT);
       }
       publishReadDiagnostic(diag);
     }catch(e){

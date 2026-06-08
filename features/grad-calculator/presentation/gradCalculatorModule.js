@@ -603,7 +603,7 @@
     });
     ctx.restore();
   }
-  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}return result;};}
+  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}try{window.CANDLE_CLOSE_COUNTDOWN?.draw?.();}catch(_e){}return result;};}
   function hit(clientX,clientY){if(typeof canvas==="undefined"||!canvas)return null;const rect=canvas.getBoundingClientRect(),x=clientX-rect.left,y=clientY-rect.top;return state.overlayBoxes.find(box=>x>=box.x1&&x<=box.x2&&y>=box.y1&&y<=box.y2)||null;}
   function installDrag(){if(typeof canvas==="undefined"||!canvas||canvas.__gradV4Drag)return;canvas.__gradV4Drag=true;canvas.addEventListener("mousedown",event=>{const box=hit(event.clientX,event.clientY);if(!box||!box.boundary)return;state.drag=box;event.preventDefault();event.stopImmediatePropagation();},true);window.addEventListener("mousemove",event=>{if(!state.drag)return;const level=priceFromY(event.clientY);if(level==null||level<=0)return;redistributeFromBoundaries(state.drag.section,state.drag.boundary,level);event.preventDefault();},true);window.addEventListener("mouseup",event=>{if(!state.drag)return;state.drag=null;event.preventDefault();},true);}
   function bindGenerator(section){
@@ -612,17 +612,22 @@
       const generator=state.generators[section];
       if(name==="End")generator.lastEdited="end";
       readGenerator(section);
+      if(section==="protection"&&name==="Lot"&&state.livePosition&&number(state.generators.protection.lot)>number(state.livePosition.qty)){
+        state.generators.protection.lot=fmtLot(state.livePosition.qty);
+        q(prefix+"Lot").value=state.generators.protection.lot;
+        setStatus("Protection total lot cannot exceed live open-position size.");
+      }
       if(state.loadedMode[section]&&name==="Lot"){
         redistributeLotsOnly(section,state.generators[section].lot);
         setStatus(sectionTitle(section)+" loaded-order mode: levels remain fixed until boundary edit or regeneration.");
         return;
       }
-      if(state.loadedMode[section]&&name==="Count"&&section!=="exit"){
+      if(state.loadedMode[section]&&name==="Count"&&section==="entry"){
         state.generators[section].count=rows(section).length||1;q(prefix+"Count").value=String(state.generators[section].count);
         setStatus(sectionTitle(section)+" loaded-order mode: count remains derived from loaded rows.");
         return;
       }
-      if(section==="exit"&&name==="Count")state.loadedMode.exit=false;
+      if((section==="exit"||section==="protection")&&name==="Count")state.loadedMode[section]=false;
       if(name==="Start"||name==="End")state.loadedMode[section]=false;
       if(number(q(prefix+"Start").value)>0)generate(section);
     },false));

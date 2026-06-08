@@ -1353,8 +1353,7 @@ function updateTabTitle(){
   const price = candles.length ? candles[candles.length-1].close : lastMarkPrice;
   const flt = openBoxesFloating(price);
   const lot = (openPositionBoxes || []).reduce((total,box) => total + Math.abs(Number(box && box.qty) || 0),0);
-  const symbol = typeof cfg === "function" && cfg() ? String(cfg().symbol || "") : "";
-  document.title = (symbol ? symbol + " " : "") + titlePrice(price) + " | " + lot.toFixed(3) + " | " + titlePL(flt, !!(openPositionBoxes && openPositionBoxes.length));
+  document.title = titlePrice(price) + " | " + lot.toFixed(3) + " | " + titlePL(flt, !!(openPositionBoxes && openPositionBoxes.length));
 }
 
 function startTitleUpdater(){
@@ -19632,7 +19631,7 @@ If there is NO open position, use this Section 2 instead:
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",start,{once:true});
   else start();
-  window.CANDLE_CLOSE_COUNTDOWN = {version:MODULE,countdownText};
+  window.CANDLE_CLOSE_COUNTDOWN = {version:MODULE,countdownText,draw:drawCountdown};
 })();
 
 (() => {
