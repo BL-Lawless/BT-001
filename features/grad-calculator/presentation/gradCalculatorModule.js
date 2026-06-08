@@ -297,7 +297,7 @@
       if(model.binanceOrderId!=null) node.dataset.binanceOrderId=String(model.binanceOrderId);
       node.innerHTML=`<span class="grad-calc-index">${index+1}</span><input class="grad-calc-level" type="number" min="0" step="10" value="${fmtLevelInput(model.level)}"><input class="grad-calc-lot" type="number" min="0.001" step="0.001" value="${fmtLot(model.lot)}"><span class="grad-calc-value">-</span><button class="grad-calc-remove" type="button">x</button>`;
       const level=node.querySelector(".grad-calc-level"), lot=node.querySelector(".grad-calc-lot");
-      if(model.status==="executed"){node.classList.add("is-executed");level.disabled=true;lot.disabled=true;node.querySelector(".grad-calc-remove").disabled=true;}
+      if(section==="entry"&&model.status==="executed"){node.classList.add("is-executed");level.disabled=true;lot.disabled=true;node.querySelector(".grad-calc-remove").disabled=true;}
       const sync=()=>{
         model.level=fmtLevelInput(level.value);
         model.lot=fmtLot(lot.value);
@@ -661,12 +661,17 @@
       const generator=state.generators[section];
       if(name==="End")generator.lastEdited="end";
       readGenerator(section);
-      if(state.loadedMode[section]&&(name==="Lot"||name==="Count")){
-        if(name==="Count"){state.generators[section].count=rows(section).length||1;q(prefix+"Count").value=String(state.generators[section].count);}
-        if(name==="Lot")redistributeLotsOnly(section,state.generators[section].lot);
+      if(state.loadedMode[section]&&name==="Lot"){
+        redistributeLotsOnly(section,state.generators[section].lot);
         setStatus(sectionTitle(section)+" loaded-order mode: levels remain fixed until boundary edit or regeneration.");
         return;
       }
+      if(state.loadedMode[section]&&name==="Count"&&section!=="exit"){
+        state.generators[section].count=rows(section).length||1;q(prefix+"Count").value=String(state.generators[section].count);
+        setStatus(sectionTitle(section)+" loaded-order mode: count remains derived from loaded rows.");
+        return;
+      }
+      if(section==="exit"&&name==="Count")state.loadedMode.exit=false;
       if(name==="Start"||name==="End")state.loadedMode[section]=false;
       if(number(q(prefix+"Start").value)>0)generate(section);
     },false));
