@@ -9,6 +9,10 @@
   const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
   const OPEN_ALGO_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
   const sections = ["entry","protection","exit"];
+  const conditionalClassifier = window.BinanceConditionalOrderClassifier || null;
+  const CONDITIONAL_KIND = conditionalClassifier && conditionalClassifier.KINDS
+    ? conditionalClassifier.KINDS
+    : {MASTER_SL:"MASTER_SL",PSL:"PSL",MASTER_TP:"MASTER_TP",PARTIAL_TP:"PARTIAL_TP",UNKNOWN:"UNKNOWN"};
   const state = {
     active:"entry",
     direction:"LONG",
@@ -91,6 +95,33 @@
   const orderLevel = (section,order) => {
     const candidates=section==="protection"?[order&&order.stopPrice,order&&order.triggerPrice,order&&order.price]:[order&&order.price,order&&order.stopPrice,order&&order.triggerPrice];
     return candidates.map(number).find(value=>value!=null&&value>0)||null;
+  };
+  const classifyConditionalOrder = order => conditionalClassifier && typeof conditionalClassifier.classify === "function"
+    ? conditionalClassifier.classify(order)
+    : {
+        kind:CONDITIONAL_KIND.UNKNOWN,
+        sourceOrder:order || null,
+        symbol:order && order.symbol != null ? order.symbol : null,
+        side:order && order.side != null ? order.side : null,
+        positionSide:order && order.positionSide != null ? order.positionSide : null,
+        triggerPrice:number(order && (order.stopPrice ?? order.triggerPrice ?? order.price)),
+        quantity:number(order && (order.origQty ?? order.quantity ?? order.qty)),
+        closePosition:order && (order.closePosition === true || String(order.closePosition).toLowerCase() === "true"),
+        clientOrderId:order && order.clientOrderId != null ? order.clientOrderId : null,
+        clientAlgoId:order && order.clientAlgoId != null ? order.clientAlgoId : null,
+        orderId:order && order.orderId != null ? order.orderId : null,
+        algoId:order && order.algoId != null ? order.algoId : null,
+        ownership:null,
+        typeText:"",
+        isLive:true
+      };
+  const classifyGrProtectionOrder = order => {
+    const classified = classifyConditionalOrder(order);
+    if(classified.kind === CONDITIONAL_KIND.MASTER_SL){
+      try{ console.warn("GR Protection order classified as MASTER_SL; forcing PSL classification.",order); }catch(_e){}
+      return {...classified,kind:CONDITIONAL_KIND.PSL,closePosition:false};
+    }
+    return classified;
   };
   const createRowId = section => `gr_${section}_${Date.now()}_${++state.rowSeq}`;
   const rowLabel = (section,index) => section === "entry" ? `G Entry ${index + 1}` : section === "exit" ? `G Exit ${index + 1}` : `G PSL ${index + 1}`;
@@ -425,13 +456,18 @@
     const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     return [].concat(Array.isArray(normal)?normal:[],Array.isArray(algo)?algo:[]).filter(order=>{
       if(!ownedClientId(order)||orderSection(order)!==section)return false;
-      if(section==="protection"&&!clientIdOf(order).startsWith("GR_PROT_PSL_"))return false;
+      if(section==="protection"){
+        const classified = classifyGrProtectionOrder(order);
+        if(!clientIdOf(order).startsWith("GR_PROT_PSL_")) return false;
+        if(classified.kind !== CONDITIONAL_KIND.PSL) return false;
+      }
       return true;
     });
   }
   function fromBinanceOrder(section,order){
     const status=String(order.status||order.orderStatus||"").toUpperCase()==="FILLED"?"executed":"sent";
-    const lot=order.executedQty&&status==="executed"?order.executedQty:order.origQty||order.quantity||order.qty;
+    const classified = section === "protection" ? classifyGrProtectionOrder(order) : null;
+    const lot=order.executedQty&&status==="executed"?order.executedQty:(classified && classified.quantity != null ? classified.quantity : order.origQty||order.quantity||order.qty);
     return rowModel(section,{localRowId:`gr_owned_${order.orderId||order.algoId||clientIdOf(order)}`,binanceOrderId:order.orderId||order.algoId||null,clientOrderId:clientIdOf(order)||null,status,symbol:order.symbol||currentSymbol(),side:order.side||null,orderType:order.type||order.orderType||null,role:section==="protection"?"psl":section,level:orderLevel(section,order),price:number(order.price)>0?order.price:null,stopPrice:number(order.stopPrice)>0?order.stopPrice:number(order.triggerPrice)>0?order.triggerPrice:null,lot,originalLot:lot});
   }
   function importOwned(section,ordersList){
@@ -536,6 +572,7 @@
         if(row.status==="modified"&&row.binanceOrderId!=null)await signedWrite(ALGO_URL,"DELETE",{symbol:currentSymbol(),algoId:String(row.binanceOrderId)});
         const payload={symbol:currentSymbol(),side,algoType:"CONDITIONAL",type:"STOP_MARKET",quantity:String(number(row.lot)),triggerPrice:String(number(row.level)),workingType:"CONTRACT_PRICE",clientAlgoId:clientId};
         if(["LONG","SHORT"].includes(state.livePosition.positionSide))payload.positionSide=state.livePosition.positionSide;else payload.reduceOnly="true";
+        delete payload.closePosition;
         const response=await signedWrite(ALGO_URL,"POST",payload);row.binanceOrderId=response.algoId||response.orderId||null;row.clientOrderId=response.clientAlgoId||clientId;
       }else{
         const direction=section==="entry"?state.direction:state.livePosition.side,side=direction==="LONG"?(section==="entry"?"BUY":"SELL"):(section==="entry"?"SELL":"BUY");

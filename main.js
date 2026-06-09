@@ -14725,6 +14725,8 @@ startTradeAuto();
   }
 
   function stopPrice21(o){
+    const helper = window.BinanceConditionalOrderClassifier;
+    if(helper && typeof helper.triggerPriceOf === "function") return helper.triggerPriceOf(o);
     const candidates = [o && o.stopPrice,o && o.triggerPrice,o && o.activatePrice,o && o.price];
     for(const v of candidates){
       const n = Number(v);
@@ -14742,12 +14744,9 @@ startTradeAuto();
     return !ps || ps === "BOTH" || ps === side;
   }
   function isStopLossOrder21(o){
-    const type = String(o && (o.type || o.origType || o.orderType || "") || "").toUpperCase();
-    const allTypes = [type,String(o && o.origType || "").toUpperCase(),String(o && o.algoType || "").toUpperCase()].join(" ");
-    if(!allTypes.includes("STOP")) return false;
-    if(allTypes.includes("TAKE_PROFIT")) return false;
-    if(allTypes.includes("TRAILING")) return false;
-    return stopPrice21(o) != null;
+    const helper = window.BinanceConditionalOrderClassifier;
+    const kind = helper && typeof helper.classify === "function" ? helper.classify(o).kind : "";
+    return kind === "MASTER_SL" || kind === "PSL";
   }
   function stopOrderPool21(){
     return [].concat(window.v13OpenOrders21 || [], window.v13OpenAlgoOrders21 || []);
@@ -14762,10 +14761,14 @@ startTradeAuto();
       .filter(o => positionSideMatches21(o,side))
       .filter(o => String(o.side || "").toUpperCase() === opp)
       .filter(isStopLossOrder21)
-      .map(o => ({order:o,price:stopPrice21(o),reduce:(String(o.reduceOnly).toLowerCase()==="true" || String(o.closePosition).toLowerCase()==="true"),algo:!!(o.algoId || o.strategyId || o.algoType)}))
+      .map(o => {
+        const helper = window.BinanceConditionalOrderClassifier;
+        const classified = helper && typeof helper.classify === "function" ? helper.classify(o) : null;
+        return {order:o,price:stopPrice21(o),kind:classified ? classified.kind : "",reduce:(String(o.reduceOnly).toLowerCase()==="true" || String(o.closePosition).toLowerCase()==="true"),algo:!!(o.algoId || o.strategyId || o.algoType)};
+      })
       .filter(x => x.price != null);
     if(!list.length) return null;
-    list.sort((a,b) => Number(b.reduce) - Number(a.reduce) || Number(b.algo) - Number(a.algo));
+    list.sort((a,b) => Number(b.kind==="MASTER_SL") - Number(a.kind==="MASTER_SL") || Number(b.reduce) - Number(a.reduce) || Number(b.algo) - Number(a.algo));
     const directional = list.filter(x => current == null ? true : (side === "LONG" ? x.price < current : x.price > current));
     const pool = directional.length ? directional : list;
     pool.sort((a,b) => side === "LONG" ? b.price - a.price : a.price - b.price);
@@ -16499,7 +16502,8 @@ If there is NO open position, use this Section 2 instead:
   function weightedAvg(rows){ let q=0,v=0; rows.forEach(r=>{const qty=Math.abs(n(r.qty)||0),px=n(r.price); if(qty>0&&px!=null){q+=qty;v+=qty*px;}}); return q>0?v/q:null; }
   function positionContext(entries){ const boxes=boxRows(); let totalSize=0,avgEntry=null,side="NONE"; if(boxes.length){ totalSize=boxes.reduce((a,b)=>a+Math.abs(n(b.qty)||0),0); avgEntry=weightedAvg(boxes.map(b=>({qty:Math.abs(n(b.qty)||0),price:n(b.price)}))); const sides=Array.from(new Set(boxes.map(sideOfBox).filter(x=>x&&x!=="-"))); side=sides.length===1?sides[0]:sides.length?"MIXED":"NONE"; }else if(entries.length){ totalSize=entries.reduce((a,e)=>a+Math.abs(n(e.qty)||0),0); avgEntry=weightedAvg(entries); const sides=Array.from(new Set(entries.map(e=>e.side||"").filter(Boolean))); side=sides.length===1?sides[0]:sides.length?"MIXED":"NONE"; } if(!(totalSize>0)) side="NONE"; return {boxes,totalSize,avgEntry,side}; }
   function stopPrice(o){ for(const v of [o&&o.stopPrice,o&&o.triggerPrice,o&&o.activatePrice,o&&o.price]){ const x=n(v); if(x!=null&&x>0) return x; } return null; }
-  function activeSL(pos,current){ const sym=currentSymbol(); const opp=pos.side==="SHORT"?"BUY":"SELL"; let list=[]; try{ const pool=[].concat(window.v13OpenOrders21||[],window.v13OpenAlgoOrders21||[]); list=pool.filter(o=>o&&String(o.symbol||"")===sym).filter(o=>{ const st=String(o.status||o.orderStatus||"NEW").toUpperCase(); return !st||st==="NEW"||st==="PENDING"||st==="ACCEPTED"||st.includes("NEW"); }).filter(o=>{ const ps=String(o.positionSide||"").toUpperCase(); return !ps||ps==="BOTH"||ps===pos.side; }).filter(o=>String(o.side||"").toUpperCase()===opp).filter(o=>{ const types=[o&&o.type,o&&o.origType,o&&o.orderType,o&&o.algoType].map(x=>String(x||"").toUpperCase()).join(" "); return types.includes("STOP")&&!types.includes("TAKE_PROFIT")&&!types.includes("TRAILING"); }).map(o=>({price:stopPrice(o)})).filter(x=>x.price!=null); }catch(_e){list=[];} if(!list.length) return null; const directional=current==null?[]:list.filter(x=>pos.side==="LONG"?x.price<current:x.price>current); const pool=directional.length?directional:list; pool.sort((a,b)=>pos.side==="LONG"?b.price-a.price:a.price-b.price); return pool[0].price; }
+  function stopPrice(o){ const helper=window.BinanceConditionalOrderClassifier; if(helper&&typeof helper.triggerPriceOf==="function") return helper.triggerPriceOf(o); for(const v of [o&&o.stopPrice,o&&o.triggerPrice,o&&o.activatePrice,o&&o.price]){ const x=n(v); if(x!=null&&x>0) return x; } return null; }
+  function activeSL(pos,current){ const sym=currentSymbol(); const opp=pos.side==="SHORT"?"BUY":"SELL"; let list=[]; try{ const helper=window.BinanceConditionalOrderClassifier; const pool=[].concat(window.v13OpenOrders21||[],window.v13OpenAlgoOrders21||[]); list=pool.filter(o=>o&&String(o.symbol||"")===sym).filter(o=>{ const st=String(o.status||o.orderStatus||"NEW").toUpperCase(); return !st||st==="NEW"||st==="PENDING"||st==="ACCEPTED"||st.includes("NEW"); }).filter(o=>{ const ps=String(o.positionSide||"").toUpperCase(); return !ps||ps==="BOTH"||ps===pos.side; }).filter(o=>String(o.side||"").toUpperCase()===opp).map(o=>({order:o,classification:helper&&typeof helper.classify==="function"?helper.classify(o):null,price:stopPrice(o)})).filter(x=>x.price!=null&&x.classification&&(x.classification.kind==="MASTER_SL"||x.classification.kind==="PSL")); }catch(_e){list=[];} if(!list.length) return null; const directional=current==null?[]:list.filter(x=>pos.side==="LONG"?x.price<current:x.price>current); const pool=directional.length?directional:list; pool.sort((a,b)=>Number(b.classification.kind==="MASTER_SL")-Number(a.classification.kind==="MASTER_SL")||(pos.side==="LONG"?b.price-a.price:a.price-b.price)); return pool[0].price; }
   function indicatorLines(){ const out=[]; try{ const slots=window.MA_FEATURE&&typeof window.MA_FEATURE.getCanonicalMASlots==="function"?window.MA_FEATURE.getCanonicalMASlots():[]; slots.forEach(slot=>{ const arr=slot&&Array.isArray(slot.series)?slot.series:[]; if(arr.length) out.push(slot.label+": "+fmtPrice(arr[arr.length-1].value)); }); }catch(_e){} try{ const series=typeof currentVWAPSeries==="function"?currentVWAPSeries():vwap; if(Array.isArray(series)&&series.length) out.push("VWAP: "+fmtPrice(series[series.length-1].value)); }catch(_e){} return out; }
   function failureReport(market){ const lines=["Some Assess datasets are missing or failed.","","Missing datasets:"]; if(market.missing&&market.missing.length) market.missing.forEach(x=>lines.push("- "+x)); else lines.push("- none"); lines.push("","Details:"); Object.keys(market.tfs||{}).forEach(key=>{const b=market.tfs[key]; if(b&&b.errors&&b.errors.length) lines.push("- "+key+": "+b.errors.join(" | "));}); return lines.join("\n"); }
 

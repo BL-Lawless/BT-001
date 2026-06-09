@@ -1979,6 +1979,10 @@ button:hover{filter:brightness(1.04)}
 .calc-module-input-pending-send{
   background:#eefbf1!important;
 }
+.calc-module-input-marked-delete{
+  background:#ffe2e2!important;
+  border-color:#ff6b6b!important;
+}
 .calc-module-row.calc-module-row-locked{
   opacity:.94;
 }
@@ -2012,9 +2016,18 @@ button:hover{filter:brightness(1.04)}
   border-radius:0;
   padding:0;
   display:grid;
-  grid-template-columns:62px minmax(68px,1fr) 30px 70px minmax(68px,max-content);
+  grid-template-columns:62px minmax(68px,1fr) 30px 70px 56px minmax(68px,max-content);
   gap:6px;
   align-items:center;
+}
+.calc-module-stop-delete{
+  height:26px;
+  padding:0 6px;
+}
+.calc-module-stop-delete.is-marked{
+  background:#ffdddd;
+  border-color:#ff6b6b;
+  color:#991b1b;
 }
 .calc-module-stop label{
   font-size:11px;
@@ -2445,6 +2458,6 @@ button:hover{filter:brightness(1.04)}
     min-width:320px;
   }
   .calc-module-grid{grid-template-columns:1fr}
-  .calc-module-stop{grid-template-columns:62px minmax(74px,1fr) 30px 64px minmax(66px,max-content)}
+  .calc-module-stop{grid-template-columns:62px minmax(74px,1fr) 30px 64px 56px minmax(66px,max-content)}
   .calc-module-binance-actions{grid-template-columns:1fr 1fr 1fr}
 }
