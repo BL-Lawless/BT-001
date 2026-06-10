@@ -39,6 +39,7 @@
   const suppressedPartialStopKeys = new Set();
   let currentStopAlgoMeta = null;
   let masterStopMarkedForDeletion = false;
+  let masterStopDraftDirty = false;
   let lastReadDiagnostic = null;
   let lastOverlayDiagnostic = null;
   let lastSendDiagnostic = null;
@@ -342,7 +343,16 @@
     }
   }
   function loadSlSendEnabled(){
-    return true;
+    const adapter = infra();
+    if(adapter && typeof adapter.readFlag === "function"){
+      return adapter.readFlag(SL_SEND_ENABLED_KEY,true);
+    }
+    try{
+      const raw = localStorage.getItem(SL_SEND_ENABLED_KEY);
+      return raw == null ? true : raw !== "0";
+    }catch(_e){
+      return true;
+    }
   }
   function loadCbsEnabled(){
     const adapter = infra();
@@ -495,12 +505,12 @@
     }
   }
   function saveSlSendEnabled(next){
-    slSendEnabled = true;
+    slSendEnabled = !!next;
     const adapter = infra();
     if(adapter && typeof adapter.writeFlag === "function"){
-      adapter.writeFlag(SL_SEND_ENABLED_KEY,true);
+      adapter.writeFlag(SL_SEND_ENABLED_KEY,slSendEnabled);
     }else{
-      try{ localStorage.setItem(SL_SEND_ENABLED_KEY,"1"); }catch(_e){}
+      try{ localStorage.setItem(SL_SEND_ENABLED_KEY,slSendEnabled ? "1" : "0"); }catch(_e){}
     }
     try{ if(typeof draw === "function") draw(); }catch(_e){}
   }
@@ -742,7 +752,7 @@
             <div class="calc-module-stop">
               <label for="calcModuleStopLevel">Master SL</label><input id="calcModuleStopLevel" type="number" inputmode="decimal" step="10" min="0" placeholder="Level">
               <label for="calcModuleStopDistance">SL Δ</label><input id="calcModuleStopDistance" type="number" inputmode="decimal" step="10" min="0" placeholder="Distance">
-              <button class="calc-module-remove calc-module-stop-delete" id="calcModuleDeleteStop" type="button" title="Mark Binance Master SL for cancellation">Delete</button>
+              <button class="calc-module-remove calc-module-stop-delete" id="calcModuleDeleteStop" type="button" title="Mark Binance Master SL for cancellation">x</button>
               <span class="calc-module-stop-pl" id="calcModuleStopPl">-</span>
             </div>
             <div class="calc-module-psl-head calc-module-partial-stop-head"><div>#</div><div>Level</div><div>Lot</div><div>PL</div><div>x</div></div>
@@ -1249,11 +1259,11 @@
     const lot = num(lotInput(row)?.value);
     if(source === "binance-limit"){
       const meta = row.__binanceLimitOrderMeta || (row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
-      return !meta || !approxEqual(level,meta.price,1e-8) || !approxEqual(lot,meta.origQty,1e-10);
+      return !meta || !sameLevelValue(level,meta.price) || !sameQtyValue(lot,meta.origQty);
     }
     if(source === "binance-partial-stop"){
       const meta = row.__binancePartialStopMeta || (row.dataset.calcPartialStopRowId ? binancePartialStopMetaByRowId.get(row.dataset.calcPartialStopRowId) : null);
-      return !meta || !approxEqual(level,meta.triggerPrice,1e-8) || !approxEqual(lot,meta.origQty,1e-10);
+      return !meta || !sameLevelValue(level,meta.triggerPrice) || !sameQtyValue(lot,meta.origQty);
     }
     return true;
   }
@@ -1261,7 +1271,41 @@
     const level = num(q("calcModuleStopLevel")?.value);
     if(masterStopMarkedForDeletion) return true;
     if(level == null || level <= 0) return false;
-    return !currentStopAlgoMeta || !approxEqual(level,currentStopAlgoMeta.triggerPrice,1e-8);
+    if(currentStopAlgoMeta) return !sameLevelValue(level,currentStopAlgoMeta.triggerPrice);
+    return !!masterStopDraftDirty;
+  }
+  function normalizeLevelComparable(value){
+    const n = num(value);
+    return n == null ? null : Number(n.toFixed(8));
+  }
+  function normalizeQtyComparable(value){
+    const n = num(value);
+    return n == null ? null : Number(n.toFixed(3));
+  }
+  function sameLevelValue(a,b){
+    const left = normalizeLevelComparable(a);
+    const right = normalizeLevelComparable(b);
+    return left != null && right != null && left === right;
+  }
+  function sameQtyValue(a,b){
+    const left = normalizeQtyComparable(a);
+    const right = normalizeQtyComparable(b);
+    return left != null && right != null && left === right;
+  }
+  function hasLocalMasterStopDraft(){
+    const level = num(q("calcModuleStopLevel")?.value);
+    return !currentStopAlgoMeta && !!masterStopDraftDirty && level != null && level > 0;
+  }
+  function shouldIncludeMasterStopInPlan(){
+    if(masterStopMarkedForDeletion && !!currentStopAlgoMeta) return true;
+    if(!slSendEnabled) return false;
+    if(hasLocalMasterStopDraft()) return true;
+    if(currentStopAlgoMeta){
+      const level = num(q("calcModuleStopLevel")?.value);
+      if(level == null || level <= 0) return false;
+      return !sameLevelValue(level,currentStopAlgoMeta.triggerPrice);
+    }
+    return false;
   }
   function isMasterStopMarkedForDeletion(){
     return masterStopMarkedForDeletion;
@@ -1282,7 +1326,7 @@
     if(stopDistance) stopDistance.classList.toggle("calc-module-input-marked-delete",masterStopMarkedForDeletion);
     if(deleteBtn){
       deleteBtn.classList.toggle("is-marked",masterStopMarkedForDeletion);
-      deleteBtn.textContent = masterStopMarkedForDeletion ? "Unmark" : "Delete";
+      deleteBtn.textContent = "x";
       deleteBtn.title = masterStopMarkedForDeletion
         ? "Unmark Binance Master SL cancellation"
         : "Mark Binance Master SL for cancellation";
@@ -1301,6 +1345,7 @@
     const opts = options || {};
     currentStopAlgoMeta = null;
     setMasterStopMarkedForDeletion(false,{skipStale:true});
+    if(!opts.preserveDraftFlag) masterStopDraftDirty = false;
     if(!opts.preserveLocalDraft){
       const stopLevel = q("calcModuleStopLevel");
       const stopDistance = q("calcModuleStopDistance");
@@ -1333,8 +1378,8 @@
     const binanceBacked = (isExit && source === "binance-limit") || (isPartialStop && source === "binance-partial-stop");
     const originalLevel = isExit ? num(meta && meta.price) : num(meta && meta.triggerPrice);
     const originalLot = num(meta && meta.origQty);
-    levelInput(row)?.classList.toggle("calc-module-input-pending-send",!!(binanceBacked && meta && !approxEqual(num(levelInput(row)?.value),originalLevel,1e-8)));
-    lotInput(row)?.classList.toggle("calc-module-input-pending-send",!!(binanceBacked && meta && !approxEqual(num(lotInput(row)?.value),originalLot,1e-10)));
+    levelInput(row)?.classList.toggle("calc-module-input-pending-send",!!(binanceBacked && meta && !sameLevelValue(num(levelInput(row)?.value),originalLevel)));
+    lotInput(row)?.classList.toggle("calc-module-input-pending-send",!!(binanceBacked && meta && !sameQtyValue(num(lotInput(row)?.value),originalLot)));
   }
   function applyRowSourceAndMeta(row,opts){
     if(!row) return row;
@@ -3602,8 +3647,9 @@
     if(true){
       const stopLevel = num(q("calcModuleStopLevel")?.value);
       const stopMath = calculateStopMath(readEntry(),stopLevel,readPartialStops());
+      const includeMasterStop = shouldIncludeMasterStopInPlan();
       if(!livePos){
-        addPlanRow(plan,{
+        if(includeMasterStop) addPlanRow(plan,{
           section:"SL Operation",
           action:"Skip",
           type:"Master SL",
@@ -3653,30 +3699,15 @@
           writable:false,
           mode:"blocked"
         });
-      }else if((stopLevel == null || stopLevel <= 0) && !isMasterStopMarkedForDeletion()){
-        plan.blocked = true;
-        addPlanRow(plan,{
-          section:"SL Operation",
-          action:"Blocked",
-          type:"Master SL",
-          side:livePos.side === "SHORT" ? "BUY" : "SELL",
-          oldPrice:"-",
-          newPrice:formatPlanValue(stopLevel,"price"),
-          oldQty:"-",
-          newQty:"-",
-          orderId:"-",
-          status:"Blocked",
-          response:"SL level is invalid.",
-          writable:false,
-          mode:"blocked"
-        });
       }else{
         const liveAlgoStop = findStopOrderForPosition(livePos,liveSnapshot,true);
         const stopMeta = liveAlgoStop && liveAlgoStop.order
           ? buildAlgoOrderMeta(liveAlgoStop.order)
           : currentStopAlgoMeta;
         const stopKey = orderKeyFromMeta(stopMeta);
-        if(isMasterStopMarkedForDeletion()){
+        if(!includeMasterStop){
+          // Skip inactive or unchanged Master SL entirely so it cannot block unrelated sends.
+        }else if(isMasterStopMarkedForDeletion()){
           if(stopMeta && stopKey && !liveKeys.has(stopKey)){
             plan.blocked = true;
             addPlanRow(plan,{
@@ -3754,7 +3785,25 @@
           });
           return plan;
         }else{
-          const masterChanged = !stopMeta || !approxEqual(stopLevel,stopMeta.triggerPrice,1e-8);
+          if(stopLevel == null || stopLevel <= 0){
+            plan.blocked = true;
+            addPlanRow(plan,{
+              section:"SL Operation",
+              action:"Blocked",
+              type:"Master SL",
+              side:livePos.side === "SHORT" ? "BUY" : "SELL",
+              oldPrice:"-",
+              newPrice:formatPlanValue(stopLevel,"price"),
+              oldQty:"-",
+              newQty:"-",
+              orderId:"-",
+              status:"Blocked",
+              response:"SL level is invalid.",
+              writable:false,
+              mode:"blocked"
+            });
+          }else{
+          const masterChanged = !stopMeta || !sameLevelValue(stopLevel,stopMeta.triggerPrice);
           if(stopMeta && !masterChanged){
             addPlanRow(plan,{
               section:"SL Operation",
@@ -3836,6 +3885,7 @@
                 workingType:stopMeta && stopMeta.workingType ? stopMeta.workingType : null
               }
             });
+          }
           }
         }
         partialStopRows.forEach((row,index) => {
@@ -4388,6 +4438,7 @@
         closePosition:"true",
         workingType:send.workingType
       },resp || {}));
+      masterStopDraftDirty = false;
       const blinkKey = orderKeyFromMeta(currentStopAlgoMeta);
       return {ok:true,response:resp,blinkKey};
     }
@@ -5170,7 +5221,7 @@
 
       let stop = null;
       let stopMapped = null;
-      const preservedLocalMasterStop = !currentStopAlgoMeta ? {
+      const preservedLocalMasterStop = (!currentStopAlgoMeta && masterStopDraftDirty) ? {
         level:String(q("calcModuleStopLevel")?.value || ""),
         distance:String(q("calcModuleStopDistance")?.value || "")
       } : null;
@@ -5199,11 +5250,13 @@
       if(pos && stop != null){
         q("calcModuleStopLevel").value = Math.round(stop);
         lastStopEdit = "level";
+        masterStopDraftDirty = false;
         syncStopFromLevel(pos.entry);
         if(preservedDeleteMark && currentStopAlgoMeta) setMasterStopMarkedForDeletion(true,{skipStale:true});
       }else if(preservedLocalMasterStop && preservedLocalMasterStop.level){
         q("calcModuleStopLevel").value = preservedLocalMasterStop.level;
         q("calcModuleStopDistance").value = preservedLocalMasterStop.distance;
+        masterStopDraftDirty = true;
       }
       else clearMasterStopBinanceState();
       restoreEditedBinanceRows(binanceSyncPreservedRows);
@@ -5438,6 +5491,7 @@
     },false);
     q("calcModuleStopLevel").addEventListener("input",() => {
       if(isMasterStopMarkedForDeletion()) setMasterStopMarkedForDeletion(false,{skipStale:true});
+      masterStopDraftDirty = true;
       normalizeLevelInput(q("calcModuleStopLevel"));
       markSendPlanStale("SL level changed after preflight.");
       lastStopEdit = "level";
@@ -5446,6 +5500,7 @@
     },false);
     q("calcModuleStopDistance").addEventListener("input",() => {
       if(isMasterStopMarkedForDeletion()) setMasterStopMarkedForDeletion(false,{skipStale:true});
+      masterStopDraftDirty = true;
       normalizeLevelInput(q("calcModuleStopDistance"));
       markSendPlanStale("SL Δ changed after preflight.");
       lastStopEdit = "distance";

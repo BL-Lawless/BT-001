@@ -2016,13 +2016,14 @@ button:hover{filter:brightness(1.04)}
   border-radius:0;
   padding:0;
   display:grid;
-  grid-template-columns:62px minmax(68px,1fr) 30px 70px 56px minmax(68px,max-content);
+  grid-template-columns:62px minmax(68px,1fr) 30px 70px 25px minmax(68px,max-content);
   gap:6px;
   align-items:center;
 }
 .calc-module-stop-delete{
+  width:25px;
   height:26px;
-  padding:0 6px;
+  padding:0;
 }
 .calc-module-stop-delete.is-marked{
   background:#ffdddd;
@@ -2458,6 +2459,6 @@ button:hover{filter:brightness(1.04)}
     min-width:320px;
   }
   .calc-module-grid{grid-template-columns:1fr}
-  .calc-module-stop{grid-template-columns:62px minmax(74px,1fr) 30px 64px 56px minmax(66px,max-content)}
+  .calc-module-stop{grid-template-columns:62px minmax(74px,1fr) 30px 64px 25px minmax(66px,max-content)}
   .calc-module-binance-actions{grid-template-columns:1fr 1fr 1fr}
 }

@@ -4,6 +4,7 @@
   const MODULE = "GR_COMMIT_V11";
   const OWNER = "GR";
   const STORE_KEY = "bt001_gr_commit_v5_orders";
+  const EXPRESS_KEY = "bt001_gr_commit_v5_express_mode";
   const ORDER_URL = "https://fapi.binance.com/fapi/v1/order";
   const ALGO_URL = "https://fapi.binance.com/fapi/v1/algoOrder";
   const OPEN_ORDERS_URL = "https://fapi.binance.com/fapi/v1/openOrders";
@@ -31,7 +32,9 @@
     drag:null,
     rowSeq:0,
     clientSeq:0,
-    preflight:null
+    preflight:null,
+    expressMode:false,
+    labelFrame:0
   };
 
   const q = id => document.getElementById(id);
@@ -55,6 +58,7 @@
   };
   const redraw = () => { try{if(typeof draw === "function") draw();}catch(_e){} };
   const setStatus = text => { const node=q("gradCalcStatus"); if(node) node.textContent=text || ""; };
+  const statusText = () => String(q("gradCalcStatus")?.textContent || "");
   const rows = section => state.rows[section];
   const sortedRows = section => rows(section).slice().sort((a,b)=>{
     const price=currentPrice(),aLevel=number(a.level),bLevel=number(b.level);
@@ -82,6 +86,25 @@
     const lev=leverage(), level=number(row.level), lot=number(row.lot);
     return lev && level && lot ? level * lot / lev : null;
   };
+  const ORDERS_VISIBLE_KEY = "btc_futures_chart_v13_calculator_orders_visible";
+  const ordersVisible = () => {
+    try{
+      const raw = localStorage.getItem(ORDERS_VISIBLE_KEY);
+      return raw == null ? true : raw !== "0";
+    }catch(_e){
+      return true;
+    }
+  };
+  const normalizeLevelComparable = value => {
+    const parsed = number(value);
+    return parsed == null ? null : Number(parsed.toFixed(8));
+  };
+  const normalizeQtyComparable = value => {
+    const parsed = number(value);
+    return parsed == null ? null : Number(parsed.toFixed(3));
+  };
+  const sameLevelValue = (a,b) => normalizeLevelComparable(a) != null && normalizeLevelComparable(a) === normalizeLevelComparable(b);
+  const sameQtyValue = (a,b) => normalizeQtyComparable(a) != null && normalizeQtyComparable(a) === normalizeQtyComparable(b);
   const totalMargin = () => validRows("entry").reduce((sum,row) => sum + (rowMargin(row) || 0),0);
   const clientIdOf = order => String(order && (order.clientOrderId || order.clientAlgoId || "") || "");
   const ownedClientId = order => /^(GR_ENTRY_|GR_PROT_|GR_EXIT_)/.test(clientIdOf(order));
@@ -91,6 +114,11 @@
     if(id.startsWith("GR_PROT_")) return "protection";
     if(id.startsWith("GR_EXIT_")) return "exit";
     return null;
+  };
+  const signedStatus = order => String(order && (order.status || order.orderStatus || "NEW") || "NEW").toUpperCase();
+  const isLiveOrder = order => {
+    const status = signedStatus(order);
+    return !status || status === "NEW" || status === "PENDING" || status === "ACCEPTED" || status === "PARTIALLY_FILLED" || status.includes("NEW");
   };
   const orderLevel = (section,order) => {
     const candidates=section==="protection"?[order&&order.stopPrice,order&&order.triggerPrice,order&&order.price]:[order&&order.price,order&&order.stopPrice,order&&order.triggerPrice];
@@ -123,11 +151,30 @@
     }
     return classified;
   };
+  const protectionOrderMatchesLivePosition = order => {
+    if(!order || !state.livePosition) return false;
+    if(String(order.symbol || "").toUpperCase() !== currentSymbol()) return false;
+    const classified = classifyGrProtectionOrder(order);
+    if(classified.kind !== CONDITIONAL_KIND.PSL) return false;
+    const expectedSide = state.livePosition.side === "SHORT" ? "BUY" : "SELL";
+    if(String(order.side || "").toUpperCase() !== expectedSide) return false;
+    const ps = String(order.positionSide || "").toUpperCase();
+    return !ps || ps === "BOTH" || ps === state.livePosition.positionSide || ps === state.livePosition.side;
+  };
   const createRowId = section => `gr_${section}_${Date.now()}_${++state.rowSeq}`;
   const rowLabel = (section,index) => section === "entry" ? `G Entry ${index + 1}` : section === "exit" ? `G Exit ${index + 1}` : `G PSL ${index + 1}`;
 
   function storedRecords(){
     try{return JSON.parse(localStorage.getItem(STORE_KEY)||"[]").filter(record=>record&&record.owner===OWNER);}catch(_e){return [];}
+  }
+  function loadExpressMode(){
+    try{return localStorage.getItem(EXPRESS_KEY)==="1";}catch(_e){return false;}
+  }
+  function saveExpressMode(next){
+    state.expressMode=!!next;
+    const tgl=q("gradExpressToggle");
+    if(tgl) tgl.checked=state.expressMode;
+    try{localStorage.setItem(EXPRESS_KEY,state.expressMode?"1":"0");}catch(_e){}
   }
   function persistRows(){
     const records=sections.flatMap(section=>rows(section)).map(row=>({...row}));
@@ -256,6 +303,7 @@
             <div><span>Projected P/L</span><b id="gradSummaryPl">-</b></div>
           </div>
         </div>
+        <label class="grad-calc-express"><input id="gradExpressToggle" type="checkbox"> <span>Express Mode</span></label>
         <button class="grad-calc-clear-all" id="gradCalcClearAll" type="button">Clear All GR</button>
         <div class="grad-calc-status" id="gradCalcStatus"></div>
       </div>
@@ -318,13 +366,19 @@
         model.level=fmtLevelInput(level.value);
         model.lot=fmtLot(lot.value);
         level.value=model.level;lot.value=model.lot;
-        model.status=model.binanceOrderId ? "modified" : "local";
+        if(model.binanceOrderId){
+          const originalLevel = model.stopPrice != null ? model.stopPrice : model.price != null ? model.price : model.level;
+          const originalLot = model.originalLot != null ? model.originalLot : model.lot;
+          model.status=(sameLevelValue(model.level,originalLevel) && sameQtyValue(model.lot,originalLot)) ? "sent" : "modified";
+        }else{
+          model.status="local";
+        }
         node.dataset.status=model.status;
         syncGeneratorFromRows(section);
         calculate();
         persistRows();
       };
-      level.onchange=sync;lot.onchange=sync;
+      level.oninput=sync;lot.oninput=sync;level.onchange=sync;lot.onchange=sync;
       node.querySelector(".grad-calc-remove").onclick=()=>{state.rows[section]=rows(section).filter(row=>row.localRowId!==model.localRowId);renderSection(section);syncGeneratorFromRows(section);calculate();persistRows();};
       container.appendChild(node);
     });
@@ -355,6 +409,11 @@
     q("gradSummaryRisk").textContent=fmtMoney(risk);q("gradSummaryRisk").style.color=moneyColor(risk);
     q("gradSummaryPl").textContent=fmtMoney(projected);q("gradSummaryPl").style.color=moneyColor(projected);
     ["protection","exit"].forEach(section=>q(`gradPanel${section}`)?.classList.toggle("is-stale",state.stale[section]));
+    const protectionTotal = validRows("protection").reduce((sum,row)=>sum + (number(row.lot) || 0),0);
+    const exceedsProtection = !!(state.livePosition && protectionTotal > state.livePosition.qty + 1e-9);
+    const warning = "Protection total lot cannot exceed live open-position size.";
+    if(exceedsProtection) setStatus(warning);
+    else if(statusText() === warning) setStatus("");
     redraw();
   }
   function generatorDirection(section){
@@ -449,19 +508,16 @@
     calculate();
     return current;
   }
-  async function ownedOrders(section){
+  async function sectionOrders(section){
     if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
     const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
     const normal=await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     return [].concat(Array.isArray(normal)?normal:[],Array.isArray(algo)?algo:[]).filter(order=>{
-      if(!ownedClientId(order)||orderSection(order)!==section)return false;
       if(section==="protection"){
-        const classified = classifyGrProtectionOrder(order);
-        if(!clientIdOf(order).startsWith("GR_PROT_PSL_")) return false;
-        if(classified.kind !== CONDITIONAL_KIND.PSL) return false;
+        return isLiveOrder(order) && protectionOrderMatchesLivePosition(order);
       }
-      return true;
+      return ownedClientId(order)&&orderSection(order)===section;
     });
   }
   function fromBinanceOrder(section,order){
@@ -484,14 +540,14 @@
       state.loadedMode[section]=false;
       renderSection(section);calculate();redraw();
       if(section==="entry"){
-        importOwned(section,await ownedOrders(section));
+        importOwned(section,await sectionOrders(section));
       }else{
         state.livePosition=await livePosition();
         if(!state.livePosition) throw new Error(sectionTitle(section)+" Read blocked: no valid open position.");
         setPositionBasis(section,state.livePosition);
         state.generators[section].lot=state.livePosition.qty;
         q(`grad${section}Lot`).value=fmtLot(state.livePosition.qty);
-        importOwned(section,await ownedOrders(section));
+        importOwned(section,await sectionOrders(section));
       }
       setStatus(sectionTitle(section)+" Read complete.");
     }catch(error){setStatus(error.message||String(error));}
@@ -515,7 +571,6 @@
       if(level==null||level<=0||Math.abs(level-Math.round(level))>1e-9)errors.push("Price level must be a positive whole number.");
       if(lot==null||lot<.001)errors.push("Lot below Binance minimum.");
       else if(Math.abs(lot*1000-Math.round(lot*1000))>1e-7)errors.push("Lot must follow the 0.001 increment.");
-      if(row.binanceOrderId!=null&&!ownedClientId(row))errors.push("GR ownership cannot be proven.");
     });
     const ids=allRows.map(clientIdOf).filter(Boolean);
     if(new Set(ids).size!==ids.length)errors.push("Duplicate GR clientOrderIds detected.");
@@ -535,7 +590,7 @@
   async function openPreflight(section){
     try{if(section!=="entry")await refreshPositionAwareness(section);}catch(_e){state.livePosition=null;state.stale[section]=true;}
     let liveExitOrders=[],exitFullRecreate=false;
-    if(section==="exit"){try{liveExitOrders=await ownedOrders("exit");exitFullRecreate=exitQuantityChanged(liveExitOrders);}catch(error){setStatus(error.message||String(error));}}
+    if(section==="exit"){try{liveExitOrders=await sectionOrders("exit");exitFullRecreate=exitQuantityChanged(liveExitOrders);}catch(error){setStatus(error.message||String(error));}}
     const errors=validateSection(section),list=section==="exit"&&exitFullRecreate?validRows("exit"):actionableRows(section);
     if(!list.length)errors.push("No local or modified GR rows to send.");
     state.preflight={section,rows:list.slice(),valid:errors.length===0,exitFullRecreate,liveExitOrders};
@@ -546,7 +601,7 @@
     const side=section==="entry"?(state.direction==="LONG"?"BUY":"SELL"):(state.livePosition&&state.livePosition.side==="SHORT"?"BUY":"SELL");
     q("gradPreflightRows").innerHTML=`<tr class="calc-module-send-section"><td colspan="9">GR ${sectionTitle(section)}</td></tr>`+list.map(row=>{
       const action=section==="exit"&&exitFullRecreate?"Recreate":row.binanceOrderId?"Modify":"Create",type=section==="protection"?"STOP_MARKET":"LIMIT";
-      return `<tr class="is-writable"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row.binanceOrderId?fmtLevelInput(row.price||row.stopPrice||row.level):"-"}</td><td>${fmtLevelInput(row.level)}</td><td>${row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row.lot)}</td><td>Ready</td><td class="calc-module-send-response">GR-owned ${sectionTitle(section)} order</td></tr>`;
+      return `<tr class="is-writable"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row.binanceOrderId?fmtLevelInput(row.price||row.stopPrice||row.level):"-"}</td><td>${fmtLevelInput(row.level)}</td><td>${row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row.lot)}</td><td>Ready</td><td class="calc-module-send-response">${sectionTitle(section)} order</td></tr>`;
     }).join("");
     q("gradPreflightConfirm").parentElement.style.display=state.preflight.valid?"flex":"none";
     q("gradPreflightConfirm").disabled=!state.preflight.valid;
@@ -603,6 +658,19 @@
     catch(error){q("gradPreflightMessage").textContent=error.message||String(error);q("gradPreflightMessage").classList.add("is-stale");}
     finally{preflight.executing=false;q("gradPreflightConfirm").textContent="Confirm Send";q("gradPreflightConfirm").disabled=!preflight.valid;}
   }
+  async function executeExpressSection(section){
+    await openPreflight(section);
+    const preflight = state.preflight;
+    if(!preflight) return;
+    if(!preflight.valid){
+      ensurePreflight().classList.remove("hidden");
+      q("gradPreflightTitle").textContent="Send Results";
+      q("gradPreflightConfirm").parentElement.style.display="none";
+      return;
+    }
+    q("gradPreflightConfirm").parentElement.style.display="none";
+    await confirmPreflight();
+  }
 
   function priceFromY(clientY){
     if(typeof canvas==="undefined"||!canvas)return null;
@@ -615,7 +683,7 @@
     if(typeof canvas==="undefined"||!canvas||typeof ctx==="undefined"||!ctx)return;
     const s=typeof currentPriceLineState!=="undefined"?currentPriceLineState||{}:{},top=number(s.top)??8,height=number(s.priceH)??lastAreaH,min=number(s.minP)??lastYMin,max=number(s.maxP)??lastYMax;
     if(!(height>0)||min==null||max==null||!(max>min))return;
-    const right=canvas.clientWidth-(typeof RIGHT_AXIS==="number"?RIGHT_AXIS:84),items=[],drawnBoxes=[];
+    const right=canvas.clientWidth-(typeof RIGHT_AXIS==="number"?RIGHT_AXIS:84),items=[],drawnBoxes=[],shiftLeft=ordersVisible()?150:0;
     sections.forEach(section=>{if(state.visible[section])sortedRows(section).forEach((row,index)=>{if(number(row.level)>0&&number(row.lot)>=.001)items.push({section,row,index});});});
     ctx.save();ctx.font="11px Arial";ctx.textBaseline="middle";
     const prepared=items.map(item=>{
@@ -624,7 +692,7 @@
       const value=item.section==="entry"?null:rowPl(item.section,item.row);
       const text=item.section==="entry"?rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot):rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot)+" | "+fmtMoney(value);
       const w=Math.ceil(ctx.measureText(text).width)+12,color=item.section==="entry"?"#374151":item.section==="protection"?moneyColor(value):"#047857",sectionRows=sortedRows(item.section).filter(row=>row.status!=="executed"&&number(row.level)>0&&number(row.lot)>=.001),boundary=item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);
-      return {item,y,value,text,w,color,boundary,x:Math.max(8,right-w-12)};
+      return {item,y,value,text,w,color,boundary,x:Math.max(8,right-w-12-shiftLeft)};
     }).filter(Boolean);
     prepared.forEach(entry=>{
       ctx.setLineDash([5,2]);ctx.strokeStyle=entry.color;ctx.globalAlpha=.62;ctx.beginPath();ctx.moveTo(8,entry.y);ctx.lineTo(right,entry.y);ctx.stroke();
@@ -640,7 +708,18 @@
     });
     ctx.restore();
   }
-  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}try{window.CANDLE_CLOSE_COUNTDOWN?.draw?.();}catch(_e){}return result;};}
+  function scheduleTopLayerLabels(){
+    if(state.labelFrame){
+      try{ cancelAnimationFrame(state.labelFrame); }catch(_e){}
+      state.labelFrame = 0;
+    }
+    state.labelFrame = requestAnimationFrame(() => {
+      state.labelFrame = 0;
+      try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}
+      try{window.CANDLE_CLOSE_COUNTDOWN?.draw?.();}catch(_e){}
+    });
+  }
+  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);scheduleTopLayerLabels();return result;};}
   function hit(clientX,clientY){if(typeof canvas==="undefined"||!canvas)return null;const rect=canvas.getBoundingClientRect(),x=clientX-rect.left,y=clientY-rect.top;return state.overlayBoxes.find(box=>x>=box.x1&&x<=box.x2&&y>=box.y1&&y<=box.y2)||null;}
   function installDrag(){if(typeof canvas==="undefined"||!canvas||canvas.__gradV4Drag)return;canvas.__gradV4Drag=true;canvas.addEventListener("mousedown",event=>{const box=hit(event.clientX,event.clientY);if(!box||!box.boundary)return;state.drag=box;event.preventDefault();event.stopImmediatePropagation();},true);window.addEventListener("mousemove",event=>{if(!state.drag)return;const level=priceFromY(event.clientY);if(level==null||level<=0)return;redistributeFromBoundaries(state.drag.section,state.drag.boundary,level);event.preventDefault();},true);window.addEventListener("mouseup",event=>{if(!state.drag)return;state.drag=null;event.preventDefault();},true);}
   function bindGenerator(section){
@@ -649,11 +728,6 @@
       const generator=state.generators[section];
       if(name==="End")generator.lastEdited="end";
       readGenerator(section);
-      if(section==="protection"&&name==="Lot"&&state.livePosition&&number(state.generators.protection.lot)>number(state.livePosition.qty)){
-        state.generators.protection.lot=fmtLot(state.livePosition.qty);
-        q(prefix+"Lot").value=state.generators.protection.lot;
-        setStatus("Protection total lot cannot exceed live open-position size.");
-      }
       if(state.loadedMode[section]&&name==="Lot"){
         redistributeLotsOnly(section,state.generators[section].lot);
         setStatus(sectionTitle(section)+" loaded-order mode: levels remain fixed until boundary edit or regeneration.");
@@ -703,7 +777,10 @@
   }
   function bind(){
     const win=ensureWindow(),open=ensureButton();ensurePreflight();restorePersistentState();
-    sections.forEach(section=>{bindGenerator(section);q(`gradTab${section}`).onclick=()=>setActive(section);q(`grad${section}Clear`).onclick=()=>clearSection(section);q(`grad${section}Read`).onclick=()=>readSection(section);q(`grad${section}Show`).onclick=()=>showSection(section,!state.visible[section]);q(`grad${section}Send`).onclick=()=>openPreflight(section);renderSection(section);});
+    state.expressMode=loadExpressMode();
+    saveExpressMode(state.expressMode);
+    q("gradExpressToggle").addEventListener("change",event=>saveExpressMode(!!(event.target&&event.target.checked)),false);
+    sections.forEach(section=>{bindGenerator(section);q(`gradTab${section}`).onclick=()=>setActive(section);q(`grad${section}Clear`).onclick=()=>clearSection(section);q(`grad${section}Read`).onclick=()=>readSection(section);q(`grad${section}Show`).onclick=()=>showSection(section,!state.visible[section]);q(`grad${section}Send`).onclick=()=>state.expressMode?executeExpressSection(section):openPreflight(section);renderSection(section);});
     q("gradentryFlush").onclick=flushEntryHistory;
     q("gradCalcClearAll").onclick=clearAll;q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
     installWindowDrag(win);installWindowResize(win);installDrawHook();installDrag();installPositionWatcher();setActive("entry");calculate();

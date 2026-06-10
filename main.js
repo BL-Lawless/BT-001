@@ -152,6 +152,19 @@ let openEntryMarkerIds = new Set();
 let activeOpenParentChainIds = new Set();
 let fundingIncomeRows = [];
 let fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
+const OPEN_FUNDING_FEE_CACHE_TTL_MS = 30000;
+let openFundingFeeCache = {
+  symbol:"",
+  start:0,
+  end:0,
+  rows:[],
+  status:"idle",
+  loadedAt:0,
+  error:"",
+  inFlight:null,
+  requestStart:0,
+  requestEnd:0
+};
 let unresolvedCount = 0;
 let closedTradesLoadedSummaryText = tradeCountEl ? String(tradeCountEl.textContent || "") : "";
 let closedTradesOperationalText = "";
@@ -4210,9 +4223,11 @@ async function getFundingIncome(key,sec,off){
   return all;
 }
 
-async function getFundingIncomeRange(key,sec,off,start,end){
+async function getFundingIncomeRange(key,sec,off,start,end,symbolOverride,trackStats){
   const c = cfg();
   const endpoint = c.income || "https://fapi.binance.com/fapi/v1/income";
+  const symbol = String(symbolOverride || c.symbol || "").toUpperCase();
+  const shouldTrackStats = trackStats !== false;
   const all = [];
   const seen = new Set();
   const startMs = Math.max(0,Math.floor(Number(start) || 0));
@@ -4228,7 +4243,7 @@ async function getFundingIncomeRange(key,sec,off,start,end){
       const rows = await signedGet(
         endpoint,
         {
-          symbol:c.symbol,
+          symbol,
           incomeType:"FUNDING_FEE",
           startTime:String(Math.floor(page)),
           endTime:String(Math.floor(chunkEnd)),
@@ -4263,7 +4278,9 @@ async function getFundingIncomeRange(key,sec,off,start,end){
     chunk = chunkEnd + 1;
   }
 
-  fundingIncomeFetchStats = {rows:all.length,start:startMs,end:endMs,symbol:c.symbol};
+  if(shouldTrackStats){
+    fundingIncomeFetchStats = {rows:all.length,start:startMs,end:endMs,symbol};
+  }
   return all;
 }
 
@@ -15743,6 +15760,156 @@ startTradeAuto();
       return sum + (Number.isFinite(value) ? value : 0);
     },0);
   }
+  function partialCloseFees25(box){
+    const sym = box && box.symbol ? box.symbol : currentSymbol25();
+    const chain = cid25(box);
+    const links = typeof openPositionLinksForRender === "function" ? openPositionLinksForRender() : [];
+    return (Array.isArray(links) ? links : []).filter(link => {
+      if(!link || !link.exitMarkerId || (sym && link.symbol && link.symbol !== sym)) return false;
+      const linkChain = cid25(link);
+      return !chain || !linkChain || linkChain === chain;
+    }).reduce((sum,link) => {
+      const rawFee = Number(link.fees ?? link.fee);
+      if(!Number.isFinite(rawFee)) return sum;
+      return sum + (rawFee > 0 ? -rawFee : rawFee);
+    },0);
+  }
+  function epochMs25(v){
+    const raw = n25(v);
+    if(!(raw > 0)) return 0;
+    return raw > 1e12 ? Math.floor(raw) : Math.floor(raw * 1000);
+  }
+  function openFundingWindow25(box){
+    const sym = String(box && box.symbol ? box.symbol : currentSymbol25() || "").toUpperCase();
+    const rows = openBreakdown25(box);
+    const start = rows.reduce((min,row) => {
+      const t = epochMs25(row && row.entryTime);
+      return t > 0 ? Math.min(min,t) : min;
+    },Number.POSITIVE_INFINITY);
+    if(!sym || !Number.isFinite(start)) return null;
+    return {symbol:sym,start,end:Date.now()};
+  }
+  function openFundingCacheCovers25(win){
+    return !!(
+      win &&
+      openFundingFeeCache &&
+      openFundingFeeCache.status === "ready" &&
+      openFundingFeeCache.symbol === win.symbol &&
+      openFundingFeeCache.start <= win.start &&
+      openFundingFeeCache.end + OPEN_FUNDING_FEE_CACHE_TTL_MS >= win.end &&
+      Array.isArray(openFundingFeeCache.rows)
+    );
+  }
+  function openFundingFeeState25(box){
+    const win = openFundingWindow25(box);
+    if(!openFundingCacheCovers25(win)) return {available:false,value:null};
+    const value = (openFundingFeeCache.rows || []).reduce((sum,row) => {
+      const t = epochMs25(row && row.time);
+      const rowSym = String(row && row.symbol || win.symbol).toUpperCase();
+      if(t >= win.start && t <= win.end && (!win.symbol || rowSym === win.symbol)){
+        const value = n25(row && (row.income ?? row.fundingFee ?? row.funding));
+        return sum + (value || 0);
+      }
+      return sum;
+    },0);
+    return {available:true,value};
+  }
+  function ensureOpenFundingFeeWindow25(box){
+    const win = openFundingWindow25(box);
+    if(!win) return Promise.resolve();
+    if(openFundingCacheCovers25(win)) return Promise.resolve();
+    const now = Date.now();
+    const key = apiKeyEl.value.trim();
+    const sec = apiSecretEl.value.trim();
+    const recentSameSymbol =
+      openFundingFeeCache.symbol === win.symbol &&
+      openFundingFeeCache.start <= win.start &&
+      openFundingFeeCache.loadedAt > 0 &&
+      (now - openFundingFeeCache.loadedAt) < OPEN_FUNDING_FEE_CACHE_TTL_MS;
+    if(
+      recentSameSymbol &&
+      (
+        openFundingFeeCache.status === "error" ||
+        openFundingFeeCache.end + OPEN_FUNDING_FEE_CACHE_TTL_MS >= win.end
+      )
+    ){
+      return Promise.resolve();
+    }
+    if(
+      openFundingFeeCache.inFlight &&
+      openFundingFeeCache.symbol === win.symbol &&
+      openFundingFeeCache.requestStart <= win.start &&
+      openFundingFeeCache.requestEnd + OPEN_FUNDING_FEE_CACHE_TTL_MS >= win.end
+    ){
+      return openFundingFeeCache.inFlight;
+    }
+    if(!(key && sec)){
+      openFundingFeeCache = {
+        ...openFundingFeeCache,
+        symbol:win.symbol,
+        start:win.start,
+        end:win.end,
+        rows:[],
+        status:"error",
+        loadedAt:now,
+        error:"Missing Binance API keys",
+        inFlight:null,
+        requestStart:win.start,
+        requestEnd:win.end
+      };
+      return Promise.resolve();
+    }
+    let request = null;
+    openFundingFeeCache = {
+      ...openFundingFeeCache,
+      symbol:win.symbol,
+      start:win.start,
+      end:win.end,
+      rows:[],
+      status:"loading",
+      error:"",
+      requestStart:win.start,
+      requestEnd:win.end
+    };
+    request = (async() => {
+      try{
+        const off = await timeOffset();
+        const rows = await getFundingIncomeRange(key,sec,off,win.start,win.end,win.symbol,false);
+        openFundingFeeCache = {
+          ...openFundingFeeCache,
+          symbol:win.symbol,
+          start:win.start,
+          end:win.end,
+          rows:Array.isArray(rows) ? rows : [],
+          status:"ready",
+          loadedAt:Date.now(),
+          error:"",
+          inFlight:null,
+          requestStart:win.start,
+          requestEnd:win.end
+        };
+      }catch(err){
+        openFundingFeeCache = {
+          ...openFundingFeeCache,
+          symbol:win.symbol,
+          start:win.start,
+          end:win.end,
+          rows:[],
+          status:"error",
+          loadedAt:Date.now(),
+          error:err && err.message ? err.message : String(err || "Funding fees unavailable"),
+          inFlight:null,
+          requestStart:win.start,
+          requestEnd:win.end
+        };
+      }
+      try{
+        if(typeof draw === "function") draw();
+      }catch(_e){}
+    })();
+    openFundingFeeCache.inFlight = request;
+    return request;
+  }
 
   function openBoxTooltipLines25(it){
     const box = it && it.boxData ? it.boxData : {};
@@ -15776,9 +15943,24 @@ startTradeAuto();
       });
     }
     const partialCloseSum = partialCloseSum25(box);
+    const tradingFees = partialCloseFees25(box);
+    ensureOpenFundingFeeWindow25(box);
+    const fundingFees = openFundingFeeState25(box);
     lines.push([
       {text:"Partial closes: ",color:BLACK25,bold:false},
       {text:typeof fm === "function" ? fm(partialCloseSum) : String(partialCloseSum),color:pnlColor25(partialCloseSum),bold:true}
+    ]);
+    lines.push([
+      {text:"Trading fees: ",color:BLACK25,bold:false},
+      {text:typeof fm === "function" ? fm(tradingFees) : String(tradingFees),color:pnlColor25(tradingFees),bold:true}
+    ]);
+    lines.push([
+      {text:"Funding fees: ",color:BLACK25,bold:false},
+      {
+        text:fundingFees.available ? (typeof fm === "function" ? fm(fundingFees.value) : String(fundingFees.value)) : "unavailable",
+        color:fundingFees.available ? pnlColor25(fundingFees.value) : BLACK25,
+        bold:true
+      }
     ]);
     if(floating != null){
       lines.push([
