@@ -34,7 +34,8 @@
     clientSeq:0,
     preflight:null,
     expressMode:false,
-    labelFrame:0
+    labelFrame:0,
+    lastSettingsRequestedSymbol:""
   };
 
   const q = id => document.getElementById(id);
@@ -80,11 +81,33 @@
   const leverage = () => {
     const list = typeof openPositionBoxes !== "undefined" && Array.isArray(openPositionBoxes) ? openPositionBoxes : [];
     const box = list.find(item => item && (!item.symbol || item.symbol === currentSymbol()) && number(item.leverage) > 0);
-    return box ? number(box.leverage) : null;
+    if(box) return number(box.leverage);
+    const settings = window.BT001SymbolTradingSettings && typeof window.BT001SymbolTradingSettings.getCached === "function"
+      ? window.BT001SymbolTradingSettings.getCached(currentSymbol())
+      : null;
+    return number(settings && settings.leverage);
+  };
+  const ensureSymbolSettingsLoaded = () => {
+    const helper = window.BT001SymbolTradingSettings;
+    if(!helper || typeof helper.get !== "function") return;
+    const symbol = currentSymbol();
+    if(!symbol || state.lastSettingsRequestedSymbol === symbol) return;
+    state.lastSettingsRequestedSymbol = symbol;
+    Promise.resolve(helper.get(symbol))
+      .catch(() => null)
+      .finally(() => {
+        state.lastSettingsRequestedSymbol = "";
+        try{calculate();}catch(_e){}
+      });
   };
   const rowMargin = row => {
     const lev=leverage(), level=number(row.level), lot=number(row.lot);
-    return lev && level && lot ? level * lot / lev : null;
+    if(lev && level && lot) return {value:level * lot / lev,unavailable:false};
+    if(level && lot){
+      ensureSymbolSettingsLoaded();
+      return {value:null,unavailable:true};
+    }
+    return {value:null,unavailable:false};
   };
   const ORDERS_VISIBLE_KEY = "btc_futures_chart_v13_calculator_orders_visible";
   const ordersVisible = () => {
@@ -96,16 +119,22 @@
     }
   };
   const normalizeLevelComparable = value => {
-    const parsed = number(value);
-    return parsed == null ? null : Number(parsed.toFixed(8));
+    const helper = window.BT001SymbolTradingSettings;
+    const settings = helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
+    return helper && typeof helper.normalizePrice === "function"
+      ? helper.normalizePrice(value,settings)
+      : (number(value) == null ? null : Number(number(value).toFixed(8)).toFixed(8));
   };
   const normalizeQtyComparable = value => {
-    const parsed = number(value);
-    return parsed == null ? null : Number(parsed.toFixed(3));
+    const helper = window.BT001SymbolTradingSettings;
+    const settings = helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
+    return helper && typeof helper.normalizeQty === "function"
+      ? helper.normalizeQty(value,settings)
+      : (number(value) == null ? null : Number(number(value).toFixed(3)).toFixed(3));
   };
   const sameLevelValue = (a,b) => normalizeLevelComparable(a) != null && normalizeLevelComparable(a) === normalizeLevelComparable(b);
   const sameQtyValue = (a,b) => normalizeQtyComparable(a) != null && normalizeQtyComparable(a) === normalizeQtyComparable(b);
-  const totalMargin = () => validRows("entry").reduce((sum,row) => sum + (rowMargin(row) || 0),0);
+  const totalMargin = () => validRows("entry").reduce((sum,row) => sum + (number(rowMargin(row).value) || 0),0);
   const clientIdOf = order => String(order && (order.clientOrderId || order.clientAlgoId || "") || "");
   const ownedClientId = order => /^(GR_ENTRY_|GR_PROT_|GR_EXIT_)/.test(clientIdOf(order));
   const orderSection = order => {
@@ -143,14 +172,7 @@
         typeText:"",
         isLive:true
       };
-  const classifyGrProtectionOrder = order => {
-    const classified = classifyConditionalOrder(order);
-    if(classified.kind === CONDITIONAL_KIND.MASTER_SL){
-      try{ console.warn("GR Protection order classified as MASTER_SL; forcing PSL classification.",order); }catch(_e){}
-      return {...classified,kind:CONDITIONAL_KIND.PSL,closePosition:false};
-    }
-    return classified;
-  };
+  const classifyGrProtectionOrder = order => classifyConditionalOrder(order);
   const protectionOrderMatchesLivePosition = order => {
     if(!order || !state.livePosition) return false;
     if(String(order.symbol || "").toUpperCase() !== currentSymbol()) return false;
@@ -391,8 +413,14 @@
       const row=displayRows[index];
       const value=section==="entry" ? rowMargin(row) : rowPl(section,row);
       const valueNode=node.querySelector(".grad-calc-value");
-      valueNode.textContent=fmtMoney(value);
-      valueNode.style.color=section==="entry" ? "#111" : moneyColor(value);
+      if(section==="entry" && value && value.unavailable){
+        valueNode.textContent="Leverage unavailable";
+        valueNode.style.color="#111";
+      }else{
+        const displayValue = value && typeof value === "object" ? value.value : value;
+        valueNode.textContent=fmtMoney(displayValue);
+        valueNode.style.color=section==="entry" ? "#111" : moneyColor(displayValue);
+      }
       const market=currentPrice(), level=number(row.level);
       node.classList.toggle("is-invalid",section==="entry" && market!=null && level!=null && (state.direction==="LONG" ? level>=market : level<=market));
       node.classList.toggle("is-invalid-lot",!!exceedsPosition);
@@ -402,7 +430,9 @@
     sections.forEach(updateRowValues);
     const entry=weighted("entry"), protection=weighted("protection"), exit=weighted("exit");
     const risk=totalPl("protection"), projected=totalPl("exit");
-    q("gradentryAverage").textContent=fmtPrice(entry.average);q("gradentryTotal").textContent=fmtMoney(totalMargin());
+    const entryMargins = validRows("entry").map(rowMargin);
+    const entryMarginUnavailable = entryMargins.some(item => item && item.unavailable);
+    q("gradentryAverage").textContent=fmtPrice(entry.average);q("gradentryTotal").textContent=entryMarginUnavailable&&totalMargin()===0?"Leverage unavailable":fmtMoney(totalMargin());
     q("gradprotectionAverage").textContent=fmtPrice(protection.average);q("gradprotectionTotal").textContent=fmtMoney(risk);q("gradprotectionTotal").style.color=moneyColor(risk);
     q("gradexitAverage").textContent=fmtPrice(exit.average);q("gradexitTotal").textContent=fmtMoney(projected);q("gradexitTotal").style.color=moneyColor(projected);
     q("gradSummaryEntryLots").textContent=fmtLot(entry.quantity);q("gradSummaryEntryAvg").textContent=fmtPrice(entry.average);

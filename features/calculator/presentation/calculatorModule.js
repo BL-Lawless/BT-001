@@ -73,6 +73,7 @@
   let binanceSyncPreserveKeys = new Set();
   let binanceSyncPreservedRows = [];
   const notifiedExecutionKeys = new Set();
+  let lastSettingsRequestedSymbol = "";
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -109,7 +110,12 @@
   }
   function setMargin(node,value){
     if(!node) return;
-    const n = num(value);
+    if(value && typeof value === "object" && value.unavailable){
+      node.textContent = "Leverage unavailable";
+      return;
+    }
+    const rawValue = value && typeof value === "object" ? value.value : value;
+    const n = num(rawValue);
     node.textContent = n == null ? "-" : "$" + Math.abs(n).toFixed(2);
   }
   function setStatus(text){
@@ -918,19 +924,41 @@
   }
   function currentCalculatorLeverage(){
     const box = currentPositionBoxesForCalculator().find(item => num(item && item.leverage) > 0);
-    return box ? num(box.leverage) : null;
+    if(box) return num(box.leverage);
+    const settings = window.BT001SymbolTradingSettings && typeof window.BT001SymbolTradingSettings.getCached === "function"
+      ? window.BT001SymbolTradingSettings.getCached(currentSymbol())
+      : null;
+    return num(settings && settings.leverage);
+  }
+  function ensureSymbolSettingsLoaded(){
+    const helper = window.BT001SymbolTradingSettings;
+    if(!helper || typeof helper.get !== "function") return;
+    const symbol = currentSymbol();
+    if(!symbol || lastSettingsRequestedSymbol === symbol) return;
+    lastSettingsRequestedSymbol = symbol;
+    Promise.resolve(helper.get(symbol))
+      .catch(() => null)
+      .finally(() => {
+        lastSettingsRequestedSymbol = "";
+        try{ calculate(); }catch(_e){}
+      });
   }
   function entryRowMargin(row,level,lot){
     if(isOpenPositionRow(row)){
       const margins = currentPositionBoxesForCalculator()
         .map(box => typeof openBoxMargin === "function" ? num(openBoxMargin(box)) : null)
         .filter(value => value != null && value > 0);
-      if(margins.length) return margins.reduce((sum,value) => sum + value,0);
+      if(margins.length) return {value:margins.reduce((sum,value) => sum + value,0),unavailable:false};
     }
     const leverage = currentCalculatorLeverage();
-    return leverage != null && leverage > 0 && level != null && lot != null
-      ? level * lot / leverage
-      : null;
+    if(leverage != null && leverage > 0 && level != null && lot != null){
+      return {value:level * lot / leverage,unavailable:false};
+    }
+    if(level != null && lot != null && !isOpenPositionRow(row)){
+      ensureSymbolSettingsLoaded();
+      return {value:null,unavailable:true};
+    }
+    return {value:null,unavailable:false};
   }
   function isPartialStopBeforeMaster(side,partialLevel,masterLevel){
     const p = num(partialLevel);
@@ -1275,12 +1303,18 @@
     return !!masterStopDraftDirty;
   }
   function normalizeLevelComparable(value){
-    const n = num(value);
-    return n == null ? null : Number(n.toFixed(8));
+    const helper = window.BT001SymbolTradingSettings;
+    const settings = helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
+    return helper && typeof helper.normalizePrice === "function"
+      ? helper.normalizePrice(value,settings)
+      : (num(value) == null ? null : Number(num(value).toFixed(8)).toFixed(8));
   }
   function normalizeQtyComparable(value){
-    const n = num(value);
-    return n == null ? null : Number(n.toFixed(3));
+    const helper = window.BT001SymbolTradingSettings;
+    const settings = helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
+    return helper && typeof helper.normalizeQty === "function"
+      ? helper.normalizeQty(value,settings)
+      : (num(value) == null ? null : Number(num(value).toFixed(3)).toFixed(3));
   }
   function sameLevelValue(a,b){
     const left = normalizeLevelComparable(a);

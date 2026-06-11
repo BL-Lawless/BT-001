@@ -119,6 +119,10 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const TRADE_CHUNK_MS = WEEK_MS;
 const TRADE_LIMIT = 1000;
 const RECON_LOOKBACK_WEEKS = 26;
+const SYMBOL_TRADING_SETTINGS_CACHE_TTL_MS = 30000;
+const BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo";
+const BINANCE_POSITION_MODE_URL = "https://fapi.binance.com/fapi/v1/positionSide/dual";
+const BINANCE_LEVERAGE_BRACKET_URL = "https://fapi.binance.com/fapi/v1/leverageBracket";
 
 const STORE = "btc_futures_chart_v12_";
 const SK = STORE + "api_key";
@@ -165,6 +169,19 @@ let openFundingFeeCache = {
   requestStart:0,
   requestEnd:0
 };
+let openCommissionFeeCache = {
+  symbol:"",
+  start:0,
+  end:0,
+  rows:[],
+  status:"idle",
+  loadedAt:0,
+  error:"",
+  inFlight:null,
+  requestStart:0,
+  requestEnd:0
+};
+const symbolTradingSettingsCache = new Map();
 let unresolvedCount = 0;
 let closedTradesLoadedSummaryText = tradeCountEl ? String(tradeCountEl.textContent || "") : "";
 let closedTradesOperationalText = "";
@@ -511,6 +528,140 @@ function suppressOpenPositionRenderState(){
 ========================================================= */
 
 function cfg(){ return MARKETS[marketEl.value]; }
+function tradingSettingsNum(value){
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function tradingSettingsUpper(value){
+  return String(value == null ? "" : value).toUpperCase();
+}
+function tradingSettingsPrecision(step){
+  const text = String(step == null ? "" : step);
+  if(!text || !text.includes(".")) return 0;
+  return text.replace(/0+$/,"").split(".")[1]?.length || 0;
+}
+function tradingSettingsNormalize(value,step,fallbackPrecision){
+  const parsed = tradingSettingsNum(value);
+  if(parsed == null) return null;
+  const stepNum = tradingSettingsNum(step);
+  const precision = stepNum && stepNum > 0
+    ? tradingSettingsPrecision(stepNum)
+    : Math.max(0,Number(fallbackPrecision) || 0);
+  const normalized = stepNum && stepNum > 0 ? Math.round(parsed / stepNum) * stepNum : parsed;
+  return normalized.toFixed(precision);
+}
+function filterValue(symbolInfo,filterType,key){
+  const filters = Array.isArray(symbolInfo && symbolInfo.filters) ? symbolInfo.filters : [];
+  const found = filters.find(filter => tradingSettingsUpper(filter && filter.filterType) === tradingSettingsUpper(filterType));
+  return found && found[key] != null ? found[key] : null;
+}
+async function fetchSelectedSymbolTradingSettings(symbolOverride,options = {}){
+  const symbol = tradingSettingsUpper(symbolOverride || (typeof cfg === "function" && cfg() ? cfg().symbol : ""));
+  if(!symbol) return null;
+  const force = options && options.force === true;
+  const now = Date.now();
+  const cached = symbolTradingSettingsCache.get(symbol);
+  if(!force && cached && cached.loadedAt > 0 && (now - cached.loadedAt) < SYMBOL_TRADING_SETTINGS_CACHE_TTL_MS) return cached;
+  if(!force && cached && cached.inFlight) return cached.inFlight;
+  const base = cached || {
+    symbol,
+    leverage:null,
+    marginMode:null,
+    positionMode:null,
+    filters:null,
+    tickSize:null,
+    stepSize:null,
+    leverageBracket:null,
+    loadedAt:0,
+    error:"",
+    status:"idle",
+    inFlight:null
+  };
+  const request = (async() => {
+    const next = {...base,symbol,status:"loading",error:""};
+    try{
+      const exchangeInfoPromise = fetch(BINANCE_EXCHANGE_INFO_URL + "?symbol=" + encodeURIComponent(symbol),{cache:"no-store"})
+        .then(resp => resp.ok ? resp.json() : null)
+        .catch(() => null);
+      let riskRows = null;
+      let positionMode = null;
+      let leverageBracket = null;
+      if(typeof hasKeys === "function" && hasKeys()){
+        const key = apiKeyEl.value.trim();
+        const sec = apiSecretEl.value.trim();
+        const off = typeof timeOffset === "function" ? await timeOffset() : 0;
+        const marketCfg = typeof cfg === "function" ? cfg() : null;
+        const positionRiskUrl = marketCfg && marketCfg.positionRisk ? marketCfg.positionRisk : "https://fapi.binance.com/fapi/v2/positionRisk";
+        [riskRows,positionMode,leverageBracket] = await Promise.all([
+          signedGet(positionRiskUrl,{symbol},key,sec,off).catch(() => null),
+          signedGet(BINANCE_POSITION_MODE_URL,{},key,sec,off).catch(() => null),
+          signedGet(BINANCE_LEVERAGE_BRACKET_URL,{symbol},key,sec,off).catch(() => null)
+        ]);
+      }
+      const exchangeInfo = await exchangeInfoPromise;
+      const symbolInfo = Array.isArray(exchangeInfo && exchangeInfo.symbols) ? exchangeInfo.symbols.find(row => tradingSettingsUpper(row && row.symbol) === symbol) : null;
+      const riskList = Array.isArray(riskRows) ? riskRows : riskRows ? [riskRows] : [];
+      const riskRow = riskList.find(row => tradingSettingsUpper(row && row.symbol) === symbol) || null;
+      const positionModeText = positionMode && positionMode.dualSidePosition != null
+        ? (positionMode.dualSidePosition === true || String(positionMode.dualSidePosition).toLowerCase() === "true" ? "HEDGE" : "ONE_WAY")
+        : null;
+      const bracketList = Array.isArray(leverageBracket) ? leverageBracket : leverageBracket ? [leverageBracket] : [];
+      const bracket = bracketList.find(row => tradingSettingsUpper(row && row.symbol) === symbol) || bracketList[0] || null;
+      const resolved = {
+        ...next,
+        leverage:tradingSettingsNum(riskRow && riskRow.leverage),
+        marginMode:riskRow && riskRow.marginType ? String(riskRow.marginType) : null,
+        positionMode:positionModeText,
+        filters:symbolInfo && symbolInfo.filters ? symbolInfo.filters : null,
+        tickSize:filterValue(symbolInfo,"PRICE_FILTER","tickSize"),
+        stepSize:filterValue(symbolInfo,"LOT_SIZE","stepSize"),
+        leverageBracket:bracket,
+        status:"ready",
+        loadedAt:Date.now(),
+        error:"",
+        inFlight:null
+      };
+      symbolTradingSettingsCache.set(symbol,resolved);
+      return resolved;
+    }catch(error){
+      const failed = {
+        ...next,
+        status:"error",
+        loadedAt:Date.now(),
+        error:error && error.message ? error.message : String(error || "Unable to load symbol settings"),
+        inFlight:null
+      };
+      symbolTradingSettingsCache.set(symbol,failed);
+      return failed;
+    }
+  })();
+  const pending = {...base,symbol,status:"loading",inFlight:request};
+  symbolTradingSettingsCache.set(symbol,pending);
+  return request;
+}
+window.BT001SymbolTradingSettings = {
+  get:symbol => fetchSelectedSymbolTradingSettings(symbol),
+  getCached(symbol){
+    const key = tradingSettingsUpper(symbol || (typeof cfg === "function" && cfg() ? cfg().symbol : ""));
+    return key ? (symbolTradingSettingsCache.get(key) || null) : null;
+  },
+  normalizePrice(value,settings){
+    return tradingSettingsNormalize(value,settings && settings.tickSize,8);
+  },
+  normalizeQty(value,settings){
+    return tradingSettingsNormalize(value,settings && settings.stepSize,3);
+  },
+  samePrice(a,b,settings){
+    const left = tradingSettingsNormalize(a,settings && settings.tickSize,8);
+    const right = tradingSettingsNormalize(b,settings && settings.tickSize,8);
+    return left != null && right != null && left === right;
+  },
+  sameQty(a,b,settings){
+    const left = tradingSettingsNormalize(a,settings && settings.stepSize,3);
+    const right = tradingSettingsNormalize(b,settings && settings.stepSize,3);
+    return left != null && right != null && left === right;
+  }
+};
 function iv(){ return intervalEl.value; }
 
 function parseCustomDate(value,endOfDay=false){
@@ -4224,6 +4375,10 @@ async function getFundingIncome(key,sec,off){
 }
 
 async function getFundingIncomeRange(key,sec,off,start,end,symbolOverride,trackStats){
+  return getIncomeRowsRange("FUNDING_FEE",key,sec,off,start,end,symbolOverride,trackStats);
+}
+
+async function getIncomeRowsRange(incomeType,key,sec,off,start,end,symbolOverride,trackStats){
   const c = cfg();
   const endpoint = c.income || "https://fapi.binance.com/fapi/v1/income";
   const symbol = String(symbolOverride || c.symbol || "").toUpperCase();
@@ -4244,7 +4399,7 @@ async function getFundingIncomeRange(key,sec,off,start,end,symbolOverride,trackS
         endpoint,
         {
           symbol,
-          incomeType:"FUNDING_FEE",
+          incomeType:String(incomeType || "FUNDING_FEE"),
           startTime:String(Math.floor(page)),
           endTime:String(Math.floor(chunkEnd)),
           limit:"1000"
@@ -15774,6 +15929,28 @@ startTradeAuto();
       return sum + (rawFee > 0 ? -rawFee : rawFee);
     },0);
   }
+  function openTradingWindow25(box){
+    const sym = String(box && box.symbol ? box.symbol : currentSymbol25() || "").toUpperCase();
+    const rows = openBreakdown25(box);
+    const partials = typeof openPositionLinksForRender === "function" ? openPositionLinksForRender() : [];
+    const start = rows.reduce((min,row) => {
+      const t = epochMs25(row && entryTimeOf25(row));
+      return t > 0 ? Math.min(min,t) : min;
+    },Number.POSITIVE_INFINITY);
+    const latestPartial = (Array.isArray(partials) ? partials : []).reduce((max,row) => {
+      if(!row || row.exitMarkerId == null) return max;
+      const t = epochMs25(exitTimeOf25(row));
+      return t > 0 ? Math.max(max,t) : max;
+    },0);
+    if(!sym || !Number.isFinite(start)) return null;
+    return {symbol:sym,start,end:Math.max(Date.now(),latestPartial || 0)};
+  }
+  function entryTimeOf25(row){
+    return row && (row.entryTime ?? row.time ?? row.rawTime);
+  }
+  function exitTimeOf25(row){
+    return row && (row.exitTime ?? row.time ?? row.rawTime);
+  }
   function epochMs25(v){
     const raw = n25(v);
     if(!(raw > 0)) return 0;
@@ -15803,12 +15980,39 @@ startTradeAuto();
   function openFundingFeeState25(box){
     const win = openFundingWindow25(box);
     if(!openFundingCacheCovers25(win)) return {available:false,value:null};
+    let matched = 0;
     const value = (openFundingFeeCache.rows || []).reduce((sum,row) => {
       const t = epochMs25(row && row.time);
       const rowSym = String(row && row.symbol || win.symbol).toUpperCase();
       if(t >= win.start && t <= win.end && (!win.symbol || rowSym === win.symbol)){
+        matched++;
         const value = n25(row && (row.income ?? row.fundingFee ?? row.funding));
         return sum + (value || 0);
+      }
+      return sum;
+    },0);
+    return {available:matched > 0,value:matched > 0 ? value : null};
+  }
+  function openCommissionCacheCovers25(win){
+    return !!(
+      win &&
+      openCommissionFeeCache &&
+      openCommissionFeeCache.status === "ready" &&
+      openCommissionFeeCache.symbol === win.symbol &&
+      openCommissionFeeCache.start <= win.start &&
+      openCommissionFeeCache.end + OPEN_FUNDING_FEE_CACHE_TTL_MS >= win.end &&
+      Array.isArray(openCommissionFeeCache.rows)
+    );
+  }
+  function openCommissionFeeState25(box){
+    const win = openTradingWindow25(box);
+    if(!openCommissionCacheCovers25(win)) return {available:false,value:null};
+    const value = (openCommissionFeeCache.rows || []).reduce((sum,row) => {
+      const t = epochMs25(row && row.time);
+      const rowSym = String(row && row.symbol || win.symbol).toUpperCase();
+      if(t >= win.start && t <= win.end && (!win.symbol || rowSym === win.symbol)){
+        const income = n25(row && row.income);
+        return sum + (income || 0);
       }
       return sum;
     },0);
@@ -15910,6 +16114,86 @@ startTradeAuto();
     openFundingFeeCache.inFlight = request;
     return request;
   }
+  function ensureOpenCommissionFeeWindow25(box){
+    const win = openTradingWindow25(box);
+    if(!win) return Promise.resolve();
+    if(openCommissionCacheCovers25(win)) return Promise.resolve();
+    const now = Date.now();
+    const key = apiKeyEl.value.trim();
+    const sec = apiSecretEl.value.trim();
+    if(
+      openCommissionFeeCache.inFlight &&
+      openCommissionFeeCache.symbol === win.symbol &&
+      openCommissionFeeCache.requestStart <= win.start &&
+      openCommissionFeeCache.requestEnd + OPEN_FUNDING_FEE_CACHE_TTL_MS >= win.end
+    ){
+      return openCommissionFeeCache.inFlight;
+    }
+    if(!(key && sec)){
+      openCommissionFeeCache = {
+        ...openCommissionFeeCache,
+        symbol:win.symbol,
+        start:win.start,
+        end:win.end,
+        rows:[],
+        status:"error",
+        loadedAt:now,
+        error:"Missing Binance API keys",
+        inFlight:null,
+        requestStart:win.start,
+        requestEnd:win.end
+      };
+      return Promise.resolve();
+    }
+    let request = null;
+    openCommissionFeeCache = {
+      ...openCommissionFeeCache,
+      symbol:win.symbol,
+      start:win.start,
+      end:win.end,
+      rows:[],
+      status:"loading",
+      loadedAt:openCommissionFeeCache.loadedAt || 0,
+      error:"",
+      requestStart:win.start,
+      requestEnd:win.end
+    };
+    request = (async() => {
+      try{
+        const off = await timeOffset();
+        const rows = await getIncomeRowsRange("COMMISSION",key,sec,off,win.start,win.end,win.symbol,false);
+        openCommissionFeeCache = {
+          ...openCommissionFeeCache,
+          symbol:win.symbol,
+          start:win.start,
+          end:win.end,
+          rows:Array.isArray(rows) ? rows : [],
+          status:"ready",
+          loadedAt:Date.now(),
+          error:"",
+          inFlight:null,
+          requestStart:win.start,
+          requestEnd:win.end
+        };
+      }catch(err){
+        openCommissionFeeCache = {
+          ...openCommissionFeeCache,
+          symbol:win.symbol,
+          start:win.start,
+          end:win.end,
+          rows:[],
+          status:"error",
+          loadedAt:Date.now(),
+          error:err && err.message ? err.message : String(err || "Trading fees unavailable"),
+          inFlight:null,
+          requestStart:win.start,
+          requestEnd:win.end
+        };
+      }
+    })();
+    openCommissionFeeCache.inFlight = request;
+    return request;
+  }
 
   function openBoxTooltipLines25(it){
     const box = it && it.boxData ? it.boxData : {};
@@ -15943,7 +16227,9 @@ startTradeAuto();
       });
     }
     const partialCloseSum = partialCloseSum25(box);
-    const tradingFees = partialCloseFees25(box);
+    const fillTradingFees = partialCloseFees25(box);
+    ensureOpenCommissionFeeWindow25(box);
+    const commissionFees = openCommissionFeeState25(box);
     ensureOpenFundingFeeWindow25(box);
     const fundingFees = openFundingFeeState25(box);
     lines.push([
@@ -15952,7 +16238,13 @@ startTradeAuto();
     ]);
     lines.push([
       {text:"Trading fees: ",color:BLACK25,bold:false},
-      {text:typeof fm === "function" ? fm(tradingFees) : String(tradingFees),color:pnlColor25(tradingFees),bold:true}
+      {
+        text:commissionFees.available
+          ? (typeof fm === "function" ? fm(commissionFees.value) : String(commissionFees.value))
+          : (typeof fm === "function" ? fm(fillTradingFees) : String(fillTradingFees)),
+        color:pnlColor25(commissionFees.available ? commissionFees.value : fillTradingFees),
+        bold:true
+      }
     ]);
     lines.push([
       {text:"Funding fees: ",color:BLACK25,bold:false},
