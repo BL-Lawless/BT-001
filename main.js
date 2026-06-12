@@ -13002,6 +13002,79 @@ startTradeAuto();
     return Math.floor(new Date(d.getFullYear(),d.getMonth(),d.getDate() + 1,0,0,0,0).getTime() / 1000);
   }
 
+  function closedMarkerMetrics15(letter,slot){
+    const candleWidth = Math.max(1,Number(slot) || 0);
+    const diameter = Math.max(7,Math.min(11,candleWidth * 0.65));
+    const radius = diameter / 2;
+    const fontSize = Math.max(7,Math.min(8,diameter * 0.72));
+    let text = String(letter || "");
+    if(text === "EX"){
+      if(diameter <= 7.4) text = "";
+      else if(diameter <= 8.6) text = "X";
+    }
+    return {
+      diameter,
+      radius,
+      fontSize,
+      text,
+      hitRadius:Math.max(10,Math.min(12,radius + 5))
+    };
+  }
+
+  function drawClosedMarker15(x,y,letter,col,unresolved,slot){
+    const metrics = closedMarkerMetrics15(letter,slot);
+    const text = metrics.text;
+    ctx.save();
+    ctx.font = "bold " + metrics.fontSize.toFixed(1) + "px Arial";
+    const textWidth = text ? ctx.measureText(text).width : 0;
+    const padX = text === "EX" ? 4 : text === "X" ? 2 : 0;
+    const w = text
+      ? Math.max(metrics.diameter,Math.ceil(textWidth + padX * 2))
+      : Math.ceil(metrics.diameter);
+    const h = Math.ceil(metrics.diameter);
+    const bx = ix(x - w/2);
+    const by = ix(y - h/2);
+    ctx.fillStyle = col;
+    ctx.strokeStyle = unresolved ? "#111" : "#fff";
+    ctx.lineWidth = unresolved ? 1.4 : 1;
+    if(!text || w <= h + 1){
+      ctx.beginPath();
+      ctx.arc(x,y,metrics.radius,0,Math.PI*2);
+      ctx.fill();
+      ctx.stroke();
+      if(unresolved){
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.arc(x,y,metrics.radius + 2,0,Math.PI*2);
+        ctx.stroke();
+      }
+    }else{
+      const r = Math.max(3,Math.min(metrics.radius,h/2));
+      ctx.beginPath();
+      ctx.moveTo(bx+r, by);
+      ctx.lineTo(bx+w-r, by);
+      ctx.quadraticCurveTo(bx+w, by, bx+w, by+r);
+      ctx.lineTo(bx+w, by+h-r);
+      ctx.quadraticCurveTo(bx+w, by+h, bx+w-r, by+h);
+      ctx.lineTo(bx+r, by+h);
+      ctx.quadraticCurveTo(bx, by+h, bx, by+h-r);
+      ctx.lineTo(bx, by+r);
+      ctx.quadraticCurveTo(bx, by, bx+r, by);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    if(text){
+      ctx.fillStyle = "#fff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text,x,y+.5);
+    }
+    ctx.restore();
+    return metrics;
+  }
+
   function drawMode2Marker15(m,vis,mapX,mapY,slot){
     if(!m || !inTime(m.time,vis)) return;
     const x = markerTimeX(m,vis,mapX,slot);
@@ -13009,16 +13082,8 @@ startTradeAuto();
     const y = mapY(n15(m.price));
     let col = m.side === 'SHORT' || m.letter === 'S' || m.letter === 'ES' ? '#f6465d' : '#0ecb81';
     if(m.role === 'close') col = m.unresolved ? '#f59e0b' : (m.side === 'SHORT' ? '#f6465d' : '#0ecb81');
-    ctx.save();
-    ctx.fillStyle = col;
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 1.1;
-    ctx.beginPath();
-    ctx.arc(ix(x),ix(y),5,0,Math.PI*2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-    pushOverlayHitItem({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:5,qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''}, 'closed');
+    const metrics = drawClosedMarker15(ix(x),ix(y),m.letter,col,m.unresolved,slot);
+    pushOverlayHitItem({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:metrics.hitRadius,qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''}, 'closed');
   }
 
   function drawMode2DailyNetBoxes15(records,vis,mapX,slot,clip){
@@ -13414,8 +13479,30 @@ startTradeAuto();
     if(m.role === 'close') m.letter = m.isFinalExit ? 'EX' : 'P';
     let col = m.side === 'SHORT' || m.letter === 'S' || m.letter === 'ES' ? '#f6465d' : '#0ecb81';
     if(m.role === 'close') col = m.unresolved ? '#f59e0b' : (m.side === 'SHORT' ? '#f6465d' : '#0ecb81');
-    circle(ix(x),ix(y),m.letter,col,m.unresolved);
-    pushOverlayHitItem({kind:'marker',markerId:m.id,role:m.role,side:m.side,letter:m.letter,x,y,radius:m.unresolved ? 11 : Math.max(9, String(m.letter||'').length > 1 ? 14 : 7),qty:m.qty,price:m.price,time:m.time,pnl:m.pnl,fee:m.fee || 0,unresolved:m.unresolved,chainId:cid15(m),parentTradeId:cid15(m),note:m.note || ''}, owner);
+    const metrics = owner === 'closed'
+      ? drawClosedMarker15(ix(x),ix(y),m.letter,col,m.unresolved,slot)
+      : (circle(ix(x),ix(y),m.letter,col,m.unresolved), null);
+    pushOverlayHitItem({
+      kind:'marker',
+      markerId:m.id,
+      role:m.role,
+      side:m.side,
+      letter:m.letter,
+      x,
+      y,
+      radius:owner === 'closed'
+        ? metrics.hitRadius
+        : (m.unresolved ? 11 : Math.max(9, String(m.letter||'').length > 1 ? 14 : 7)),
+      qty:m.qty,
+      price:m.price,
+      time:m.time,
+      pnl:m.pnl,
+      fee:m.fee || 0,
+      unresolved:m.unresolved,
+      chainId:cid15(m),
+      parentTradeId:cid15(m),
+      note:m.note || ''
+    }, owner);
   }
 
   function drawSimplifiedTrades15(vis,mapX,mapY,slot,clip,showLots,placedLabels){
