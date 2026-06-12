@@ -5081,11 +5081,11 @@ function clipped(l,vis,mapX,mapY,slot){
 function tradeMarkerIconMetrics(txt,slot){
   const label = String(txt || "");
   const candleWidth = Math.max(1,Number(slot) || 0);
-  const diameter = Math.max(10,Math.min(12,candleWidth * 1.05));
+  const diameter = Math.max(12,Math.min(14,candleWidth * 1.2));
   const radius = diameter / 2;
   const fontSize = Math.max(7,Math.min(8,diameter * 0.68));
   let text = label;
-  if(label === "EX" && diameter <= 10.4) text = "X";
+  if(label === "EX" && diameter <= 10.8) text = "X";
   return {
     diameter,
     radius,
