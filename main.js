@@ -3793,6 +3793,127 @@ const marketDataHub = (() => {
   };
 })();
 
+(() => {
+  "use strict";
+
+  const CHART_TAB_KEY = "overlays";
+  const CHART_TAB_LABEL = "Chart";
+  const CHART_STYLE_KEYS = {
+    candleOutline: "btc_futures_chart_v13_chart_candle_outline",
+    bullBody: "btc_futures_chart_v13_chart_bull_body",
+    bearBody: "btc_futures_chart_v13_chart_bear_body"
+  };
+  const CHART_STYLE_DEFAULTS = {
+    candleOutline: "#969696",
+    bullBody: "#ffffff",
+    bearBody: "#969696"
+  };
+
+  function readChartStyleSetting(key){
+    const stored = localStorage.getItem(CHART_STYLE_KEYS[key]);
+    return /^#[0-9a-f]{6}$/i.test(String(stored || "")) ? stored : CHART_STYLE_DEFAULTS[key];
+  }
+
+  function applyChartCandleStyles(){
+    const root = document.documentElement;
+    if(!root || !root.style) return;
+    const outline = readChartStyleSetting("candleOutline");
+    const bullBody = readChartStyleSetting("bullBody");
+    const bearBody = readChartStyleSetting("bearBody");
+    root.style.setProperty("--candle-stroke", outline);
+    root.style.setProperty("--candle-up-border", outline);
+    root.style.setProperty("--candle-up-wick", outline);
+    root.style.setProperty("--candle-down-border", outline);
+    root.style.setProperty("--candle-down-wick", outline);
+    root.style.setProperty("--candle-up-body", bullBody);
+    root.style.setProperty("--candle-down-body", bearBody);
+  }
+
+  function renameChartSettingsLabels(){
+    document.querySelectorAll('#settingsModal .v24-settings-tab[data-tab="' + CHART_TAB_KEY + '"]').forEach(btn => {
+      btn.textContent = CHART_TAB_LABEL;
+    });
+    const panel = document.querySelector('#settingsModal .v24-settings-panel[data-tab="' + CHART_TAB_KEY + '"]');
+    if(panel) panel.dataset.label = CHART_TAB_LABEL;
+  }
+
+  function chartSettingsMarkup(){
+    return `
+      <div class="settings-card-title">Chart</div>
+      <div class="settings-card-desc">Candle color settings only.</div>
+      <div class="patch5-row"><span>Candle outline</span><input id="chartCandleOutlineColor" type="color" value="${readChartStyleSetting("candleOutline")}"></div>
+      <div class="patch5-row"><span>Bull body</span><input id="chartBullBodyColor" type="color" value="${readChartStyleSetting("bullBody")}"></div>
+      <div class="patch5-row"><span>Bear body</span><input id="chartBearBodyColor" type="color" value="${readChartStyleSetting("bearBody")}"></div>`;
+  }
+
+  function bindChartSettingsCard(card){
+    [
+      ["chartCandleOutlineColor", "candleOutline"],
+      ["chartBullBodyColor", "bullBody"],
+      ["chartBearBodyColor", "bearBody"]
+    ].forEach(([id,key]) => {
+      const el = document.getElementById(id);
+      if(!el || el.__chartColorBound) return;
+      el.__chartColorBound = true;
+      const sync = () => {
+        localStorage.setItem(CHART_STYLE_KEYS[key], el.value);
+        applyChartCandleStyles();
+        try{ draw(); }catch(_e){}
+      };
+      el.addEventListener("input", sync, false);
+      el.addEventListener("change", sync, false);
+    });
+    if(card && card.querySelector){
+      const title = card.querySelector(".settings-card-title");
+      if(title) title.textContent = CHART_TAB_LABEL;
+    }
+  }
+
+  function ensureChartSettingsCard(){
+    renameChartSettingsLabels();
+    const panelGrid = document.querySelector('#settingsModal .v24-settings-panel[data-tab="' + CHART_TAB_KEY + '"] .v24-settings-panel-grid');
+    const fallbackGrid = document.querySelector("#settingsModal .settings-grid");
+    const host = panelGrid || fallbackGrid;
+    if(!host) return;
+
+    let card = document.getElementById("chartCandleSettingsCard");
+    if(!card){
+      card = document.createElement("div");
+      card.className = "settings-card";
+      card.id = "chartCandleSettingsCard";
+      card.innerHTML = chartSettingsMarkup();
+      host.prepend(card);
+    }else{
+      card.innerHTML = chartSettingsMarkup();
+    }
+    bindChartSettingsCard(card);
+  }
+
+  applyChartCandleStyles();
+
+  if(typeof installSettingsTabs24 === "function" && !window.__chartSettingsTabsRenamed){
+    window.__chartSettingsTabsRenamed = true;
+    const prevInstallSettingsTabs24 = installSettingsTabs24;
+    installSettingsTabs24 = function(){
+      const result = prevInstallSettingsTabs24.apply(this, arguments);
+      ensureChartSettingsCard();
+      return result;
+    };
+  }
+
+  if(typeof openSettings === "function" && !window.__chartSettingsOpenWrapped){
+    window.__chartSettingsOpenWrapped = true;
+    const prevOpenSettings = openSettings;
+    openSettings = function(){
+      const result = prevOpenSettings.apply(this, arguments);
+      setTimeout(ensureChartSettingsCard, 0);
+      return result;
+    };
+  }else{
+    setTimeout(ensureChartSettingsCard, 0);
+  }
+})();
+
 window.PUBLIC_MARKET_DATA_HUB = marketDataHub;
 window.refreshConn = refreshConn;
 
@@ -15703,7 +15824,7 @@ startTradeAuto();
     let panelsRoot = grid.querySelector(":scope > .v24-settings-panels");
     const defs = [
       ["apis","APIs"],
-      ["overlays","Chart Overlays"],
+      ["overlays","Chart"],
       ["control","Control"],
       ["sessions","Sessions"]
     ];
