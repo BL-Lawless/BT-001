@@ -33,6 +33,7 @@
     rowSeq:0,
     clientSeq:0,
     preflight:null,
+    reconcile:null,
     expressMode:false,
     labelFrame:0,
     lastSettingsRequestedSymbol:""
@@ -132,6 +133,32 @@
       ? helper.normalizeQty(value,settings)
       : (number(value) == null ? null : Number(number(value).toFixed(3)).toFixed(3));
   };
+  const symbolSettings = () => {
+    const helper = window.BT001SymbolTradingSettings;
+    return helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
+  };
+  const qtyStep = () => {
+    const step = number(symbolSettings() && symbolSettings().stepSize);
+    return step && step > 0 ? step : 0.001;
+  };
+  const qtyPrecision = () => {
+    const stepText = String((symbolSettings() && symbolSettings().stepSize) || "");
+    const decimal = stepText.includes(".") ? stepText.split(".")[1].replace(/0+$/,"") : "";
+    return decimal.length || 3;
+  };
+  const normalizeQtyDown = value => {
+    const qty = number(value);
+    if(qty == null) return null;
+    const step = qtyStep();
+    const precision = qtyPrecision();
+    const normalized = Math.floor((qty + 1e-12) / step) * step;
+    return Number(normalized.toFixed(precision));
+  };
+  const qtyEqual = (a,b) => {
+    const left = normalizeQtyComparable(a);
+    const right = normalizeQtyComparable(b);
+    return left != null && right != null && left === right;
+  };
   const sameLevelValue = (a,b) => normalizeLevelComparable(a) != null && normalizeLevelComparable(a) === normalizeLevelComparable(b);
   const sameQtyValue = (a,b) => normalizeQtyComparable(a) != null && normalizeQtyComparable(a) === normalizeQtyComparable(b);
   const totalMargin = () => validRows("entry").reduce((sum,row) => sum + (number(rowMargin(row).value) || 0),0);
@@ -145,6 +172,10 @@
     return null;
   };
   const signedStatus = order => String(order && (order.status || order.orderStatus || "NEW") || "NEW").toUpperCase();
+  const isReduceOnly = order => {
+    const reduceOnly = order && order.reduceOnly;
+    return reduceOnly === true || String(reduceOnly).toLowerCase() === "true";
+  };
   const isLiveOrder = order => {
     const status = signedStatus(order);
     return !status || status === "NEW" || status === "PENDING" || status === "ACCEPTED" || status === "PARTIALLY_FILLED" || status.includes("NEW");
@@ -173,6 +204,11 @@
         isLive:true
       };
   const classifyGrProtectionOrder = order => classifyConditionalOrder(order);
+  const liveExitSide = position => position && position.side === "SHORT" ? "BUY" : "SELL";
+  const positionSideMatches = (order,position) => {
+    const ps = String(order && order.positionSide || "").toUpperCase();
+    return !ps || ps === "BOTH" || ps === String(position && position.positionSide || "").toUpperCase() || ps === String(position && position.side || "").toUpperCase();
+  };
   const protectionOrderMatchesLivePosition = order => {
     if(!order || !state.livePosition) return false;
     if(String(order.symbol || "").toUpperCase() !== currentSymbol()) return false;
@@ -280,6 +316,11 @@
 
   function generatorMarkup(section){
     const prefix=`grad${section}`;
+    const reconcileMarkup = section==="protection"
+      ? `<div class="grad-calc-reconcile-actions"><span>Reconcile</span><div><button id="gradProtectionReconcile" type="button" title="Reconcile Protection">RP</button></div></div>`
+      : section==="exit"
+        ? `<div class="grad-calc-reconcile-actions"><span>Reconcile</span><div><button id="gradExitReconcile" type="button" title="Reconcile Exits">RE</button></div></div>`
+        : "";
     return `<div class="grad-calc-generator">
       ${section==="entry" ? `<label>Direction<select id="${prefix}Direction"><option>LONG</option><option>SHORT</option></select></label>` : ""}
       <label>Start level<input id="${prefix}Start" type="number" min="0" step="10"></label>
@@ -287,6 +328,7 @@
       <label>Step<span class="grad-step-control"><input id="${prefix}Step" type="text" inputmode="decimal"><span class="grad-step-buttons"><button id="${prefix}StepUp" type="button">▲</button><button id="${prefix}StepDown" type="button">▼</button></span></span></label>
       <label>Total lot<input id="${prefix}Lot" type="number" min="0.001" step="0.001" value="0.000"></label>
       <label>Count<input id="${prefix}Count" type="number" min="1" step="1" value="${section==="protection" ? 2 : 3}"></label>
+      ${reconcileMarkup}
     </div>`;
   }
   function panelMarkup(section){
@@ -370,6 +412,31 @@
     head.addEventListener("pointerup",event=>{drag=null;try{head.releasePointerCapture(event.pointerId);}catch(_e){}});
     return modal;
   }
+  function closeReconcilePreview(){
+    q("gradReconcilePreview")?.classList.add("hidden");
+    state.reconcile=null;
+  }
+  function ensureReconcilePreview(){
+    let modal=q("gradReconcilePreview");
+    if(modal) return modal;
+    modal=document.createElement("div");
+    modal.id="gradReconcilePreview";
+    modal.className="calc-module-send-popup hidden";
+    modal.innerHTML=`<div class="calc-module-send-popup-head" id="gradReconcileHead"><div class="calc-module-send-popup-title" id="gradReconcileTitle">Reconcile Preview</div><button id="gradReconcileClose" type="button" title="Close">x</button></div>
+      <div class="calc-module-send-summary" id="gradReconcileMessage"></div>
+      <div class="calc-module-send-wrap"><table class="calc-module-send-table"><colgroup><col class="calc-col-action"><col class="calc-col-type"><col class="calc-col-side"><col class="calc-col-old-price"><col class="calc-col-new-price"><col class="calc-col-old-qty"><col class="calc-col-new-qty"><col class="calc-col-status"><col class="calc-col-response"></colgroup><thead><tr><th>Action</th><th>Type</th><th>Side</th><th>Level</th><th>New Level</th><th>Current Lot</th><th>New Lot</th><th>Status</th><th>Binance Response</th></tr></thead><tbody id="gradReconcileRows"></tbody></table></div>
+      <div class="calc-module-send-popup-actions"><button id="gradReconcileConfirm" type="button">Confirm</button><button id="gradReconcileCancel" type="button">Cancel</button><button id="gradReconcileManualClose" type="button">Manual Edit / Close</button></div>`;
+    document.body.appendChild(modal);
+    q("gradReconcileClose").onclick=()=>{if(state.reconcile&&state.reconcile.executing){setStatus("Reconcile confirm is in progress.");return;}closeReconcilePreview();};
+    q("gradReconcileCancel").onclick=()=>{if(state.reconcile&&state.reconcile.executing)return;closeReconcilePreview();};
+    q("gradReconcileManualClose").onclick=()=>{if(state.reconcile&&state.reconcile.executing)return;closeReconcilePreview();};
+    q("gradReconcileConfirm").onclick=confirmReconcilePreview;
+    const head=q("gradReconcileHead");let drag=null;
+    head.addEventListener("pointerdown",event=>{if(event.target.closest("button"))return;const rect=modal.getBoundingClientRect();drag={x:event.clientX,y:event.clientY,left:rect.left,top:rect.top};try{head.setPointerCapture(event.pointerId);}catch(_e){}event.preventDefault();});
+    head.addEventListener("pointermove",event=>{if(!drag)return;modal.style.left=Math.max(6,drag.left+event.clientX-drag.x)+"px";modal.style.top=Math.max(6,drag.top+event.clientY-drag.y)+"px";modal.style.right="auto";});
+    head.addEventListener("pointerup",event=>{drag=null;try{head.releasePointerCapture(event.pointerId);}catch(_e){}});
+    return modal;
+  }
 
   function renderSection(section){
     const container=q(`grad${section}Rows`);
@@ -445,6 +512,145 @@
     if(exceedsProtection) setStatus(warning);
     else if(statusText() === warning) setStatus("");
     redraw();
+  }
+  function liveOrdersSnapshotBySymbol(snapshot){
+    const sym = currentSymbol();
+    return {
+      normal:(snapshot && Array.isArray(snapshot.normal) ? snapshot.normal : []).filter(order => String(order && order.symbol || "").toUpperCase() === sym).filter(isLiveOrder),
+      algo:(snapshot && Array.isArray(snapshot.algo) ? snapshot.algo : []).filter(order => String(order && order.symbol || "").toUpperCase() === sym).filter(isLiveOrder)
+    };
+  }
+  async function openOrdersSnapshot(){
+    if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
+    const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
+    const normal=await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
+    const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
+    return liveOrdersSnapshotBySymbol({normal:Array.isArray(normal)?normal:[],algo:Array.isArray(algo)?algo:[]});
+  }
+  function reconcileOrderKey(item){
+    if(!item) return "";
+    if(item.isAlgo){
+      if(item.order && item.order.algoId != null) return "algo:" + String(item.order.algoId);
+      if(item.order && item.order.clientAlgoId) return "calgo:" + String(item.order.clientAlgoId);
+    }
+    if(item.order && item.order.orderId != null) return "id:" + String(item.order.orderId);
+    if(item.order && item.order.clientOrderId) return "cid:" + String(item.order.clientOrderId);
+    return "";
+  }
+  function protectionReconcileItems(snapshot,position){
+    state.livePosition = position;
+    return [].concat(snapshot.algo || [],snapshot.normal || [])
+      .filter(order => protectionOrderMatchesLivePosition(order))
+      .map(order => {
+        const classified = classifyGrProtectionOrder(order);
+        return {
+          key:reconcileOrderKey({order,isAlgo:(snapshot.algo || []).includes(order)}),
+          isAlgo:(snapshot.algo || []).includes(order),
+          order,
+          type:String(order.type || order.orderType || order.algoType || "STOP_MARKET").toUpperCase(),
+          side:liveExitSide(position),
+          positionSide:String(order.positionSide || position.positionSide || "").toUpperCase(),
+          level:number(classified.triggerPrice),
+          qty:normalizeQtyDown(classified.quantity),
+          workingType:String(order.workingType || "CONTRACT_PRICE"),
+          price:number(order.price),
+          timeInForce:String(order.timeInForce || "GTC").toUpperCase()
+        };
+      })
+      .filter(item => item.level != null && item.qty != null && item.qty > 0);
+  }
+  function exitReconcileItems(snapshot,position){
+    const side = liveExitSide(position);
+    return (snapshot.normal || [])
+      .filter(order => String(order.type || order.orderType || "").toUpperCase() === "LIMIT")
+      .filter(order => String(order.side || "").toUpperCase() === side)
+      .filter(order => positionSideMatches(order,position))
+      .map(order => ({
+        key:reconcileOrderKey({order,isAlgo:false}),
+        isAlgo:false,
+        order,
+        type:"LIMIT",
+        side,
+        positionSide:String(order.positionSide || position.positionSide || "").toUpperCase(),
+        level:number(order.price),
+        qty:normalizeQtyDown(order.origQty || order.quantity || order.qty),
+        reduceOnly:isReduceOnly(order),
+        timeInForce:String(order.timeInForce || "GTC").toUpperCase()
+      }))
+      .filter(item => item.level != null && item.qty != null && item.qty > 0);
+  }
+  function sortReconcileWorstFirst(kind,items,position){
+    return items.slice().sort((a,b) => {
+      const left = number(normalizeLevelComparable(a.level)) ?? number(a.level) ?? 0;
+      const right = number(normalizeLevelComparable(b.level)) ?? number(b.level) ?? 0;
+      if(kind === "RP") return position.side === "SHORT" ? right - left : left - right;
+      return position.side === "SHORT" ? left - right : right - left;
+    });
+  }
+  function buildReconcilePlan(kind,position,snapshot){
+    if(!position) throw new Error("No valid open position.");
+    const targetQty = normalizeQtyDown(position.qty);
+    const items = kind === "RP" ? protectionReconcileItems(snapshot,position) : exitReconcileItems(snapshot,position);
+    const currentTotal = normalizeQtyDown(items.reduce((sum,item) => sum + (number(item.qty) || 0),0)) || 0;
+    if(targetQty == null) throw new Error("Live open-position lot is unavailable.");
+    if(currentTotal <= targetQty + 1e-9){
+      return {kind,position,items,actions:items.map(item=>({item,action:"Keep",newQty:item.qty})),currentTotal,targetQty,excess:0,finalTotal:currentTotal,already:true};
+    }
+    let remaining = normalizeQtyDown(currentTotal - targetQty) || 0;
+    const actionMap = new Map();
+    sortReconcileWorstFirst(kind,items,position).forEach(item => {
+      let action = "Keep";
+      let newQty = item.qty;
+      if(remaining > 1e-9){
+        if(item.qty <= remaining + 1e-9){
+          action = "Cancel";
+          newQty = 0;
+          remaining = normalizeQtyDown(Math.max(0,remaining - item.qty)) || 0;
+        }else{
+          const reducedQty = normalizeQtyDown(Math.max(0,item.qty - remaining));
+          if(reducedQty == null || reducedQty <= 0){
+            action = "Cancel";
+            newQty = 0;
+            remaining = normalizeQtyDown(Math.max(0,remaining - item.qty)) || 0;
+          }else{
+            action = "Reduce";
+            newQty = reducedQty;
+            remaining = normalizeQtyDown(Math.max(0,remaining - (item.qty - reducedQty))) || 0;
+          }
+        }
+      }
+      actionMap.set(item.key,{item,action,newQty});
+    });
+    const actions = items.map(item => actionMap.get(item.key) || {item,action:"Keep",newQty:item.qty});
+    const finalTotal = normalizeQtyDown(actions.reduce((sum,entry)=>sum + (entry.action === "Cancel" ? 0 : number(entry.newQty) || 0),0)) || 0;
+    if(!qtyEqual(finalTotal,targetQty)) throw new Error("Reconcile could not reach the live open-position lot after stepSize normalization.");
+    return {kind,position,items,actions,currentTotal,targetQty,excess:normalizeQtyDown(currentTotal - targetQty) || 0,finalTotal,already:false};
+  }
+  function renderReconcilePreview(plan){
+    state.reconcile = {...plan,executing:false,fingerprint:positionFingerprint(plan.position)};
+    ensureReconcilePreview().classList.remove("hidden");
+    q("gradReconcileTitle").textContent = plan.kind === "RP" ? "Reconcile Protection Preview" : "Reconcile Exits Preview";
+    q("gradReconcileConfirm").textContent = plan.kind === "RP" ? "Confirm RP" : "Confirm RE";
+    q("gradReconcileConfirm").disabled = !!plan.already;
+    q("gradReconcileConfirm").parentElement.style.display = "flex";
+    q("gradReconcileMessage").textContent = plan.already
+      ? (plan.kind === "RP" ? "Protection already reconciled." : "Exits already reconciled.")
+      : "Live lot: " + fmtLot(plan.targetQty) + " | Current total: " + fmtLot(plan.currentTotal) + " | Excess: " + fmtLot(plan.excess) + " | Final total: " + fmtLot(plan.finalTotal);
+    q("gradReconcileMessage").classList.toggle("is-stale",!!plan.already);
+    q("gradReconcileRows").innerHTML = `<tr class="calc-module-send-section"><td colspan="9">${plan.kind === "RP" ? "GR Reconcile Protection" : "GR Reconcile Exits"}</td></tr>` + plan.actions.map(entry => `<tr class="${entry.action !== "Keep" ? "is-writable" : ""}"><td>${entry.action}</td><td>${entry.item.type}</td><td>${entry.item.side}</td><td>${fmtLevelInput(entry.item.level)}</td><td>${fmtLevelInput(entry.item.level)}</td><td>${fmtLot(entry.item.qty)}</td><td>${fmtLot(entry.action === "Cancel" ? 0 : entry.newQty)}</td><td>${entry.action === "Keep" ? "Ready" : "Planned"}</td><td class="calc-module-send-response">${entry.item.key || entry.item.type}</td></tr>`).join("");
+  }
+  async function openReconcile(kind){
+    try{
+      const position = await livePosition();
+      state.livePosition = position;
+      if(!position) throw new Error((kind === "RP" ? "Protection" : "Exits") + " reconcile blocked: no valid open position.");
+      const snapshot = await openOrdersSnapshot();
+      const plan = buildReconcilePlan(kind,position,snapshot);
+      renderReconcilePreview(plan);
+      setStatus(plan.already ? (kind === "RP" ? "Protection already reconciled." : "Exits already reconciled.") : (kind === "RP" ? "Protection reconcile preview ready." : "Exit reconcile preview ready."));
+    }catch(error){
+      setStatus(error.message || String(error));
+    }
   }
   function generatorDirection(section){
     const direction=positionDirection();
@@ -688,6 +894,115 @@
     catch(error){q("gradPreflightMessage").textContent=error.message||String(error);q("gradPreflightMessage").classList.add("is-stale");}
     finally{preflight.executing=false;q("gradPreflightConfirm").textContent="Confirm Send";q("gradPreflightConfirm").disabled=!preflight.valid;}
   }
+  async function cancelReconcileItem(item){
+    if(item.isAlgo){
+      const payload = {symbol:currentSymbol()};
+      if(item.order && item.order.algoId != null) payload.algoId = String(item.order.algoId);
+      else if(item.order && item.order.clientAlgoId) payload.clientAlgoId = String(item.order.clientAlgoId);
+      else throw new Error("Protection order is missing cancel metadata.");
+      return signedWrite(ALGO_URL,"DELETE",payload);
+    }
+    const payload = {symbol:currentSymbol()};
+    if(item.order && item.order.orderId != null) payload.orderId = String(item.order.orderId);
+    else if(item.order && item.order.clientOrderId) payload.origClientOrderId = String(item.order.clientOrderId);
+    else throw new Error("Order is missing cancel metadata.");
+    return signedWrite(ORDER_URL,"DELETE",payload);
+  }
+  async function recreateProtectionItem(item,newQty,position){
+    const qty = normalizeQtyDown(newQty);
+    if(qty == null || qty < 0.001) throw new Error("Protection reduce quantity is invalid.");
+    if(item.isAlgo){
+      const payload = {
+        symbol:currentSymbol(),
+        side:item.side,
+        algoType:"CONDITIONAL",
+        type:"STOP_MARKET",
+        quantity:String(qty),
+        triggerPrice:String(number(item.level)),
+        workingType:String(item.workingType || "CONTRACT_PRICE")
+      };
+      if(["LONG","SHORT"].includes(position.positionSide)) payload.positionSide = position.positionSide;
+      else payload.reduceOnly = "true";
+      return signedWrite(ALGO_URL,"POST",payload);
+    }
+    const payload = {
+      symbol:currentSymbol(),
+      side:item.side,
+      type:String(item.type || "STOP_MARKET").toUpperCase(),
+      quantity:String(qty),
+      stopPrice:String(number(item.level))
+    };
+    if(payload.type === "STOP" || payload.type === "TAKE_PROFIT"){
+      if(!(number(item.price) > 0)) throw new Error("Protection STOP order is missing its price.");
+      payload.price = String(number(item.price));
+      payload.timeInForce = item.timeInForce || "GTC";
+    }
+    if(["LONG","SHORT"].includes(position.positionSide)) payload.positionSide = position.positionSide;
+    else payload.reduceOnly = "true";
+    if(item.order && item.order.workingType) payload.workingType = String(item.order.workingType);
+    return signedWrite(ORDER_URL,"POST",payload);
+  }
+  async function reduceExitItem(item,newQty){
+    const qty = normalizeQtyDown(newQty);
+    if(qty == null || qty < 0.001) throw new Error("Exit reduce quantity is invalid.");
+    const payload = {
+      symbol:currentSymbol(),
+      side:item.side,
+      type:"LIMIT",
+      quantity:String(qty),
+      price:String(number(item.level)),
+      timeInForce:item.timeInForce || "GTC"
+    };
+    if(item.order && item.order.orderId != null) payload.orderId = String(item.order.orderId);
+    else if(item.order && item.order.clientOrderId) payload.origClientOrderId = String(item.order.clientOrderId);
+    else throw new Error("Exit order is missing modify metadata.");
+    if(item.positionSide && item.positionSide !== "BOTH") payload.positionSide = item.positionSide;
+    if(item.reduceOnly) payload.reduceOnly = "true";
+    return signedWrite(ORDER_URL,"PUT",payload);
+  }
+  async function confirmReconcilePreview(){
+    const reconcile = state.reconcile;
+    if(!reconcile || reconcile.executing || reconcile.already) return;
+    reconcile.executing = true;
+    q("gradReconcileConfirm").disabled = true;
+    q("gradReconcileConfirm").textContent = "Sending...";
+    try{
+      const live = await livePosition();
+      if(positionFingerprint(live) !== reconcile.fingerprint) throw new Error("Position changed - reconcile again.");
+      const snapshot = await openOrdersSnapshot();
+      const latest = buildReconcilePlan(reconcile.kind,live,snapshot);
+      if(latest.already) throw new Error(reconcile.kind === "RP" ? "Protection already reconciled." : "Exits already reconciled.");
+      const changed = latest.actions.filter(entry => entry.action !== "Keep");
+      for(const entry of changed){
+        if(entry.action === "Cancel"){
+          await cancelReconcileItem(entry.item);
+        }else if(entry.action === "Reduce"){
+          if(reconcile.kind === "RP"){
+            await cancelReconcileItem(entry.item);
+            await recreateProtectionItem(entry.item,entry.newQty,live);
+          }else{
+            await reduceExitItem(entry.item,entry.newQty);
+          }
+        }
+      }
+      q("gradReconcileTitle").textContent = "Reconcile Results";
+      q("gradReconcileMessage").textContent = "Confirmed actions: " + changed.length + " | Final total: " + fmtLot(latest.finalTotal);
+      q("gradReconcileMessage").classList.remove("is-stale");
+      q("gradReconcileRows").querySelectorAll("tr.is-writable").forEach(row=>{row.classList.remove("is-writable");const cells=row.querySelectorAll("td");if(cells[7])cells[7].textContent="Confirmed";if(cells[8])cells[8].textContent="Binance confirmed";});
+      q("gradReconcileConfirm").parentElement.style.display = "none";
+      if(reconcile.kind === "RP") await readSection("protection");
+      else await readSection("exit");
+      setStatus((reconcile.kind === "RP" ? "Protection" : "Exit") + " reconcile complete.");
+    }catch(error){
+      q("gradReconcileMessage").textContent=error.message||String(error);
+      q("gradReconcileMessage").classList.add("is-stale");
+      setStatus(error.message||String(error));
+    }finally{
+      if(state.reconcile) state.reconcile.executing=false;
+      q("gradReconcileConfirm").textContent = reconcile && reconcile.kind === "RP" ? "Confirm RP" : "Confirm RE";
+      q("gradReconcileConfirm").disabled = !!(state.reconcile && state.reconcile.already);
+    }
+  }
   async function executeExpressSection(section){
     await openPreflight(section);
     const preflight = state.preflight;
@@ -806,11 +1121,13 @@
     sections.forEach(section=>{state.rows[section]=records.filter(record=>record.section===section&&record.role!=="masterSl").map(record=>rowModel(section,record));state.loadedMode[section]=state.rows[section].some(row=>row.status==="sent"||row.status==="executed");});
   }
   function bind(){
-    const win=ensureWindow(),open=ensureButton();ensurePreflight();restorePersistentState();
+    const win=ensureWindow(),open=ensureButton();ensurePreflight();ensureReconcilePreview();restorePersistentState();
     state.expressMode=loadExpressMode();
     saveExpressMode(state.expressMode);
     q("gradExpressToggle").addEventListener("change",event=>saveExpressMode(!!(event.target&&event.target.checked)),false);
     sections.forEach(section=>{bindGenerator(section);q(`gradTab${section}`).onclick=()=>setActive(section);q(`grad${section}Clear`).onclick=()=>clearSection(section);q(`grad${section}Read`).onclick=()=>readSection(section);q(`grad${section}Show`).onclick=()=>showSection(section,!state.visible[section]);q(`grad${section}Send`).onclick=()=>state.expressMode?executeExpressSection(section):openPreflight(section);renderSection(section);});
+    q("gradProtectionReconcile").onclick=()=>openReconcile("RP");
+    q("gradExitReconcile").onclick=()=>openReconcile("RE");
     q("gradentryFlush").onclick=flushEntryHistory;
     q("gradCalcClearAll").onclick=clearAll;q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
     installWindowDrag(win);installWindowResize(win);installDrawHook();installDrag();installPositionWatcher();setActive("entry");calculate();
