@@ -861,8 +861,14 @@ function drawHoverPriceOnRightAxis(cursorPrice,mouseY,layout){
     if(y < avoidBottom && y + labelH > avoidTop){
       const above = avoidTop - labelH - 2;
       const below = avoidBottom + 2;
-      if(above >= topY) y = above;
-      else if(below + labelH <= topY + priceH) y = below;
+      const cursorBelowCurrent = Number(mouseY) > currentY;
+      if(cursorBelowCurrent){
+        if(below + labelH <= topY + priceH) y = below;
+        else if(above >= topY) y = above;
+      }else{
+        if(above >= topY) y = above;
+        else if(below + labelH <= topY + priceH) y = below;
+      }
     }
   }
   y = clamp(y,topY,topY + priceH - labelH);
