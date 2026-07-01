@@ -354,7 +354,7 @@
     win=document.createElement("div");
     win.id="gradCalcWindow";
     win.className="grad-calc-window hidden";
-    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR Commit V11</div><button id="gradCalcClose" type="button">x</button></div>
+    win.innerHTML=`<div class="grad-calc-head" id="gradCalcHead"><div class="grad-calc-title">GR position</div><div class="grad-calc-actions"><button id="gradCalcCollapse" type="button" title="Collapse">-</button><button id="gradCalcClose" type="button">x</button></div></div>
       <div class="grad-calc-body">
         <div class="grad-calc-tabs">${sections.map(section=>`<button id="gradTab${section}" type="button">${sectionTitle(section)}</button>`).join("")}</div>
         <div class="grad-calc-tab-stage">${sections.map(panelMarkup).join("")}</div>
@@ -1116,6 +1116,34 @@
   function installPositionWatcher(){
     window.setInterval(async()=>{for(const section of ["protection","exit"]){if(!state.positionBasis[section])continue;try{await refreshPositionAwareness(section,{quiet:true});}catch(_e){state.stale[section]=true;calculate();}}},15000);
   }
+  function setWindowCollapsed(win,collapsed){
+    const button=q("gradCalcCollapse"),body=win.querySelector(".grad-calc-body"),stage=win.querySelector(".grad-calc-tab-stage"),head=q("gradCalcHead");
+    if(!button||!body)return;
+    if(collapsed){
+      if(win.classList.contains("is-collapsed")) return;
+      const rect=win.getBoundingClientRect();
+      win.dataset.expandedWidth=Math.round(rect.width)+"px";
+      win.dataset.expandedHeight=Math.round(rect.height)+"px";
+      win.dataset.bodyScrollTop=String(body.scrollTop||0);
+      win.dataset.stageScrollTop=String(stage&&stage.scrollTop||0);
+      win.style.width=win.dataset.expandedWidth;
+      win.style.height=((head&&head.offsetHeight)||34)+"px";
+      win.classList.add("is-collapsed");
+      button.setAttribute("aria-pressed","true");
+      button.title="Restore";
+      return;
+    }
+    if(!win.classList.contains("is-collapsed")) return;
+    win.classList.remove("is-collapsed");
+    if(win.dataset.expandedWidth) win.style.width=win.dataset.expandedWidth;
+    if(win.dataset.expandedHeight) win.style.height=win.dataset.expandedHeight;
+    button.setAttribute("aria-pressed","false");
+    button.title="Collapse";
+    requestAnimationFrame(()=>{
+      body.scrollTop=Number(win.dataset.bodyScrollTop||0)||0;
+      if(stage) stage.scrollTop=Number(win.dataset.stageScrollTop||0)||0;
+    });
+  }
   function restorePersistentState(){
     const records=storedRecords().filter(record=>record.symbol===currentSymbol()&&sections.includes(record.section)&&(["local"].includes(record.status)||ownedClientId(record)));
     sections.forEach(section=>{state.rows[section]=records.filter(record=>record.section===section&&record.role!=="masterSl").map(record=>rowModel(section,record));state.loadedMode[section]=state.rows[section].some(row=>row.status==="sent"||row.status==="executed");});
@@ -1129,7 +1157,7 @@
     q("gradProtectionReconcile").onclick=()=>openReconcile("RP");
     q("gradExitReconcile").onclick=()=>openReconcile("RE");
     q("gradentryFlush").onclick=flushEntryHistory;
-    q("gradCalcClearAll").onclick=clearAll;q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
+    q("gradCalcClearAll").onclick=clearAll;q("gradCalcCollapse").onclick=()=>setWindowCollapsed(win,!win.classList.contains("is-collapsed"));q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
     installWindowDrag(win);installWindowResize(win);installDrawHook();installDrag();installPositionWatcher();setActive("entry");calculate();
     window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:openPreflight,setVisible:showSection,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row})));}};
   }

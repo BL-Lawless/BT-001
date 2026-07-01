@@ -2108,7 +2108,7 @@ function metrics(c){
     mChange.style.color = css("--text");
   }
 
-  mVWAP.textContent = vw == null ? "-" : fp(vw);
+  mVWAP.textContent = vw == null ? "-" : ip(vw);
   updatePositionStrip(c);
   updateTabTitle();
 }

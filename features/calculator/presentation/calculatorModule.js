@@ -75,7 +75,7 @@
   let openPositionReconcileTimer = null;
   let pendingOpenPositionChange = null;
   let lastOpenPositionReconcileSignature = "";
-  let openPositionCloseUi = {open:false,percent:100,dragging:false,sending:false,sliderLeft:null,sliderRight:null,mode:"MKT",chsDistTicks:1,chsValidKey:"30s"};
+  let openPositionCloseUi = {open:false,percent:0,dragging:false,sending:false,sliderLeft:null,sliderRight:null,mode:"CHS",chsDistTicks:2,chsValidKey:"manual"};
   let openPositionCloseChs = {
     active:false,
     canceling:false,
@@ -91,9 +91,9 @@
     orderId:null,
     clientOrderId:"",
     startedPositionQty:0,
-    distTicks:1,
-    validKey:"30s",
-    validMs:30000,
+    distTicks:2,
+    validKey:"manual",
+    validMs:null,
     startedAt:0,
     expiresAt:0
   };
@@ -163,27 +163,28 @@
     openPositionCloseChs.orderId = null;
     openPositionCloseChs.clientOrderId = "";
     openPositionCloseChs.startedPositionQty = 0;
-    openPositionCloseChs.distTicks = Math.max(0,num(openPositionCloseUi.chsDistTicks) || 1);
-    openPositionCloseChs.validKey = String(openPositionCloseUi.chsValidKey || "30s");
+    openPositionCloseChs.distTicks = Math.max(0,num(openPositionCloseUi.chsDistTicks) || 2);
+    openPositionCloseChs.validKey = String(openPositionCloseUi.chsValidKey || "manual");
     const validOption = openPositionCloseChsValidOption(openPositionCloseChs.validKey);
-    openPositionCloseChs.validMs = validOption ? validOption.ms : 30000;
+    openPositionCloseChs.validMs = validOption ? validOption.ms : null;
     openPositionCloseChs.startedAt = 0;
     openPositionCloseChs.expiresAt = 0;
   }
   function resetOpenPositionCloseUi(){
     openPositionCloseUi.open = false;
-    openPositionCloseUi.percent = 100;
+    openPositionCloseUi.percent = 0;
     openPositionCloseUi.dragging = false;
     openPositionCloseUi.sending = false;
     openPositionCloseUi.sliderLeft = null;
     openPositionCloseUi.sliderRight = null;
-    openPositionCloseUi.mode = "MKT";
-    openPositionCloseUi.chsDistTicks = 1;
-    openPositionCloseUi.chsValidKey = "30s";
+    openPositionCloseUi.mode = "CHS";
+    openPositionCloseUi.chsDistTicks = 2;
+    openPositionCloseUi.chsValidKey = "manual";
   }
   function isOpenPositionCloseControl(hit){
     return !!(hit && [
       "open-position-close-toggle",
+      "open-position-close-confirm",
       "open-position-close-slider",
       "open-position-close-mode-mkt",
       "open-position-close-mode-chs",
@@ -193,11 +194,11 @@
     ].includes(hit.controlType));
   }
   function openPositionCloseMode(){
-    return openPositionCloseChs.active ? "CHS" : (String(openPositionCloseUi.mode || "MKT").toUpperCase() === "CHS" ? "CHS" : "MKT");
+    return openPositionCloseChs.active ? "CHS" : (String(openPositionCloseUi.mode || "CHS").toUpperCase() === "MKT" ? "MKT" : "CHS");
   }
   function openPositionCloseChsValidOption(key){
     const target = String(key || "30s").toLowerCase();
-    return OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS.find(item => String(item.key).toLowerCase() === target) || OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS[1];
+    return OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS.find(item => String(item.key).toLowerCase() === target) || OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS[3];
   }
   function openPositionCloseChsRemainingValidMs(nowValue){
     if(!openPositionCloseChs.active || !openPositionCloseChs.validMs || !(openPositionCloseChs.expiresAt > 0)) return null;
@@ -211,7 +212,18 @@
     return Math.max(0,Math.round(num(openPositionCloseChs.active ? openPositionCloseChs.distTicks : openPositionCloseUi.chsDistTicks) || 0));
   }
   function currentOpenPositionCloseChsValidKey(){
-    return String(openPositionCloseChs.active ? openPositionCloseChs.validKey : openPositionCloseUi.chsValidKey || "30s");
+    return String(openPositionCloseChs.active ? openPositionCloseChs.validKey : openPositionCloseUi.chsValidKey || "manual");
+  }
+  function primeOpenPositionClosePanelDefaults(){
+    openPositionCloseUi.open = true;
+    openPositionCloseUi.dragging = false;
+    openPositionCloseUi.sliderLeft = null;
+    openPositionCloseUi.sliderRight = null;
+    if(openPositionCloseChs.active) return;
+    openPositionCloseUi.percent = 0;
+    openPositionCloseUi.mode = "CHS";
+    openPositionCloseUi.chsDistTicks = 2;
+    openPositionCloseUi.chsValidKey = "manual";
   }
   function cycleOpenPositionCloseChsDist(){
     const current = currentOpenPositionCloseChsDistTicks();
@@ -234,7 +246,7 @@
   function openPositionClosePreview(positionLike){
     const liveQty = Math.max(0,num(positionLike && (positionLike.qty != null ? positionLike.qty : positionLike.lot)) || 0);
     const entry = num(positionLike && (positionLike.entry != null ? positionLike.entry : positionLike.level));
-    const percent = clamp(num(openPositionCloseUi.percent) == null ? 100 : num(openPositionCloseUi.percent),0,100);
+    const percent = clamp(num(openPositionCloseUi.percent) == null ? 0 : num(openPositionCloseUi.percent),0,100);
     const rawQty = liveQty * percent / 100;
     const roundedQty = Math.min(liveQty,floorToLotStep(rawQty));
     const belowMinimum = rawQty > 0 && roundedQty < 0.001;
@@ -491,6 +503,15 @@
     openPositionCloseUi.percent = nextPercent;
     return true;
   }
+  function hideOpenPositionClosePanel(){
+    if(!openPositionCloseUi.open && !openPositionCloseUi.dragging) return false;
+    openPositionCloseUi.open = false;
+    openPositionCloseUi.dragging = false;
+    openPositionCloseUi.sliderLeft = null;
+    openPositionCloseUi.sliderRight = null;
+    calculate();
+    return true;
+  }
   function handleOpenPositionCloseControlHit(hit,clientX){
     if(!hit || !isOpenPositionCloseControl(hit)) return false;
     if(hit.controlType === "open-position-close-mode-mkt" || hit.controlType === "open-position-close-mode-chs"){
@@ -516,8 +537,6 @@
         setStatus("Open Position CHS is active. Cancel CHS first.");
         return true;
       }
-      cycleOpenPositionCloseChsValid();
-      calculate();
       return true;
     }
     if(hit.controlType === "open-position-close-chs-cancel"){
@@ -533,12 +552,22 @@
       openPositionCloseUi.dragging = true;
       return true;
     }
-    if(openPositionCloseUi.open) void confirmOpenPositionCloseOrder();
-    else{
-      openPositionCloseUi.open = true;
-      openPositionCloseUi.percent = 100;
-      openPositionCloseUi.mode = "MKT";
-      calculate();
+    if(hit.controlType === "open-position-close-confirm"){
+      if(!openPositionCloseUi.open){
+        primeOpenPositionClosePanelDefaults();
+        calculate();
+        return true;
+      }
+      void confirmOpenPositionCloseOrder();
+      return true;
+    }
+    if(hit.controlType === "open-position-close-toggle"){
+      if(openPositionCloseUi.open) hideOpenPositionClosePanel();
+      else{
+        primeOpenPositionClosePanelDefaults();
+        calculate();
+      }
+      return true;
     }
     return true;
   }
@@ -1267,6 +1296,7 @@
       <div class="calc-module-head" id="calcModuleHead">
         <div class="calc-module-title">Position Calculator</div>
         <div class="calc-module-actions">
+          <button id="calcModuleCollapse" type="button" title="Collapse">-</button>
           <button id="calcModuleClose" type="button" title="Close">x</button>
         </div>
       </div>
@@ -3624,145 +3654,158 @@
         if(closeSliderOpen && closePreview){
           const chsActive = !!openPositionCloseChs.active;
           const selectedMode = openPositionCloseMode();
-          const showChsControls = selectedMode === "CHS";
           const chsValidOption = openPositionCloseChsValidOption(currentOpenPositionCloseChsValidKey());
           const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : chsValidOption.ms;
-          const sliderWidth = Math.min(Math.max(164,p.w + 18),228);
-          const sliderX = clamp(x,left + 2,chartRight - sliderWidth - 2);
+          const sliderMaxWidth = Math.min(260,Math.max(196,p.w + 36));
+          const sliderX = Math.max(left + 2,x + p.w - sliderMaxWidth);
+          const sliderWidth = Math.max(182,(x + p.w) - sliderX);
           const sliderY = y + p.h + 4;
-          const sliderH = showChsControls ? 60 : 42;
-          const topRowY = sliderY + 7;
-          const infoY = showChsControls ? sliderY + 23 : sliderY + 29;
-          const modeY = sliderY + sliderH - 16;
+          const sliderH = chsActive ? 82 : 62;
+          const chipH = 14;
+          const distW = 40;
           const modeW = 28;
           const modeGap = 4;
-          const modeChsX = sliderX + sliderWidth - 8 - modeW;
-          const modeMktX = modeChsX - modeGap - modeW;
-          const modeH = 12;
-          const cancelW = 46;
-          const cancelX = modeMktX - 6 - cancelW;
+          const modeH = 14;
+          const confirmW = p.h;
+          const confirmSize = Math.max(8,p.h - 8);
+          const confirmX = sliderX - 2 - confirmW;
+          const confirmY = sliderY + Math.max(3,(sliderH - p.h) / 2);
+          const confirmGlyphX = confirmX + Math.max(2,(confirmW - confirmSize) / 2);
+          const confirmGlyphY = confirmY + Math.max(2,(p.h - confirmSize) / 2);
+          const controlTotalW = modeW + modeGap + modeW + modeGap + distW;
+          const controlStartX = sliderX + Math.max(8,(sliderWidth - controlTotalW) / 2);
+          const modeMktX = controlStartX;
+          const modeChsX = modeMktX + modeW + modeGap;
+          const distX = modeChsX + modeW + modeGap;
+          const cancelW = 54;
+          const cancelX = sliderX + Math.max(8,(sliderWidth - cancelW) / 2);
           const cancelH = 12;
-          const sliderTrackLeft = sliderX + 8;
-          const sliderTrackRight = sliderX + sliderWidth - 8;
-          const sliderTrackY = showChsControls ? sliderY + 35 : sliderY + 17;
+          const sliderTrackLeft = sliderX + 14;
+          const sliderTrackRight = sliderX + sliderWidth - 12;
+          const controlY = sliderY + sliderH - 20;
+          const sliderTrackY = Math.round((sliderY + 20 + controlY - 10) / 2);
           const sliderThumbX = sliderTrackLeft + ((sliderTrackRight - sliderTrackLeft) * closePreview.percent / 100);
-          const distW = 54;
-          const validW = 64;
-          const distX = sliderX + 8;
-          const validX = distX + distW + 6;
-          const chipH = 12;
+          const infoY = sliderY + 16;
+          const cancelY = sliderY + sliderH - 38;
           ctx.save();
-          ctx.fillStyle = "rgba(255,252,245,0.84)";
-          ctx.strokeStyle = "rgba(146,64,14,0.54)";
+          ctx.fillStyle = "rgba(255,247,214,0.62)";
+          ctx.strokeStyle = derivedStrokeStyle;
           ctx.lineWidth = 1;
           ctx.fillRect(ix(sliderX),ix(sliderY),sliderWidth,sliderH);
           ctx.strokeRect(px(sliderX),px(sliderY),sliderWidth,sliderH);
-          ctx.font = "11px Arial";
-          ctx.textAlign = "left";
-          ctx.fillStyle = closePreview.executable ? moneyColor(closePreview.estPl) : "#7f1d1d";
-          ctx.fillText(closePreview.percent + "% | " + (closePreview.executable ? fmtLot(closePreview.roundedQty) : "min 0.001") + " | " + (closePreview.executable ? fmtChartMoney(closePreview.estPl) : "Not executable"),sliderX + 8,infoY);
-          if(showChsControls){
-            const drawChip = (boxX,width,label,value) => {
-              ctx.fillStyle = "rgba(255,255,255,0.78)";
-              ctx.strokeStyle = "rgba(146,64,14,0.32)";
-              ctx.fillRect(ix(boxX),ix(topRowY),width,chipH);
-              ctx.strokeRect(px(boxX),px(topRowY),width,chipH);
-              ctx.fillStyle = "#6b4423";
-              ctx.font = "10px Arial";
-              ctx.textAlign = "center";
-              ctx.fillText(label + " " + value,boxX + width / 2,topRowY + chipH / 2 + 0.5);
-            };
-            drawChip(distX,distW,"Dist",String(currentOpenPositionCloseChsDistTicks()));
-            drawChip(validX,validW,"Valid",openPositionCloseChsTimerText(remainingValidMs));
-          }
+          ctx.fillStyle = blinkOn ? "rgba(255,214,10,0.32)" : "rgba(255,247,204,0.95)";
+          ctx.strokeStyle = blinkOn ? "rgba(255,106,0,0.70)" : derivedStrokeStyle;
+          ctx.fillRect(ix(confirmX),ix(confirmY),confirmW,p.h);
+          ctx.strokeRect(px(confirmX),px(confirmY),confirmW,p.h);
+          ctx.strokeStyle = "#166534";
+          ctx.lineWidth = 1.25;
+          ctx.beginPath();
+          ctx.moveTo(px(confirmGlyphX),px(confirmGlyphY + confirmSize * 0.55));
+          ctx.lineTo(px(confirmGlyphX + confirmSize * 0.38),px(confirmGlyphY + confirmSize));
+          ctx.lineTo(px(confirmGlyphX + confirmSize),px(confirmGlyphY));
+          ctx.stroke();
+          const infoPl = closePreview.estPl == null ? 0 : closePreview.estPl;
+          const infoColor = infoPl > 0 ? "#166534" : infoPl < 0 ? "#991b1b" : "#53351f";
+          ctx.font = "bold 13px Arial";
+          ctx.textAlign = "center";
+          ctx.fillStyle = infoColor;
+          ctx.fillText(closePreview.percent + "% | " + fmtLot(closePreview.roundedQty) + " | " + fmtChartMoney(infoPl),sliderX + sliderWidth / 2,infoY);
           const drawModeBox = (boxX,label,selected) => {
             ctx.fillStyle = selected ? "rgba(251,191,36,0.26)" : "rgba(255,255,255,0.85)";
             ctx.strokeStyle = selected ? "#92400e" : "rgba(146,64,14,0.42)";
-            ctx.fillRect(ix(boxX),ix(modeY),modeW,modeH);
-            ctx.strokeRect(px(boxX),px(modeY),modeW,modeH);
+            ctx.fillRect(ix(boxX),ix(controlY),modeW,modeH);
+            ctx.strokeRect(px(boxX),px(controlY),modeW,modeH);
             ctx.fillStyle = selected ? "#92400e" : "#6b4423";
-            ctx.font = "bold 10px Arial";
+            ctx.font = "11px Arial";
             ctx.textAlign = "center";
-            ctx.fillText(label,boxX + modeW / 2,modeY + modeH / 2 + 0.5);
+            ctx.fillText(label,boxX + modeW / 2,controlY + modeH / 2 + 0.5);
           };
-          if(selectedMode === "CHS" && chsActive){
-            ctx.fillStyle = "rgba(254,242,242,0.86)";
-            ctx.strokeStyle = "rgba(185,28,28,0.46)";
-            ctx.fillRect(ix(cancelX),ix(modeY),cancelW,cancelH);
-            ctx.strokeRect(px(cancelX),px(modeY),cancelW,cancelH);
-            ctx.fillStyle = "#991b1b";
-            ctx.font = "10px Arial";
+          const drawChip = (boxX,width,label,value,selected=false) => {
+            ctx.fillStyle = selected ? "rgba(251,191,36,0.18)" : "rgba(255,255,255,0.82)";
+            ctx.strokeStyle = selected ? "#92400e" : "rgba(146,64,14,0.38)";
+            ctx.fillRect(ix(boxX),ix(controlY),width,chipH);
+            ctx.strokeRect(px(boxX),px(controlY),width,chipH);
+            ctx.fillStyle = selected ? "#92400e" : "#6b4423";
+            ctx.font = "11px Arial";
             ctx.textAlign = "center";
-            ctx.fillText("Cancel CHS",cancelX + cancelW / 2,modeY + cancelH / 2 + 0.5);
-          }
+            const chipText = String(value || "").trim() ? (label + " " + value) : label;
+            ctx.fillText(chipText,boxX + width / 2,controlY + chipH / 2 + 0.5);
+          };
           if(chsActive){
             const chsText = "CHS " + fmtLot(openPositionCloseChs.requestedQty) + " | fill " + fmtLot(openPositionCloseChs.filledQty) + " | rem " + fmtLot(openPositionCloseChs.remainingQty) + " | " + fmtPrice(openPositionCloseChs.price) + " | " + openPositionCloseChsTimerText(remainingValidMs);
             ctx.fillStyle = "#7f1d1d";
             ctx.font = "10px Arial";
-            ctx.textAlign = "left";
-            ctx.fillText(chsText,sliderX + 8,sliderY + 53);
+            ctx.textAlign = "center";
+            ctx.fillText(chsText,sliderX + sliderWidth / 2,cancelY - 6);
+            ctx.fillStyle = "rgba(254,242,242,0.86)";
+            ctx.strokeStyle = "rgba(185,28,28,0.46)";
+            ctx.fillRect(ix(cancelX),ix(cancelY),cancelW,cancelH);
+            ctx.strokeRect(px(cancelX),px(cancelY),cancelW,cancelH);
+            ctx.fillStyle = "#991b1b";
+            ctx.font = "11px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText("Cancel CHS",cancelX + cancelW / 2,cancelY + cancelH / 2 + 0.5);
           }
           drawModeBox(modeMktX,"MKT",selectedMode === "MKT");
           drawModeBox(modeChsX,"CHS",selectedMode === "CHS");
-          ctx.strokeStyle = "rgba(161,98,7,0.64)";
+          drawChip(distX,distW,"Dist",String(currentOpenPositionCloseChsDistTicks()),selectedMode === "CHS");
+          ctx.strokeStyle = "rgba(107,114,128,0.80)";
           ctx.beginPath();
           ctx.moveTo(px(sliderTrackLeft),px(sliderTrackY));
           ctx.lineTo(px(sliderTrackRight),px(sliderTrackY));
           ctx.stroke();
-          ctx.strokeStyle = "#b45309";
+          ctx.strokeStyle = "rgba(107,114,128,0.96)";
           ctx.beginPath();
           ctx.moveTo(px(sliderTrackLeft),px(sliderTrackY));
           ctx.lineTo(px(sliderThumbX),px(sliderTrackY));
           ctx.stroke();
-          ctx.fillStyle = "#b45309";
+          ctx.fillStyle = "rgba(82,82,91,0.98)";
           ctx.beginPath();
           ctx.arc(px(sliderThumbX),px(sliderTrackY),4,0,Math.PI * 2);
           ctx.fill();
           ctx.restore();
-          if(showChsControls){
-            overlayLevelBoxes.push({
-              x1:distX,
-              y1:topRowY,
-              x2:distX + distW,
-              y2:topRowY + chipH,
-              controlType:"open-position-close-chs-dist",
-              openPosition:true,
-              draggable:false
-            });
-            overlayLevelBoxes.push({
-              x1:validX,
-              y1:topRowY,
-              x2:validX + validW,
-              y2:topRowY + chipH,
-              controlType:"open-position-close-chs-valid",
-              openPosition:true,
-              draggable:false
-            });
-          }
+          overlayLevelBoxes.push({
+            x1:confirmX,
+            y1:confirmY,
+            x2:confirmX + confirmW,
+            y2:confirmY + p.h,
+            controlType:"open-position-close-confirm",
+            openPosition:true,
+            draggable:false
+          });
           overlayLevelBoxes.push({
             x1:modeMktX,
-            y1:modeY,
+            y1:controlY,
             x2:modeMktX + modeW,
-            y2:modeY + modeH,
+            y2:controlY + modeH,
             controlType:"open-position-close-mode-mkt",
             openPosition:true,
             draggable:false
           });
           overlayLevelBoxes.push({
             x1:modeChsX,
-            y1:modeY,
+            y1:controlY,
             x2:modeChsX + modeW,
-            y2:modeY + modeH,
+            y2:controlY + modeH,
             controlType:"open-position-close-mode-chs",
+            openPosition:true,
+            draggable:false
+          });
+          overlayLevelBoxes.push({
+            x1:distX,
+            y1:controlY,
+            x2:distX + distW,
+            y2:controlY + chipH,
+            controlType:"open-position-close-chs-dist",
             openPosition:true,
             draggable:false
           });
           if(chsActive){
             overlayLevelBoxes.push({
               x1:cancelX,
-              y1:modeY,
+              y1:cancelY,
               x2:cancelX + cancelW,
-              y2:modeY + cancelH,
+              y2:cancelY + cancelH,
               controlType:"open-position-close-chs-cancel",
               openPosition:true,
               draggable:false
@@ -4026,6 +4069,16 @@
       e.stopImmediatePropagation();
       if(moved) confirmOtfSelection();
     },{capture:true,passive:false});
+    if(!document.__calculatorOpenPositionCloseEscape){
+      document.__calculatorOpenPositionCloseEscape = true;
+      document.addEventListener("keydown",e => {
+        if(e.key !== "Escape") return;
+        if(!openPositionCloseUi.open) return;
+        hideOpenPositionClosePanel();
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },true);
+    }
   }
   async function readOpenOrdersSnapshot(){
     const sym = currentSymbol();
@@ -6489,10 +6542,41 @@
       openBtn.classList.remove("is-on");
       openBtn.setAttribute("aria-pressed","false");
     }
+    function setCalculatorCollapsed(collapsed){
+      const body = q("calcModuleBody");
+      const button = q("calcModuleCollapse");
+      const head = q("calcModuleHead");
+      if(!body || !button) return;
+      if(collapsed){
+        if(win.classList.contains("is-collapsed")) return;
+        const rect = win.getBoundingClientRect();
+        win.dataset.expandedWidth = Math.round(rect.width) + "px";
+        win.dataset.expandedHeight = Math.round(rect.height) + "px";
+        win.dataset.bodyScrollTop = String(body.scrollTop || 0);
+        win.style.width = win.dataset.expandedWidth;
+        win.style.height = ((head && head.offsetHeight) || 34) + "px";
+        win.classList.add("is-collapsed");
+        button.setAttribute("aria-pressed","true");
+        button.title = "Restore";
+        return;
+      }
+      if(!win.classList.contains("is-collapsed")) return;
+      win.classList.remove("is-collapsed");
+      if(win.dataset.expandedWidth) win.style.width = win.dataset.expandedWidth;
+      if(win.dataset.expandedHeight) win.style.height = win.dataset.expandedHeight;
+      button.setAttribute("aria-pressed","false");
+      button.title = "Collapse";
+      requestAnimationFrame(() => {
+        body.scrollTop = Number(win.dataset.bodyScrollTop || 0) || 0;
+      });
+    }
 
     openBtn.addEventListener("click",() => {
       if(win.classList.contains("hidden")) showCalculator();
       else hideCalculator();
+    },false);
+    q("calcModuleCollapse").addEventListener("click",() => {
+      setCalculatorCollapsed(!win.classList.contains("is-collapsed"));
     },false);
     q("calcModuleClose").addEventListener("click",hideCalculator,false);
     q("calcModuleDir").addEventListener("click",() => {
