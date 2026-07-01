@@ -265,7 +265,11 @@ button:hover{filter:brightness(1.04)}
 }
 
 .metric.metric-account{
-  flex-basis:118px;
+  flex-basis:106px;
+}
+
+.metric.metric-lot-size{
+  flex:0 0 68px;
 }
 
 .metric.metric-account-start{
@@ -287,6 +291,102 @@ button:hover{filter:brightness(1.04)}
   white-space:nowrap;
   overflow:visible;
   text-overflow:clip;
+}
+
+.metric-day-range{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  flex:0 0 88px;
+  overflow:hidden;
+  --day-range-fill-left:50%;
+  --day-range-fill-width:0%;
+  --day-range-marker:50%;
+  --day-range-fill-color:rgba(22,163,74,.22);
+  --day-range-marker-color:rgba(75,85,99,.94);
+  --day-range-band-top:29px;
+  --day-range-guide-color:rgba(148,163,184,.40);
+  --day-range-guide-center-color:rgba(100,116,139,.62);
+  background-image:
+    linear-gradient(90deg,
+      transparent 0,
+      transparent var(--day-range-fill-left),
+      var(--day-range-fill-color) var(--day-range-fill-left),
+      var(--day-range-fill-color) calc(var(--day-range-fill-left) + var(--day-range-fill-width)),
+      transparent calc(var(--day-range-fill-left) + var(--day-range-fill-width)),
+      transparent 100%),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-center-color),var(--day-range-guide-center-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color)),
+    linear-gradient(var(--day-range-guide-color),var(--day-range-guide-color));
+  background-repeat:no-repeat;
+  background-size:
+    100% calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top)),
+    1px calc(100% - var(--day-range-band-top));
+  background-position:
+    0 var(--day-range-band-top),
+    0 var(--day-range-band-top),
+    10% var(--day-range-band-top),
+    20% var(--day-range-band-top),
+    30% var(--day-range-band-top),
+    40% var(--day-range-band-top),
+    50% var(--day-range-band-top),
+    60% var(--day-range-band-top),
+    70% var(--day-range-band-top),
+    80% var(--day-range-band-top),
+    90% var(--day-range-band-top),
+    100% var(--day-range-band-top);
+}
+
+.metric-day-range > *{
+  position:relative;
+  z-index:1;
+}
+
+.metric-day-range-value{
+  margin-bottom:0;
+}
+
+.metric-day-range::after{
+  content:"";
+  position:absolute;
+  top:var(--day-range-band-top);
+  bottom:0;
+  left:var(--day-range-marker);
+  width:2px;
+  transform:translateX(-50%);
+  background:var(--day-range-marker-color);
+  box-shadow:0 0 0 1px rgba(255,255,255,.12);
+  pointer-events:none;
+}
+
+.metric-day-range.is-below{
+  --day-range-fill-color:rgba(37,99,235,.22);
+}
+
+.metric-day-range.is-neutral{
+  --day-range-fill-width:0%;
+}
+
+.metric-day-range.is-neutral::after{
+  display:none;
 }
 
 

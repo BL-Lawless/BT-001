@@ -63,7 +63,10 @@ const mClose = $("mClose");
 const mVolume = $("mVolume");
 const mChange = $("mChange");
 const mVWAP = $("mVWAP");
+const mDayRangeBox = $("mDayRangeBox");
+const mDayRange = $("mDayRange");
 const mBalance = $("mBalance");
+const mLotSize = $("mLotSize");
 const mFloatPL = $("mFloatPL");
 
 
@@ -927,6 +930,61 @@ function fmPnlBox(x){
   return "$" + Math.abs(x).toFixed(2);
 }
 
+function lotMetric(x){
+  x = Number(x);
+  if(!isFinite(x)) return "0.000";
+  return Math.max(0,x).toFixed(3);
+}
+
+function currentOpenPositionQty(){
+  const symbol = cfg().symbol;
+  if(!Array.isArray(openPositionBoxes) || !openPositionBoxes.length) return 0;
+  return openPositionBoxes.reduce((total,box) => {
+    if(!box) return total;
+    if(box.symbol && String(box.symbol).toUpperCase() !== String(symbol).toUpperCase()) return total;
+    return total + Math.abs(Number(box.qty) || 0);
+  },0);
+}
+
+function currentMetricPrice(c){
+  const fromArg = Number(c && c.close);
+  if(Number.isFinite(fromArg) && fromArg > 0) return fromArg;
+  const fromDaily = Number(dailyState && dailyState.close);
+  if(Number.isFinite(fromDaily) && fromDaily > 0) return fromDaily;
+  const fromCandles = candles.length ? Number(candles[candles.length - 1].close) : NaN;
+  if(Number.isFinite(fromCandles) && fromCandles > 0) return fromCandles;
+  const fromMark = Number(lastMarkPrice);
+  return Number.isFinite(fromMark) && fromMark > 0 ? fromMark : NaN;
+}
+
+function updateDayRangeMetric(c){
+  if(!mDayRange || !mDayRangeBox) return;
+  const high = Number(dailyState && dailyState.high);
+  const low = Number(dailyState && dailyState.low);
+  const current = currentMetricPrice(c);
+  const validRange = Number.isFinite(high) && Number.isFinite(low) && high > low;
+  mDayRangeBox.classList.remove("is-below");
+  if(!validRange){
+    mDayRange.textContent = "-";
+    mDayRangeBox.classList.add("is-neutral");
+    mDayRangeBox.style.setProperty("--day-range-fill-left","50%");
+    mDayRangeBox.style.setProperty("--day-range-fill-width","0%");
+    mDayRangeBox.style.setProperty("--day-range-marker","50%");
+    return;
+  }
+  const range = high - low;
+  const pointer = Number.isFinite(current) ? clamp((current - low) / range, 0, 1) : 0.5;
+  const centerDelta = clamp(Math.abs(pointer - 0.5) * 2, 0, 1);
+  const fillLeft = pointer < 0.5 ? 50 - centerDelta * 50 : 50;
+  const fillWidth = centerDelta <= 1e-6 ? 0 : centerDelta * 50;
+  mDayRange.textContent = ip(range);
+  mDayRangeBox.classList.remove("is-neutral");
+  if(pointer < 0.5) mDayRangeBox.classList.add("is-below");
+  mDayRangeBox.style.setProperty("--day-range-fill-left",fillLeft.toFixed(2) + "%");
+  mDayRangeBox.style.setProperty("--day-range-fill-width",fillWidth.toFixed(2) + "%");
+  mDayRangeBox.style.setProperty("--day-range-marker",(pointer * 100).toFixed(2) + "%");
+}
+
 function titlePrice(x){
   x = Number(x);
   if(!isFinite(x)) return "-";
@@ -1553,6 +1611,10 @@ function updatePositionStrip(c){
     mBalance.textContent = isFinite(bal) ? p2(bal) : "-";
   }
 
+  if(mLotSize){
+    mLotSize.textContent = lotMetric(currentOpenPositionQty());
+  }
+
   const flt = openBoxesFloating(price);
   if(mFloatPL){
     mFloatPL.textContent = flt == null ? "--" : fm(flt);
@@ -1560,6 +1622,8 @@ function updatePositionStrip(c){
       ? css("--text")
       : flt > 0 ? "#047857" : flt < 0 ? "#7f1d1d" : "#111";
   }
+
+  updateDayRangeMetric({close:price});
 }
 
 function updateTabTitle(){
@@ -2084,17 +2148,13 @@ function updateDailyFromLive(c){
 function metrics(c){
   if(c) updateDailyFromLive(c);
 
-  const vwapSeries = currentVWAPSeries();
-  const rawVWAP = vwapSeries.length ? Number(vwapSeries[vwapSeries.length-1].value) : NaN;
-  const vw = Number.isFinite(rawVWAP) && rawVWAP > 0 ? rawVWAP : null;
-
   mSymbol.textContent = cfg().symbol;
 
   if(dailyState){
     mOpen.textContent = ip(dailyState.open);
     mHigh.textContent = ip(dailyState.high);
     mLow.textContent = ip(dailyState.low);
-    mClose.textContent = ip(dailyState.close);
+    if(mClose) mClose.textContent = ip(dailyState.close);
     mVolume.textContent = fv(dailyState.volume);
     mChange.textContent = pct(dailyState.changePct);
     mChange.style.color = dailyState.changePct >= 0 ? css("--green") : css("--red");
@@ -2102,13 +2162,13 @@ function metrics(c){
     mOpen.textContent = ip(c.open);
     mHigh.textContent = ip(c.high);
     mLow.textContent = ip(c.low);
-    mClose.textContent = ip(c.close);
+    if(mClose) mClose.textContent = ip(c.close);
     mVolume.textContent = fv(c.volume);
     mChange.textContent = "-";
     mChange.style.color = css("--text");
   }
 
-  mVWAP.textContent = vw == null ? "-" : ip(vw);
+  updateDayRangeMetric(c);
   updatePositionStrip(c);
   updateTabTitle();
 }

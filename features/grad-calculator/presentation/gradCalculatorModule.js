@@ -376,9 +376,9 @@
     return win;
   }
   function arrangeMetricButtons(){
-    const gr=q("gradCalcMetric"),calc=q("calcModuleMetric"),assess=q("v29AssessMetric"),floating=q("mFloatPL")?.closest(".metric"),account=q("mBalance")?.closest(".metric"),parent=account&&account.parentNode;
-    if(!gr||!calc||!account||!floating||!parent)return;
-    [gr,calc,account,floating,assess].filter(Boolean).forEach(node=>parent.appendChild(node));
+    const gr=q("gradCalcMetric"),calc=q("calcModuleMetric"),assess=q("v29AssessMetric"),floating=q("mFloatPL")?.closest(".metric"),lot=q("mLotSize")?.closest(".metric"),account=q("mBalance")?.closest(".metric"),parent=account&&account.parentNode;
+    if(!gr||!calc||!account||!lot||!floating||!parent)return;
+    [gr,calc,account,lot,floating,assess].filter(Boolean).forEach(node=>parent.appendChild(node));
   }
   function ensureButton(){
     let wrap=q("gradCalcMetric");
