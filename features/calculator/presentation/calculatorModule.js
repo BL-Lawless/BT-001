@@ -15,6 +15,13 @@
   const AUTO_SYNC_POLL_MS = 2000;
   const AUTO_SYNC_DEBOUNCE_MS = 800;
   const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1200;
+  const OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS = [0,1,2,5];
+  const OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS = [
+    {key:"10s",label:"10s",ms:10000},
+    {key:"30s",label:"30s",ms:30000},
+    {key:"60s",label:"60s",ms:60000},
+    {key:"manual",label:"Manual",ms:null}
+  ];
   const CALC_OWNED_REFRESH_SOURCES = new Set(["preflightRead","sendConfirm","postSendRefresh","resultWindowClose"]);
   const conditionalClassifier = window.BinanceConditionalOrderClassifier || null;
   const CONDITIONAL_KIND = conditionalClassifier && conditionalClassifier.KINDS
@@ -68,7 +75,7 @@
   let openPositionReconcileTimer = null;
   let pendingOpenPositionChange = null;
   let lastOpenPositionReconcileSignature = "";
-  let openPositionCloseUi = {open:false,percent:100,dragging:false,sending:false,sliderLeft:null,sliderRight:null,mode:"MKT"};
+  let openPositionCloseUi = {open:false,percent:100,dragging:false,sending:false,sliderLeft:null,sliderRight:null,mode:"MKT",chsDistTicks:1,chsValidKey:"30s"};
   let openPositionCloseChs = {
     active:false,
     canceling:false,
@@ -83,7 +90,12 @@
     price:"",
     orderId:null,
     clientOrderId:"",
-    startedPositionQty:0
+    startedPositionQty:0,
+    distTicks:1,
+    validKey:"30s",
+    validMs:30000,
+    startedAt:0,
+    expiresAt:0
   };
   let binanceStateReconcileTimer = null;
   let pendingBinanceStateChange = null;
@@ -151,6 +163,12 @@
     openPositionCloseChs.orderId = null;
     openPositionCloseChs.clientOrderId = "";
     openPositionCloseChs.startedPositionQty = 0;
+    openPositionCloseChs.distTicks = Math.max(0,num(openPositionCloseUi.chsDistTicks) || 1);
+    openPositionCloseChs.validKey = String(openPositionCloseUi.chsValidKey || "30s");
+    const validOption = openPositionCloseChsValidOption(openPositionCloseChs.validKey);
+    openPositionCloseChs.validMs = validOption ? validOption.ms : 30000;
+    openPositionCloseChs.startedAt = 0;
+    openPositionCloseChs.expiresAt = 0;
   }
   function resetOpenPositionCloseUi(){
     openPositionCloseUi.open = false;
@@ -160,6 +178,8 @@
     openPositionCloseUi.sliderLeft = null;
     openPositionCloseUi.sliderRight = null;
     openPositionCloseUi.mode = "MKT";
+    openPositionCloseUi.chsDistTicks = 1;
+    openPositionCloseUi.chsValidKey = "30s";
   }
   function isOpenPositionCloseControl(hit){
     return !!(hit && [
@@ -167,11 +187,49 @@
       "open-position-close-slider",
       "open-position-close-mode-mkt",
       "open-position-close-mode-chs",
-      "open-position-close-chs-cancel"
+      "open-position-close-chs-cancel",
+      "open-position-close-chs-dist",
+      "open-position-close-chs-valid"
     ].includes(hit.controlType));
   }
   function openPositionCloseMode(){
     return openPositionCloseChs.active ? "CHS" : (String(openPositionCloseUi.mode || "MKT").toUpperCase() === "CHS" ? "CHS" : "MKT");
+  }
+  function openPositionCloseChsValidOption(key){
+    const target = String(key || "30s").toLowerCase();
+    return OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS.find(item => String(item.key).toLowerCase() === target) || OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS[1];
+  }
+  function openPositionCloseChsRemainingValidMs(nowValue){
+    if(!openPositionCloseChs.active || !openPositionCloseChs.validMs || !(openPositionCloseChs.expiresAt > 0)) return null;
+    return Math.max(0,openPositionCloseChs.expiresAt - (nowValue == null ? Date.now() : nowValue));
+  }
+  function openPositionCloseChsTimerText(ms){
+    if(ms == null) return "Manual";
+    return Math.max(0,Math.ceil(ms / 1000)) + "s";
+  }
+  function currentOpenPositionCloseChsDistTicks(){
+    return Math.max(0,Math.round(num(openPositionCloseChs.active ? openPositionCloseChs.distTicks : openPositionCloseUi.chsDistTicks) || 0));
+  }
+  function currentOpenPositionCloseChsValidKey(){
+    return String(openPositionCloseChs.active ? openPositionCloseChs.validKey : openPositionCloseUi.chsValidKey || "30s");
+  }
+  function cycleOpenPositionCloseChsDist(){
+    const current = currentOpenPositionCloseChsDistTicks();
+    const index = OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.indexOf(current);
+    const next = OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS[(index + 1 + OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.length) % OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.length];
+    openPositionCloseUi.chsDistTicks = next;
+  }
+  function cycleOpenPositionCloseChsValid(){
+    const current = currentOpenPositionCloseChsValidKey();
+    const index = Math.max(0,OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS.findIndex(item => item.key === current));
+    const next = OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS[(index + 1 + OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS.length) % OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS.length];
+    openPositionCloseUi.chsValidKey = next.key;
+  }
+  function symbolTickSizeValue(){
+    const helper = window.BT001SymbolTradingSettings;
+    const settings = helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
+    const tick = num(settings && settings.tickSize);
+    return tick && tick > 0 ? tick : null;
   }
   function openPositionClosePreview(positionLike){
     const liveQty = Math.max(0,num(positionLike && (positionLike.qty != null ? positionLike.qty : positionLike.lot)) || 0);
@@ -186,24 +244,30 @@
     const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * roundedQty);
     return {liveQty,entry,percent,rawQty,roundedQty,belowMinimum,executable,estPl,side,current};
   }
-  function normalizedCloseChasePrice(positionSide){
+  function normalizedCloseChasePrice(positionSide,distTicksOverride){
     const side = String(positionSide || direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const current = currentPriceReference();
     if(!(num(current) > 0)) return "";
+    const tickSize = symbolTickSizeValue();
+    const distTicks = Math.max(0,num(distTicksOverride) == null ? currentOpenPositionCloseChsDistTicks() : num(distTicksOverride));
+    const adjusted = tickSize && tickSize > 0
+      ? (side === "LONG" ? current - distTicks * tickSize : current + distTicks * tickSize)
+      : current;
     const helper = window.BT001SymbolTradingSettings;
     const settings = helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
     const normalized = helper && typeof helper.normalizePrice === "function"
-      ? helper.normalizePrice(current,settings)
-      : Number(current.toFixed(8)).toFixed(8);
+      ? helper.normalizePrice(adjusted,settings)
+      : Number(adjusted.toFixed(8)).toFixed(8);
     const parsed = num(normalized);
     if(!(parsed > 0)) return "";
-    return side === "SHORT" ? normalized : normalized;
+    return normalized;
   }
-  function findOpenPositionCloseChsOrder(snapshot){
+  function findOpenPositionCloseChsOrder(snapshot,identity){
     if(!snapshot || !Array.isArray(snapshot.normalOrders)) return null;
-    const symbol = String(openPositionCloseChs.symbol || currentSymbol()).toUpperCase();
-    const orderId = openPositionCloseChs.orderId != null ? String(openPositionCloseChs.orderId) : "";
-    const clientOrderId = String(openPositionCloseChs.clientOrderId || "").trim();
+    const source = identity || openPositionCloseChs;
+    const symbol = String(source.symbol || currentSymbol()).toUpperCase();
+    const orderId = source.orderId != null ? String(source.orderId) : "";
+    const clientOrderId = String(source.clientOrderId || "").trim();
     return snapshot.normalOrders.find(order => {
       if(!order || toUpper(order.symbol) !== symbol) return false;
       if(toUpper(order.type) !== "LIMIT") return false;
@@ -234,11 +298,13 @@
   function openPositionCloseChsStatusText(progress,options){
     const opts = options || {};
     const prefix = opts.prefix || "Open Position CHS";
+    const validText = opts.validText ? " | valid " + opts.validText : "";
     return prefix
       + " | chasing " + fmtLot(progress.requestedQty)
       + " | filled " + fmtLot(progress.filledQty)
       + " | remaining " + fmtLot(progress.remainingQty)
-      + " | price " + (progress.activePrice ? fmtPrice(progress.activePrice) : "-");
+      + " | price " + (progress.activePrice ? fmtPrice(progress.activePrice) : "-")
+      + validText;
   }
   async function submitOpenPositionCloseChsLimit(livePos,quantity,price){
     const clientId = freshOpenPositionCloseClientId();
@@ -284,10 +350,17 @@
     resetOpenPositionCloseChs();
     if(opts.closeUi) resetOpenPositionCloseUi();
     calculate();
-    setStatus(openPositionCloseChsStatusText(progress,{prefix:reason || "Open Position CHS stopped"}));
+    setStatus(openPositionCloseChsStatusText(progress,{prefix:reason || "Open Position CHS stopped",validText:opts.validText || ""}));
     if(opts.refresh !== false){
       try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_e){}
     }
+  }
+  async function verifyOpenPositionCloseChsCancel(identity){
+    const snapshot = await readOpenOrdersSnapshot();
+    return {
+      snapshot,
+      remainingOrder:findOpenPositionCloseChsOrder(snapshot,identity)
+    };
   }
   async function cancelOpenPositionCloseChs(reason,options){
     const opts = options || {};
@@ -299,19 +372,40 @@
     if(openPositionCloseChs.canceling) return;
     openPositionCloseChs.canceling = true;
     clearOpenPositionCloseChsTimer();
+    const identity = {
+      symbol:String(openPositionCloseChs.symbol || currentSymbol()),
+      orderId:openPositionCloseChs.orderId,
+      clientOrderId:String(openPositionCloseChs.clientOrderId || "")
+    };
     const progress = {
       requestedQty:Math.max(0,num(openPositionCloseChs.requestedQty) || 0),
       filledQty:Math.max(0,num(openPositionCloseChs.filledQty) || 0),
       remainingQty:Math.max(0,num(openPositionCloseChs.remainingQty) || 0),
       activePrice:String(openPositionCloseChs.price || "")
     };
+    const remainingValidText = openPositionCloseChsTimerText(openPositionCloseChsRemainingValidMs());
     if(opts.closeUi) resetOpenPositionCloseUi();
     calculate();
     setStatus(reason || "Open Position CHS canceling...");
+    let cancelFailed = false;
     try{
       await cancelOpenPositionCloseChsOrderOnly();
+    }catch(_e){
+      cancelFailed = true;
+    }
+    let verify = null;
+    try{
+      verify = await verifyOpenPositionCloseChsCancel(identity);
     }catch(_e){}
-    await finishOpenPositionCloseChs(reason || "Open Position CHS cancelled",{progress,closeUi:!!opts.closeUi,refresh:true});
+    if(cancelFailed || (verify && verify.remainingOrder)){
+      resetOpenPositionCloseChs();
+      if(opts.closeUi) resetOpenPositionCloseUi();
+      calculate();
+      setStatus("CHS cancel failed — order may still be active");
+      try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_e){}
+      return;
+    }
+    await finishOpenPositionCloseChs(reason || "Open Position CHS cancelled",{progress,closeUi:!!opts.closeUi,refresh:true,validText:remainingValidText});
   }
   async function runOpenPositionCloseChsTick(){
     if(!openPositionCloseChs.active || openPositionCloseChs.canceling || openPositionCloseChs.checking) return;
@@ -324,25 +418,31 @@
       openPositionCloseChs.filledQty = progress.filledQty;
       openPositionCloseChs.remainingQty = progress.remainingQty;
       if(progress.activePrice) openPositionCloseChs.price = String(progress.activePrice);
+      const remainingValidMs = openPositionCloseChsRemainingValidMs();
+      const validText = openPositionCloseChsTimerText(remainingValidMs);
       if(!livePos || !(num(livePos.qty) > 0) || progress.remainingQty < 0.001){
         if(openOrder){
           try{ await cancelOpenPositionCloseChsOrderOnly(); }catch(_e){}
         }
-        await finishOpenPositionCloseChs("Open Position CHS filled",{progress,refresh:true});
+        await finishOpenPositionCloseChs("Open Position CHS filled",{progress,refresh:true,validText});
+        return;
+      }
+      if(remainingValidMs != null && remainingValidMs <= 0){
+        await cancelOpenPositionCloseChs("CHS expired — remaining qty not closed",{closeUi:false});
         return;
       }
       if(!openOrder){
-        await finishOpenPositionCloseChs(progress.filledQty > 0 ? "Open Position CHS filled" : "Open Position CHS inactive",{progress,refresh:true});
+        await finishOpenPositionCloseChs(progress.filledQty > 0 ? "Open Position CHS filled" : "Open Position CHS inactive",{progress,refresh:true,validText});
         return;
       }
-      const desiredPrice = normalizedCloseChasePrice(openPositionCloseChs.side === "BUY" ? "SHORT" : "LONG");
+      const desiredPrice = normalizedCloseChasePrice(openPositionCloseChs.side === "BUY" ? "SHORT" : "LONG",openPositionCloseChs.distTicks);
       const desiredQty = floorToLotStep(progress.remainingQty);
       if(!(desiredQty >= 0.001)){
-        await finishOpenPositionCloseChs("Open Position CHS completed",{progress,refresh:true});
+        await finishOpenPositionCloseChs("Open Position CHS completed",{progress,refresh:true,validText});
         return;
       }
       if(!(num(desiredPrice) > 0)){
-        setStatus(openPositionCloseChsStatusText(progress,{prefix:"Open Position CHS waiting for price"}));
+        setStatus(openPositionCloseChsStatusText(progress,{prefix:"Open Position CHS waiting for price",validText}));
         scheduleOpenPositionCloseChsTick();
         return;
       }
@@ -362,7 +462,7 @@
         filledQty:Math.max(0,num(openPositionCloseChs.filledQty) || 0),
         remainingQty:Math.max(0,num(openPositionCloseChs.remainingQty) || 0),
         activePrice:String(openPositionCloseChs.price || "")
-      }));
+      },{validText}));
       scheduleOpenPositionCloseChsTick();
     }catch(e){
       await finishOpenPositionCloseChs("Open Position CHS failed: " + (e && e.message ? e.message : String(e)),{refresh:true});
@@ -399,6 +499,24 @@
         return true;
       }
       openPositionCloseUi.mode = hit.controlType.endsWith("-chs") ? "CHS" : "MKT";
+      calculate();
+      return true;
+    }
+    if(hit.controlType === "open-position-close-chs-dist"){
+      if(openPositionCloseChs.active){
+        setStatus("Open Position CHS is active. Cancel CHS first.");
+        return true;
+      }
+      cycleOpenPositionCloseChsDist();
+      calculate();
+      return true;
+    }
+    if(hit.controlType === "open-position-close-chs-valid"){
+      if(openPositionCloseChs.active){
+        setStatus("Open Position CHS is active. Cancel CHS first.");
+        return true;
+      }
+      cycleOpenPositionCloseChsValid();
       calculate();
       return true;
     }
@@ -455,7 +573,8 @@
         return;
       }
       if(openPositionCloseMode() === "CHS"){
-        const chasePrice = normalizedCloseChasePrice(preview.side);
+        const validOption = openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
+        const chasePrice = normalizedCloseChasePrice(preview.side,openPositionCloseUi.chsDistTicks);
         if(!(num(chasePrice) > 0)) throw new Error("CHS price is unavailable.");
         openPositionCloseChs.active = true;
         openPositionCloseChs.canceling = false;
@@ -467,6 +586,11 @@
         openPositionCloseChs.filledQty = 0;
         openPositionCloseChs.remainingQty = preview.roundedQty;
         openPositionCloseChs.startedPositionQty = Math.max(0,num(livePos.qty) || 0);
+        openPositionCloseChs.distTicks = Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks) || 1));
+        openPositionCloseChs.validKey = validOption.key;
+        openPositionCloseChs.validMs = validOption.ms;
+        openPositionCloseChs.startedAt = Date.now();
+        openPositionCloseChs.expiresAt = validOption.ms == null ? 0 : (openPositionCloseChs.startedAt + validOption.ms);
         openPositionCloseUi.open = true;
         openPositionCloseUi.mode = "CHS";
         setStatus("Open Position CHS: sending " + openPositionCloseChs.side + " LIMIT " + fmtLot(preview.roundedQty) + "...");
@@ -3500,49 +3624,86 @@
         if(closeSliderOpen && closePreview){
           const chsActive = !!openPositionCloseChs.active;
           const selectedMode = openPositionCloseMode();
+          const showChsControls = selectedMode === "CHS";
+          const chsValidOption = openPositionCloseChsValidOption(currentOpenPositionCloseChsValidKey());
+          const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : chsValidOption.ms;
           const sliderWidth = Math.min(Math.max(164,p.w + 18),228);
           const sliderX = clamp(x,left + 2,chartRight - sliderWidth - 2);
           const sliderY = y + p.h + 4;
-          const sliderH = chsActive ? 58 : 44;
-          const modeY = sliderY + 6;
-          const modeMktX = sliderX + 8;
+          const sliderH = showChsControls ? 60 : 42;
+          const topRowY = sliderY + 7;
+          const infoY = showChsControls ? sliderY + 23 : sliderY + 29;
+          const modeY = sliderY + sliderH - 16;
           const modeW = 28;
           const modeGap = 4;
-          const modeChsX = modeMktX + modeW + modeGap;
+          const modeChsX = sliderX + sliderWidth - 8 - modeW;
+          const modeMktX = modeChsX - modeGap - modeW;
           const modeH = 12;
           const cancelW = 46;
-          const cancelX = sliderX + sliderWidth - cancelW - 8;
+          const cancelX = modeMktX - 6 - cancelW;
           const cancelH = 12;
           const sliderTrackLeft = sliderX + 8;
           const sliderTrackRight = sliderX + sliderWidth - 8;
-          const sliderTrackY = sliderY + 22;
+          const sliderTrackY = showChsControls ? sliderY + 35 : sliderY + 17;
           const sliderThumbX = sliderTrackLeft + ((sliderTrackRight - sliderTrackLeft) * closePreview.percent / 100);
+          const distW = 54;
+          const validW = 64;
+          const distX = sliderX + 8;
+          const validX = distX + distW + 6;
+          const chipH = 12;
           ctx.save();
-          ctx.fillStyle = "rgba(255,250,235,0.98)";
-          ctx.strokeStyle = "rgba(146,64,14,0.72)";
+          ctx.fillStyle = "rgba(255,252,245,0.84)";
+          ctx.strokeStyle = "rgba(146,64,14,0.54)";
           ctx.lineWidth = 1;
           ctx.fillRect(ix(sliderX),ix(sliderY),sliderWidth,sliderH);
           ctx.strokeRect(px(sliderX),px(sliderY),sliderWidth,sliderH);
+          ctx.font = "11px Arial";
+          ctx.textAlign = "left";
+          ctx.fillStyle = closePreview.executable ? moneyColor(closePreview.estPl) : "#7f1d1d";
+          ctx.fillText(closePreview.percent + "% | " + (closePreview.executable ? fmtLot(closePreview.roundedQty) : "min 0.001") + " | " + (closePreview.executable ? fmtChartMoney(closePreview.estPl) : "Not executable"),sliderX + 8,infoY);
+          if(showChsControls){
+            const drawChip = (boxX,width,label,value) => {
+              ctx.fillStyle = "rgba(255,255,255,0.78)";
+              ctx.strokeStyle = "rgba(146,64,14,0.32)";
+              ctx.fillRect(ix(boxX),ix(topRowY),width,chipH);
+              ctx.strokeRect(px(boxX),px(topRowY),width,chipH);
+              ctx.fillStyle = "#6b4423";
+              ctx.font = "10px Arial";
+              ctx.textAlign = "center";
+              ctx.fillText(label + " " + value,boxX + width / 2,topRowY + chipH / 2 + 0.5);
+            };
+            drawChip(distX,distW,"Dist",String(currentOpenPositionCloseChsDistTicks()));
+            drawChip(validX,validW,"Valid",openPositionCloseChsTimerText(remainingValidMs));
+          }
           const drawModeBox = (boxX,label,selected) => {
             ctx.fillStyle = selected ? "rgba(251,191,36,0.26)" : "rgba(255,255,255,0.85)";
             ctx.strokeStyle = selected ? "#92400e" : "rgba(146,64,14,0.42)";
             ctx.fillRect(ix(boxX),ix(modeY),modeW,modeH);
             ctx.strokeRect(px(boxX),px(modeY),modeW,modeH);
             ctx.fillStyle = selected ? "#92400e" : "#6b4423";
-            ctx.font = "bold 9px Arial";
+            ctx.font = "bold 10px Arial";
             ctx.textAlign = "center";
             ctx.fillText(label,boxX + modeW / 2,modeY + modeH / 2 + 0.5);
           };
-          drawModeBox(modeMktX,"MKT",selectedMode === "MKT");
-          drawModeBox(modeChsX,"CHS",selectedMode === "CHS");
-          if(chsActive){
-            ctx.fillStyle = "rgba(254,242,242,0.95)";
-            ctx.strokeStyle = "rgba(185,28,28,0.52)";
+          if(selectedMode === "CHS" && chsActive){
+            ctx.fillStyle = "rgba(254,242,242,0.86)";
+            ctx.strokeStyle = "rgba(185,28,28,0.46)";
             ctx.fillRect(ix(cancelX),ix(modeY),cancelW,cancelH);
             ctx.strokeRect(px(cancelX),px(modeY),cancelW,cancelH);
             ctx.fillStyle = "#991b1b";
+            ctx.font = "10px Arial";
+            ctx.textAlign = "center";
             ctx.fillText("Cancel CHS",cancelX + cancelW / 2,modeY + cancelH / 2 + 0.5);
           }
+          if(chsActive){
+            const chsText = "CHS " + fmtLot(openPositionCloseChs.requestedQty) + " | fill " + fmtLot(openPositionCloseChs.filledQty) + " | rem " + fmtLot(openPositionCloseChs.remainingQty) + " | " + fmtPrice(openPositionCloseChs.price) + " | " + openPositionCloseChsTimerText(remainingValidMs);
+            ctx.fillStyle = "#7f1d1d";
+            ctx.font = "10px Arial";
+            ctx.textAlign = "left";
+            ctx.fillText(chsText,sliderX + 8,sliderY + 53);
+          }
+          drawModeBox(modeMktX,"MKT",selectedMode === "MKT");
+          drawModeBox(modeChsX,"CHS",selectedMode === "CHS");
           ctx.strokeStyle = "rgba(161,98,7,0.64)";
           ctx.beginPath();
           ctx.moveTo(px(sliderTrackLeft),px(sliderTrackY));
@@ -3557,19 +3718,27 @@
           ctx.beginPath();
           ctx.arc(px(sliderThumbX),px(sliderTrackY),4,0,Math.PI * 2);
           ctx.fill();
-          const sliderLotText = closePreview.executable ? fmtLot(closePreview.roundedQty) : "min 0.001";
-          const sliderPlText = closePreview.executable ? fmtChartMoney(closePreview.estPl) : "Not executable";
-          const infoText = closePreview.percent + "% | " + sliderLotText + " | " + sliderPlText;
-          ctx.font = "10px Arial";
-          ctx.fillStyle = closePreview.executable ? moneyColor(closePreview.estPl) : "#7f1d1d";
-          ctx.textAlign = "left";
-          ctx.fillText(infoText,sliderX + 8,sliderY + 36);
-          if(chsActive){
-            const chsText = "CHS " + fmtLot(openPositionCloseChs.requestedQty) + " | fill " + fmtLot(openPositionCloseChs.filledQty) + " | rem " + fmtLot(openPositionCloseChs.remainingQty) + " | " + fmtPrice(openPositionCloseChs.price);
-            ctx.fillStyle = "#7f1d1d";
-            ctx.fillText(chsText,sliderX + 8,sliderY + 50);
-          }
           ctx.restore();
+          if(showChsControls){
+            overlayLevelBoxes.push({
+              x1:distX,
+              y1:topRowY,
+              x2:distX + distW,
+              y2:topRowY + chipH,
+              controlType:"open-position-close-chs-dist",
+              openPosition:true,
+              draggable:false
+            });
+            overlayLevelBoxes.push({
+              x1:validX,
+              y1:topRowY,
+              x2:validX + validW,
+              y2:topRowY + chipH,
+              controlType:"open-position-close-chs-valid",
+              openPosition:true,
+              draggable:false
+            });
+          }
           overlayLevelBoxes.push({
             x1:modeMktX,
             y1:modeY,
