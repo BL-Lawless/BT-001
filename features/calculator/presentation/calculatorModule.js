@@ -573,7 +573,10 @@
       btn.classList.toggle("is-off",!otfEnabled);
       btn.setAttribute("aria-pressed",otfEnabled ? "true" : "false");
     }
-    if(!otfEnabled) clearOtfSelection();
+    if(!otfEnabled){
+      clearOtfSelection();
+      resetOpenPositionCloseUi();
+    }
   }
   function toggleOtfEnabled(){
     if(!otfEnabled && !ordersVisible){
@@ -3062,11 +3065,15 @@
             : isManualEntry
               ? "rgba(8,145,178,0.72)"
               : "rgba(112,122,138,0.70)";
-      const closePreview = isOpenPos ? openPositionClosePreview(p.item) : null;
-      const closeSliderOpen = !!(isOpenPos && openPositionCloseUi.open);
-      const closeButtonSize = isOpenPos ? Math.max(11,p.h - 4) : 0;
-      const closeButtonX = isOpenPos ? x + 3 : 0;
-      const closeButtonY = isOpenPos ? y + Math.max(1,(p.h - closeButtonSize) / 2) : 0;
+      const showOtfCloseControl = !!(otfEnabled && isOpenPos);
+      const closePreview = showOtfCloseControl ? openPositionClosePreview(p.item) : null;
+      const closeSliderOpen = !!(showOtfCloseControl && openPositionCloseUi.open);
+      const closeButtonWidth = showOtfCloseControl ? p.h : 0;
+      const closeButtonSize = showOtfCloseControl ? Math.max(9,p.h - 8) : 0;
+      const closeButtonX = showOtfCloseControl ? x - 2 - closeButtonWidth : 0;
+      const closeButtonY = showOtfCloseControl ? y : 0;
+      const closeGlyphX = showOtfCloseControl ? closeButtonX + Math.max(2,(closeButtonWidth - closeButtonSize) / 2) : 0;
+      const closeGlyphY = showOtfCloseControl ? closeButtonY + Math.max(2,(p.h - closeButtonSize) / 2) : 0;
       ctx.fillStyle = blinkOn
         ? "rgba(255,214,10," + (0.18 + blinkOn * 0.78).toFixed(3) + ")"
         : isOpenPos
@@ -3107,15 +3114,22 @@
       }else{
         ctx.strokeRect(px(x),px(y),p.w,p.h);
       }
-      if(isOpenPos){
+      if(showOtfCloseControl){
+        ctx.save();
+        ctx.fillStyle = blinkOn ? "rgba(255,214,10," + (0.18 + blinkOn * 0.78).toFixed(3) + ")" : "rgba(255,247,204,0.95)";
+        ctx.strokeStyle = blinkOn ? "rgba(255,106,0," + (0.30 + blinkOn * 0.68).toFixed(3) + ")" : derivedStrokeStyle;
+        ctx.lineWidth = 1;
+        ctx.fillRect(ix(closeButtonX),ix(closeButtonY),closeButtonWidth,p.h);
+        ctx.strokeRect(px(closeButtonX),px(closeButtonY),closeButtonWidth,p.h);
+        ctx.restore();
         ctx.save();
         ctx.strokeStyle = closeSliderOpen ? "#b91c1c" : "#7f1d1d";
         ctx.lineWidth = 1.25;
         ctx.beginPath();
-        ctx.moveTo(px(closeButtonX + 2),px(closeButtonY + 2));
-        ctx.lineTo(px(closeButtonX + closeButtonSize - 2),px(closeButtonY + closeButtonSize - 2));
-        ctx.moveTo(px(closeButtonX + closeButtonSize - 2),px(closeButtonY + 2));
-        ctx.lineTo(px(closeButtonX + 2),px(closeButtonY + closeButtonSize - 2));
+        ctx.moveTo(px(closeGlyphX),px(closeGlyphY));
+        ctx.lineTo(px(closeGlyphX + closeButtonSize),px(closeGlyphY + closeButtonSize));
+        ctx.moveTo(px(closeGlyphX + closeButtonSize),px(closeGlyphY));
+        ctx.lineTo(px(closeGlyphX),px(closeGlyphY + closeButtonSize));
         ctx.stroke();
         ctx.restore();
       }
@@ -3147,7 +3161,7 @@
               ? "#0f766e"
               : "#39414a";
       ctx.textAlign = "left";
-      ctx.fillText(p.item.text,x + padX + (isOpenPos ? closeButtonSize + 6 : 0),y + p.h / 2 + 0.5);
+      ctx.fillText(p.item.text,x + padX,y + p.h / 2 + 0.5);
       drawnBoxes.push({
         item:p.item,
         x,
@@ -3169,12 +3183,12 @@
         openPosition:isOpenPos,
         draggable:(!isOpenPos && p.item.type !== "master-sl" && calcLevelsInteractive()) || (p.item.type === "master-sl" && calcSlInteractive())
       });
-      if(isOpenPos){
+      if(showOtfCloseControl){
         overlayLevelBoxes.push({
           x1:closeButtonX,
           y1:closeButtonY,
-          x2:closeButtonX + closeButtonSize,
-          y2:closeButtonY + closeButtonSize,
+          x2:closeButtonX + closeButtonWidth,
+          y2:closeButtonY + p.h,
           controlType:"open-position-close-toggle",
           openPosition:true,
           draggable:false
@@ -3295,7 +3309,7 @@
     canvas.__calculatorOverlayDragHooks = true;
     canvas.addEventListener("mousedown",e => {
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if(isOpenPositionCloseControl(hit)){
+      if(otfEnabled && isOpenPositionCloseControl(hit)){
         if(hit.controlType === "open-position-close-slider"){
           if(setOpenPositionClosePercentFromHit(hit,e.clientX)) calculate();
           openPositionCloseUi.dragging = true;
@@ -3347,7 +3361,7 @@
       e.stopImmediatePropagation();
     },true);
     canvas.addEventListener("mousemove",e => {
-      if(openPositionCloseUi.dragging){
+      if(otfEnabled && openPositionCloseUi.dragging){
         if(setOpenPositionClosePercentFromClientX(e.clientX)) calculate();
         canvas.style.cursor = "pointer";
         e.preventDefault();
@@ -3367,7 +3381,7 @@
       }
       if(dragChart || dragAxis) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if(isOpenPositionCloseControl(hit) || (otfEnabled && otfBoxEligible(hit)) || (calcLevelsInteractive() && hit && hit.draggable)) canvas.style.cursor = "pointer";
+      if((otfEnabled && isOpenPositionCloseControl(hit)) || (otfEnabled && otfBoxEligible(hit)) || (calcLevelsInteractive() && hit && hit.draggable)) canvas.style.cursor = "pointer";
     },false);
     window.addEventListener("mouseup",e => {
       if(openPositionCloseUi.dragging){
@@ -3401,7 +3415,7 @@
         return;
       }
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if(isOpenPositionCloseControl(hit)){
+      if(otfEnabled && isOpenPositionCloseControl(hit)){
         e.preventDefault();
         e.stopImmediatePropagation();
         return;
@@ -3421,7 +3435,7 @@
       if(!e.touches || e.touches.length !== 1) return;
       const touch = e.touches[0];
       const hit = overlayBoxAtClient(touch.clientX,touch.clientY);
-      if(isOpenPositionCloseControl(hit)){
+      if(otfEnabled && isOpenPositionCloseControl(hit)){
         if(hit.controlType === "open-position-close-slider"){
           if(setOpenPositionClosePercentFromHit(hit,touch.clientX)) calculate();
           openPositionCloseUi.dragging = true;
@@ -3454,7 +3468,7 @@
       e.stopImmediatePropagation();
     },{capture:true,passive:false});
     canvas.addEventListener("touchmove",e => {
-      if(openPositionCloseUi.dragging){
+      if(otfEnabled && openPositionCloseUi.dragging){
         const touch = e.touches && e.touches[0];
         if(touch){
           if(setOpenPositionClosePercentFromClientX(touch.clientX)) calculate();
