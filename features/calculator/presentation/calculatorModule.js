@@ -67,6 +67,7 @@
   let openPositionReconcileTimer = null;
   let pendingOpenPositionChange = null;
   let lastOpenPositionReconcileSignature = "";
+  let openPositionCloseUi = {open:false,percent:100,dragging:false,sending:false,sliderLeft:null,sliderRight:null};
   let binanceStateReconcileTimer = null;
   let pendingBinanceStateChange = null;
   let lastBinanceStateEventSignature = "";
@@ -100,6 +101,104 @@
     const n = num(v);
     if(n == null) return "$-";
     return (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
+  }
+  function floorToLotStep(value){
+    const n = num(value);
+    if(n == null || n <= 0) return 0;
+    return Math.floor((n + 1e-12) * 1000) / 1000;
+  }
+  function resetOpenPositionCloseUi(){
+    openPositionCloseUi.open = false;
+    openPositionCloseUi.percent = 100;
+    openPositionCloseUi.dragging = false;
+    openPositionCloseUi.sending = false;
+    openPositionCloseUi.sliderLeft = null;
+    openPositionCloseUi.sliderRight = null;
+  }
+  function isOpenPositionCloseControl(hit){
+    return !!(hit && (hit.controlType === "open-position-close-toggle" || hit.controlType === "open-position-close-slider"));
+  }
+  function openPositionClosePreview(positionLike){
+    const liveQty = Math.max(0,num(positionLike && (positionLike.qty != null ? positionLike.qty : positionLike.lot)) || 0);
+    const entry = num(positionLike && (positionLike.entry != null ? positionLike.entry : positionLike.level));
+    const percent = clamp(num(openPositionCloseUi.percent) == null ? 100 : num(openPositionCloseUi.percent),0,100);
+    const rawQty = liveQty * percent / 100;
+    const roundedQty = Math.min(liveQty,floorToLotStep(rawQty));
+    const belowMinimum = rawQty > 0 && roundedQty < 0.001;
+    const executable = roundedQty >= 0.001 && roundedQty <= liveQty + 1e-9;
+    const current = currentPriceReference();
+    const side = String(positionLike && positionLike.side || direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * roundedQty);
+    return {liveQty,entry,percent,rawQty,roundedQty,belowMinimum,executable,estPl,side,current};
+  }
+  function setOpenPositionClosePercentFromHit(hit,clientX){
+    if(!hit || hit.controlType !== "open-position-close-slider") return false;
+    const left = num(hit.sliderLeft);
+    const right = num(hit.sliderRight);
+    if(left == null || right == null || !(right > left)) return false;
+    openPositionCloseUi.sliderLeft = left;
+    openPositionCloseUi.sliderRight = right;
+    return setOpenPositionClosePercentFromClientX(clientX);
+  }
+  function setOpenPositionClosePercentFromClientX(clientX){
+    const left = num(openPositionCloseUi.sliderLeft);
+    const right = num(openPositionCloseUi.sliderRight);
+    if(left == null || right == null || !(right > left) || !canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    const x = clamp(clientX - rect.left,left,right);
+    const ratio = clamp((x - left) / (right - left),0,1);
+    const nextPercent = Math.round(ratio * 100);
+    if(openPositionCloseUi.percent === nextPercent) return false;
+    openPositionCloseUi.percent = nextPercent;
+    return true;
+  }
+  async function confirmOpenPositionCloseOrder(){
+    if(openPositionCloseUi.sending){
+      setStatus("Open Position close is already in progress.");
+      return;
+    }
+    if(typeof hasKeys !== "function" || !hasKeys()){
+      setStatus("Open Position close blocked. API keys required.");
+      return;
+    }
+    openPositionCloseUi.sending = true;
+    setStatus("Open Position close: reading live position...");
+    try{
+      const livePos = await signedPosition();
+      if(!livePos || !(num(livePos.qty) > 0)){
+        resetOpenPositionCloseUi();
+        calculate();
+        setStatus("Open Position close skipped: position is already flat.");
+        return;
+      }
+      const preview = openPositionClosePreview(livePos);
+      if(!preview.executable){
+        setStatus(preview.belowMinimum
+          ? "Open Position close blocked: selected lot rounds below 0.001."
+          : "Open Position close blocked: selected lot is not executable.");
+        return;
+      }
+      const send = {
+        symbol:String(currentSymbol()),
+        side:preview.side === "SHORT" ? "BUY" : "SELL",
+        type:"MARKET",
+        quantity:fmtLot(preview.roundedQty)
+      };
+      const ps = toUpper(livePos.positionSide || "");
+      if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
+      else send.reduceOnly = "true";
+      setStatus("Open Position close: sending " + send.side + " MARKET " + send.quantity + "...");
+      const resp = await signedOrderWrite("POST",send);
+      if(!binanceWriteConfirmed(resp)) throw new Error("Unexpected Binance response.");
+      resetOpenPositionCloseUi();
+      calculate();
+      setStatus("Open Position close sent: " + send.side + " MARKET " + send.quantity + ".");
+      try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_e){}
+    }catch(e){
+      setStatus("Open Position close failed: " + (e && e.message ? e.message : String(e)));
+    }finally{
+      openPositionCloseUi.sending = false;
+    }
   }
   function moneyColor(v){
     const n = num(v);
@@ -1716,6 +1815,7 @@
     if(stopDistance) stopDistance.value = "";
     clearMasterStopBinanceState();
     lastReadStateSnapshot = null;
+    resetOpenPositionCloseUi();
     setStatus("Calculator cleared locally.");
     calculate();
   }
@@ -2547,6 +2647,8 @@
         type:"entry",
         level:item.level,
         lot:item.lot,
+        side:direction,
+        entry:item.level,
         row:item.row,
         openPosition,
         binanceBacked:sourceStyle === "binance-existing",
@@ -2960,6 +3062,11 @@
             : isManualEntry
               ? "rgba(8,145,178,0.72)"
               : "rgba(112,122,138,0.70)";
+      const closePreview = isOpenPos ? openPositionClosePreview(p.item) : null;
+      const closeSliderOpen = !!(isOpenPos && openPositionCloseUi.open);
+      const closeButtonSize = isOpenPos ? Math.max(11,p.h - 4) : 0;
+      const closeButtonX = isOpenPos ? x + 3 : 0;
+      const closeButtonY = isOpenPos ? y + Math.max(1,(p.h - closeButtonSize) / 2) : 0;
       ctx.fillStyle = blinkOn
         ? "rgba(255,214,10," + (0.18 + blinkOn * 0.78).toFixed(3) + ")"
         : isOpenPos
@@ -3000,6 +3107,18 @@
       }else{
         ctx.strokeRect(px(x),px(y),p.w,p.h);
       }
+      if(isOpenPos){
+        ctx.save();
+        ctx.strokeStyle = closeSliderOpen ? "#b91c1c" : "#7f1d1d";
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        ctx.moveTo(px(closeButtonX + 2),px(closeButtonY + 2));
+        ctx.lineTo(px(closeButtonX + closeButtonSize - 2),px(closeButtonY + closeButtonSize - 2));
+        ctx.moveTo(px(closeButtonX + closeButtonSize - 2),px(closeButtonY + 2));
+        ctx.lineTo(px(closeButtonX + 2),px(closeButtonY + closeButtonSize - 2));
+        ctx.stroke();
+        ctx.restore();
+      }
       if(p.item.pendingSend){
         const triHeight = 12;
         const triHalf = triHeight / 2;
@@ -3028,7 +3147,7 @@
               ? "#0f766e"
               : "#39414a";
       ctx.textAlign = "left";
-      ctx.fillText(p.item.text,x + padX,y + p.h / 2 + 0.5);
+      ctx.fillText(p.item.text,x + padX + (isOpenPos ? closeButtonSize + 6 : 0),y + p.h / 2 + 0.5);
       drawnBoxes.push({
         item:p.item,
         x,
@@ -3050,6 +3169,65 @@
         openPosition:isOpenPos,
         draggable:(!isOpenPos && p.item.type !== "master-sl" && calcLevelsInteractive()) || (p.item.type === "master-sl" && calcSlInteractive())
       });
+      if(isOpenPos){
+        overlayLevelBoxes.push({
+          x1:closeButtonX,
+          y1:closeButtonY,
+          x2:closeButtonX + closeButtonSize,
+          y2:closeButtonY + closeButtonSize,
+          controlType:"open-position-close-toggle",
+          openPosition:true,
+          draggable:false
+        });
+        if(closeSliderOpen && closePreview){
+          const sliderWidth = Math.min(Math.max(138,p.w - 10),186);
+          const sliderX = clamp(x,left + 2,chartRight - sliderWidth - 2);
+          const sliderY = y + p.h + 4;
+          const sliderH = 30;
+          const sliderTrackLeft = sliderX + 8;
+          const sliderTrackRight = sliderX + sliderWidth - 8;
+          const sliderTrackY = sliderY + 9;
+          const sliderThumbX = sliderTrackLeft + ((sliderTrackRight - sliderTrackLeft) * closePreview.percent / 100);
+          ctx.save();
+          ctx.fillStyle = "rgba(255,250,235,0.98)";
+          ctx.strokeStyle = "rgba(146,64,14,0.72)";
+          ctx.lineWidth = 1;
+          ctx.fillRect(ix(sliderX),ix(sliderY),sliderWidth,sliderH);
+          ctx.strokeRect(px(sliderX),px(sliderY),sliderWidth,sliderH);
+          ctx.strokeStyle = "rgba(161,98,7,0.64)";
+          ctx.beginPath();
+          ctx.moveTo(px(sliderTrackLeft),px(sliderTrackY));
+          ctx.lineTo(px(sliderTrackRight),px(sliderTrackY));
+          ctx.stroke();
+          ctx.strokeStyle = "#b45309";
+          ctx.beginPath();
+          ctx.moveTo(px(sliderTrackLeft),px(sliderTrackY));
+          ctx.lineTo(px(sliderThumbX),px(sliderTrackY));
+          ctx.stroke();
+          ctx.fillStyle = "#b45309";
+          ctx.beginPath();
+          ctx.arc(px(sliderThumbX),px(sliderTrackY),4,0,Math.PI * 2);
+          ctx.fill();
+          const sliderLotText = closePreview.executable ? fmtLot(closePreview.roundedQty) : "min 0.001";
+          const sliderPlText = closePreview.executable ? fmtChartMoney(closePreview.estPl) : "Not executable";
+          const infoText = closePreview.percent + "% | " + sliderLotText + " | " + sliderPlText;
+          ctx.font = "10px Arial";
+          ctx.fillStyle = closePreview.executable ? moneyColor(closePreview.estPl) : "#7f1d1d";
+          ctx.fillText(infoText,sliderX + 8,sliderY + sliderH - 8);
+          ctx.restore();
+          overlayLevelBoxes.push({
+            x1:sliderTrackLeft - 6,
+            y1:sliderY + 1,
+            x2:sliderTrackRight + 6,
+            y2:sliderY + sliderH - 2,
+            controlType:"open-position-close-slider",
+            openPosition:true,
+            draggable:false,
+            sliderLeft:sliderTrackLeft,
+            sliderRight:sliderTrackRight
+          });
+        }
+      }
     });
     ctx.restore();
     const axisItems = [];
@@ -3117,6 +3295,21 @@
     canvas.__calculatorOverlayDragHooks = true;
     canvas.addEventListener("mousedown",e => {
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
+      if(isOpenPositionCloseControl(hit)){
+        if(hit.controlType === "open-position-close-slider"){
+          if(setOpenPositionClosePercentFromHit(hit,e.clientX)) calculate();
+          openPositionCloseUi.dragging = true;
+        }else if(openPositionCloseUi.open){
+          confirmOpenPositionCloseOrder();
+        }else{
+          openPositionCloseUi.open = true;
+          openPositionCloseUi.percent = 100;
+          calculate();
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
       if(otfEnabled){
         if(!otfBoxEligible(hit)){
           if(otfSelection) clearOtfSelection();
@@ -3154,6 +3347,13 @@
       e.stopImmediatePropagation();
     },true);
     canvas.addEventListener("mousemove",e => {
+      if(openPositionCloseUi.dragging){
+        if(setOpenPositionClosePercentFromClientX(e.clientX)) calculate();
+        canvas.style.cursor = "pointer";
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
       if(overlayDrag.active){
         overlayDrag.moved = true;
         if(overlayDrag.target === "sl") setStopLevelFromClientY(e.clientY);
@@ -3167,9 +3367,18 @@
       }
       if(dragChart || dragAxis) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
-      if((otfEnabled && otfBoxEligible(hit)) || (calcLevelsInteractive() && hit && hit.draggable)) canvas.style.cursor = "pointer";
+      if(isOpenPositionCloseControl(hit) || (otfEnabled && otfBoxEligible(hit)) || (calcLevelsInteractive() && hit && hit.draggable)) canvas.style.cursor = "pointer";
     },false);
     window.addEventListener("mouseup",e => {
+      if(openPositionCloseUi.dragging){
+        openPositionCloseUi.dragging = false;
+        openPositionCloseUi.sliderLeft = null;
+        openPositionCloseUi.sliderRight = null;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if(canvas) canvas.style.cursor = "crosshair";
+        return;
+      }
       if(!overlayDrag.active) return;
       const moved = !!overlayDrag.moved;
       const wasOtf = !!overlayDrag.otf;
@@ -3191,8 +3400,13 @@
         e.stopImmediatePropagation();
         return;
       }
-      if(!otfEnabled) return;
       const hit = overlayBoxAtClient(e.clientX,e.clientY);
+      if(isOpenPositionCloseControl(hit)){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      if(!otfEnabled) return;
       if(!otfBoxEligible(hit)){
         if(otfSelection) clearOtfSelection();
         return;
@@ -3204,9 +3418,25 @@
       e.stopImmediatePropagation();
     },true);
     canvas.addEventListener("touchstart",e => {
-      if(!otfEnabled || !e.touches || e.touches.length !== 1) return;
+      if(!e.touches || e.touches.length !== 1) return;
       const touch = e.touches[0];
       const hit = overlayBoxAtClient(touch.clientX,touch.clientY);
+      if(isOpenPositionCloseControl(hit)){
+        if(hit.controlType === "open-position-close-slider"){
+          if(setOpenPositionClosePercentFromHit(hit,touch.clientX)) calculate();
+          openPositionCloseUi.dragging = true;
+        }else if(openPositionCloseUi.open){
+          confirmOpenPositionCloseOrder();
+        }else{
+          openPositionCloseUi.open = true;
+          openPositionCloseUi.percent = 100;
+          calculate();
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      if(!otfEnabled) return;
       if(!otfBoxEligible(hit)){
         if(otfSelection) clearOtfSelection();
         return;
@@ -3224,6 +3454,15 @@
       e.stopImmediatePropagation();
     },{capture:true,passive:false});
     canvas.addEventListener("touchmove",e => {
+      if(openPositionCloseUi.dragging){
+        const touch = e.touches && e.touches[0];
+        if(touch){
+          if(setOpenPositionClosePercentFromClientX(touch.clientX)) calculate();
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
       if(!overlayDrag.active || !overlayDrag.otf || !e.touches || e.touches.length !== 1) return;
       const touch = e.touches[0];
       overlayDrag.moved = true;
@@ -3233,6 +3472,14 @@
       e.stopImmediatePropagation();
     },{capture:true,passive:false});
     canvas.addEventListener("touchend",e => {
+      if(openPositionCloseUi.dragging){
+        openPositionCloseUi.dragging = false;
+        openPositionCloseUi.sliderLeft = null;
+        openPositionCloseUi.sliderRight = null;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
       if(!overlayDrag.active || !overlayDrag.otf) return;
       const moved = !!overlayDrag.moved;
       overlayDrag.active = false;
@@ -5409,6 +5656,7 @@
       }else{
         unlockEntryRows();
         clearOpenPositionRows();
+        resetOpenPositionCloseUi();
       }
 
       purgeSuppressedPartialStopRows();
