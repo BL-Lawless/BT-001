@@ -21313,5 +21313,555 @@ If there is NO open position, use this Section 2 instead:
     }
   };
 
-  window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
+window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "BT001_WATERFALL_WINDOW_V1";
+  if(typeof document === "undefined" || window.__bt001WaterfallWindowInstalled) return;
+  window.__bt001WaterfallWindowInstalled = true;
+
+  const q = id => document.getElementById(id);
+  const num = value => Number.isFinite(Number(value)) ? Number(value) : null;
+  const money = value => {
+    const n = num(value);
+    if(n == null) return "-";
+    const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+    return sign + "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+  };
+  const moneyPlain = value => {
+    const n = num(value);
+    if(n == null) return "-";
+    return (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+  };
+  const pctText = value => {
+    const n = num(value);
+    return n == null ? "-" : (n > 0 ? "+" : "") + n.toFixed(2) + "%";
+  };
+  const shortDate = value => {
+    const n = num(value);
+    if(n == null || n <= 0) return "-";
+    const dt = new Date(n > 1e12 ? n : n * 1000);
+    if(Number.isNaN(dt.getTime())) return "-";
+    return dt.toLocaleDateString("en-GB",{day:"2-digit",month:"2-digit"});
+  };
+  const clamp = (value,min,max) => Math.min(max,Math.max(min,value));
+  const niceStep = range => {
+    const base = Math.max(1,Math.abs(range) / 4);
+    const power = Math.pow(10,Math.floor(Math.log10(base)));
+    const scaled = base / power;
+    const nice = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+    return nice * power;
+  };
+  const fmtBigResult = value => {
+    const n = num(value);
+    if(n == null) return "-";
+    const abs = "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+    return n < 0 ? "(" + abs + ")" : "+" + abs;
+  };
+  const dayText = ms => {
+    const dt = new Date(ms);
+    const pad = value => String(value).padStart(2,"0");
+    return pad(dt.getDate()) + "/" + pad(dt.getMonth() + 1) + "/" + dt.getFullYear();
+  };
+
+  let visible = false;
+  let hoverTradeIndex = null;
+
+  function ensureToggle(){
+    let input = q("tglWaterfall");
+    if(input) return input;
+    const tradesLabel = tglResults && tglResults.closest ? tglResults.closest("label") : null;
+    if(!tradesLabel || !tradesLabel.parentNode) return null;
+    const label = document.createElement("label");
+    label.className = "toggle";
+    label.id = "wfToggleLabel";
+    label.innerHTML = '<input id="tglWaterfall" type="checkbox"/><span>WF</span>';
+    tradesLabel.insertAdjacentElement("afterend",label);
+    input = q("tglWaterfall");
+    if(input && !input.__wfBound){
+      input.__wfBound = true;
+      input.addEventListener("change",() => {
+        if(input.checked) show();
+        else hide();
+      },false);
+    }
+    return input;
+  }
+
+  function ensureWindow(){
+    let win = q("wfWindow");
+    if(win) return win;
+    win = document.createElement("div");
+    win.id = "wfWindow";
+    win.className = "wf-window hidden";
+    win.innerHTML = `<div class="wf-head" id="wfHead">
+        <div class="wf-title" id="wfWindowTitle">Waterfall</div>
+        <div class="wf-actions">
+          <button id="wfCollapse" type="button" title="Collapse">-</button>
+          <button id="wfClose" type="button" title="Close">x</button>
+        </div>
+      </div>
+      <div class="wf-body" id="wfBody">
+        <div class="wf-chart-card">
+          <div class="wf-chart-shell">
+            <div class="wf-chart" id="wfChart"></div>
+            <div class="wf-result" id="wfResult"></div>
+          </div>
+        </div>
+        <div class="wf-summary">
+          <table class="wf-summary-table" id="wfSummaryTable"></table>
+        </div>
+      </div>
+      ${["n","e","s","w","ne","se","sw","nw"].map(dir => `<div class="wf-resize-handle wf-resize-${dir}" data-resize="${dir}"></div>`).join("")}
+      <div class="wf-hover-tip hidden" id="wfHoverTip"></div>`;
+    document.body.appendChild(win);
+    bindWindow(win);
+    return win;
+  }
+
+  function bindWindow(win){
+    const head = q("wfHead");
+    const collapseBtn = q("wfCollapse");
+    const closeBtn = q("wfClose");
+    let drag = null;
+    if(head && !head.__wfDragBound){
+      head.__wfDragBound = true;
+      head.addEventListener("pointerdown",event => {
+        if(event.target.closest("button")) return;
+        const rect = win.getBoundingClientRect();
+        drag = {x:event.clientX,y:event.clientY,left:rect.left,top:rect.top};
+        try{head.setPointerCapture(event.pointerId);}catch(_e){}
+        event.preventDefault();
+      },false);
+      head.addEventListener("pointermove",event => {
+        if(!drag) return;
+        win.style.left = Math.max(6,drag.left + event.clientX - drag.x) + "px";
+        win.style.top = Math.max(6,drag.top + event.clientY - drag.y) + "px";
+        win.style.right = "auto";
+      },false);
+      const endDrag = event => {
+        drag = null;
+        try{head.releasePointerCapture(event.pointerId);}catch(_e){}
+      };
+      head.addEventListener("pointerup",endDrag,false);
+      head.addEventListener("pointercancel",endDrag,false);
+    }
+    if(!win.__wfResizeBound){
+      win.__wfResizeBound = true;
+      win.querySelectorAll(".wf-resize-handle").forEach(handle => {
+        handle.addEventListener("pointerdown",event => {
+          if(win.classList.contains("is-collapsed")) return;
+          const rect = win.getBoundingClientRect();
+          const start = {
+            x:event.clientX,
+            y:event.clientY,
+            left:rect.left,
+            top:rect.top,
+            width:rect.width,
+            height:rect.height,
+            dir:handle.dataset.resize || ""
+          };
+          const minWidth = 520;
+          const minHeight = 260;
+          try{handle.setPointerCapture(event.pointerId);}catch(_e){}
+          event.preventDefault();
+          event.stopPropagation();
+          const move = moveEvent => {
+            const dx = moveEvent.clientX - start.x;
+            const dy = moveEvent.clientY - start.y;
+            let left = start.left;
+            let top = start.top;
+            let width = start.width;
+            let height = start.height;
+            if(start.dir.includes("e")) width = start.width + dx;
+            if(start.dir.includes("s")) height = start.height + dy;
+            if(start.dir.includes("w")){
+              width = start.width - dx;
+              left = start.left + dx;
+            }
+            if(start.dir.includes("n")){
+              height = start.height - dy;
+              top = start.top + dy;
+            }
+            if(width < minWidth){
+              if(start.dir.includes("w")) left -= minWidth - width;
+              width = minWidth;
+            }
+            if(height < minHeight){
+              if(start.dir.includes("n")) top -= minHeight - height;
+              height = minHeight;
+            }
+            left = clamp(left,6,window.innerWidth - 80);
+            top = clamp(top,6,window.innerHeight - 60);
+            width = Math.min(width,window.innerWidth - left - 6);
+            height = Math.min(height,window.innerHeight - top - 6);
+            win.style.left = left + "px";
+            win.style.top = top + "px";
+            win.style.right = "auto";
+            win.style.width = width + "px";
+            win.style.height = height + "px";
+            if(visible) render();
+          };
+          const up = endEvent => {
+            document.removeEventListener("pointermove",move,true);
+            document.removeEventListener("pointerup",up,true);
+            document.removeEventListener("pointercancel",up,true);
+            try{handle.releasePointerCapture(endEvent.pointerId);}catch(_e){}
+          };
+          document.addEventListener("pointermove",move,true);
+          document.addEventListener("pointerup",up,true);
+          document.addEventListener("pointercancel",up,true);
+        },false);
+      });
+      if(typeof ResizeObserver === "function"){
+        const observer = new ResizeObserver(() => {
+          if(visible && !win.classList.contains("is-collapsed")) render();
+        });
+        observer.observe(win);
+      }
+    }
+    const chart = q("wfChart");
+    if(chart && !chart.__wfHoverBound){
+      chart.__wfHoverBound = true;
+      chart.addEventListener("pointermove",event => {
+        const bar = event.target.closest ? event.target.closest(".wf-bar[data-trade-index]") : null;
+        if(!bar){
+          hoverTradeIndex = null;
+          renderHover();
+          return;
+        }
+        const next = Number(bar.dataset.tradeIndex);
+        hoverTradeIndex = Number.isFinite(next) ? next : null;
+        renderHover(event);
+      },false);
+      chart.addEventListener("pointerleave",() => {
+        hoverTradeIndex = null;
+        renderHover();
+      },false);
+    }
+    if(collapseBtn && !collapseBtn.__wfBound){
+      collapseBtn.__wfBound = true;
+      collapseBtn.addEventListener("click",() => {
+        win.classList.toggle("is-collapsed");
+      },false);
+    }
+    if(closeBtn && !closeBtn.__wfBound){
+      closeBtn.__wfBound = true;
+      closeBtn.addEventListener("click",() => {
+        const toggle = ensureToggle();
+        if(toggle) toggle.checked = false;
+        hide();
+      },false);
+    }
+  }
+
+  function buildTradeRows(){
+    const rec = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection;
+    const parents = typeof closedTradeParentTrades === "function" ? closedTradeParentTrades(rec || {}) : [];
+    const trades = parents.map((trade,index) => {
+      const realized = (trade.links && trade.links.length)
+        ? trade.links.reduce((sum,link) => sum + closedTradeRealizedValue(link),0)
+        : (trade.exits || []).reduce((sum,marker) => sum + closedTradeNumber(marker && (marker.binanceRealizedPnl ?? marker.realizedPnl ?? marker.pnl)),0);
+      const fees = (trade.links && trade.links.length)
+        ? trade.links.reduce((sum,link) => sum + closedTradeSignedFeeValue(link && (link.fees ?? link.fee)),0)
+        : (trade.exits || []).reduce((sum,marker) => sum + closedTradeSignedFeeValue(marker && marker.fee),0);
+      const net = (num(realized) || 0) + (num(fees) || 0);
+      const fundingDelta = (num(trade && trade.netTotal) || 0) - net;
+      return {
+        id: trade.parentId || ("wf_" + index),
+        index,
+        when: shortDate(trade.finalExit && trade.finalExit.time),
+        net,
+        fundingDelta,
+        finalExitTime: num(trade.finalExit && trade.finalExit.time),
+        markerId: trade.finalExit && trade.finalExit.id ? trade.finalExit.id : null,
+        start:0,
+        end:0
+      };
+    }).sort((a,b) => (a.finalExitTime || 0) - (b.finalExitTime || 0));
+    let cumulative = 0;
+    trades.forEach(trade => {
+      trade.start = cumulative;
+      cumulative += num(trade.net) || 0;
+      trade.end = cumulative;
+    });
+    return trades;
+  }
+
+  function selectedPeriodDates(){
+    if(reportWeeksEl && String(reportWeeksEl.value || "").toLowerCase() === "custom" && typeof parseCustomDate === "function"){
+      const start = parseCustomDate(customFromEl ? customFromEl.value : "",false);
+      const end = parseCustomDate(customToEl ? customToEl.value : "",true);
+      if(Number.isFinite(start) && Number.isFinite(end) && end >= start){
+        return {start,end};
+      }
+    }
+    const win = closedTradePeriodWindowMs(reportWeeksEl && reportWeeksEl.value);
+    return {start:win.start,end:win.end};
+  }
+
+  function buildViewModel(){
+    const trades = buildTradeRows();
+    const selectedNet = trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
+    const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
+    const endBalance = num(accountBalanceState);
+    const startBalance = endBalance == null ? null : endBalance - selectedNet;
+    const wins = trades.filter(trade => trade.net > 0);
+    const losses = trades.filter(trade => trade.net < 0);
+    const totalWin = wins.reduce((sum,trade) => sum + trade.net,0);
+    const totalLoss = losses.reduce((sum,trade) => sum + trade.net,0);
+    const returnPct = startBalance && Math.abs(startBalance) > 1e-9 ? (selectedNet / startBalance) * 100 : null;
+    const note = Math.abs(fundingExcluded) > 1e-9 ? "Trade-only; excludes transfers/unallocated funding" : "";
+    const average = trades.length ? selectedNet / trades.length : null;
+    const values = [0].concat(trades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
+    const minCumulative = values.length ? Math.min(...values) : 0;
+    const maxCumulative = values.length ? Math.max(...values) : 0;
+    const span = Math.max(1,maxCumulative - minCumulative);
+    const pad = span * 0.08;
+    const domainMin = Math.min(0,minCumulative - pad);
+    const domainMax = Math.max(0,maxCumulative + pad);
+    const majorStep = niceStep(domainMax - domainMin);
+    const majorTicks = [];
+    const firstTick = Math.floor(domainMin / majorStep) * majorStep;
+    for(let tick = firstTick; tick <= domainMax + majorStep * 0.5; tick += majorStep){
+      majorTicks.push(Number(tick.toFixed(8)));
+    }
+    const minorTicks = [];
+    const minorStep = majorStep / 2;
+    for(let tick = firstTick - minorStep; tick <= domainMax + minorStep; tick += minorStep){
+      const rounded = Number(tick.toFixed(8));
+      if(majorTicks.some(major => Math.abs(major - rounded) < 1e-8)) continue;
+      if(rounded < domainMin - 1e-8 || rounded > domainMax + 1e-8) continue;
+      minorTicks.push(rounded);
+    }
+    const period = selectedPeriodDates();
+    return {
+      trades,
+      wins:wins.length,
+      losses:losses.length,
+      average,
+      averageWin:wins.length ? totalWin / wins.length : null,
+      averageLoss:losses.length ? totalLoss / losses.length : null,
+      totalWin,
+      totalLoss,
+      selectedNet,
+      startBalance,
+      endBalance,
+      returnPct,
+      note,
+      domainMin,
+      domainMax,
+      majorTicks,
+      minorTicks,
+      period
+    };
+  }
+
+  function renderSummary(model){
+    const table = q("wfSummaryTable");
+    if(!table) return;
+    table.innerHTML = `<thead>
+        <tr>
+          <th></th>
+          <th>Count</th>
+          <th>Average</th>
+          <th>Total</th>
+          <th class="wf-return-head">Return %</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th>Win</th>
+          <td>${model.wins}</td>
+          <td>${money(model.averageWin)}</td>
+          <td>${money(model.totalWin)}</td>
+          <td class="wf-return-cell" rowspan="2">${pctText(model.returnPct)}</td>
+        </tr>
+        <tr>
+          <th>Loss</th>
+          <td>${model.losses}</td>
+          <td>${money(model.averageLoss)}</td>
+          <td>${money(model.totalLoss)}</td>
+        </tr>
+      </tbody>`;
+  }
+
+  function renderChart(model){
+    const chart = q("wfChart");
+    const result = q("wfResult");
+    const title = q("wfWindowTitle");
+    if(!chart) return;
+    if(title && model.period){
+      title.textContent = "Waterfall — From " + dayText(model.period.start) + " to " + dayText(model.period.end);
+    }
+    if(result){
+      result.innerHTML = `<div class="wf-result-label">Net P/L</div><div class="wf-result-value ${model.selectedNet < 0 ? "is-loss" : "is-gain"}">${fmtBigResult(model.selectedNet)}</div>`;
+    }
+    if(!model.trades.length){
+      chart.innerHTML = `<div class="wf-empty">No closed trades in the selected period.</div>`;
+      return;
+    }
+    const plotTop = 10;
+    const plotBottom = 18;
+    const plotHeight = Math.max(1,chart.clientHeight - plotTop - plotBottom);
+    const valueToPct = value => {
+      const domain = model.domainMax - model.domainMin;
+      if(!(domain > 0)) return 50;
+      return ((model.domainMax - value) / domain) * 100;
+    };
+    const valueToPlotPx = value => {
+      const domain = model.domainMax - model.domainMin;
+      if(!(domain > 0)) return plotHeight / 2;
+      return ((model.domainMax - value) / domain) * plotHeight;
+    };
+    const labelTicks = [];
+    const majorLines = model.majorTicks.map(tick => {
+      const y = valueToPlotPx(tick);
+      if(y < -0.5 || y > plotHeight + 0.5) return "";
+      if(!labelTicks.length || Math.abs(y - labelTicks[labelTicks.length - 1].y) >= 14){
+        labelTicks.push({tick,y});
+      }
+      return `<div class="wf-gridline is-major" style="top:${y}px"></div>`;
+    }).join("");
+    const axisLabels = labelTicks.map(({tick,y}) =>
+      `<div class="wf-axis-label" style="top:${y}px">${moneyPlain(tick).replace("$","")}</div>`
+    ).join("");
+    const minorLines = model.minorTicks.map(tick => {
+      const y = valueToPlotPx(tick);
+      if(y < -0.5 || y > plotHeight + 0.5) return "";
+      return `<div class="wf-gridline is-minor" style="top:${y}px"></div>`;
+    }).join("");
+    const tradeCount = Math.max(1,model.trades.length);
+    const gapPx = tradeCount > 90 ? 0 : 1;
+    const barsHtml = model.trades.map((trade,index) => {
+      const topValue = Math.max(trade.start,trade.end);
+      const bottomValue = Math.min(trade.start,trade.end);
+      const topPct = clamp(valueToPct(topValue),0,100);
+      const bottomPct = clamp(valueToPct(bottomValue),0,100);
+      const heightPct = Math.max(1.5,bottomPct - topPct);
+      const cls = trade.net >= 0 ? "is-gain" : "is-loss";
+      const connector = index < model.trades.length - 1
+        ? `<div class="wf-connector" style="top:${clamp(valueToPct(trade.end),0,100)}%;width:${Math.max(1,gapPx + 1)}px"></div>`
+        : "";
+      return `<div class="wf-bar-col">
+          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${clamp(topPct,0,100)}%;height:${clamp(heightPct,1.5,100)}%"></div>
+          ${connector}
+        </div>`;
+    }).join("");
+    chart.innerHTML = `<div class="wf-plot">
+        <div class="wf-axis-band">${majorLines}${axisLabels}</div>
+        <div class="wf-grid">${minorLines}</div>
+        <div class="wf-zero" style="top:${valueToPlotPx(0)}px"></div>
+        <div class="wf-bars" style="grid-template-columns:repeat(${tradeCount},minmax(2px,1fr));gap:${gapPx}px">${barsHtml}</div>
+      </div>`;
+  }
+
+  function wfTooltipLines(trade){
+    if(!trade || !trade.markerId) return [];
+    const marker = Array.isArray(resultMarkers) ? resultMarkers.find(item => item && item.id === trade.markerId) : null;
+    if(!marker) return [];
+    const lines = [
+      marker.role === "entry"
+        ? (marker.side === "SHORT" ? "Short entry/fill" : "Long entry/fill")
+        : (marker.unresolved ? "Unresolved/carry-in close" : "Close/reduce fill"),
+      "Size: " + fq(marker.qty) + " BTC",
+      "Price: " + p2(marker.price)
+    ];
+    if(marker.role === "close"){
+      const closeLinks = Array.isArray(resultLinks) ? resultLinks.filter(l => l.exitMarkerId === marker.id) : [];
+      const closePnl = closeLinks.length ? closeLinks.reduce((a,l) => a + Number(l.netPnl || 0),0) : marker.pnl;
+      lines.push("P/L part: " + fm(closePnl));
+    }
+    lines.push("Time: " + ft(marker.time));
+    if(String(marker.letter || "").toUpperCase() === "EX"){
+      const entryLines = typeof getExitEntryContributionLines === "function" ? getExitEntryContributionLines(marker.id) : [];
+      if(entryLines.length){
+        lines.push("Entries:");
+        lines.push(...entryLines);
+      }
+    }
+    if(marker.note) lines.push(marker.note);
+    return lines;
+  }
+
+  function renderHover(event){
+    const tip = q("wfHoverTip");
+    if(!tip) return;
+    if(hoverTradeIndex == null){
+      tip.classList.add("hidden");
+      tip.innerHTML = "";
+      return;
+    }
+    const trade = buildViewModel().trades[hoverTradeIndex];
+    const lines = wfTooltipLines(trade);
+    if(!lines.length || !event){
+      tip.classList.add("hidden");
+      tip.innerHTML = "";
+      return;
+    }
+    tip.innerHTML = lines.map(line => `<div>${String(line)}</div>`).join("");
+    const win = ensureWindow();
+    const rect = win.getBoundingClientRect();
+    let left = event.clientX - rect.left + 14;
+    let top = event.clientY - rect.top + 14;
+    tip.classList.remove("hidden");
+    const tipRect = tip.getBoundingClientRect();
+    if(left + tipRect.width > rect.width - 10) left = Math.max(8,left - tipRect.width - 28);
+    if(top + tipRect.height > rect.height - 10) top = Math.max(8,top - tipRect.height - 28);
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  }
+
+  function render(){
+    const win = ensureWindow();
+    if(!win || !visible) return;
+    const model = buildViewModel();
+    renderSummary(model);
+    renderChart(model);
+    renderHover();
+  }
+
+  function show(){
+    visible = true;
+    const win = ensureWindow();
+    if(!win) return;
+    win.classList.remove("hidden");
+    render();
+  }
+
+  function hide(){
+    visible = false;
+    const win = q("wfWindow");
+    if(win) win.classList.add("hidden");
+  }
+
+  function install(){
+    ensureToggle();
+    ensureWindow();
+  }
+
+  const prevLoadClosedTradesForPeriod = loadClosedTradesForPeriod;
+  loadClosedTradesForPeriod = async function(){
+    const result = await prevLoadClosedTradesForPeriod.apply(this,arguments);
+    if(visible) render();
+    return result;
+  };
+  if(typeof window !== "undefined") window.loadClosedTradesForPeriod = loadClosedTradesForPeriod;
+
+  if(typeof refreshAccountBalance === "function"){
+    const prevRefreshAccountBalance = refreshAccountBalance;
+    refreshAccountBalance = async function(){
+      const result = await prevRefreshAccountBalance.apply(this,arguments);
+      if(visible) render();
+      return result;
+    };
+    if(typeof window !== "undefined") window.refreshAccountBalance = refreshAccountBalance;
+  }
+
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",install,{once:true});
+  else install();
+
+  window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
 })();

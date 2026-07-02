@@ -226,7 +226,10 @@
     try{return JSON.parse(localStorage.getItem(STORE_KEY)||"[]").filter(record=>record&&record.owner===OWNER);}catch(_e){return [];}
   }
   function loadExpressMode(){
-    try{return localStorage.getItem(EXPRESS_KEY)==="1";}catch(_e){return false;}
+    try{
+      const raw = localStorage.getItem(EXPRESS_KEY);
+      return raw == null ? true : raw === "1";
+    }catch(_e){return true;}
   }
   function saveExpressMode(next){
     state.expressMode=!!next;
@@ -335,7 +338,6 @@
     const valueTitle=section==="entry" ? "Margin" : section==="protection" ? "Risk" : "PL";
     return `<section class="grad-calc-tab-panel" id="gradPanel${section}">
       <div class="grad-calc-tab-actions">
-        ${section==="entry"?`<button id="gradentryFlush" type="button">Flush</button>`:""}
         <button id="grad${section}Clear" type="button">Clear</button>
         <button id="grad${section}Read" type="button">Read</button>
         <button id="grad${section}Show" class="is-on" type="button">Show</button>
@@ -411,6 +413,35 @@
     head.addEventListener("pointermove",event=>{if(!drag)return;modal.style.left=Math.max(6,drag.left+event.clientX-drag.x)+"px";modal.style.top=Math.max(6,drag.top+event.clientY-drag.y)+"px";modal.style.right="auto";});
     head.addEventListener("pointerup",event=>{drag=null;try{head.releasePointerCapture(event.pointerId);}catch(_e){}});
     return modal;
+  }
+  function blinkSendButton(section){
+    const btn=q(`grad${section}Send`);
+    if(!btn) return;
+    btn.classList.remove("bt001-send-success-blink");
+    void btn.offsetWidth;
+    btn.classList.add("bt001-send-success-blink");
+    clearTimeout(btn.__bt001SendBlinkTimer);
+    btn.__bt001SendBlinkTimer=setTimeout(()=>{
+      btn.classList.remove("bt001-send-success-blink");
+      btn.__bt001SendBlinkTimer=null;
+    },900);
+  }
+  function showSendErrorWindow(section,message,list,context={}){
+    const modal=ensurePreflight();
+    const rowsList=Array.isArray(list)?list:[];
+    const side=section==="entry"
+      ? (state.direction==="LONG"?"BUY":"SELL")
+      : (state.livePosition&&state.livePosition.side==="SHORT"?"BUY":"SELL");
+    q("gradPreflightTitle").textContent="Send Results";
+    q("gradPreflightMessage").textContent=message||"Send failed.";
+    q("gradPreflightMessage").classList.add("is-stale");
+    q("gradPreflightRows").innerHTML=`<tr class="calc-module-send-section"><td colspan="9">GR ${sectionTitle(section)}</td></tr>`+rowsList.map(row=>{
+      const action=section==="exit"&&context.exitFullRecreate?"Recreate":row&&row.binanceOrderId?"Modify":"Create";
+      const type=section==="protection"?"STOP_MARKET":"LIMIT";
+      return `<tr class="is-error"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row&&row.binanceOrderId?fmtLevelInput(row.price||row.stopPrice||row.level):"-"}</td><td>${fmtLevelInput(row&&row.level)}</td><td>${row&&row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row&&row.lot)}</td><td>Failed</td><td class="calc-module-send-response">${message||"Send failed."}</td></tr>`;
+    }).join("");
+    q("gradPreflightConfirm").parentElement.style.display="none";
+    modal.classList.remove("hidden");
   }
   function closeReconcilePreview(){
     q("gradReconcilePreview")?.classList.add("hidden");
@@ -847,9 +878,9 @@
     const room=Math.max(1,36-prefix.length-suffix.length-2),rowPart=String(row.localRowId||"row").replace(/[^a-zA-Z0-9]/g,"").slice(-room);
     return prefix+rowPart+"_"+suffix;
   }
-  async function executeSection(section,list){
-    if(section==="exit"&&state.preflight&&state.preflight.exitFullRecreate){
-      for(const order of state.preflight.liveExitOrders||[]){
+  async function executeSection(section,list,context={}){
+    if(section==="exit"&&context.exitFullRecreate){
+      for(const order of context.liveExitOrders||[]){
         if(order&&order.orderId!=null)await signedWrite(ORDER_URL,"DELETE",{symbol:currentSymbol(),orderId:String(order.orderId)});
       }
       list.forEach(row=>{row.binanceOrderId=null;row.clientOrderId=null;row.status="local";});
@@ -893,6 +924,45 @@
     }
     catch(error){q("gradPreflightMessage").textContent=error.message||String(error);q("gradPreflightMessage").classList.add("is-stale");}
     finally{preflight.executing=false;q("gradPreflightConfirm").textContent="Confirm Send";q("gradPreflightConfirm").disabled=!preflight.valid;}
+  }
+  async function executeSectionDirect(section){
+    try{if(section!=="entry")await refreshPositionAwareness(section);}catch(_e){state.livePosition=null;state.stale[section]=true;}
+    let liveExitOrders=[],exitFullRecreate=false;
+    if(section==="exit"){
+      try{
+        liveExitOrders=await sectionOrders("exit");
+        exitFullRecreate=exitQuantityChanged(liveExitOrders);
+      }catch(error){
+        const message=error&&error.message?error.message:String(error);
+        showSendErrorWindow(section,message,[],{exitFullRecreate,liveExitOrders});
+        setStatus(message);
+        return;
+      }
+    }
+    const errors=validateSection(section);
+    const list=section==="exit"&&exitFullRecreate?validRows("exit"):actionableRows(section);
+    if(!list.length) errors.push("No local or modified GR rows to send.");
+    if(errors.length){
+      const message=errors.join(" | ");
+      showSendErrorWindow(section,message,list,{exitFullRecreate,liveExitOrders});
+      setStatus(message);
+      return;
+    }
+    q("gradPreflight")?.classList.add("hidden");
+    setStatus(sectionTitle(section)+" Send executing...");
+    try{
+      await executeSection(section,list,{exitFullRecreate,liveExitOrders});
+      renderSection(section);
+      calculate();
+      q("gradPreflight")?.classList.add("hidden");
+      state.preflight=null;
+      setStatus(sectionTitle(section)+" Send confirmed.");
+      blinkSendButton(section);
+    }catch(error){
+      const message=error&&error.message?error.message:String(error);
+      showSendErrorWindow(section,message,list,{exitFullRecreate,liveExitOrders});
+      setStatus(sectionTitle(section)+" Send failed: "+message);
+    }
   }
   async function cancelReconcileItem(item){
     if(item.isAlgo){
@@ -1152,14 +1222,15 @@
     const win=ensureWindow(),open=ensureButton();ensurePreflight();ensureReconcilePreview();restorePersistentState();
     state.expressMode=loadExpressMode();
     saveExpressMode(state.expressMode);
+    clearAll();
     q("gradExpressToggle").addEventListener("change",event=>saveExpressMode(!!(event.target&&event.target.checked)),false);
-    sections.forEach(section=>{bindGenerator(section);q(`gradTab${section}`).onclick=()=>setActive(section);q(`grad${section}Clear`).onclick=()=>clearSection(section);q(`grad${section}Read`).onclick=()=>readSection(section);q(`grad${section}Show`).onclick=()=>showSection(section,!state.visible[section]);q(`grad${section}Send`).onclick=()=>state.expressMode?executeExpressSection(section):openPreflight(section);renderSection(section);});
+    sections.forEach(section=>{bindGenerator(section);q(`gradTab${section}`).onclick=()=>{window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}setActive(section);};q(`grad${section}Clear`).onclick=()=>clearSection(section);q(`grad${section}Read`).onclick=()=>readSection(section);q(`grad${section}Show`).onclick=()=>showSection(section,!state.visible[section]);q(`grad${section}Send`).onclick=()=>{window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}void executeSectionDirect(section);};renderSection(section);});
     q("gradProtectionReconcile").onclick=()=>openReconcile("RP");
     q("gradExitReconcile").onclick=()=>openReconcile("RE");
-    q("gradentryFlush").onclick=flushEntryHistory;
-    q("gradCalcClearAll").onclick=clearAll;q("gradCalcCollapse").onclick=()=>setWindowCollapsed(win,!win.classList.contains("is-collapsed"));q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();};
+    q("gradCalcHead").addEventListener("pointerdown",()=>{window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}},false);
+    q("gradCalcClearAll").onclick=clearAll;q("gradCalcCollapse").onclick=()=>setWindowCollapsed(win,!win.classList.contains("is-collapsed"));q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}};
     installWindowDrag(win);installWindowResize(win);installDrawHook();installDrag();installPositionWatcher();setActive("entry");calculate();
-    window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:openPreflight,setVisible:showSection,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row})));}};
+    window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:executeSectionDirect,setVisible:showSection,drawOverlayNow:drawLabels,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row})));}};
   }
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",bind,{once:true});else bind();
 })();

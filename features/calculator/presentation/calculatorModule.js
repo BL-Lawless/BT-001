@@ -1360,7 +1360,6 @@
             <button id="calcModuleSend" type="button" title="Prepare Binance order send plan">Send</button>
           </div>
           <div class="calc-module-express-row"><label class="calc-module-express-toggle" id="calcModuleExpressToggleWrap" title="Express Mode skips preflight/review and executes immediately"><input id="calcModuleExpressToggle" type="checkbox" aria-label="Execute now confirm later"><span>Execute now confirm later</span></label></div>
-          <div class="calc-module-cbs-row"><label class="calc-module-express-toggle" id="calcModuleCbsToggleWrap" title="Cancel Binance-read LIMIT orders before placing fresh LIMIT orders"><input id="calcModuleCbsToggle" type="checkbox" aria-label="Cancel Before Send"><span>Cancel Before Send</span></label></div>
           <div class="calc-module-status" id="calcModuleStatus"></div>
         </div>
       </div>`;
@@ -2978,8 +2977,20 @@
     const btn = q("calcModuleSend");
     if(!btn) return;
     btn.disabled = !!state;
-    if(state) btn.textContent = expressModeEnabled ? "Running..." : "Preparing...";
+    if(state) btn.textContent = "Sending...";
     else btn.textContent = "Send";
+  }
+  function blinkSendSuccess(){
+    const btn = q("calcModuleSend");
+    if(!btn) return;
+    btn.classList.remove("bt001-send-success-blink");
+    void btn.offsetWidth;
+    btn.classList.add("bt001-send-success-blink");
+    clearTimeout(btn.__bt001SendBlinkTimer);
+    btn.__bt001SendBlinkTimer = setTimeout(() => {
+      btn.classList.remove("bt001-send-success-blink");
+      btn.__bt001SendBlinkTimer = null;
+    },900);
   }
   function renderSendPlanTable(){
     const box = ensureSendPopup();
@@ -3496,6 +3507,7 @@
       });
     });
     const drawnBoxes = [];
+    const otfClosePanels = [];
     placed.forEach(p => {
       const x = p.x;
       const y = p.y;
@@ -3656,11 +3668,18 @@
           const selectedMode = openPositionCloseMode();
           const chsValidOption = openPositionCloseChsValidOption(currentOpenPositionCloseChsValidKey());
           const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : chsValidOption.ms;
-          const sliderMaxWidth = Math.min(260,Math.max(196,p.w + 36));
-          const sliderX = Math.max(left + 2,x + p.w - sliderMaxWidth);
-          const sliderWidth = Math.max(182,(x + p.w) - sliderX);
+          const selectorWidth = Math.min(196,Math.max(168,p.w + 18));
+          const feedbackWidth = chsActive ? 176 : 0;
+          const sliderWidth = selectorWidth;
+          const anchorRight = x + p.w;
+          const sliderX = clamp(anchorRight - sliderWidth,left + 2,chartRight - sliderWidth - 2);
           const sliderY = y + p.h + 4;
           const sliderH = chsActive ? 82 : 62;
+          const feedbackH = chsActive ? 82 : 0;
+          const feedbackX = chsActive
+            ? clamp((sliderX + sliderWidth) - feedbackWidth,left + 2,chartRight - feedbackWidth - 2)
+            : sliderX;
+          const feedbackY = sliderY + sliderH + 4;
           const chipH = 14;
           const distW = 40;
           const modeW = 28;
@@ -3685,85 +3704,55 @@
           const controlY = sliderY + sliderH - 20;
           const sliderTrackY = Math.round((sliderY + 20 + controlY - 10) / 2);
           const sliderThumbX = sliderTrackLeft + ((sliderTrackRight - sliderTrackLeft) * closePreview.percent / 100);
-          const infoY = sliderY + 16;
+          const infoY = sliderY + 18;
           const cancelY = sliderY + sliderH - 38;
-          ctx.save();
-          ctx.fillStyle = "rgba(255,247,214,0.62)";
-          ctx.strokeStyle = derivedStrokeStyle;
-          ctx.lineWidth = 1;
-          ctx.fillRect(ix(sliderX),ix(sliderY),sliderWidth,sliderH);
-          ctx.strokeRect(px(sliderX),px(sliderY),sliderWidth,sliderH);
-          ctx.fillStyle = blinkOn ? "rgba(255,214,10,0.32)" : "rgba(255,247,204,0.95)";
-          ctx.strokeStyle = blinkOn ? "rgba(255,106,0,0.70)" : derivedStrokeStyle;
-          ctx.fillRect(ix(confirmX),ix(confirmY),confirmW,p.h);
-          ctx.strokeRect(px(confirmX),px(confirmY),confirmW,p.h);
-          ctx.strokeStyle = "#166534";
-          ctx.lineWidth = 1.25;
-          ctx.beginPath();
-          ctx.moveTo(px(confirmGlyphX),px(confirmGlyphY + confirmSize * 0.55));
-          ctx.lineTo(px(confirmGlyphX + confirmSize * 0.38),px(confirmGlyphY + confirmSize));
-          ctx.lineTo(px(confirmGlyphX + confirmSize),px(confirmGlyphY));
-          ctx.stroke();
           const infoPl = closePreview.estPl == null ? 0 : closePreview.estPl;
           const infoColor = infoPl > 0 ? "#166534" : infoPl < 0 ? "#991b1b" : "#53351f";
-          ctx.font = "bold 13px Arial";
-          ctx.textAlign = "center";
-          ctx.fillStyle = infoColor;
-          ctx.fillText(closePreview.percent + "% | " + fmtLot(closePreview.roundedQty) + " | " + fmtChartMoney(infoPl),sliderX + sliderWidth / 2,infoY);
-          const drawModeBox = (boxX,label,selected) => {
-            ctx.fillStyle = selected ? "rgba(251,191,36,0.26)" : "rgba(255,255,255,0.85)";
-            ctx.strokeStyle = selected ? "#92400e" : "rgba(146,64,14,0.42)";
-            ctx.fillRect(ix(boxX),ix(controlY),modeW,modeH);
-            ctx.strokeRect(px(boxX),px(controlY),modeW,modeH);
-            ctx.fillStyle = selected ? "#92400e" : "#6b4423";
-            ctx.font = "11px Arial";
-            ctx.textAlign = "center";
-            ctx.fillText(label,boxX + modeW / 2,controlY + modeH / 2 + 0.5);
-          };
-          const drawChip = (boxX,width,label,value,selected=false) => {
-            ctx.fillStyle = selected ? "rgba(251,191,36,0.18)" : "rgba(255,255,255,0.82)";
-            ctx.strokeStyle = selected ? "#92400e" : "rgba(146,64,14,0.38)";
-            ctx.fillRect(ix(boxX),ix(controlY),width,chipH);
-            ctx.strokeRect(px(boxX),px(controlY),width,chipH);
-            ctx.fillStyle = selected ? "#92400e" : "#6b4423";
-            ctx.font = "11px Arial";
-            ctx.textAlign = "center";
-            const chipText = String(value || "").trim() ? (label + " " + value) : label;
-            ctx.fillText(chipText,boxX + width / 2,controlY + chipH / 2 + 0.5);
-          };
-          if(chsActive){
-            const chsText = "CHS " + fmtLot(openPositionCloseChs.requestedQty) + " | fill " + fmtLot(openPositionCloseChs.filledQty) + " | rem " + fmtLot(openPositionCloseChs.remainingQty) + " | " + fmtPrice(openPositionCloseChs.price) + " | " + openPositionCloseChsTimerText(remainingValidMs);
-            ctx.fillStyle = "#7f1d1d";
-            ctx.font = "10px Arial";
-            ctx.textAlign = "center";
-            ctx.fillText(chsText,sliderX + sliderWidth / 2,cancelY - 6);
-            ctx.fillStyle = "rgba(254,242,242,0.86)";
-            ctx.strokeStyle = "rgba(185,28,28,0.46)";
-            ctx.fillRect(ix(cancelX),ix(cancelY),cancelW,cancelH);
-            ctx.strokeRect(px(cancelX),px(cancelY),cancelW,cancelH);
-            ctx.fillStyle = "#991b1b";
-            ctx.font = "11px Arial";
-            ctx.textAlign = "center";
-            ctx.fillText("Cancel CHS",cancelX + cancelW / 2,cancelY + cancelH / 2 + 0.5);
-          }
-          drawModeBox(modeMktX,"MKT",selectedMode === "MKT");
-          drawModeBox(modeChsX,"CHS",selectedMode === "CHS");
-          drawChip(distX,distW,"Dist",String(currentOpenPositionCloseChsDistTicks()),selectedMode === "CHS");
-          ctx.strokeStyle = "rgba(107,114,128,0.80)";
-          ctx.beginPath();
-          ctx.moveTo(px(sliderTrackLeft),px(sliderTrackY));
-          ctx.lineTo(px(sliderTrackRight),px(sliderTrackY));
-          ctx.stroke();
-          ctx.strokeStyle = "rgba(107,114,128,0.96)";
-          ctx.beginPath();
-          ctx.moveTo(px(sliderTrackLeft),px(sliderTrackY));
-          ctx.lineTo(px(sliderThumbX),px(sliderTrackY));
-          ctx.stroke();
-          ctx.fillStyle = "rgba(82,82,91,0.98)";
-          ctx.beginPath();
-          ctx.arc(px(sliderThumbX),px(sliderTrackY),4,0,Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
+          const summaryText = closePreview.percent + "% | " + fmtLot(closePreview.roundedQty) + " | " + fmtChartMoney(infoPl);
+          const chsText = chsActive
+            ? "CHS " + fmtLot(openPositionCloseChs.requestedQty) + " | fill " + fmtLot(openPositionCloseChs.filledQty) + " | rem " + fmtLot(openPositionCloseChs.remainingQty) + " | " + fmtPrice(openPositionCloseChs.price) + " | " + openPositionCloseChsTimerText(remainingValidMs)
+            : "";
+          otfClosePanels.push({
+            blinkOn,
+            derivedStrokeStyle,
+            sliderX,
+            sliderY,
+            sliderWidth,
+            sliderH,
+            feedbackX,
+            feedbackY,
+            feedbackWidth,
+            feedbackH,
+            confirmX,
+            confirmY,
+            confirmW,
+            confirmSize,
+            confirmGlyphX,
+            confirmGlyphY,
+            modeMktX,
+            modeChsX,
+            distX,
+            distW,
+            controlY,
+            modeW,
+            modeH,
+            chipH,
+            sliderTrackLeft,
+            sliderTrackRight,
+            sliderTrackY,
+            sliderThumbX,
+            infoY,
+            cancelX,
+            cancelY,
+            cancelW,
+            cancelH,
+            selectedMode,
+            summaryText,
+            infoColor,
+            hasFeedback:chsActive,
+            chsActive,
+            chsText
+          });
           overlayLevelBoxes.push({
             x1:confirmX,
             y1:confirmY,
@@ -3824,6 +3813,100 @@
           });
         }
       }
+    });
+    otfClosePanels.forEach(panel => {
+      const fitPanelText = (text,maxWidth) => {
+        const raw = String(text || "");
+        if(!raw) return "";
+        if(ctx.measureText(raw).width <= maxWidth) return raw;
+        let out = raw;
+        while(out.length > 1 && ctx.measureText(out + "...").width > maxWidth) out = out.slice(0,-1);
+        return out.length < raw.length ? out + "..." : out;
+      };
+      const drawModeBox = (boxX,label,selected) => {
+        ctx.fillStyle = selected ? "rgba(251,191,36,0.26)" : "rgba(255,255,255,0.85)";
+        ctx.strokeStyle = selected ? "#92400e" : "rgba(146,64,14,0.42)";
+        ctx.fillRect(ix(boxX),ix(panel.controlY),panel.modeW,panel.modeH);
+        ctx.strokeRect(px(boxX),px(panel.controlY),panel.modeW,panel.modeH);
+        ctx.fillStyle = selected ? "#92400e" : "#6b4423";
+        ctx.font = "11px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(label,boxX + panel.modeW / 2,panel.controlY + panel.modeH / 2 + 0.5);
+      };
+      const drawChip = (boxX,width,label,value,selected=false) => {
+        ctx.fillStyle = selected ? "rgba(251,191,36,0.18)" : "rgba(255,255,255,0.82)";
+        ctx.strokeStyle = selected ? "#92400e" : "rgba(146,64,14,0.38)";
+        ctx.fillRect(ix(boxX),ix(panel.controlY),width,panel.chipH);
+        ctx.strokeRect(px(boxX),px(panel.controlY),width,panel.chipH);
+        ctx.fillStyle = selected ? "#92400e" : "#6b4423";
+        ctx.font = "11px Arial";
+        ctx.textAlign = "center";
+        const chipText = String(value || "").trim() ? (label + " " + value) : label;
+        ctx.fillText(chipText,boxX + width / 2,panel.controlY + panel.chipH / 2 + 0.5);
+      };
+      ctx.save();
+      ctx.fillStyle = "rgba(255,247,214,0.78)";
+      ctx.strokeStyle = panel.derivedStrokeStyle;
+      ctx.lineWidth = 1;
+      ctx.fillRect(ix(panel.sliderX),ix(panel.sliderY),panel.sliderWidth,panel.sliderH);
+      ctx.strokeRect(px(panel.sliderX),px(panel.sliderY),panel.sliderWidth,panel.sliderH);
+      if(panel.hasFeedback){
+        ctx.fillRect(ix(panel.feedbackX),ix(panel.feedbackY),panel.feedbackWidth,panel.feedbackH);
+        ctx.strokeRect(px(panel.feedbackX),px(panel.feedbackY),panel.feedbackWidth,panel.feedbackH);
+      }
+      ctx.fillStyle = panel.blinkOn ? "rgba(255,214,10,0.32)" : "rgba(255,247,204,0.95)";
+      ctx.strokeStyle = panel.blinkOn ? "rgba(255,106,0,0.70)" : panel.derivedStrokeStyle;
+      ctx.fillRect(ix(panel.confirmX),ix(panel.confirmY),panel.confirmW,16);
+      ctx.strokeRect(px(panel.confirmX),px(panel.confirmY),panel.confirmW,16);
+      ctx.strokeStyle = "#166534";
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.moveTo(px(panel.confirmGlyphX),px(panel.confirmGlyphY + panel.confirmSize * 0.55));
+      ctx.lineTo(px(panel.confirmGlyphX + panel.confirmSize * 0.38),px(panel.confirmGlyphY + panel.confirmSize));
+      ctx.lineTo(px(panel.confirmGlyphX + panel.confirmSize),px(panel.confirmGlyphY));
+      ctx.stroke();
+      ctx.fillStyle = panel.infoColor;
+      ctx.font = "11px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText(
+        fitPanelText(panel.summaryText,(panel.hasFeedback ? panel.feedbackWidth : panel.sliderWidth) - 14),
+        (panel.hasFeedback ? panel.feedbackX + panel.feedbackWidth / 2 : panel.sliderX + panel.sliderWidth / 2),
+        (panel.hasFeedback ? panel.feedbackY + 18 : panel.infoY)
+      );
+      if(panel.chsActive){
+        ctx.fillStyle = "#7f1d1d";
+        ctx.font = "11px Arial";
+        ctx.fillText(
+          fitPanelText(panel.chsText,panel.feedbackWidth - 14),
+          panel.feedbackX + panel.feedbackWidth / 2,
+          panel.feedbackY + panel.feedbackH - 22
+        );
+        ctx.fillStyle = "rgba(254,242,242,0.86)";
+        ctx.strokeStyle = "rgba(185,28,28,0.46)";
+        ctx.fillRect(ix(panel.cancelX),ix(panel.cancelY),panel.cancelW,panel.cancelH);
+        ctx.strokeRect(px(panel.cancelX),px(panel.cancelY),panel.cancelW,panel.cancelH);
+        ctx.fillStyle = "#991b1b";
+        ctx.font = "11px Arial";
+        ctx.fillText("Cancel CHS",panel.cancelX + panel.cancelW / 2,panel.cancelY + panel.cancelH / 2 + 0.5);
+      }
+      drawModeBox(panel.modeMktX,"MKT",panel.selectedMode === "MKT");
+      drawModeBox(panel.modeChsX,"CHS",panel.selectedMode === "CHS");
+      drawChip(panel.distX,panel.distW,"Dist",String(currentOpenPositionCloseChsDistTicks()),panel.selectedMode === "CHS");
+      ctx.strokeStyle = "rgba(107,114,128,0.80)";
+      ctx.beginPath();
+      ctx.moveTo(px(panel.sliderTrackLeft),px(panel.sliderTrackY));
+      ctx.lineTo(px(panel.sliderTrackRight),px(panel.sliderTrackY));
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(107,114,128,0.96)";
+      ctx.beginPath();
+      ctx.moveTo(px(panel.sliderTrackLeft),px(panel.sliderTrackY));
+      ctx.lineTo(px(panel.sliderThumbX),px(panel.sliderTrackY));
+      ctx.stroke();
+      ctx.fillStyle = "rgba(82,82,91,0.98)";
+      ctx.beginPath();
+      ctx.arc(px(panel.sliderThumbX),px(panel.sliderTrackY),4,0,Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     });
     ctx.restore();
     const axisItems = [];
@@ -5756,27 +5839,31 @@
   async function executeSendPlan(plan,options={}){
     if(!plan || !Array.isArray(plan.rows)) return;
     if(!plan.canConfirm){
+      if(options.showPopupOnError !== false) plan.showPopup = true;
       setStatus(options.blockedStatus || "Confirm Send blocked. Run Send preflight again.");
       renderSendPlanTable();
-      return;
+      return {ok:false,failed:0,blocked:true,writable:0,confirmed:0,skipped:0};
     }
     try{
       if(!await validateLiveExitQuantity(plan)){
+        if(options.showPopupOnError !== false) plan.showPopup = true;
         setStatus(options.blockedStatus || "Confirm Send blocked. Review Exits.");
         renderSendPlanTable();
-        return;
+        return {ok:false,failed:0,blocked:true,writable:0,confirmed:0,skipped:0};
       }
       if(!await validateLivePartialStopQuantity(plan)){
+        if(options.showPopupOnError !== false) plan.showPopup = true;
         setStatus(options.blockedStatus || "Confirm Send blocked. Review Stops.");
         renderSendPlanTable();
-        return;
+        return {ok:false,failed:0,blocked:true,writable:0,confirmed:0,skipped:0};
       }
     }catch(e){
       plan.blocked = true;
       plan.canConfirm = false;
+      if(options.showPopupOnError !== false) plan.showPopup = true;
       setStatus("Confirm Send blocked. Live position validation failed.");
       renderSendPlanTable();
-      return;
+      return {ok:false,failed:0,blocked:true,writable:0,confirmed:0,skipped:0};
     }
     const contextDirection = options.contextDirection || inferDirectionForSend(lastReadStateSnapshot && lastReadStateSnapshot.openPosition);
     const executionMode = options.executionMode || "normal";
@@ -5877,6 +5964,122 @@
       skipped:writable.filter(r => r && r.status === "Skipped").length
     });
     setStatus(failed ? ((options.donePrefix || "Confirm Send") + " completed with " + failed + " failed row(s).") : ((options.donePrefix || "Confirm Send") + " completed."));
+    return {
+      ok:failed === 0,
+      failed,
+      blocked:false,
+      writable:writable.length,
+      confirmed:writable.filter(r => r && r.status === "Confirmed").length,
+      skipped:writable.filter(r => r && r.status === "Skipped").length
+    };
+  }
+  async function executeDirectSend(){
+    clearSendPlan();
+    clearStructuralWarning();
+    clearTimeout(autoSyncDebounceTimer);
+    if(typeof hasKeys !== "function" || !hasKeys()){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Send",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"API keys are required before Send.",
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false,
+        stale:false,
+        cbsEnabled:false,
+        slSendEnabled:!!slSendEnabled,
+        showPopup:true
+      };
+      renderSendPlanTable();
+      setStatus("Send blocked. API keys required.");
+      return;
+    }
+    updateSendButtonState(true);
+    setStatus("Send: reading live Binance state...");
+    try{
+      const preflightState = await withCalculatorOwnedRefresh("preflightRead",async() => {
+        const livePos = await signedPosition();
+        const liveSnapshot = await readOpenOrdersSnapshot();
+        return {livePos,liveSnapshot};
+      });
+      const livePos = preflightState.livePos;
+      const liveSnapshot = preflightState.liveSnapshot;
+      refreshLiveStopsValidity(livePos,true);
+      refreshLiveExitsValidity(livePos,true);
+      updateAutoSyncBaseline(livePos,liveSnapshot);
+      if(!lastReadStateSnapshot) lastReadStateSnapshot = buildReadStateSnapshot(livePos,liveSnapshot,currentMappedRowsForBaseline());
+      sendPlanState = applyExpressPayloadSafeguards(buildPlanFromCurrentRows(livePos,liveSnapshot));
+      sendPlanState.stale = false;
+      sendPlanState.staleReason = "";
+      sendPlanState.showPopup = false;
+      if(!sendPlanState.canConfirm){
+        sendPlanState.showPopup = true;
+        renderSendPlanTable();
+        setStatus("Send blocked. Review results.");
+        return;
+      }
+      const result = await executeSendPlan(sendPlanState,{
+        executionMode:"express",
+        hidePopupUntilComplete:true,
+        contextDirection:inferDirectionForSend(livePos),
+        blockedStatus:"Send blocked. Review results.",
+        inProgressStatus:"Send executing...",
+        donePrefix:"Send"
+      });
+      if(result && result.ok){
+        clearSendPlan({source:"resultWindowClose"});
+        setStatus("Send confirmed.");
+        blinkSendSuccess();
+      }else{
+        if(sendPlanState) sendPlanState.showPopup = true;
+        renderSendPlanTable();
+      }
+    }catch(e){
+      sendPlanState = {
+        planId:++sendPlanSeq,
+        at:new Date().toISOString(),
+        symbol:currentSymbol(),
+        rows:[{
+          action:"Blocked",
+          type:"Send",
+          side:"-",
+          oldPrice:"-",
+          newPrice:"-",
+          oldQty:"-",
+          newQty:"-",
+          orderId:"-",
+          status:"Blocked",
+          response:"Send failed: " + (e && e.message ? e.message : String(e)),
+          writable:false,
+          mode:"blocked"
+        }],
+        blocked:true,
+        canConfirm:false,
+        executing:false,
+        stale:false,
+        cbsEnabled:false,
+        slSendEnabled:!!slSendEnabled,
+        showPopup:true
+      };
+      renderSendPlanTable();
+      setStatus("Send failed.");
+    }finally{
+      updateSendButtonState(false);
+    }
   }
   async function prepareSendPlan(){
     clearSendPlan();
@@ -6515,13 +6718,14 @@
     win.__calculatorModuleBound = true;
     levelsVisible = loadLevelsVisible();
     slSendEnabled = loadSlSendEnabled();
-    cbsEnabled = loadCbsEnabled();
+    cbsEnabled = false;
     expressModeEnabled = loadExpressModeEnabled();
     ordersVisible = loadOrdersVisible();
     saveLevelsVisible(levelsVisible);
     saveSlSendEnabled(slSendEnabled);
-    saveCbsEnabled(cbsEnabled);
+    saveCbsEnabled(false);
     saveExpressModeEnabled(expressModeEnabled);
+    clearCalculatorLocal();
     ensureOrdersToggle();
     installDrawOverlayHook();
     installOverlayDragHooks();
@@ -6536,6 +6740,8 @@
       openBtn.classList.add("is-on");
       clearCalculatorExecutionNotice();
       openBtn.setAttribute("aria-pressed","true");
+      window.__bt001LastOverlayModule = "calculator";
+      try{ draw(); }catch(_e){}
     }
     function hideCalculator(){
       win.classList.add("hidden");
@@ -6574,6 +6780,10 @@
     openBtn.addEventListener("click",() => {
       if(win.classList.contains("hidden")) showCalculator();
       else hideCalculator();
+    },false);
+    q("calcModuleHead").addEventListener("pointerdown",() => {
+      window.__bt001LastOverlayModule = "calculator";
+      try{ draw(); }catch(_e){}
     },false);
     q("calcModuleCollapse").addEventListener("click",() => {
       setCalculatorCollapsed(!win.classList.contains("is-collapsed"));
@@ -6649,15 +6859,12 @@
     q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
     q("calcModuleRead").addEventListener("click",() => readBinance({userRead:true}),false);
     q("calcModuleSend").addEventListener("click",() => {
-      if(expressModeEnabled) executeExpressMode();
-      else prepareSendPlan();
+      window.__bt001LastOverlayModule = "calculator";
+      try{ draw(); }catch(_e){}
+      void executeDirectSend();
     },false);
     q("calcModuleLevelsToggle").addEventListener("change",e => {
       saveLevelsVisible(!!(e.target && e.target.checked));
-    },false);
-    q("calcModuleCbsToggle").addEventListener("change",e => {
-      markSendPlanStale("CBS toggle changed after preflight.");
-      saveCbsEnabled(!!(e.target && e.target.checked));
     },false);
     q("calcModuleExpressToggle").addEventListener("change",e => {
       markSendPlanStale("Express Mode toggle changed after preflight.");
@@ -6678,6 +6885,7 @@
       open:showCalculator,
       hide:hideCalculator,
       calculate,
+      drawOverlayNow:drawCalculatorLevelsOverlay,
       priceFromCanvasY,
       getBinanceLimitRowMeta(rowOrId){
         const rowId = typeof rowOrId === "string"

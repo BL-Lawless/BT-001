@@ -1846,6 +1846,13 @@ button:hover{filter:brightness(1.04)}
   animation:calcModulePositionSizeBlink .8s ease-in-out infinite alternate;
 }
 @keyframes calcModulePositionSizeBlink{from{filter:brightness(1);opacity:1}to{filter:brightness(1.14);opacity:.48}}
+.bt001-send-success-blink{
+  animation:bt001SendSuccessBlink .22s ease-in-out 0s 4 alternate;
+  border-color:#16a34a !important;
+  background:#ecfdf5 !important;
+  box-shadow:0 0 0 2px rgba(22,163,74,.24) !important;
+}
+@keyframes bt001SendSuccessBlink{from{filter:brightness(1)}to{filter:brightness(1.08);background:#dcfce7}}
 .calc-module-orders-toggle{
   position:absolute;
   top:8px;
@@ -2397,6 +2404,270 @@ button:hover{filter:brightness(1.04)}
   resize:both;
   overflow:hidden;
 }
+.wf-window{
+  position:fixed;
+  left:126px;
+  top:118px;
+  width:760px;
+  height:420px;
+  min-width:520px;
+  min-height:260px;
+  max-width:calc(100vw - 12px);
+  max-height:calc(100vh - 12px);
+  overflow:hidden;
+  background:#fff;
+  border:1px solid #aeb5bf;
+  border-radius:0;
+  box-shadow:0 8px 18px rgba(0,0,0,.10);
+  z-index:82;
+  display:flex;
+  flex-direction:column;
+  color:#1e2329;
+  font-family:Arial,Helvetica,sans-serif;
+}
+.wf-window.hidden{display:none}
+.wf-window.is-collapsed{height:auto;min-height:0}
+.wf-window.is-collapsed .wf-body{display:none}
+.wf-window.is-collapsed .wf-resize-handle{display:none}
+.wf-head{
+  height:34px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  padding:7px 10px;
+  border-bottom:1px solid #b9c0c8;
+  background:#eef1f4;
+  cursor:move;
+  user-select:none;
+}
+.wf-window.is-collapsed .wf-head{
+  border-bottom:none;
+  border-radius:0;
+}
+.wf-title{font-size:13px;font-weight:700}
+.wf-actions{display:flex;gap:6px}
+.wf-actions button{
+  width:24px;
+  height:22px;
+  padding:0;
+  margin:0;
+  border:1px solid #d9dce1;
+  background:#fff;
+  color:#111;
+  font-weight:700;
+}
+.wf-body{
+  flex:1;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  gap:0;
+  padding:6px;
+}
+.wf-summary,.wf-chart-card{
+  border:none;
+  border-radius:0;
+  background:transparent;
+  padding:0;
+  min-width:0;
+}
+.wf-summary{
+  display:flex;
+  flex-direction:column;
+  gap:0;
+  margin-top:-1px;
+}
+.wf-chart-title{font-size:12px;font-weight:700;text-transform:uppercase}
+.wf-chart-card{
+  display:flex;
+  flex-direction:column;
+  gap:0;
+  flex:1;
+  min-height:0;
+}
+.wf-chart-shell{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 108px;
+  gap:0;
+  flex:1;
+  min-height:0;
+  border:1px solid #b9c0c8;
+  background:#fff;
+}
+.wf-chart{
+  position:relative;
+  flex:1;
+  min-height:250px;
+  border:none;
+  border-right:1px solid #b9c0c8;
+  background:#fff;
+  overflow:hidden;
+}
+.wf-plot{
+  position:absolute;
+  inset:0;
+  padding:10px 10px 18px 48px;
+}
+.wf-axis-band,.wf-grid{
+  position:absolute;
+  inset:10px 10px 18px 48px;
+}
+.wf-gridline{
+  position:absolute;
+  left:0;
+  right:0;
+  height:0;
+  transform:translateY(-0.5px);
+}
+.wf-gridline.is-major{border-top:1px solid #c4cad2}
+.wf-gridline.is-minor{border-top:1px solid #e3e7ec}
+.wf-axis-label{
+  position:absolute;
+  left:-44px;
+  width:40px;
+  transform:translateY(-50%);
+  text-align:right;
+  font-size:10px;
+  color:#5c6673;
+  font-variant-numeric:tabular-nums;
+}
+.wf-zero{
+  position:absolute;
+  left:48px;
+  right:10px;
+  border-top:1px solid #7d8794;
+  pointer-events:none;
+}
+.wf-bars{
+  position:relative;
+  height:calc(100% - 28px);
+  margin-left:48px;
+  margin-right:10px;
+  margin-top:10px;
+  display:grid;
+  align-items:stretch;
+  padding:0;
+}
+.wf-bar-col{
+  position:relative;
+  min-width:0;
+  height:100%;
+}
+.wf-bar{
+  position:absolute;
+  left:0;
+  right:0;
+  border-radius:0;
+  border:none;
+  background:#dbe4ee;
+}
+.wf-bar.is-gain{
+  background:#166534;
+}
+.wf-bar.is-loss{
+  background:#991b1b;
+}
+.wf-connector{
+  position:absolute;
+  left:100%;
+  right:auto;
+  height:0;
+  border-top:1px solid #8b95a3;
+  transform:translateY(-0.5px);
+  pointer-events:none;
+}
+.wf-empty{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  height:100%;
+  color:#6b7280;
+  font-size:12px;
+}
+.wf-result{
+  border:none;
+  background:#f7f8fa;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  padding:10px 8px;
+  text-align:center;
+}
+.wf-result-label{
+  font-size:11px;
+  font-weight:700;
+  color:#5c6673;
+  text-transform:uppercase;
+  margin-bottom:10px;
+}
+.wf-result-value{
+  font-size:24px;
+  line-height:1.1;
+  font-weight:700;
+  font-variant-numeric:tabular-nums;
+}
+.wf-result-value.is-gain{color:#17863d}
+.wf-result-value.is-loss{color:#b34a4a}
+.wf-summary-table{
+  width:100%;
+  border-collapse:collapse;
+  table-layout:fixed;
+  font-size:13px;
+  border:1px solid #b9c0c8;
+}
+.wf-summary-table th,
+.wf-summary-table td{
+  border:1px solid #b9c0c8;
+  padding:6px 7px;
+  text-align:center;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+.wf-summary-table .wf-return-head{
+  min-width:78px;
+}
+.wf-summary-table .wf-return-cell{
+  font-weight:700;
+  background:#f7f8fa;
+}
+.wf-summary-table thead th{
+  background:#eef1f4;
+  font-weight:700;
+}
+.wf-summary-table tbody th{
+  background:#f7f8fa;
+  font-weight:700;
+}
+.wf-hover-tip{
+  position:absolute;
+  z-index:2;
+  min-width:160px;
+  max-width:280px;
+  padding:12px;
+  border:1px solid #b9c0c8;
+  background:rgba(255,255,255,.98);
+  color:#1e2329;
+  font:12px Arial,Helvetica,sans-serif;
+  line-height:1.4;
+  pointer-events:none;
+  box-shadow:0 6px 12px rgba(0,0,0,.10);
+}
+.wf-hover-tip.hidden{display:none}
+.wf-resize-handle{
+  position:absolute;
+  z-index:3;
+  background:transparent;
+}
+.wf-resize-n{top:0;left:10px;right:10px;height:6px;cursor:n-resize}
+.wf-resize-s{bottom:0;left:10px;right:10px;height:6px;cursor:s-resize}
+.wf-resize-e{top:10px;right:0;bottom:10px;width:6px;cursor:e-resize}
+.wf-resize-w{top:10px;left:0;bottom:10px;width:6px;cursor:w-resize}
+.wf-resize-ne{top:0;right:0;width:10px;height:10px;cursor:ne-resize}
+.wf-resize-nw{top:0;left:0;width:10px;height:10px;cursor:nw-resize}
+.wf-resize-se{right:0;bottom:0;width:12px;height:12px;cursor:se-resize}
+.wf-resize-sw{left:0;bottom:0;width:10px;height:10px;cursor:sw-resize}
 .calc-module-send-popup.hidden{
   display:none;
 }
