@@ -21397,7 +21397,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     win.id = "wfWindow";
     win.className = "wf-window hidden";
     win.innerHTML = `<div class="wf-head" id="wfHead">
-        <div class="wf-title" id="wfWindowTitle">Waterfall</div>
+        <div class="wf-title" id="wfWindowTitle"></div>
         <div class="wf-actions">
           <button id="wfCollapse" type="button" title="Collapse">-</button>
           <button id="wfClose" type="button" title="Close">x</button>
@@ -21612,6 +21612,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const losses = trades.filter(trade => trade.net < 0);
     const totalWin = wins.reduce((sum,trade) => sum + trade.net,0);
     const totalLoss = losses.reduce((sum,trade) => sum + trade.net,0);
+    const largestWin = wins.length ? Math.max(...wins.map(trade => trade.net)) : null;
+    const largestLoss = losses.length ? Math.min(...losses.map(trade => trade.net)) : null;
     const returnPct = startBalance && Math.abs(startBalance) > 1e-9 ? (selectedNet / startBalance) * 100 : null;
     const note = Math.abs(fundingExcluded) > 1e-9 ? "Trade-only; excludes transfers/unallocated funding" : "";
     const average = trades.length ? selectedNet / trades.length : null;
@@ -21644,6 +21646,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       average,
       averageWin:wins.length ? totalWin / wins.length : null,
       averageLoss:losses.length ? totalLoss / losses.length : null,
+      largestWin,
+      largestLoss,
       totalWin,
       totalLoss,
       selectedNet,
@@ -21667,15 +21671,17 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           <th></th>
           <th>Count</th>
           <th>Average</th>
+          <th>Largest</th>
           <th>Total</th>
           <th class="wf-return-head">Return %</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <th>Win</th>
+          <th>Wins</th>
           <td>${model.wins}</td>
           <td>${money(model.averageWin)}</td>
+          <td>${money(model.largestWin)}</td>
           <td>${money(model.totalWin)}</td>
           <td class="wf-return-cell" rowspan="2">${pctText(model.returnPct)}</td>
         </tr>
@@ -21683,6 +21689,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           <th>Loss</th>
           <td>${model.losses}</td>
           <td>${money(model.averageLoss)}</td>
+          <td>${money(model.largestLoss)}</td>
           <td>${money(model.totalLoss)}</td>
         </tr>
       </tbody>`;
@@ -21693,7 +21700,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const result = q("wfResult");
     const title = q("wfWindowTitle");
     if(!chart) return;
-    if(title && model.period){
+    if(title && model.period) title.textContent = "From " + dayText(model.period.start) + " to " + dayText(model.period.end);
+    if(false && title && model.period){
       title.textContent = "Waterfall — From " + dayText(model.period.start) + " to " + dayText(model.period.end);
     }
     if(result){
@@ -21704,32 +21712,34 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       return;
     }
     const plotTop = 10;
+    const plotLeft = 48;
+    const plotRight = 10;
     const plotBottom = 18;
     const plotHeight = Math.max(1,chart.clientHeight - plotTop - plotBottom);
-    const valueToPct = value => {
-      const domain = model.domainMax - model.domainMin;
-      if(!(domain > 0)) return 50;
-      return ((model.domainMax - value) / domain) * 100;
-    };
-    const valueToPlotPx = value => {
+    const valueToY = value => {
       const domain = model.domainMax - model.domainMin;
       if(!(domain > 0)) return plotHeight / 2;
       return ((model.domainMax - value) / domain) * plotHeight;
     };
+    const valueToPct = value => (valueToY(value) / plotHeight) * 100;
     const labelTicks = [];
+    const zeroY = valueToY(0);
     const majorLines = model.majorTicks.map(tick => {
-      const y = valueToPlotPx(tick);
+      const y = valueToY(tick);
       if(y < -0.5 || y > plotHeight + 0.5) return "";
       if(!labelTicks.length || Math.abs(y - labelTicks[labelTicks.length - 1].y) >= 14){
         labelTicks.push({tick,y});
       }
       return `<div class="wf-gridline is-major" style="top:${y}px"></div>`;
     }).join("");
-    const axisLabels = labelTicks.map(({tick,y}) =>
-      `<div class="wf-axis-label" style="top:${y}px">${moneyPlain(tick).replace("$","")}</div>`
+    const axisLabels = labelTicks.map(({tick,y}) => {
+      const cls = Math.abs(tick) < 1e-8 ? "wf-axis-label is-zero" : "";
+      const labelY = Math.abs(tick) < 1e-8 ? zeroY : y;
+      return `<div class="${cls || "wf-axis-label"}" style="top:${labelY}px">${moneyPlain(tick).replace("$","")}</div>`;
+    }
     ).join("");
     const minorLines = model.minorTicks.map(tick => {
-      const y = valueToPlotPx(tick);
+      const y = valueToY(tick);
       if(y < -0.5 || y > plotHeight + 0.5) return "";
       return `<div class="wf-gridline is-minor" style="top:${y}px"></div>`;
     }).join("");
@@ -21738,23 +21748,21 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const barsHtml = model.trades.map((trade,index) => {
       const topValue = Math.max(trade.start,trade.end);
       const bottomValue = Math.min(trade.start,trade.end);
-      const topPct = clamp(valueToPct(topValue),0,100);
-      const bottomPct = clamp(valueToPct(bottomValue),0,100);
-      const heightPct = Math.max(1.5,bottomPct - topPct);
+      const topY = Math.max(0,Math.min(plotHeight,valueToY(topValue)));
+      const bottomY = Math.max(0,Math.min(plotHeight,valueToY(bottomValue)));
+      const heightPx = Math.max(2,bottomY - topY);
       const cls = trade.net >= 0 ? "is-gain" : "is-loss";
       const connector = index < model.trades.length - 1
-        ? `<div class="wf-connector" style="top:${clamp(valueToPct(trade.end),0,100)}%;width:${Math.max(1,gapPx + 1)}px"></div>`
+        ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
       return `<div class="wf-bar-col">
-          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${clamp(topPct,0,100)}%;height:${clamp(heightPct,1.5,100)}%"></div>
+          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"></div>
           ${connector}
         </div>`;
     }).join("");
     chart.innerHTML = `<div class="wf-plot">
-        <div class="wf-axis-band">${majorLines}${axisLabels}</div>
-        <div class="wf-grid">${minorLines}</div>
-        <div class="wf-zero" style="top:${valueToPlotPx(0)}px"></div>
-        <div class="wf-bars" style="grid-template-columns:repeat(${tradeCount},minmax(2px,1fr));gap:${gapPx}px">${barsHtml}</div>
+        <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
+        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,1fr));gap:${gapPx}px">${barsHtml}</div>
       </div>`;
   }
 
