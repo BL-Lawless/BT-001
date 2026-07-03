@@ -17043,8 +17043,7 @@ startTradeAuto();
     return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0") + ":" + String(d.getSeconds()).padStart(2,"0");
   }
   function dateOnly26(ms){
-    const d = date26(ms);
-    return String(d.getMonth()+1).padStart(2,"0") + "/" + String(d.getDate()).padStart(2,"0");
+    return formatDateDdMmmYy(ms);
   }
   function localMidnight26(ts){
     const d = new Date(ts || Date.now());
@@ -22670,12 +22669,14 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const mapY = price => top + ((maxP - price) / (maxP - minP)) * priceH;
     const yHigh = Math.max(top,Math.min(top + priceH,mapY(high)));
     const yLow = Math.max(top,Math.min(top + priceH,mapY(low)));
+    const mid = (high + low) / 2;
+    const yMid = Math.max(top,Math.min(top + priceH,mapY(mid)));
     const bandTop = Math.min(yHigh,yLow);
     const bandHeight = Math.max(1,Math.abs(yLow - yHigh));
     ctx.save();
-    ctx.fillStyle = "rgba(156,163,175,.14)";
+    ctx.fillStyle = "rgba(156,163,175,.09)";
     ctx.fillRect(axisLeft,bandTop,axisRight - axisLeft,bandHeight);
-    ctx.strokeStyle = "rgba(107,114,128,.42)";
+    ctx.strokeStyle = "rgba(107,114,128,.34)";
     ctx.lineWidth = typeof hairline === "function" ? hairline() : 1;
     [yHigh,yLow].forEach(y => {
       const yy = typeof px === "function" ? px(y) : y;
@@ -22684,6 +22685,22 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       ctx.lineTo(typeof px === "function" ? px(axisRight - 1) : axisRight - 1,yy);
       ctx.stroke();
     });
+    ctx.strokeStyle = "rgba(107,114,128,.24)";
+    ctx.beginPath();
+    ctx.moveTo(typeof px === "function" ? px(axisLeft + 5) : axisLeft + 5,typeof px === "function" ? px(yMid) : yMid);
+    ctx.lineTo(typeof px === "function" ? px(axisRight - 5) : axisRight - 5,typeof px === "function" ? px(yMid) : yMid);
+    ctx.stroke();
+    const midX = Math.round((axisLeft + axisRight) / 2);
+    ctx.fillStyle = "rgba(107,114,128,.28)";
+    ctx.beginPath();
+    ctx.arc(
+      typeof px === "function" ? px(midX) : midX,
+      typeof px === "function" ? px(yMid) : yMid,
+      1.6,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
     ctx.restore();
   }
   function drawDailyVolumeSplitVisual(){
@@ -22699,36 +22716,36 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const volH = Math.max(0,canvas.clientHeight - volTop - bottom);
     const axisLeft = chartRight;
     const axisW = Math.max(0,canvas.clientWidth - axisLeft);
-    if(!(volH >= 26) || !(axisW >= 40)) return;
-    const baseY = volTop + Math.max(6,volH - 18);
-    const barZoneH = Math.max(16,volH - 30);
+    if(!(volH >= 26) || !(axisW >= 64)) return;
+    const baseY = volTop + Math.max(10,volH - 18);
+    const barZoneH = Math.max(22,volH - 24);
     const gap = 4;
-    const availableW = Math.max(24,axisW - 12);
-    const barW = Math.max(12,Math.min(18,Math.floor((availableW - gap) / 2)));
+    const availableW = Math.max(48,axisW - 10);
+    const barW = Math.max(20,Math.min(28,Math.floor((availableW - gap) / 2)));
     const totalBarsW = barW * 2 + gap;
-    const startX = Math.round(axisLeft + Math.max(6,Math.floor((axisW - totalBarsW) / 2)));
+    const startX = Math.round(axisLeft + Math.max(5,Math.floor((axisW - totalBarsW) / 2)));
     const hasValidSplit = !!(split && split.ready && Number.isFinite(split.bullPct) && Number.isFinite(split.bearPct));
     const bars = [
-      {x:startX,pct:hasValidSplit ? split.bullPct : 0,color:"rgba(34,197,94,.34)",textColor:"#4b7b57",label:hasValidSplit ? Math.round(split.bullPct * 100) + "%" : "N/A"},
-      {x:startX + barW + gap,pct:hasValidSplit ? split.bearPct : 0,color:"rgba(239,68,68,.32)",textColor:"#8b4d4d",label:hasValidSplit ? Math.round(split.bearPct * 100) + "%" : "N/A"}
+      {x:startX,pct:hasValidSplit ? split.bullPct : 0,color:"rgba(34,197,94,.40)",stroke:"rgba(34,197,94,.18)",textColor:"#4b7b57",label:hasValidSplit ? Math.round(split.bullPct * 100) + "%" : "N/A"},
+      {x:startX + barW + gap,pct:hasValidSplit ? split.bearPct : 0,color:"rgba(239,68,68,.38)",stroke:"rgba(239,68,68,.18)",textColor:"#8b4d4d",label:hasValidSplit ? Math.round(split.bearPct * 100) + "%" : "N/A"}
     ];
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.font = "12px Arial";
     for(const bar of bars){
-      const height = hasValidSplit ? Math.max(2,Math.round(bar.pct * barZoneH)) : 0;
+      const height = hasValidSplit ? Math.max(6,Math.round(bar.pct * barZoneH)) : 0;
       const x = Math.round(bar.x);
       const y = baseY - height;
       if(height > 0){
         ctx.fillStyle = bar.color;
         ctx.fillRect(x,y,barW,height);
       }
-      ctx.strokeStyle = hasValidSplit ? "rgba(107,114,128,.22)" : "rgba(107,114,128,.16)";
+      ctx.strokeStyle = hasValidSplit ? bar.stroke : "rgba(107,114,128,.14)";
       ctx.lineWidth = 1;
       ctx.strokeRect(x + 0.5,baseY - Math.max(1,height) + 0.5,Math.max(1,barW - 1),Math.max(1,height || 10) - 1);
       ctx.fillStyle = bar.textColor;
-      ctx.fillText(bar.label,x + barW / 2,baseY + 3);
+      ctx.fillText(bar.label,x + barW / 2,baseY + 4);
     }
     ctx.restore();
   }
