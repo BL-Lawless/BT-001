@@ -1283,15 +1283,91 @@ function selectedClosedTradePeriod(period){
   return {value:"1w",weeks:1,label:"1W"};
 }
 
-function closedTradePeriodWindowMs(period){
+function closedTradeBoundaryFallbackMs(period,endMs = Date.now()){
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const exchangeNowMs = typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now();
+  const refMs = Number.isFinite(Number(exchangeNowMs))
+    ? Number(exchangeNowMs)
+    : (Number.isFinite(Number(endMs)) ? Number(endMs) : Date.now());
+  const d = new Date(refMs);
+  const dayOpen = Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate(),0,0,0,0);
+  if(period === "1d") return dayOpen;
+  const daysSinceMonday = (d.getUTCDay() + 6) % 7;
+  return dayOpen - daysSinceMonday * DAY_MS;
+}
+
+function closedTradeCurrentCandleOpenMs(tf,endMs = Date.now()){
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const stepMs = tf === "1w" ? WEEK_MS : DAY_MS;
+  if(tf === "1d"){
+    const dailyStartSec = Number(dailyState && dailyState.dayStart);
+    if(Number.isFinite(dailyStartSec) && dailyStartSec > 0) return dailyStartSec * 1000;
+  }
+
+  const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+  const rowOpenMs = row => {
+    const openTime = Number(row && row.openTime);
+    if(Number.isFinite(openTime) && openTime > 0) return openTime;
+    const timeSec = Number(row && row.time);
+    return Number.isFinite(timeSec) && timeSec > 0 ? timeSec * 1000 : null;
+  };
+
+  if(hub && typeof hub.getChartBuffer === "function"){
+    const chartRows = hub.getChartBuffer(tf) || [];
+    const lastChart = chartRows.length ? chartRows[chartRows.length - 1] : null;
+    const chartOpenMs = rowOpenMs(lastChart);
+    if(Number.isFinite(chartOpenMs) && chartOpenMs > 0){
+      const nextOpenMs = chartOpenMs + stepMs;
+      return nextOpenMs <= endMs ? nextOpenMs : chartOpenMs;
+    }
+  }
+
+  if(hub && typeof hub.getClosedBuffer === "function"){
+    const closedRows = hub.getClosedBuffer(tf) || [];
+    const lastClosed = closedRows.length ? closedRows[closedRows.length - 1] : null;
+    const closedOpenMs = rowOpenMs(lastClosed);
+    if(Number.isFinite(closedOpenMs) && closedOpenMs > 0){
+      const nextOpenMs = closedOpenMs + stepMs;
+      return nextOpenMs <= endMs ? nextOpenMs : closedOpenMs;
+    }
+  }
+
+  return closedTradeBoundaryFallbackMs(tf,endMs);
+}
+
+function closedTradeSessionWindowMs(period,endMs = Date.now()){
   const selected = selectedClosedTradePeriod(period);
-  const end = Date.now();
+  const end = Number.isFinite(Number(endMs)) ? Number(endMs) : Date.now();
+  if(selected.value === "1d" || selected.value === "1w"){
+    return {
+      start:closedTradeCurrentCandleOpenMs(selected.value,end),
+      end,
+      label:selected.label,
+      period:selected.value
+    };
+  }
   return {
     start:end - selected.weeks * WEEK_MS,
     end,
     label:selected.label,
     period:selected.value
   };
+}
+
+async function ensureClosedTradeSessionBoundary(period){
+  const selected = selectedClosedTradePeriod(period);
+  if(selected.value !== "1d" && selected.value !== "1w") return;
+  const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+  if(!hub || typeof hub.prepareTimeframeBuffer !== "function") return;
+  try{
+    await hub.prepareTimeframeBuffer(selected.value,2);
+  }catch(error){
+    console.warn("Closed trade timeframe preload failed",selected.value,error);
+  }
+}
+
+function closedTradePeriodWindowMs(period){
+  return closedTradeSessionWindowMs(period,Date.now());
 }
 
 function visibleClosedTradeWindowMs(){
@@ -1521,6 +1597,7 @@ async function loadClosedTradesForPeriod(period,opt={}){
   try{
     if(!silent) closedTradeStatus("Loading closed trades...");
 
+    await ensureClosedTradeSessionBoundary(period || opt.period);
     const win = closedTradePeriodWindowMs(period || opt.period);
     const off = opt.off != null ? opt.off : await timeOffset();
     closedTradeStatus("Fetching fills...");
@@ -17816,7 +17893,11 @@ If there is NO open position, use this Section 2 instead:
     return {start,end};
   };
   reportRangeMs=function(){
-    const now=Date.now(), today0=startOfLocalDay(new Date());
+    const now=Date.now();
+    if(reportWeeksEl && (reportWeeksEl.value === '1d' || reportWeeksEl.value === '1w')){
+      const win = closedTradeSessionWindowMs(reportWeeksEl.value,now);
+      return {start:win.start,end:win.end};
+    }
     return {start:now-selectedReportPresetMs(),end:now};
   };
   reportLabel=function(){
