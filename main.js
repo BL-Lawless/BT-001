@@ -804,6 +804,14 @@ function formatTimeOnly(value){
   return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
 }
 
+function formatDateDdMmmYy(value){
+  const d = value instanceof Date ? value : new Date(value);
+  if(isNaN(d.getTime())) return "-";
+  const pad = n => String(n).padStart(2,"0");
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return pad(d.getDate()) + "/" + months[d.getMonth()] + "/" + pad(d.getFullYear() % 100);
+}
+
 
 function emaPeriod(input,fallback){
   const n = Number(input && input.value);
@@ -5643,7 +5651,7 @@ function candleTip(c){
   const d = new Date(c.time*1000);
 
   const lines = [
-    formatDateTime(d),
+    formatDateDdMmmYy(d),
     "O : " + ip(c.open),
     "H : " + ip(c.high),
     "L : " + ip(c.low),
@@ -22527,21 +22535,101 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   window.__bt001DailyVisualsInstalled = true;
 
   const DAY_SEC = 86400;
+  const DAY_MINUTES = 1440;
+  const DAILY_1M_KEEP = DAY_MINUTES + 1;
+  const DAILY_1M_TF = "1m";
   const n = value => {
     const num = Number(value);
     return Number.isFinite(num) ? num : null;
   };
-  function intradayDayRows(){
+  const splitSourceState = {
+    symbol:"",
+    dayStart:null,
+    loading:false,
+    ready:false,
+    promise:null
+  };
+  function currentSymbol(){
+    try{
+      return String((cfg() && cfg().symbol) || "").toUpperCase();
+    }catch(_error){
+      return "";
+    }
+  }
+  function requestRedraw(){
+    try{
+      requestAnimationFrame(() => {
+        if(typeof draw === "function") draw();
+      });
+    }catch(_error){}
+  }
+  function resetDailySplitSource(symbol,dayStart){
+    splitSourceState.symbol = symbol;
+    splitSourceState.dayStart = dayStart;
+    splitSourceState.loading = false;
+    splitSourceState.ready = false;
+    splitSourceState.promise = null;
+  }
+  function dailyVolumeRows1m(){
     const start = n(dailyState && dailyState.dayStart);
-    if(start == null || !Array.isArray(candles) || !candles.length) return [];
+    const symbol = currentSymbol();
+    if(start == null || !symbol) return [];
+    if(splitSourceState.symbol !== symbol || splitSourceState.dayStart !== start){
+      resetDailySplitSource(symbol,start);
+    }
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    if(!hub || typeof hub.getChartBuffer !== "function") return [];
+    const chartRows = hub.getChartBuffer(DAILY_1M_TF);
+    if(!Array.isArray(chartRows) || !chartRows.length) return [];
     const end = start + DAY_SEC;
-    return candles.filter(row => {
+    const deduped = new Map();
+    for(const row of chartRows){
       const time = n(row && row.time);
-      return time != null && time >= start && time < end;
-    });
+      if(time == null || time < start || time >= end) continue;
+      deduped.set(time,row);
+    }
+    return Array.from(deduped.values()).sort((a,b) => Number(a.time) - Number(b.time));
+  }
+  function needsDailyVolumeLoad(rows,start){
+    if(start == null) return false;
+    if(!Array.isArray(rows) || !rows.length) return true;
+    const firstTime = n(rows[0] && rows[0].time);
+    const lastTime = n(rows[rows.length-1] && rows[rows.length-1].time);
+    if(firstTime == null || lastTime == null) return true;
+    if(lastTime < start) return true;
+    return firstTime > start;
+  }
+  function ensureDailyVolumeSource(){
+    const start = n(dailyState && dailyState.dayStart);
+    const symbol = currentSymbol();
+    if(start == null || !symbol) return;
+    if(splitSourceState.symbol !== symbol || splitSourceState.dayStart !== start){
+      resetDailySplitSource(symbol,start);
+    }
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    if(!hub || typeof hub.prepareTimeframeBuffer !== "function") return;
+    const rows = dailyVolumeRows1m();
+    if(!needsDailyVolumeLoad(rows,start)){
+      splitSourceState.ready = true;
+      return;
+    }
+    if(splitSourceState.loading && splitSourceState.promise) return;
+    splitSourceState.loading = true;
+    splitSourceState.promise = hub.prepareTimeframeBuffer(DAILY_1M_TF,DAILY_1M_KEEP)
+      .catch(error => {
+        console.warn(MODULE + " 1m day volume preload failed",error);
+      })
+      .finally(() => {
+        splitSourceState.loading = false;
+        splitSourceState.ready = !needsDailyVolumeLoad(dailyVolumeRows1m(),start);
+        splitSourceState.promise = null;
+        requestRedraw();
+      });
   }
   function bullBearSplit(){
-    const rows = intradayDayRows();
+    ensureDailyVolumeSource();
+    const rows = dailyVolumeRows1m();
+    if(!rows.length || !splitSourceState.ready) return { ready:false, total:0, bullPct:null, bearPct:null };
     let bull = 0;
     let bear = 0;
     for(const row of rows){
@@ -22553,8 +22641,9 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       else if(close < open) bear += volume;
     }
     const total = bull + bear;
-    if(!(total > 0)) return null;
+    if(!(total > 0)) return { ready:true, total:0, bullPct:null, bearPct:null };
     return {
+      ready:true,
       bull,
       bear,
       total,
@@ -22600,10 +22689,8 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   function drawDailyVolumeSplitVisual(){
     if(!ctx || !canvas) return;
     const split = bullBearSplit();
-    if(!split) return;
     const state = currentPriceLineState || null;
     const chartRight = n(state && state.chartRight);
-    const rightAxis = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
     const top = n(state && state.top);
     const priceH = n(state && state.priceH);
     if(chartRight == null || top == null || priceH == null) return;
@@ -22612,31 +22699,36 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const volH = Math.max(0,canvas.clientHeight - volTop - bottom);
     const axisLeft = chartRight;
     const axisW = Math.max(0,canvas.clientWidth - axisLeft);
-    if(!(volH >= 26) || !(axisW >= 30)) return;
-    const baseY = volTop + Math.max(6,volH - 16);
-    const barZoneH = Math.max(16,volH - 28);
-    const barW = Math.max(8,Math.min(14,Math.floor((axisW - 14) / 3)));
-    const gap = Math.max(4,Math.floor((axisW - barW * 2) / 3));
-    const startX = axisLeft + gap;
+    if(!(volH >= 26) || !(axisW >= 40)) return;
+    const baseY = volTop + Math.max(6,volH - 18);
+    const barZoneH = Math.max(16,volH - 30);
+    const gap = 4;
+    const availableW = Math.max(24,axisW - 12);
+    const barW = Math.max(12,Math.min(18,Math.floor((availableW - gap) / 2)));
+    const totalBarsW = barW * 2 + gap;
+    const startX = Math.round(axisLeft + Math.max(6,Math.floor((axisW - totalBarsW) / 2)));
+    const hasValidSplit = !!(split && split.ready && Number.isFinite(split.bullPct) && Number.isFinite(split.bearPct));
     const bars = [
-      {x:startX,pct:split.bullPct,color:"rgba(34,197,94,.26)",textColor:"#4b7b57"},
-      {x:startX + barW + gap,pct:split.bearPct,color:"rgba(239,68,68,.24)",textColor:"#8b4d4d"}
+      {x:startX,pct:hasValidSplit ? split.bullPct : 0,color:"rgba(34,197,94,.34)",textColor:"#4b7b57",label:hasValidSplit ? Math.round(split.bullPct * 100) + "%" : "N/A"},
+      {x:startX + barW + gap,pct:hasValidSplit ? split.bearPct : 0,color:"rgba(239,68,68,.32)",textColor:"#8b4d4d",label:hasValidSplit ? Math.round(split.bearPct * 100) + "%" : "N/A"}
     ];
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.font = "10px Arial";
+    ctx.font = "12px Arial";
     for(const bar of bars){
-      const height = Math.max(2,Math.round(bar.pct * barZoneH));
+      const height = hasValidSplit ? Math.max(2,Math.round(bar.pct * barZoneH)) : 0;
       const x = Math.round(bar.x);
       const y = baseY - height;
-      ctx.fillStyle = bar.color;
-      ctx.fillRect(x,y,barW,height);
-      ctx.strokeStyle = "rgba(107,114,128,.18)";
+      if(height > 0){
+        ctx.fillStyle = bar.color;
+        ctx.fillRect(x,y,barW,height);
+      }
+      ctx.strokeStyle = hasValidSplit ? "rgba(107,114,128,.22)" : "rgba(107,114,128,.16)";
       ctx.lineWidth = 1;
-      ctx.strokeRect(x + 0.5,y + 0.5,Math.max(1,barW - 1),Math.max(1,height - 1));
+      ctx.strokeRect(x + 0.5,baseY - Math.max(1,height) + 0.5,Math.max(1,barW - 1),Math.max(1,height || 10) - 1);
       ctx.fillStyle = bar.textColor;
-      ctx.fillText(Math.round(bar.pct * 100) + "%",x + barW / 2,baseY + 3);
+      ctx.fillText(bar.label,x + barW / 2,baseY + 3);
     }
     ctx.restore();
   }
