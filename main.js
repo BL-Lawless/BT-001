@@ -21898,6 +21898,16 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   let visible = false;
   let hoverTradeIndex = null;
   let lastModel = null;
+  const wfSyncState = {
+    loaded:false,
+    symbol:"",
+    period:"",
+    closeTimer:null,
+    closeRetry:0,
+    closeSyncBusy:false,
+    closeSyncBaseline:"",
+    liveRefreshKey:""
+  };
   function activeWfTradeKey(){
     try{
       return typeof window.getActiveClosedTradeIsolateKey === "function" ? window.getActiveClosedTradeIsolateKey() : null;
@@ -21907,6 +21917,210 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function tradeKey(trade){
     return trade && (trade.parentTradeId || trade.chainId || trade.markerId || trade.id || null);
+  }
+  function currentSymbol(){
+    try{
+      return String((cfg() && cfg().symbol) || "").toUpperCase();
+    }catch(_e){
+      return "";
+    }
+  }
+  function currentPeriodValue(){
+    try{
+      return String((reportWeeksEl && reportWeeksEl.value) || "1w").toLowerCase();
+    }catch(_e){
+      return "1w";
+    }
+  }
+  function currentLivePrice(){
+    const mark = num(typeof lastMarkPrice !== "undefined" ? lastMarkPrice : null);
+    if(mark != null) return mark;
+    const latest = Array.isArray(candles) && candles.length ? candles[candles.length - 1] : null;
+    return num(latest && latest.close);
+  }
+  function closedTradeSignature(rec){
+    const parents = typeof closedTradeParentTrades === "function" ? closedTradeParentTrades(rec || {}) : [];
+    return parents.map(trade => [
+      String(trade && trade.parentId || ""),
+      String(num(trade && trade.finalExit && trade.finalExit.time) || 0),
+      String(num(trade && trade.netTotal) || 0)
+    ].join(":")).join("|");
+  }
+  function livePreviewTrade(){
+    const chainIds = Array.from((OPEN_POSITION_STATE && OPEN_POSITION_STATE.activeParentChainIds) || []).filter(Boolean);
+    const parentId = chainIds[0] || null;
+    if(!parentId) return null;
+    const markers = (OPEN_POSITION_STATE.markers || []).filter(m => stateChainId(m) === parentId).slice().sort((a,b) => (num(a && a.time) || 0) - (num(b && b.time) || 0));
+    const links = (OPEN_POSITION_STATE.links || []).filter(l => stateChainId(l) === parentId).slice();
+    const boxes = (OPEN_POSITION_STATE.boxes || []).filter(b => stateChainId(b) === parentId);
+    if(!markers.length && !boxes.length) return null;
+    const entries = markers.filter(m => m && m.role === "entry");
+    const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const realizedPartials = links.reduce((sum,link) => sum + (num(link && link.netPnl) || 0),0);
+    const floatingPL = boxes.length
+      ? boxes.reduce((sum,box) => {
+          const unrealized = num(box && box.unrealizedPnl);
+          if(unrealized != null) return sum + unrealized;
+          const floating = typeof openBoxFloating === "function" ? openBoxFloating(box,currentLivePrice()) : null;
+          return sum + (num(floating) || 0);
+        },0)
+      : null;
+    const netLivePL = floatingPL == null ? null : realizedPartials + floatingPL;
+    const startTime = num(entries[0] && entries[0].time);
+    const tooltipLines = [
+      "Current open position",
+      "Direction: " + (side === "SHORT" ? "Short" : "Long"),
+      "Duration: " + wfDurationText(startTime,Math.floor(Date.now() / 1000)),
+      "",
+      [{text:"Realized partials | ",color:WF_BLACK},{text:fm(realizedPartials),color:wfPnlColor(realizedPartials),bold:true}],
+      [{text:"Floating P/L | ",color:WF_BLACK},{text:floatingPL == null ? "N/A" : fm(floatingPL),color:floatingPL == null ? WF_BLACK : wfPnlColor(floatingPL),bold:true}],
+      "",
+      [{text:"Net live P/L | ",color:WF_BLACK,bold:true,large:true},{text:netLivePL == null ? "N/A" : fm(netLivePL),color:netLivePL == null ? WF_BLACK : wfPnlColor(netLivePL),bold:true,large:true}]
+    ];
+    return {
+      id:"wf_live_" + parentId,
+      parentTradeId:parentId,
+      chainId:parentId,
+      live:true,
+      dir:side === "SHORT" ? "S" : "L",
+      net:netLivePL,
+      realizedPartials,
+      floatingPL,
+      tooltipLines,
+      markerId:null,
+      liveKey:[parentId,String(realizedPartials),floatingPL == null ? "na" : String(floatingPL),String(startTime || 0)].join(":"),
+      start:0,
+      end:0
+    };
+  }
+  function liveSegmentMarkup(trade,model){
+    if(!trade || !trade.live || !model) return "";
+    const realized = num(trade.realizedPartials) || 0;
+    const floating = num(trade.floatingPL);
+    const net = num(trade.net);
+    const parts = [];
+    const segment = (topPct,heightPct,cls) =>
+      `<div class="wf-live-segment ${cls}" style="top:${topPct}%;height:${Math.max(0.8,heightPct)}%"></div>`;
+    const separator = topPct =>
+      `<div class="wf-live-midline" style="top:${Math.max(0,Math.min(100,topPct))}%"></div>`;
+    const composeStack = segments => {
+      let cursor = 0;
+      segments.forEach((entry,index) => {
+        const share = Math.max(0,Number(entry && entry.share) || 0);
+        if(!(share > 0)) return;
+        parts.push(segment(cursor,share * 100,entry.cls));
+        cursor += share * 100;
+        if(index < segments.length - 1) parts.push(separator(cursor));
+      });
+      return parts.join("");
+    };
+    if(net == null){
+      parts.push(`<div class="wf-live-segment is-neutral" style="top:0;height:100%"></div>`);
+      return parts.join("");
+    }
+    if(Math.abs(realized) < 1e-12){
+      parts.push(segment(0,100,net > 0 ? "is-green" : net < 0 ? "is-red" : "is-neutral"));
+      return parts.join("");
+    }
+    if(realized > 0){
+      if(floating != null && floating >= 0){
+        const total = realized + floating;
+        if(!(total > 0)){
+          parts.push(segment(0,100,"is-neutral"));
+          return parts.join("");
+        }
+        return composeStack([
+          {share:floating / total,cls:"is-green-float"},
+          {share:realized / total,cls:"is-green"}
+        ]);
+      }
+      if(floating != null && net >= 0){
+        const base = realized;
+        if(!(base > 0)){
+          parts.push(segment(0,100,"is-green"));
+          return parts.join("");
+        }
+        return composeStack([
+          {share:Math.min(1,Math.abs(floating) / base),cls:"is-grey"},
+          {share:Math.min(1,Math.max(0,net) / base),cls:"is-green"}
+        ]);
+      }
+      if(floating != null && net < 0){
+        const base = realized + Math.abs(net);
+        if(!(base > 0)){
+          parts.push(segment(0,100,"is-red"));
+          return parts.join("");
+        }
+        return composeStack([
+          {share:realized / base,cls:"is-grey"},
+          {share:Math.abs(net) / base,cls:"is-red"}
+        ]);
+      }
+      if(net > 0){
+        parts.push(segment(0,100,"is-green"));
+      }else if(net < 0){
+        parts.push(segment(0,100,"is-red"));
+      }else{
+        parts.push(segment(0,100,"is-neutral"));
+      }
+      return parts.join("");
+    }
+    parts.push(segment(0,100,net > 0 ? "is-green" : net < 0 ? "is-red" : "is-neutral"));
+    return parts.join("");
+  }
+  function markClosedTradesLoaded(loaded){
+    wfSyncState.loaded = !!loaded;
+    wfSyncState.symbol = loaded ? currentSymbol() : "";
+    wfSyncState.period = loaded ? currentPeriodValue() : "";
+    if(!loaded) wfSyncState.closeSyncBaseline = "";
+  }
+  function clearAutoCloseSync(){
+    if(wfSyncState.closeTimer){
+      clearTimeout(wfSyncState.closeTimer);
+      wfSyncState.closeTimer = null;
+    }
+    wfSyncState.closeRetry = 0;
+    wfSyncState.closeSyncBusy = false;
+    wfSyncState.closeSyncBaseline = "";
+  }
+  function scheduleAutoCloseSync(delayMs=1250){
+    if(!wfSyncState.loaded || wfSyncState.symbol !== currentSymbol()) return;
+    if(wfSyncState.closeTimer || wfSyncState.closeSyncBusy) return;
+    wfSyncState.closeSyncBaseline = closedTradeSignature(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection);
+    wfSyncState.closeTimer = setTimeout(async () => {
+      wfSyncState.closeTimer = null;
+      wfSyncState.closeSyncBusy = true;
+      try{
+        while(wfSyncState.closeRetry < 3){
+          const result = await loadClosedTradesForPeriod(wfSyncState.period || currentPeriodValue(),{silent:true});
+          const nextSignature = closedTradeSignature(result && result.report);
+          if(result && nextSignature && nextSignature !== wfSyncState.closeSyncBaseline){
+            wfSyncState.closeRetry = 0;
+            wfSyncState.closeSyncBaseline = "";
+            if(visible) render();
+            return;
+          }
+          wfSyncState.closeRetry += 1;
+          if(wfSyncState.closeRetry < 3) await new Promise(resolve => setTimeout(resolve,1100));
+        }
+        showWfTradesStatus("Closed trade not ready yet");
+      }catch(error){
+        console.warn(MODULE + " live sync failed",error);
+        showWfTradesStatus("Closed trade sync failed");
+      }finally{
+        wfSyncState.closeSyncBusy = false;
+        wfSyncState.closeRetry = 0;
+        wfSyncState.closeSyncBaseline = "";
+      }
+    },Math.max(250,delayMs));
+  }
+  function maybeRefreshLivePreview(){
+    if(!visible) return;
+    const live = livePreviewTrade();
+    const nextKey = live ? live.liveKey : "";
+    if(nextKey === wfSyncState.liveRefreshKey) return;
+    wfSyncState.liveRefreshKey = nextKey;
+    render();
   }
 
   function profitRatioCell(value){
@@ -22123,6 +22337,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         const bar = event.target.closest ? event.target.closest(".wf-bar[data-trade-index]") : null;
         if(!bar) return;
         const next = Number(bar.dataset.tradeIndex);
+        if(next < 0) return;
         const trade = lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[next] : null;
         if(trade) bridgeTradeIsolate(trade);
       },false);
@@ -22240,6 +22455,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
 
   function buildViewModel(){
     const trades = buildTradeRows();
+    const liveTrade = livePreviewTrade();
     const selectedNet = trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
     const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
     const endBalance = num(accountBalanceState);
@@ -22257,7 +22473,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const returnPct = validStartBalance ? (selectedNet / validStartBalance) * 100 : null;
     const note = Math.abs(fundingExcluded) > 1e-9 ? "Trade-only; excludes transfers/unallocated funding" : "";
     const average = trades.length ? selectedNet / trades.length : null;
-    const values = [0].concat(trades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
+    if(liveTrade){
+      const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
+      liveTrade.start = cumulative;
+      liveTrade.end = cumulative + (num(liveTrade.net) || 0);
+    }
+    const chartTrades = liveTrade ? trades.concat(liveTrade) : trades.slice();
+    const values = [0].concat(chartTrades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
     const minCumulative = values.length ? Math.min(...values) : 0;
     const maxCumulative = values.length ? Math.max(...values) : 0;
     const span = Math.max(1,maxCumulative - minCumulative);
@@ -22281,6 +22503,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const period = selectedPeriodDates();
     return {
       trades,
+      chartTrades,
+      liveTrade,
       wins:wins.length,
       losses:losses.length,
       average,
@@ -22361,7 +22585,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(result){
       result.innerHTML = `<div class="wf-result-label">Net P/L</div><div class="wf-result-value ${model.selectedNet < 0 ? "is-loss" : "is-gain"}">${fmtBigResult(model.selectedNet)}</div>`;
     }
-    if(!model.trades.length){
+    if(!model.trades.length && !model.liveTrade){
       chart.innerHTML = `<div class="wf-empty">No closed trades in the selected period.</div>`;
       return;
     }
@@ -22397,10 +22621,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       if(y < -0.5 || y > plotHeight + 0.5) return "";
       return `<div class="wf-gridline is-minor" style="top:${y}px"></div>`;
     }).join("");
-    const tradeCount = Math.max(1,model.trades.length);
+    const chartTrades = Array.isArray(model.chartTrades) ? model.chartTrades : model.trades;
+    const tradeCount = Math.max(1,chartTrades.length);
     const gapPx = tradeCount > 90 ? 0 : 1;
     const activeKey = activeWfTradeKey();
-    const barsHtml = model.trades.map((trade,index) => {
+    const barsHtml = chartTrades.map((trade,index) => {
       const topValue = Math.max(trade.start,trade.end);
       const bottomValue = Math.min(trade.start,trade.end);
       const topY = Math.max(0,Math.min(plotHeight,valueToY(topValue)));
@@ -22410,12 +22635,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         ? Math.max(0,topY - 12)
         : Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
       const cls = [trade.net >= 0 ? "is-gain" : "is-loss"];
+      if(trade.live) cls.push("is-live");
       if(activeKey && tradeKey(trade) === activeKey) cls.push("is-selected");
-      const connector = index < model.trades.length - 1
+      const connector = index < chartTrades.length - 1
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
+      const barInner = trade.live ? `${liveSegmentMarkup(trade,model)}<span class="wf-bar-live-flag">Live</span>` : "";
       return `<div class="wf-bar-col">
-          <div class="wf-bar ${cls.join(" ")}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"></div>
+          <div class="wf-bar ${cls.join(" ")}" data-trade-index="${trade.live ? -1 : index}" style="top:${topY}px;height:${heightPx}px">${barInner}</div>
           <span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>
           ${connector}
         </div>`;
@@ -22484,7 +22711,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       tip.innerHTML = "";
       return;
     }
-    const trade = lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[hoverTradeIndex] : null;
+    const trade = hoverTradeIndex < 0
+      ? (lastModel && lastModel.liveTrade ? lastModel.liveTrade : null)
+      : (lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[hoverTradeIndex] : null);
     const lines = wfTooltipLines(trade);
     if(!lines.length || !event){
       tip.classList.add("hidden");
@@ -22548,10 +22777,23 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   const prevLoadClosedTradesForPeriod = loadClosedTradesForPeriod;
   loadClosedTradesForPeriod = async function(){
     const result = await prevLoadClosedTradesForPeriod.apply(this,arguments);
+    if(result) markClosedTradesLoaded(true);
     if(visible) render();
     return result;
   };
   if(typeof window !== "undefined") window.loadClosedTradesForPeriod = loadClosedTradesForPeriod;
+
+  if(typeof clearTrades === "function"){
+    const prevClearTrades = clearTrades;
+    clearTrades = function(){
+      clearAutoCloseSync();
+      markClosedTradesLoaded(false);
+      const result = prevClearTrades.apply(this,arguments);
+      if(visible) render();
+      return result;
+    };
+    if(typeof window !== "undefined") window.clearTrades = clearTrades;
+  }
 
   if(typeof refreshAccountBalance === "function"){
     const prevRefreshAccountBalance = refreshAccountBalance;
@@ -22561,6 +22803,36 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       return result;
     };
     if(typeof window !== "undefined") window.refreshAccountBalance = refreshAccountBalance;
+  }
+
+  if(typeof refreshOpenPosition === "function"){
+    const prevRefreshOpenPosition = refreshOpenPosition;
+    refreshOpenPosition = async function(){
+      const result = await prevRefreshOpenPosition.apply(this,arguments);
+      maybeRefreshLivePreview();
+      return result;
+    };
+    if(typeof window !== "undefined") window.refreshOpenPosition = refreshOpenPosition;
+  }
+
+  if(typeof draw === "function" && !window.__bt001WfLiveDrawBridge){
+    window.__bt001WfLiveDrawBridge = true;
+    const prevDrawForWfLive = draw;
+    draw = window.draw = function(){
+      const result = prevDrawForWfLive.apply(this,arguments);
+      maybeRefreshLivePreview();
+      return result;
+    };
+  }
+
+  if(typeof window !== "undefined" && !window.__bt001WfLiveSyncBound){
+    window.__bt001WfLiveSyncBound = true;
+    window.addEventListener("v13:open-position-change",event => {
+      const detail = event && event.detail || {};
+      if(detail && detail.closed) scheduleAutoCloseSync(1250);
+      else if(detail && detail.opened) clearAutoCloseSync();
+      maybeRefreshLivePreview();
+    },false);
   }
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",install,{once:true});

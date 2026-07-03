@@ -2685,6 +2685,7 @@ button:hover{filter:brightness(1.04)}
   border:1px solid #b7c4d0;
   box-sizing:border-box;
   pointer-events:auto;
+  overflow:hidden;
 }
 .wf-bar.is-gain{
   background:rgb(22,163,74);
@@ -2696,6 +2697,41 @@ button:hover{filter:brightness(1.04)}
   z-index:2;
   box-shadow:0 0 0 2px rgba(17,24,39,.18);
   outline:1px solid rgba(255,255,255,.82);
+}
+.wf-bar.is-live{
+  border-style:dashed;
+  border-color:#94a3b8;
+  background:rgba(148,163,184,.08);
+}
+.wf-live-segment{
+  position:absolute;
+  left:0;
+  right:0;
+}
+.wf-live-segment.is-green{background:rgba(22,163,74,.72)}
+.wf-live-segment.is-green-float{background:rgba(22,163,74,.46)}
+.wf-live-segment.is-red{background:rgba(220,38,38,.72)}
+.wf-live-segment.is-grey{background:rgba(148,163,184,.56)}
+.wf-live-segment.is-neutral{background:rgba(148,163,184,.24)}
+.wf-live-midline{
+  position:absolute;
+  left:1px;
+  right:1px;
+  height:1px;
+  background:rgba(107,114,128,.8);
+  transform:translateY(-0.5px);
+}
+.wf-bar-live-flag{
+  position:absolute;
+  top:2px;
+  right:3px;
+  font-size:8px;
+  line-height:1;
+  color:#475569;
+  background:rgba(255,255,255,.82);
+  padding:1px 2px;
+  border-radius:2px;
+  pointer-events:none;
 }
 .wf-connector{
   position:absolute;
