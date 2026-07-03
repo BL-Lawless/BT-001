@@ -49,7 +49,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 <button id="reload">Reload</button>
 <button id="resetView">Reset</button>
 <div class="toggles">
-<span class="trade-count" id="tradeCount">From: --/-- | To: --/-- | Trades: 0 | net P/L: +$0.00</span>
+<span class="trade-count" id="tradeCount"></span>
 <label class="report-control">Period
       <select id="reportWeeks">
 <option selected="" value="1d">1D</option>
@@ -154,6 +154,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/ma/ma-overlay.module.js" defer></script>
   <script src="features/ma/ma-tooltip.module.js" defer></script>
   <script src="features/ma/ma-index.js" defer></script>
+  <script src="features/shared/binancePositionGroupTracker.js" defer></script>
   <script src="features/shared/binanceConditionalOrderClassifier.js" defer></script>
   <script src="main.js" defer></script>
   <script src="features/smc/smc-overlay.module.js" defer></script>

@@ -11,6 +11,7 @@
   const OPEN_ALGO_URL = "https://fapi.binance.com/fapi/v1/openAlgoOrders";
   const sections = ["entry","protection","exit"];
   const conditionalClassifier = window.BinanceConditionalOrderClassifier || null;
+  const positionGroupTracker = window.BT001PositionGroups || null;
   const CONDITIONAL_KIND = conditionalClassifier && conditionalClassifier.KINDS
     ? conditionalClassifier.KINDS
     : {MASTER_SL:"MASTER_SL",PSL:"PSL",MASTER_TP:"MASTER_TP",PARTIAL_TP:"PARTIAL_TP",UNKNOWN:"UNKNOWN"};
@@ -163,12 +164,58 @@
   const sameQtyValue = (a,b) => normalizeQtyComparable(a) != null && normalizeQtyComparable(a) === normalizeQtyComparable(b);
   const totalMargin = () => validRows("entry").reduce((sum,row) => sum + (number(rowMargin(row).value) || 0),0);
   const clientIdOf = order => String(order && (order.clientOrderId || order.clientAlgoId || "") || "");
-  const ownedClientId = order => /^(GR_ENTRY_|GR_PROT_|GR_EXIT_)/.test(clientIdOf(order));
+  const trackedOrderMeta = order => {
+    if(!positionGroupTracker || !order) return null;
+    try{return positionGroupTracker.lookupOrderMeta(order);}catch(_e){return null;}
+  };
+  const buildTrackedPosition = position => {
+    if(!position) return null;
+    const qty = Math.abs(number(position.qty) || 0);
+    if(!(qty > 0)) return null;
+    const side = String(position.side || state.direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const ps = String(position.positionSide || "").toUpperCase();
+    return {
+      symbol:currentSymbol(),
+      side,
+      positionSide:ps === "LONG" || ps === "SHORT" ? ps : side,
+      qty,
+      entry:number(position.entry)
+    };
+  };
+  const nextTrackedClientId = (roleCode,position) => {
+    if(!positionGroupTracker) return "";
+    const trackedPosition = buildTrackedPosition(position);
+    if(!trackedPosition) return "";
+    try{
+      return positionGroupTracker.nextChildClientId({
+        symbol:trackedPosition.symbol,
+        position:trackedPosition,
+        roleCode,
+        owner:"GR"
+      }) || "";
+    }catch(_e){
+      return "";
+    }
+  };
+  const registerTrackedOrderMeta = meta => {
+    if(!positionGroupTracker || !meta) return null;
+    try{return positionGroupTracker.registerOrderMeta(meta);}catch(_e){return null;}
+  };
+  const ownedClientId = order => {
+    const clientId = clientIdOf(order);
+    if(/^(GR_ENTRY_|GR_PROT_|GR_EXIT_)/.test(clientId)) return true;
+    const tracked = trackedOrderMeta(order);
+    return !!(tracked && tracked.owner === "GR");
+  };
   const orderSection = order => {
     const id=clientIdOf(order);
     if(id.startsWith("GR_ENTRY_")) return "entry";
     if(id.startsWith("GR_PROT_")) return "protection";
     if(id.startsWith("GR_EXIT_")) return "exit";
+    const tracked = trackedOrderMeta(order);
+    if(!tracked || tracked.owner !== "GR") return null;
+    if(tracked.roleCode === "P") return "protection";
+    if(tracked.roleCode === "X") return "exit";
     return null;
   };
   const signedStatus = order => String(order && (order.status || order.orderStatus || "NEW") || "NEW").toUpperCase();
@@ -758,7 +805,11 @@
     const list=typeof getPositions==="function" ? await getPositions(key,secret,offset) : [];
     const found=(list||[]).find(row=>row&&row.symbol===currentSymbol()&&Math.abs(number(row.positionAmt)||0)>0);
     if(!found) return null;
-    return {side:number(found.positionAmt)<0||String(found.positionSide).toUpperCase()==="SHORT"?"SHORT":"LONG",qty:Math.abs(number(found.positionAmt)),entry:number(found.entryPrice),current:currentPrice(),positionSide:String(found.positionSide||"BOTH").toUpperCase()};
+    const position = {side:number(found.positionAmt)<0||String(found.positionSide).toUpperCase()==="SHORT"?"SHORT":"LONG",qty:Math.abs(number(found.positionAmt)),entry:number(found.entryPrice),current:currentPrice(),positionSide:String(found.positionSide||"BOTH").toUpperCase()};
+    if(positionGroupTracker){
+      try{ positionGroupTracker.syncPosition(currentSymbol(),position); }catch(_e){}
+    }
+    return position;
   }
   const positionFingerprint = position => position ? [currentSymbol(),position.side,fmtLot(position.qty),position.positionSide].join("|") : "none";
   function setPositionBasis(section,position){
@@ -873,7 +924,11 @@
     q("gradPreflightConfirm").parentElement.style.display=state.preflight.valid?"flex":"none";
     q("gradPreflightConfirm").disabled=!state.preflight.valid;
   }
-  function freshClientId(prefix,row){
+  function freshClientId(prefix,row,section){
+    if(section === "protection" || section === "exit"){
+      const trackedId = nextTrackedClientId(section === "protection" ? "P" : "X",state.livePosition);
+      if(trackedId) return trackedId;
+    }
     const suffix=Date.now().toString(36)+"_"+(++state.clientSeq).toString(36)+"_"+Math.random().toString(36).slice(2,7);
     const room=Math.max(1,36-prefix.length-suffix.length-2),rowPart=String(row.localRowId||"row").replace(/[^a-zA-Z0-9]/g,"").slice(-room);
     return prefix+rowPart+"_"+suffix;
@@ -886,7 +941,7 @@
       list.forEach(row=>{row.binanceOrderId=null;row.clientOrderId=null;row.status="local";});
     }
     for(let index=0;index<list.length;index++){
-      const row=list[index],clientId=freshClientId(clientPrefix(section),row);
+      const row=list[index],clientId=freshClientId(clientPrefix(section),row,section);
       let sentSide=null,sentType=null;
       if(section==="protection"){
         const side=state.livePosition.side==="SHORT"?"BUY":"SELL";
@@ -896,6 +951,18 @@
         if(["LONG","SHORT"].includes(state.livePosition.positionSide))payload.positionSide=state.livePosition.positionSide;else payload.reduceOnly="true";
         delete payload.closePosition;
         const response=await signedWrite(ALGO_URL,"POST",payload);row.binanceOrderId=response.algoId||response.orderId||null;row.clientOrderId=response.clientAlgoId||clientId;
+        registerTrackedOrderMeta({
+          symbol:currentSymbol(),
+          side,
+          positionSide:payload.positionSide || "",
+          positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientAlgoId:row.clientOrderId}) : null,
+          roleCode:"P",
+          roleType:"PSL",
+          owner:"GR",
+          algoId:row.binanceOrderId,
+          orderId:response && response.orderId != null ? response.orderId : null,
+          clientAlgoId:row.clientOrderId
+        });
       }else{
         const direction=section==="entry"?state.direction:state.livePosition.side,side=direction==="LONG"?(section==="entry"?"BUY":"SELL"):(section==="entry"?"SELL":"BUY");
         sentSide=side;sentType="LIMIT";
@@ -904,6 +971,19 @@
         let response;
         if(row.status==="modified"&&row.binanceOrderId!=null){delete payload.newClientOrderId;payload.orderId=String(row.binanceOrderId);response=await signedWrite(ORDER_URL,"PUT",payload);}else response=await signedWrite(ORDER_URL,"POST",payload);
         row.binanceOrderId=response.orderId||null;row.clientOrderId=response.clientOrderId||row.clientOrderId||clientId;
+        if(section==="exit"){
+          registerTrackedOrderMeta({
+            symbol:currentSymbol(),
+            side,
+            positionSide:payload.positionSide || "",
+            positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientOrderId:row.clientOrderId}) : null,
+            roleCode:"X",
+            roleType:"EXIT",
+            owner:"GR",
+            orderId:row.binanceOrderId,
+            clientOrderId:row.clientOrderId
+          });
+        }
       }
       Object.assign(row,{owner:OWNER,module:OWNER,section,clientOrderId:row.clientOrderId||clientId,symbol:currentSymbol(),side:sentSide,orderType:sentType,price:section==="protection"?null:fmtLevelInput(row.level),stopPrice:section==="protection"?fmtLevelInput(row.level):null,originalLot:fmtLot(row.lot),status:"sent"});
       persistRows();
@@ -982,6 +1062,7 @@
     const qty = normalizeQtyDown(newQty);
     if(qty == null || qty < 0.001) throw new Error("Protection reduce quantity is invalid.");
     if(item.isAlgo){
+      const clientAlgoId = nextTrackedClientId("P",position);
       const payload = {
         symbol:currentSymbol(),
         side:item.side,
@@ -991,9 +1072,23 @@
         triggerPrice:String(number(item.level)),
         workingType:String(item.workingType || "CONTRACT_PRICE")
       };
+      if(clientAlgoId) payload.clientAlgoId = clientAlgoId;
       if(["LONG","SHORT"].includes(position.positionSide)) payload.positionSide = position.positionSide;
       else payload.reduceOnly = "true";
-      return signedWrite(ALGO_URL,"POST",payload);
+      const response = await signedWrite(ALGO_URL,"POST",payload);
+      registerTrackedOrderMeta({
+        symbol:currentSymbol(),
+        side:item.side,
+        positionSide:payload.positionSide || "",
+        positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientAlgoId:response && response.clientAlgoId ? response.clientAlgoId : clientAlgoId}) : null,
+        roleCode:"P",
+        roleType:"PSL",
+        owner:"GR",
+        algoId:response && response.algoId != null ? response.algoId : null,
+        orderId:response && response.orderId != null ? response.orderId : null,
+        clientAlgoId:response && response.clientAlgoId ? response.clientAlgoId : clientAlgoId
+      });
+      return response;
     }
     const payload = {
       symbol:currentSymbol(),
@@ -1010,7 +1105,19 @@
     if(["LONG","SHORT"].includes(position.positionSide)) payload.positionSide = position.positionSide;
     else payload.reduceOnly = "true";
     if(item.order && item.order.workingType) payload.workingType = String(item.order.workingType);
-    return signedWrite(ORDER_URL,"POST",payload);
+    const response = await signedWrite(ORDER_URL,"POST",payload);
+    registerTrackedOrderMeta({
+      symbol:currentSymbol(),
+      side:item.side,
+      positionSide:payload.positionSide || "",
+      positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientOrderId:response && response.clientOrderId}) : null,
+      roleCode:"P",
+      roleType:"PSL",
+      owner:"GR",
+      orderId:response && response.orderId != null ? response.orderId : null,
+      clientOrderId:response && response.clientOrderId ? response.clientOrderId : ""
+    });
+    return response;
   }
   async function reduceExitItem(item,newQty){
     const qty = normalizeQtyDown(newQty);

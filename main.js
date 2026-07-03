@@ -1286,9 +1286,7 @@ function visibleClosedTradeWindowMs(){
 function renderClosedTradeStatus(){
   if(!tradeCountEl) return;
   const operational = String(closedTradesOperationalText || "").trim();
-  const summary = String(closedTradesLoadedSummaryText || "").trim();
-  const showSummary = !!(tglResults && tglResults.checked);
-  const text = operational || (showSummary ? summary : "");
+  const text = operational || "";
   tradeCountEl.textContent = text;
   tradeCountEl.style.display = text ? "inline-block" : "none";
 }
@@ -1313,34 +1311,8 @@ function closedTradesTooltipLines(){
 
 function ensureClosedTradesTooltip(){
   const label = tglResults && tglResults.closest ? tglResults.closest("label") : null;
-  if(!label || label.__closedTradesTooltipBound) return;
-  label.__closedTradesTooltipBound = true;
-  const tip = document.createElement("div");
-  tip.className = "trades-summary-tooltip";
-  document.body.appendChild(tip);
-  const render = () => {
-    tip.innerHTML = "";
-    closedTradesTooltipLines().forEach(line => {
-      const row = document.createElement("div");
-      row.className = line ? "trades-summary-tooltip-row" : "trades-summary-tooltip-gap";
-      row.textContent = line;
-      tip.appendChild(row);
-    });
-  };
-  const move = e => {
-    const pad = 12;
-    const left = Math.min(e.clientX + pad,window.innerWidth - tip.offsetWidth - 8);
-    const top = Math.min(e.clientY + pad,window.innerHeight - tip.offsetHeight - 8);
-    tip.style.left = Math.max(8,left) + "px";
-    tip.style.top = Math.max(8,top) + "px";
-  };
-  label.addEventListener("mouseenter",e => {
-    render();
-    tip.classList.add("is-visible");
-    move(e);
-  },false);
-  label.addEventListener("mousemove",move,false);
-  label.addEventListener("mouseleave",() => tip.classList.remove("is-visible"),false);
+  if(label) label.removeAttribute("title");
+  document.querySelectorAll(".trades-summary-tooltip").forEach(node => node.remove());
 }
 
 function closedTradeStatus(text,options={}){
@@ -21337,7 +21309,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   };
   const pctText = value => {
     const n = num(value);
-    return n == null ? "-" : (n > 0 ? "+" : "") + n.toFixed(2) + "%";
+    return n == null ? "N/A" : (n > 0 ? "+" : "") + n.toFixed(2) + "%";
   };
   const shortDate = value => {
     const n = num(value);
@@ -21365,9 +21337,41 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const pad = value => String(value).padStart(2,"0");
     return pad(dt.getDate()) + "/" + pad(dt.getMonth() + 1) + "/" + dt.getFullYear();
   };
+  const WF_GREEN = "#047857";
+  const WF_RED = "#7f1d1d";
+  const WF_BLACK = "#1e2329";
 
   let visible = false;
   let hoverTradeIndex = null;
+  let lastModel = null;
+
+  function profitRatioCell(value){
+    const n = num(value);
+    if(!(n >= 0)) return {text:"N/A",cls:"is-na"};
+    if(n < 1) return {text:n.toFixed(2),cls:"is-bad"};
+    if(n < 1.25) return {text:n.toFixed(2),cls:"is-neutral"};
+    if(n < 1.5) return {text:n.toFixed(2),cls:"is-amber"};
+    if(n < 2) return {text:n.toFixed(2),cls:"is-good"};
+    return {text:n.toFixed(2),cls:"is-strong"};
+  }
+  function wfPnlColor(value){
+    const n = num(value);
+    if(n == null || Math.abs(n) < 1e-12) return WF_BLACK;
+    return n > 0 ? WF_GREEN : WF_RED;
+  }
+  function wfLineText(line){
+    return Array.isArray(line) ? line.map(part => String(part && part.text || "")).join("") : String(line || "");
+  }
+  function wfDurationText(startValue,endValue){
+    const start = num(startValue);
+    const end = num(endValue);
+    if(start == null || end == null || end < start) return "00:00";
+    const diffMs = start > 1e12 || end > 1e12 ? (end - start) : (end - start) * 1000;
+    const totalMinutes = Math.max(0,Math.floor(diffMs / 60000));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return String(hours).padStart(2,"0") + ":" + String(minutes).padStart(2,"0");
+  }
 
   function ensureToggle(){
     let input = q("tglWaterfall");
@@ -21567,14 +21571,59 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       const fees = (trade.links && trade.links.length)
         ? trade.links.reduce((sum,link) => sum + closedTradeSignedFeeValue(link && (link.fees ?? link.fee)),0)
         : (trade.exits || []).reduce((sum,marker) => sum + closedTradeSignedFeeValue(marker && marker.fee),0);
-      const net = (num(realized) || 0) + (num(fees) || 0);
-      const fundingDelta = (num(trade && trade.netTotal) || 0) - net;
+      const fundingDelta = (num(trade && trade.netTotal) || 0) - ((num(realized) || 0) + (num(fees) || 0));
+      const net = (num(realized) || 0) + (num(fees) || 0) + (num(fundingDelta) || 0);
+      const firstEntryTime = num(trade && trade.entries && trade.entries[0] && trade.entries[0].time);
+      const finalExitTime = num(trade && trade.finalExit && trade.finalExit.time);
+      const dir = String(trade && trade.entries && trade.entries[0] && trade.entries[0].side || "").toUpperCase() === "SHORT" ? "S" : "L";
+      const dirText = dir === "S" ? "Short" : "Long";
+      const tooltipLines = [
+        "Direction: " + dirText,
+        "Duration: " + wfDurationText(firstEntryTime,finalExitTime)
+      ];
+      if(trade.entries && trade.entries.length){
+        tooltipLines.push("Entries (" + trade.entries.length + "):");
+        trade.entries.forEach(marker => {
+          const entryPnl = (trade.links || [])
+            .filter(link => link && link.entryMarkerId === marker.id)
+            .reduce((sum,link) => sum + closedTradeNumber(link && link.netPnl),0);
+          tooltipLines.push([
+            {text:(marker.letter || "E") + " " + fq(marker.qty) + " | ",color:WF_BLACK},
+            {text:fm(entryPnl),color:wfPnlColor(entryPnl),bold:true}
+          ]);
+        });
+      }
+      if(trade.exits && trade.exits.length){
+        tooltipLines.push("Exits (" + trade.exits.length + "):");
+        trade.exits.forEach(marker => {
+          const exitLinks = (trade.links || []).filter(link => link && link.exitMarkerId === marker.id);
+          const exitPnl = exitLinks.length
+            ? exitLinks.reduce((sum,link) => sum + closedTradeNumber(link && link.netPnl),0)
+            : closedTradeNumber(marker && (marker.binanceRealizedPnl ?? marker.realizedPnl ?? marker.pnl));
+          tooltipLines.push([
+            {text:(marker.letter || (marker.isFinalExit ? "EX" : "P")) + " " + fq(marker.qty) + " | ",color:WF_BLACK},
+            {text:fm(exitPnl),color:wfPnlColor(exitPnl),bold:true}
+          ]);
+        });
+      }
+      tooltipLines.push("");
+      tooltipLines.push([{text:"Closing PnL | ",color:WF_BLACK},{text:fm(realized),color:wfPnlColor(realized),bold:true}]);
+      tooltipLines.push([{text:"Trading Fee | ",color:WF_BLACK},{text:fm(fees),color:wfPnlColor(fees),bold:true}]);
+      tooltipLines.push([{text:"Funding Fee | ",color:WF_BLACK},{text:fm(fundingDelta),color:wfPnlColor(fundingDelta),bold:true}]);
+      tooltipLines.push("");
+      tooltipLines.push([{text:"Net P/L | ",color:WF_BLACK},{text:fm(net),color:wfPnlColor(net),bold:true}]);
       return {
         id: trade.parentId || ("wf_" + index),
         index,
         when: shortDate(trade.finalExit && trade.finalExit.time),
         net,
+        realized,
+        fees,
         fundingDelta,
+        dir,
+        tooltipLines,
+        finalExit:trade.finalExit || null,
+        links:trade.links || [],
         finalExitTime: num(trade.finalExit && trade.finalExit.time),
         markerId: trade.finalExit && trade.finalExit.id ? trade.finalExit.id : null,
         start:0,
@@ -21608,13 +21657,17 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
     const endBalance = num(accountBalanceState);
     const startBalance = endBalance == null ? null : endBalance - selectedNet;
+    const validStartBalance = startBalance != null && startBalance > 0 ? startBalance : null;
     const wins = trades.filter(trade => trade.net > 0);
     const losses = trades.filter(trade => trade.net < 0);
     const totalWin = wins.reduce((sum,trade) => sum + trade.net,0);
     const totalLoss = losses.reduce((sum,trade) => sum + trade.net,0);
     const largestWin = wins.length ? Math.max(...wins.map(trade => trade.net)) : null;
     const largestLoss = losses.length ? Math.min(...losses.map(trade => trade.net)) : null;
-    const returnPct = startBalance && Math.abs(startBalance) > 1e-9 ? (selectedNet / startBalance) * 100 : null;
+    const grossWins = wins.reduce((sum,trade) => sum + Math.max(0,num(trade.net) || 0),0);
+    const grossLosses = losses.reduce((sum,trade) => sum + Math.abs(Math.min(0,num(trade.net) || 0)),0);
+    const profitRatio = grossLosses > 0 ? grossWins / grossLosses : null;
+    const returnPct = validStartBalance ? (selectedNet / validStartBalance) * 100 : null;
     const note = Math.abs(fundingExcluded) > 1e-9 ? "Trade-only; excludes transfers/unallocated funding" : "";
     const average = trades.length ? selectedNet / trades.length : null;
     const values = [0].concat(trades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
@@ -21650,8 +21703,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       largestLoss,
       totalWin,
       totalLoss,
+      profitRatio,
       selectedNet,
-      startBalance,
+      startBalance:validStartBalance,
       endBalance,
       returnPct,
       note,
@@ -21666,13 +21720,24 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function renderSummary(model){
     const table = q("wfSummaryTable");
     if(!table) return;
-    table.innerHTML = `<thead>
+    const ratio = profitRatioCell(model.profitRatio);
+    table.innerHTML = `<colgroup>
+        <col>
+        <col>
+        <col>
+        <col>
+        <col>
+        <col>
+        <col class="wf-return-col">
+      </colgroup>
+      <thead>
         <tr>
           <th></th>
           <th>Count</th>
           <th>Average</th>
           <th>Largest</th>
           <th>Total</th>
+          <th>Profit Ratio</th>
           <th class="wf-return-head">Return %</th>
         </tr>
       </thead>
@@ -21683,10 +21748,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           <td>${money(model.averageWin)}</td>
           <td>${money(model.largestWin)}</td>
           <td>${money(model.totalWin)}</td>
+          <td class="wf-ratio-cell ${ratio.cls}" rowspan="2">${ratio.text}</td>
           <td class="wf-return-cell" rowspan="2">${pctText(model.returnPct)}</td>
         </tr>
         <tr>
-          <th>Loss</th>
+          <th>Losses</th>
           <td>${model.losses}</td>
           <td>${money(model.averageLoss)}</td>
           <td>${money(model.largestLoss)}</td>
@@ -21756,7 +21822,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
       return `<div class="wf-bar-col">
-          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"></div>
+          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"><span class="wf-bar-dir">${trade.dir}</span></div>
           ${connector}
         </div>`;
     }).join("");
@@ -21767,31 +21833,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
 
   function wfTooltipLines(trade){
-    if(!trade || !trade.markerId) return [];
-    const marker = Array.isArray(resultMarkers) ? resultMarkers.find(item => item && item.id === trade.markerId) : null;
-    if(!marker) return [];
-    const lines = [
-      marker.role === "entry"
-        ? (marker.side === "SHORT" ? "Short entry/fill" : "Long entry/fill")
-        : (marker.unresolved ? "Unresolved/carry-in close" : "Close/reduce fill"),
-      "Size: " + fq(marker.qty) + " BTC",
-      "Price: " + p2(marker.price)
-    ];
-    if(marker.role === "close"){
-      const closeLinks = Array.isArray(resultLinks) ? resultLinks.filter(l => l.exitMarkerId === marker.id) : [];
-      const closePnl = closeLinks.length ? closeLinks.reduce((a,l) => a + Number(l.netPnl || 0),0) : marker.pnl;
-      lines.push("P/L part: " + fm(closePnl));
-    }
-    lines.push("Time: " + ft(marker.time));
-    if(String(marker.letter || "").toUpperCase() === "EX"){
-      const entryLines = typeof getExitEntryContributionLines === "function" ? getExitEntryContributionLines(marker.id) : [];
-      if(entryLines.length){
-        lines.push("Entries:");
-        lines.push(...entryLines);
-      }
-    }
-    if(marker.note) lines.push(marker.note);
-    return lines;
+    return trade && Array.isArray(trade.tooltipLines) ? trade.tooltipLines.slice() : [];
   }
 
   function renderHover(event){
@@ -21802,14 +21844,19 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       tip.innerHTML = "";
       return;
     }
-    const trade = buildViewModel().trades[hoverTradeIndex];
+    const trade = lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[hoverTradeIndex] : null;
     const lines = wfTooltipLines(trade);
     if(!lines.length || !event){
       tip.classList.add("hidden");
       tip.innerHTML = "";
       return;
     }
-    tip.innerHTML = lines.map(line => `<div>${String(line)}</div>`).join("");
+    tip.innerHTML = lines.map(line => {
+      if(Array.isArray(line)){
+        return `<div>${line.map(part => `<span class="${part && part.bold ? "wf-tip-bold" : ""}" style="color:${String(part && part.color || WF_BLACK)}">${String(part && part.text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</span>`).join("")}</div>`;
+      }
+      return `<div>${String(line).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</div>`;
+    }).join("");
     const win = ensureWindow();
     const rect = win.getBoundingClientRect();
     let left = event.clientX - rect.left + 14;
@@ -21826,6 +21873,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const win = ensureWindow();
     if(!win || !visible) return;
     const model = buildViewModel();
+    lastModel = model;
     renderSummary(model);
     renderChart(model);
     renderHover();

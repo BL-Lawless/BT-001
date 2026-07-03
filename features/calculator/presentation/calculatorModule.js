@@ -14,6 +14,7 @@
   const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
   const AUTO_SYNC_POLL_MS = 2000;
   const AUTO_SYNC_DEBOUNCE_MS = 800;
+  const FLAT_CLEANUP_CONFIRM_MS = 700;
   const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1200;
   const OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS = [0,1,2,5];
   const OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS = [
@@ -24,6 +25,7 @@
   ];
   const CALC_OWNED_REFRESH_SOURCES = new Set(["preflightRead","sendConfirm","postSendRefresh","resultWindowClose"]);
   const conditionalClassifier = window.BinanceConditionalOrderClassifier || null;
+  const positionGroupTracker = window.BT001PositionGroups || null;
   const CONDITIONAL_KIND = conditionalClassifier && conditionalClassifier.KINDS
     ? conditionalClassifier.KINDS
     : {MASTER_SL:"MASTER_SL",PSL:"PSL",MASTER_TP:"MASTER_TP",PARTIAL_TP:"PARTIAL_TP",UNKNOWN:"UNKNOWN"};
@@ -131,12 +133,24 @@
     if(n == null) return "$-";
     return (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
   }
+  function wait(ms){
+    return new Promise(resolve => setTimeout(resolve,Math.max(0,Number(ms) || 0)));
+  }
   function floorToLotStep(value){
     const n = num(value);
     if(n == null || n <= 0) return 0;
     return Math.floor((n + 1e-12) * 1000) / 1000;
   }
   function freshOpenPositionCloseClientId(){
+    const reference = currentOpenPositionRowSnapshot() || (lastReadStateSnapshot && lastReadStateSnapshot.openPosition) || null;
+    if(positionGroupTracker && reference){
+      const clientId = positionGroupTracker.nextChildClientId({
+        symbol:currentSymbol(),
+        position:reference,
+        roleCode:"C"
+      });
+      if(clientId) return clientId;
+    }
     const prefix = "OTF_CLOSE_";
     const suffix = Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
     const symbolPart = String(currentSymbol() || "SYM").replace(/[^a-zA-Z0-9]/g,"").slice(-8);
@@ -337,6 +351,17 @@
     openPositionCloseChs.orderId = resp && resp.orderId != null ? resp.orderId : null;
     openPositionCloseChs.clientOrderId = resp && resp.clientOrderId ? String(resp.clientOrderId) : clientId;
     openPositionCloseChs.price = String(send.price);
+    registerTrackedOrderMeta({
+      symbol:send.symbol,
+      side:send.side,
+      positionSide:send.positionSide || "",
+      positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientOrderId:openPositionCloseChs.clientOrderId}) : null,
+      roleCode:"C",
+      roleType:"CHASE_CLOSE",
+      owner:"CALC",
+      orderId:resp && resp.orderId != null ? resp.orderId : null,
+      clientOrderId:openPositionCloseChs.clientOrderId
+    });
     return resp;
   }
   async function cancelOpenPositionCloseChsOrderOnly(){
@@ -735,6 +760,7 @@
     if(!container) return;
     const openRows = rows("calcModuleEntryRows").filter(isOpenPositionRow);
     if(position){
+      syncPositionGroup(position);
       setDirection(position.side);
       let row = openRows.shift() || null;
       openRows.forEach(extra => extra.remove());
@@ -2332,6 +2358,76 @@
   function toUpper(v){
     return String(v == null ? "" : v).toUpperCase();
   }
+  function syncPositionGroup(positionLike){
+    if(!positionGroupTracker || !positionLike) return null;
+    try{
+      return positionGroupTracker.syncPosition(currentSymbol(),positionLike);
+    }catch(_e){
+      return null;
+    }
+  }
+  function activePositionGroup(){
+    if(!positionGroupTracker) return null;
+    try{
+      return positionGroupTracker.getActiveGroup(currentSymbol());
+    }catch(_e){
+      return null;
+    }
+  }
+  function retiredPositionGroup(){
+    if(!positionGroupTracker) return null;
+    try{
+      return positionGroupTracker.getRetiredGroup(currentSymbol());
+    }catch(_e){
+      return null;
+    }
+  }
+  function buildTrackedPositionReference(positionLike,contextDirection,positionSide){
+    const pos = positionLike || currentOpenPositionRowSnapshot() || (lastReadStateSnapshot && lastReadStateSnapshot.openPosition) || null;
+    const qty = Math.abs(num(pos && pos.qty) || 0);
+    if(!(qty > 0)) return null;
+    const side = toUpper(pos && pos.side || contextDirection || direction) === "SHORT" ? "SHORT" : "LONG";
+    const ps = toUpper(positionSide || pos && pos.positionSide || "");
+    return {
+      symbol:currentSymbol(),
+      side,
+      positionSide:ps === "LONG" || ps === "SHORT" ? ps : side,
+      qty,
+      entry:num(pos && pos.entry)
+    };
+  }
+  function nextTrackedChildClientId(roleCode,options){
+    if(!positionGroupTracker) return "";
+    const opts = options || {};
+    const position = buildTrackedPositionReference(opts.position,opts.contextDirection,opts.positionSide);
+    if(!position) return "";
+    try{
+      return positionGroupTracker.nextChildClientId({
+        symbol:position.symbol,
+        position,
+        roleCode,
+        owner:"CALC"
+      }) || "";
+    }catch(_e){
+      return "";
+    }
+  }
+  function lookupTrackedOrderMeta(orderLike){
+    if(!positionGroupTracker || !orderLike) return null;
+    try{
+      return positionGroupTracker.lookupOrderMeta(orderLike);
+    }catch(_e){
+      return null;
+    }
+  }
+  function registerTrackedOrderMeta(metaLike){
+    if(!positionGroupTracker || !metaLike) return null;
+    try{
+      return positionGroupTracker.registerOrderMeta(metaLike);
+    }catch(_e){
+      return null;
+    }
+  }
   function safeCloneOrder(order){
     if(order == null || typeof order !== "object") return order;
     if(typeof structuredClone === "function"){
@@ -2385,6 +2481,7 @@
     return fallbackDirection === "SHORT" ? "SHORT" : "LONG";
   }
   function buildLimitOrderMeta(order){
+    const tracked = lookupTrackedOrderMeta(order);
     return {
       orderId:order && order.orderId != null ? order.orderId : null,
       clientOrderId:order && order.clientOrderId != null ? order.clientOrderId : null,
@@ -2400,11 +2497,16 @@
       reduceOnly:order && order.reduceOnly != null ? order.reduceOnly : null,
       workingType:order && order.workingType != null ? order.workingType : null,
       updateTime:order && order.updateTime != null ? order.updateTime : null,
+      positionGroupId:tracked && tracked.positionGroupId ? tracked.positionGroupId : null,
+      orderRoleCode:tracked && tracked.roleCode ? tracked.roleCode : null,
+      orderRoleType:tracked && tracked.roleType ? tracked.roleType : null,
+      orderOwner:tracked && tracked.owner ? tracked.owner : null,
       rawOrder:safeCloneOrder(order)
     };
   }
   function buildAlgoOrderMeta(order){
     const classified = classifyConditionalOrder(order);
+    const tracked = lookupTrackedOrderMeta(order);
     return {
       algoId:order && order.algoId != null ? order.algoId : null,
       clientAlgoId:order && order.clientAlgoId != null ? order.clientAlgoId : null,
@@ -2420,6 +2522,10 @@
       reduceOnly:order && order.reduceOnly != null ? order.reduceOnly : null,
       workingType:order && order.workingType != null ? order.workingType : null,
       updateTime:order && order.updateTime != null ? order.updateTime : null,
+      positionGroupId:tracked && tracked.positionGroupId ? tracked.positionGroupId : null,
+      orderRoleCode:tracked && tracked.roleCode ? tracked.roleCode : null,
+      orderRoleType:tracked && tracked.roleType ? tracked.roleType : null,
+      orderOwner:tracked && tracked.owner ? tracked.owner : null,
       rawOrder:safeCloneOrder(order)
     };
   }
@@ -4364,8 +4470,16 @@
     if(!cleanupPositionSideMatches(order,target)) return false;
     const classified = classifyConditionalOrder(order);
     if(classified.kind === CONDITIONAL_KIND.MASTER_SL || classified.kind === CONDITIONAL_KIND.PSL) return true;
+    if(classified.closePosition || isReduceOnly(order)) return true;
+    if(isLegacyAppCloseOrder(order)) return true;
+    const tracked = lookupTrackedOrderMeta(order);
+    if(tracked && ["PSL","MASTER_SL","EXIT","CHASE_CLOSE"].includes(String(tracked.roleType || ""))) return true;
     const typeText = toUpper(order && (order.type || order.origType || order.orderType || order.algoType || ""));
-    return typeText.includes("STOP");
+    return typeText.includes("TAKE_PROFIT");
+  }
+  function isLegacyAppCloseOrder(order){
+    const clientId = String(order && (order.clientOrderId || order.clientAlgoId || "") || "").trim();
+    return /^(GR_EXIT_|GR_PROT_|OTF_CLOSE_)/.test(clientId);
   }
   function isExitLimitForCleanup(order,target){
     if(!order || !target) return false;
@@ -4373,8 +4487,9 @@
     if(!isLiveOrder(order) || !isLimitOrder(order)) return false;
     if(!cleanupPositionSideMatches(order,target)) return false;
     if(isReduceOnly(order)) return true;
-    const side = toUpper(order.side);
-    return target.side === "SHORT" ? side === "BUY" : side === "SELL";
+    if(isLegacyAppCloseOrder(order)) return true;
+    const tracked = lookupTrackedOrderMeta(order);
+    return !!(tracked && tracked.positionGroupId && tracked.roleType === "EXIT");
   }
   function isSameDirectionClosePositionConditional(order,target){
     if(!order || !target) return false;
@@ -4413,55 +4528,135 @@
     }
     flatCleanupInFlight = true;
     try{
+      await wait(FLAT_CLEANUP_CONFIRM_MS);
       const confirmedPosition = await signedPosition();
       if(confirmedPosition){
         clearFlatCleanupSignature();
         return {snapshot:snapshot || null,position:confirmedPosition,attempted:false,reappeared:true};
       }
+      const retired = positionGroupTracker
+        ? positionGroupTracker.retireActiveGroup(currentSymbol(),{
+          reason:"flat-cleanup",
+          side:target.side,
+          positionSide:target.positionSide
+        })
+        : null;
+      const retiredGroupId = retired && retired.positionGroupId ? String(retired.positionGroupId) : String((retiredPositionGroup() && retiredPositionGroup().positionGroupId) || "");
+      if(retiredGroupId && positionGroupTracker && positionGroupTracker.cleanupHandled(currentSymbol(),retiredGroupId)){
+        lastFlatCleanupSignature = signature;
+        return {snapshot:snapshot || null,position:null,attempted:false,retiredGroupId};
+      }
       let liveSnapshot = snapshot;
       if(!liveSnapshot || liveSnapshot.normalFetchError || liveSnapshot.algoFetchError){
         liveSnapshot = await readOpenOrdersSnapshot();
       }
+      const taggedAlgoCancels = [];
+      const taggedNormalCancels = [];
       const algoCancels = [];
       const normalCancels = [];
+      const logRows = [];
+      const seenKeys = new Set();
+      const rememberCancel = (bucket,item) => {
+        const key = JSON.stringify(item.send || {});
+        if(seenKeys.has(key)) return;
+        seenKeys.add(key);
+        bucket.push(item);
+      };
+      const trackedGroupId = order => {
+        const tracked = lookupTrackedOrderMeta(order);
+        return tracked && tracked.positionGroupId ? String(tracked.positionGroupId) : "";
+      };
+      const trackedRoleType = order => {
+        const tracked = lookupTrackedOrderMeta(order);
+        return tracked && tracked.roleType ? String(tracked.roleType) : "";
+      };
       (liveSnapshot && liveSnapshot.algoOrders || []).forEach(order => {
+        const groupId = trackedGroupId(order);
+        if(retiredGroupId && groupId === retiredGroupId){
+          rememberCancel(taggedAlgoCancels,{
+            kind:trackedRoleType(order) || "Tagged algo",
+            send:{
+              symbol:String(target.symbol || currentSymbol()),
+              algoId:order && order.algoId != null ? String(order.algoId) : null,
+              clientAlgoId:order && order.clientAlgoId != null ? String(order.clientAlgoId) : ""
+            },
+            detail:{
+              type:String(order && (order.type || order.orderType || order.algoType || "") || ""),
+              clientId:String(order && (order.clientAlgoId || order.clientOrderId || "") || ""),
+              groupId
+            }
+          });
+          return;
+        }
         if(isProtectiveStopForCleanup(order,target)){
-          algoCancels.push({
+          rememberCancel(algoCancels,{
             kind:"Protective stop",
             send:{
               symbol:String(target.symbol || currentSymbol()),
               algoId:order && order.algoId != null ? String(order.algoId) : null,
               clientAlgoId:order && order.clientAlgoId != null ? String(order.clientAlgoId) : ""
+            },
+            detail:{
+              type:String(order && (order.type || order.orderType || order.algoType || "") || ""),
+              clientId:String(order && (order.clientAlgoId || order.clientOrderId || "") || ""),
+              groupId
             }
           });
         }
       });
       (liveSnapshot && liveSnapshot.normalOrders || []).forEach(order => {
+        const groupId = trackedGroupId(order);
+        if(retiredGroupId && groupId === retiredGroupId){
+          rememberCancel(taggedNormalCancels,{
+            kind:trackedRoleType(order) || "Tagged order",
+            send:{
+              symbol:String(target.symbol || currentSymbol()),
+              orderId:order && order.orderId != null ? String(order.orderId) : null,
+              origClientOrderId:order && order.clientOrderId != null ? String(order.clientOrderId) : ""
+            },
+            detail:{
+              type:String(order && (order.type || order.orderType || "") || ""),
+              clientId:String(order && order.clientOrderId != null ? order.clientOrderId : ""),
+              groupId
+            }
+          });
+          return;
+        }
         if(isProtectiveStopForCleanup(order,target)){
-          normalCancels.push({
+          rememberCancel(normalCancels,{
             kind:"Protective stop",
             send:{
               symbol:String(target.symbol || currentSymbol()),
               orderId:order && order.orderId != null ? String(order.orderId) : null,
               origClientOrderId:order && order.clientOrderId != null ? String(order.clientOrderId) : ""
+            },
+            detail:{
+              type:String(order && (order.type || order.orderType || "") || ""),
+              clientId:String(order && order.clientOrderId != null ? order.clientOrderId : ""),
+              groupId
             }
           });
           return;
         }
         if(isExitLimitForCleanup(order,target)){
-          normalCancels.push({
+          rememberCancel(normalCancels,{
             kind:"Exit LIMIT",
             send:{
               symbol:String(target.symbol || currentSymbol()),
               orderId:order && order.orderId != null ? String(order.orderId) : null,
               origClientOrderId:order && order.clientOrderId != null ? String(order.clientOrderId) : ""
+            },
+            detail:{
+              type:String(order && (order.type || order.orderType || "") || ""),
+              clientId:String(order && order.clientOrderId != null ? order.clientOrderId : ""),
+              groupId
             }
           });
         }
       });
       let cancelled = 0;
       let failed = 0;
-      for(const item of algoCancels){
+      for(const item of [].concat(taggedAlgoCancels,algoCancels)){
         try{
           const send = {symbol:item.send.symbol};
           if(item.send.algoId) send.algoId = item.send.algoId;
@@ -4469,11 +4664,12 @@
           else continue;
           await signedAlgoOrderWrite("DELETE",send);
           cancelled++;
+          logRows.push("algo " + item.kind + " " + (item.detail && item.detail.type ? item.detail.type : "-") + " " + (item.detail && item.detail.clientId ? item.detail.clientId : "-"));
         }catch(_e){
           failed++;
         }
       }
-      for(const item of normalCancels){
+      for(const item of [].concat(taggedNormalCancels,normalCancels)){
         try{
           const send = {symbol:item.send.symbol};
           if(item.send.orderId) send.orderId = item.send.orderId;
@@ -4481,19 +4677,38 @@
           else continue;
           await signedOrderWrite("DELETE",send);
           cancelled++;
+          logRows.push("order " + item.kind + " " + (item.detail && item.detail.type ? item.detail.type : "-") + " " + (item.detail && item.detail.clientId ? item.detail.clientId : "-"));
         }catch(_e){
           failed++;
         }
       }
       lastFlatCleanupSignature = signature;
-      const refreshedSnapshot = (algoCancels.length || normalCancels.length || !liveSnapshot)
+      if(retiredGroupId && positionGroupTracker) positionGroupTracker.markCleanupHandled(currentSymbol(),retiredGroupId);
+      const refreshedSnapshot = (taggedAlgoCancels.length || taggedNormalCancels.length || algoCancels.length || normalCancels.length || !liveSnapshot)
         ? await readOpenOrdersSnapshot()
         : liveSnapshot;
       if(cancelled || failed){
-        const summary = "Flat position confirmed. Auto-cleanup " + (failed ? "completed with failures" : "completed") + ". Cancelled " + cancelled + " orphan order(s)" + (failed ? "; " + failed + " failed." : ".");
+        const summary = failed
+          ? "Position closed \u2014 protective order cleanup finished with failures. Cleared " + cancelled + " order(s); " + failed + " failed."
+          : "Position closed \u2014 protective orders cleared";
         setStatus(summary);
       }
-      return {snapshot:refreshedSnapshot,position:null,attempted:!!(algoCancels.length || normalCancels.length),cancelled,failed};
+      if(logRows.length) console.info(MODULE + " flat cleanup",{
+        symbol:target.symbol,
+        positionGroupId:retiredGroupId || "",
+        cancelled:logRows
+      });
+      if(window.GRAD_CALCULATOR && typeof window.GRAD_CALCULATOR.readSection === "function"){
+        try{
+          const ownedRows = typeof window.GRAD_CALCULATOR.getOwnedRows === "function" ? window.GRAD_CALCULATOR.getOwnedRows() : [];
+          const hasRelevant = Array.isArray(ownedRows) && ownedRows.some(row => row && (row.section === "protection" || row.section === "exit"));
+          if(hasRelevant){
+            await window.GRAD_CALCULATOR.readSection("protection");
+            await window.GRAD_CALCULATOR.readSection("exit");
+          }
+        }catch(_e){}
+      }
+      return {snapshot:refreshedSnapshot,position:null,attempted:!!(taggedAlgoCancels.length || taggedNormalCancels.length || algoCancels.length || normalCancels.length),cancelled,failed,retiredGroupId};
     }finally{
       flatCleanupInFlight = false;
     }
@@ -5467,6 +5682,17 @@
     if(response && response.price != null) merged.price = response.price;
     if(!merged.symbol) merged.symbol = currentSymbol();
     if(!merged.type) merged.type = "LIMIT";
+    registerTrackedOrderMeta({
+      symbol:merged.symbol,
+      side:merged.side,
+      positionSide:merged.positionSide,
+      positionGroupId:merged.positionGroupId,
+      roleCode:merged.orderRoleCode || (merged.reduceOnly === true || String(merged.reduceOnly).toLowerCase() === "true" ? "X" : ""),
+      roleType:merged.orderRoleType || "EXIT",
+      owner:merged.orderOwner || "CALC",
+      orderId:merged.orderId,
+      clientOrderId:merged.clientOrderId
+    });
     const meta = buildLimitOrderMeta(merged);
     applyRowSourceAndMeta(row,{
       source:"binance-limit",
@@ -5487,6 +5713,19 @@
     if(!merged.algoType) merged.algoType = "CONDITIONAL";
     if(merged.triggerPrice == null && base.triggerPrice != null) merged.triggerPrice = base.triggerPrice;
     if(merged.origQty == null && base.quantity != null) merged.origQty = base.quantity;
+    registerTrackedOrderMeta({
+      symbol:merged.symbol,
+      side:merged.side,
+      positionSide:merged.positionSide,
+      positionGroupId:merged.positionGroupId,
+      roleCode:merged.orderRoleCode || "P",
+      roleType:merged.orderRoleType || "PSL",
+      owner:merged.orderOwner || "CALC",
+      algoId:merged.algoId,
+      orderId:merged.orderId,
+      clientAlgoId:merged.clientAlgoId,
+      clientOrderId:merged.clientOrderId
+    });
     const meta = buildAlgoOrderMeta(merged);
     applyPartialStopSourceAndMeta(row,{
       source:"binance-partial-stop",
@@ -5518,6 +5757,15 @@
     }
     if(rowPlan.mode === "psl-create"){
       const p = rowPlan.payload || {};
+      const clientAlgoId = nextTrackedChildClientId("P",{
+        position:buildTrackedPositionReference({
+          side:toUpper(p.positionSide || "") === "SHORT" ? "SHORT" : "LONG",
+          positionSide:toUpper(p.positionSide || ""),
+          qty:p.quantity
+        },contextDirection,p.positionSide),
+        contextDirection,
+        positionSide:p.positionSide
+      });
       const send = {
         symbol:String(p.symbol || currentSymbol()),
         side:String(p.side || ""),
@@ -5527,6 +5775,7 @@
         triggerPrice:String(Number(p.triggerPrice)),
         workingType:String(p.workingType || "CONTRACT_PRICE")
       };
+      if(clientAlgoId) send.clientAlgoId = clientAlgoId;
       const ps = toUpper(p.positionSide || "");
       if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
       if(!send.positionSide || send.positionSide === "BOTH") send.reduceOnly = "true";
@@ -5540,13 +5789,27 @@
         triggerPrice:send.triggerPrice,
         origQty:send.quantity,
         quantity:send.quantity,
-        workingType:send.workingType
+        workingType:send.workingType,
+        clientAlgoId:send.clientAlgoId || "",
+        positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientAlgoId:send.clientAlgoId}) : null,
+        orderRoleCode:"P",
+        orderRoleType:"PSL",
+        orderOwner:"CALC"
       });
       const meta = rowPlan.rowRef && rowPlan.rowRef.__binancePartialStopMeta ? rowPlan.rowRef.__binancePartialStopMeta : null;
       return {ok:true,response:resp,blinkKey:partialStopKeyFromMeta(meta,send.side)};
     }
     if(rowPlan.mode === "sl-create"){
       const p = rowPlan.payload || {};
+      const clientAlgoId = nextTrackedChildClientId("M",{
+        position:buildTrackedPositionReference({
+          side:toUpper(p.positionSide || "") === "SHORT" ? "SHORT" : "LONG",
+          positionSide:toUpper(p.positionSide || ""),
+          qty:1
+        },contextDirection,p.positionSide),
+        contextDirection,
+        positionSide:p.positionSide
+      });
       const send = {
         symbol:String(p.symbol || currentSymbol()),
         side:String(p.side || ""),
@@ -5556,6 +5819,7 @@
         triggerPrice:String(Number(p.triggerPrice)),
         workingType:String(p.workingType || "CONTRACT_PRICE")
       };
+      if(clientAlgoId) send.clientAlgoId = clientAlgoId;
       const ps = toUpper(p.positionSide || "");
       if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
       if(p.replaceAfterCancel){
@@ -5581,8 +5845,25 @@
         algoType:send.algoType,
         triggerPrice:send.triggerPrice,
         closePosition:"true",
-        workingType:send.workingType
+        workingType:send.workingType,
+        clientAlgoId:send.clientAlgoId || "",
+        positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientAlgoId:send.clientAlgoId}) : null,
+        orderRoleCode:"M",
+        orderRoleType:"MASTER_SL",
+        orderOwner:"CALC"
       },resp || {}));
+      registerTrackedOrderMeta({
+        symbol:send.symbol,
+        side:send.side,
+        positionSide:send.positionSide || "",
+        positionGroupId:currentStopAlgoMeta && currentStopAlgoMeta.positionGroupId,
+        roleCode:"M",
+        roleType:"MASTER_SL",
+        owner:"CALC",
+        algoId:currentStopAlgoMeta && currentStopAlgoMeta.algoId,
+        orderId:currentStopAlgoMeta && currentStopAlgoMeta.orderId,
+        clientAlgoId:currentStopAlgoMeta && currentStopAlgoMeta.clientAlgoId
+      });
       masterStopDraftDirty = false;
       const blinkKey = orderKeyFromMeta(currentStopAlgoMeta);
       return {ok:true,response:resp,blinkKey};
@@ -5630,6 +5911,14 @@
         price:String(Number(p.level)),
         timeInForce:"GTC"
       };
+      if(String(p.rowType || "") === "exit"){
+        const clientOrderId = nextTrackedChildClientId("X",{
+          position:buildTrackedPositionReference(rowPlan.livePosition || null,contextDirection,ps),
+          contextDirection,
+          positionSide:ps
+        });
+        if(clientOrderId) send.newClientOrderId = clientOrderId;
+      }
       if(ps && ps !== "BOTH") send.positionSide = ps;
       if(p.reduceOnlyOverride === true) send.reduceOnly = "true";
       else if(p.reduceOnlyOverride === false) send.reduceOnly = "false";
@@ -5641,7 +5930,12 @@
         type:"LIMIT",
         price:send.price,
         origQty:send.quantity,
-        timeInForce:send.timeInForce
+        timeInForce:send.timeInForce,
+        clientOrderId:send.newClientOrderId || "",
+        positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientOrderId:send.newClientOrderId}) : null,
+        orderRoleCode:String(p.rowType || "") === "exit" ? "X" : "",
+        orderRoleType:String(p.rowType || "") === "exit" ? "EXIT" : "",
+        orderOwner:String(p.rowType || "") === "exit" ? "CALC" : ""
       });
       const meta = rowPlan.rowRef && rowPlan.rowRef.__binanceLimitOrderMeta ? rowPlan.rowRef.__binanceLimitOrderMeta : null;
       return {ok:true,response:resp,blinkKey:orderKeyFromMeta(meta)};
@@ -6434,6 +6728,10 @@
         : {pos:await signedPosition() || openBoxPosition()}).pos;
       unlockEntryRows();
       if(pos){
+        const groupSync = syncPositionGroup(pos);
+        if(groupSync && groupSync.active && groupSync.created && positionGroupTracker){
+          positionGroupTracker.clearCleanupHandled(currentSymbol());
+        }
         clearFlatCleanupSignature();
         diag.positionSource = pos.source || null;
         diag.positionSide = pos.side || null;
@@ -6467,6 +6765,7 @@
           const cleanup = await autoCleanupFlatPositionOrphans(previousLivePosition,snapshot,{source});
           if(cleanup && cleanup.position){
             pos = cleanup.position;
+            syncPositionGroup(pos);
             clearFlatCleanupSignature();
             diag.positionSource = pos.source || null;
             diag.positionSide = pos.side || null;
