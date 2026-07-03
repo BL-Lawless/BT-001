@@ -22517,5 +22517,139 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",install,{once:true});
   else install();
 
-  window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
+window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
+})();
+
+(() => {
+  "use strict";
+  const MODULE = "BT001_DAILY_VOLUME_SPLIT_AND_AXIS_RANGE_VISUALS";
+  if(typeof draw !== "function" || window.__bt001DailyVisualsInstalled) return;
+  window.__bt001DailyVisualsInstalled = true;
+
+  const DAY_SEC = 86400;
+  const n = value => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
+  function intradayDayRows(){
+    const start = n(dailyState && dailyState.dayStart);
+    if(start == null || !Array.isArray(candles) || !candles.length) return [];
+    const end = start + DAY_SEC;
+    return candles.filter(row => {
+      const time = n(row && row.time);
+      return time != null && time >= start && time < end;
+    });
+  }
+  function bullBearSplit(){
+    const rows = intradayDayRows();
+    let bull = 0;
+    let bear = 0;
+    for(const row of rows){
+      const open = n(row && row.open);
+      const close = n(row && row.close);
+      const volume = n(row && row.volume);
+      if(open == null || close == null || volume == null || volume <= 0) continue;
+      if(close > open) bull += volume;
+      else if(close < open) bear += volume;
+    }
+    const total = bull + bear;
+    if(!(total > 0)) return null;
+    return {
+      bull,
+      bear,
+      total,
+      bullPct:bull / total,
+      bearPct:bear / total
+    };
+  }
+  function drawAxisDayRangeVisual(){
+    if(!ctx || !canvas) return;
+    const state = currentPriceLineState || null;
+    const high = n(dailyState && dailyState.high);
+    const low = n(dailyState && dailyState.low);
+    if(!state || high == null || low == null) return;
+    const minP = n(state.minP);
+    const maxP = n(state.maxP);
+    const top = n(state.top);
+    const priceH = n(state.priceH);
+    const chartRight = n(state.chartRight);
+    if(minP == null || maxP == null || top == null || priceH == null || chartRight == null) return;
+    if(!(maxP > minP) || !(priceH > 0)) return;
+    const axisLeft = chartRight + 1;
+    const axisRight = canvas.clientWidth - 1;
+    if(!(axisRight > axisLeft) || !(high >= low)) return;
+    const mapY = price => top + ((maxP - price) / (maxP - minP)) * priceH;
+    const yHigh = Math.max(top,Math.min(top + priceH,mapY(high)));
+    const yLow = Math.max(top,Math.min(top + priceH,mapY(low)));
+    const bandTop = Math.min(yHigh,yLow);
+    const bandHeight = Math.max(1,Math.abs(yLow - yHigh));
+    ctx.save();
+    ctx.fillStyle = "rgba(156,163,175,.14)";
+    ctx.fillRect(axisLeft,bandTop,axisRight - axisLeft,bandHeight);
+    ctx.strokeStyle = "rgba(107,114,128,.42)";
+    ctx.lineWidth = typeof hairline === "function" ? hairline() : 1;
+    [yHigh,yLow].forEach(y => {
+      const yy = typeof px === "function" ? px(y) : y;
+      ctx.beginPath();
+      ctx.moveTo(typeof px === "function" ? px(axisLeft + 1) : axisLeft + 1,yy);
+      ctx.lineTo(typeof px === "function" ? px(axisRight - 1) : axisRight - 1,yy);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+  function drawDailyVolumeSplitVisual(){
+    if(!ctx || !canvas) return;
+    const split = bullBearSplit();
+    if(!split) return;
+    const state = currentPriceLineState || null;
+    const chartRight = n(state && state.chartRight);
+    const rightAxis = typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
+    const top = n(state && state.top);
+    const priceH = n(state && state.priceH);
+    if(chartRight == null || top == null || priceH == null) return;
+    const volTop = Math.round(top + priceH + 20);
+    const bottom = 30;
+    const volH = Math.max(0,canvas.clientHeight - volTop - bottom);
+    const axisLeft = chartRight;
+    const axisW = Math.max(0,canvas.clientWidth - axisLeft);
+    if(!(volH >= 26) || !(axisW >= 30)) return;
+    const baseY = volTop + Math.max(6,volH - 16);
+    const barZoneH = Math.max(16,volH - 28);
+    const barW = Math.max(8,Math.min(14,Math.floor((axisW - 14) / 3)));
+    const gap = Math.max(4,Math.floor((axisW - barW * 2) / 3));
+    const startX = axisLeft + gap;
+    const bars = [
+      {x:startX,pct:split.bullPct,color:"rgba(34,197,94,.26)",textColor:"#4b7b57"},
+      {x:startX + barW + gap,pct:split.bearPct,color:"rgba(239,68,68,.24)",textColor:"#8b4d4d"}
+    ];
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.font = "10px Arial";
+    for(const bar of bars){
+      const height = Math.max(2,Math.round(bar.pct * barZoneH));
+      const x = Math.round(bar.x);
+      const y = baseY - height;
+      ctx.fillStyle = bar.color;
+      ctx.fillRect(x,y,barW,height);
+      ctx.strokeStyle = "rgba(107,114,128,.18)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5,y + 0.5,Math.max(1,barW - 1),Math.max(1,height - 1));
+      ctx.fillStyle = bar.textColor;
+      ctx.fillText(Math.round(bar.pct * 100) + "%",x + barW / 2,baseY + 3);
+    }
+    ctx.restore();
+  }
+
+  const prevDraw = draw;
+  draw = window.draw = function(){
+    const result = prevDraw.apply(this,arguments);
+    try{
+      drawAxisDayRangeVisual();
+      drawDailyVolumeSplitVisual();
+    }catch(error){
+      console.warn(MODULE + " draw failed",error);
+    }
+    return result;
+  };
 })();
