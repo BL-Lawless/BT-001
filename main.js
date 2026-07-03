@@ -21237,6 +21237,13 @@ If there is NO open position, use this Section 2 instead:
     window.isOpenLinkVisibleInIsolate = () => true;
     window.isOpenBoxVisibleInIsolate = () => true;
   }
+  function notifyWaterfallIsolateChange36(){
+    try{
+      if(window.BT001_WATERFALL_WINDOW && typeof window.BT001_WATERFALL_WINDOW.render === "function"){
+        window.BT001_WATERFALL_WINDOW.render();
+      }
+    }catch(_e){}
+  }
 
   function clearIsolateState36(options={}){
     isolate36.active = false;
@@ -21254,34 +21261,40 @@ If there is NO open position, use this Section 2 instead:
       syncOverlayHitOwnership();
     }
     setVisibilityApi36();
+    notifyWaterfallIsolateChange36();
     if(options.redraw !== false){
       try{ if(typeof draw === "function") draw(); }catch(_e){}
     }
   }
 
-  function activateIsolateFromPlLabel36(hit){
-    if(!isClosedTradePlLabel36(hit)) return false;
-    const m = marker36(hit.markerId);
+  function activateIsolateIdentity36(identity){
+    const markerId = identity && identity.markerId ? identity.markerId : null;
+    const m = marker36(markerId);
     if(!m) return false;
-    const chainId = cid36(hit) || cid36(m);
+    const chainId = cid36(identity) || cid36(m);
     // PATCH_36B: closed-trade P/L labels toggle by stable parent/chain id.
     if(isolate36.active && chainId && (isolate36.parentTradeId === chainId || isolate36.chainId === chainId || isolate36.chainIds.has(chainId))){
       clearIsolateState36({redraw:true,clearTargets:false});
       return true;
     }
-    const chain = buildChain36(hit.markerId,chainId);
+    const chain = buildChain36(markerId,chainId);
     isolate36.active = true;
     isolate36.markerIds = chain.markerIds;
     isolate36.closedLinkIds = chain.closedLinkIds;
     isolate36.chainIds = chain.chainIds;
-    isolate36.markerId = hit.markerId;
+    isolate36.markerId = markerId;
     isolate36.parentTradeId = chainId || null;
     isolate36.chainId = chainId || null;
     isolate36.lastHit = null;
     resetTransientFlags36();
     setVisibilityApi36();
+    notifyWaterfallIsolateChange36();
     try{ if(typeof draw === "function") draw(); }catch(_e){}
     return true;
+  }
+  function activateIsolateFromPlLabel36(hit){
+    if(!isClosedTradePlLabel36(hit)) return false;
+    return activateIsolateIdentity36(hit);
   }
 
   function canvasPoint36(e){
@@ -21321,6 +21334,9 @@ If there is NO open position, use this Section 2 instead:
   window.clearIsolateState = clearIsolateState36;
   window.__v34ClearIsolateState = clearIsolateState36;
   window.activateIsolateFromPlLabel = activateIsolateFromPlLabel36;
+  window.activateClosedTradeIsolateByIdentity = activateIsolateIdentity36;
+  window.focusClosedTradeIsolate = focusIsolate36;
+  window.getActiveClosedTradeIsolateKey = () => isolate36.active ? (isolate36.parentTradeId || isolate36.chainId || isolate36.markerId || null) : null;
   window.__v13Patch36IsClosedTradePlBox = isClosedTradePlLabel36;
   setVisibilityApi36();
   clearIsolateState36({redraw:false,clearTargets:false});
@@ -21882,6 +21898,16 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   let visible = false;
   let hoverTradeIndex = null;
   let lastModel = null;
+  function activeWfTradeKey(){
+    try{
+      return typeof window.getActiveClosedTradeIsolateKey === "function" ? window.getActiveClosedTradeIsolateKey() : null;
+    }catch(_e){
+      return null;
+    }
+  }
+  function tradeKey(trade){
+    return trade && (trade.parentTradeId || trade.chainId || trade.markerId || trade.id || null);
+  }
 
   function profitRatioCell(value){
     const n = num(value);
@@ -22173,6 +22199,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       ]);
       return {
         id: trade.parentId || ("wf_" + index),
+        parentTradeId: trade.parentId || null,
+        chainId: trade.parentId || null,
         index,
         when: shortDate(trade.finalExit && trade.finalExit.time),
         net,
@@ -22371,6 +22399,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     }).join("");
     const tradeCount = Math.max(1,model.trades.length);
     const gapPx = tradeCount > 90 ? 0 : 1;
+    const activeKey = activeWfTradeKey();
     const barsHtml = model.trades.map((trade,index) => {
       const topValue = Math.max(trade.start,trade.end);
       const bottomValue = Math.min(trade.start,trade.end);
@@ -22380,12 +22409,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       const dirTop = trade.dir === "S"
         ? Math.max(0,topY - 12)
         : Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
-      const cls = trade.net >= 0 ? "is-gain" : "is-loss";
+      const cls = [trade.net >= 0 ? "is-gain" : "is-loss"];
+      if(activeKey && tradeKey(trade) === activeKey) cls.push("is-selected");
       const connector = index < model.trades.length - 1
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
       return `<div class="wf-bar-col">
-          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"></div>
+          <div class="wf-bar ${cls.join(" ")}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"></div>
           <span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>
           ${connector}
         </div>`;
@@ -22423,6 +22453,17 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       showWfTradesStatus("Turn Trades ON to isolate trade");
       return;
     }
+    const identity = {
+      markerId:trade && trade.markerId ? trade.markerId : null,
+      chainId:trade && (trade.parentTradeId || trade.chainId || trade.id || null),
+      parentTradeId:trade && (trade.parentTradeId || trade.chainId || trade.id || null)
+    };
+    if(identity.markerId && typeof window.activateClosedTradeIsolateByIdentity === "function"){
+      if(window.activateClosedTradeIsolateByIdentity(identity)){
+        if(typeof window.focusClosedTradeIsolate === "function") window.focusClosedTradeIsolate();
+        return;
+      }
+    }
     let hit = findTradePlHit(trade);
     if(!hit && typeof draw === "function"){
       try{ draw(); }catch(_e){}
@@ -22430,6 +22471,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     }
     if(hit && typeof window.activateIsolateFromPlLabel === "function"){
       window.activateIsolateFromPlLabel(hit);
+      if(typeof window.focusClosedTradeIsolate === "function") window.focusClosedTradeIsolate();
       return;
     }
   }

@@ -2692,6 +2692,11 @@ button:hover{filter:brightness(1.04)}
 .wf-bar.is-loss{
   background:rgb(220,38,38);
 }
+.wf-bar.is-selected{
+  z-index:2;
+  box-shadow:0 0 0 2px rgba(17,24,39,.18);
+  outline:1px solid rgba(255,255,255,.82);
+}
 .wf-connector{
   position:absolute;
   left:100%;
