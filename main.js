@@ -123,9 +123,14 @@ const TRADE_CHUNK_MS = WEEK_MS;
 const TRADE_LIMIT = 1000;
 const RECON_LOOKBACK_WEEKS = 26;
 const SYMBOL_TRADING_SETTINGS_CACHE_TTL_MS = 30000;
+const API_CAPABILITY_CACHE_TTL_MS = 30000;
 const BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo";
 const BINANCE_POSITION_MODE_URL = "https://fapi.binance.com/fapi/v1/positionSide/dual";
 const BINANCE_LEVERAGE_BRACKET_URL = "https://fapi.binance.com/fapi/v1/leverageBracket";
+const BINANCE_SPOT_ACCOUNT_URL = "https://api.binance.com/api/v3/account";
+const BINANCE_FUTURES_ACCOUNT_URL = "https://fapi.binance.com/fapi/v2/account";
+const BINANCE_MULTI_ASSETS_MODE_URL = "https://fapi.binance.com/fapi/v1/multiAssetsMargin";
+const BINANCE_COMMISSION_RATE_URL = "https://fapi.binance.com/fapi/v1/commissionRate";
 
 const STORE = "btc_futures_chart_v12_";
 const SK = STORE + "api_key";
@@ -189,6 +194,29 @@ let unresolvedCount = 0;
 let closedTradesLoadedSummaryText = tradeCountEl ? String(tradeCountEl.textContent || "") : "";
 let closedTradesOperationalText = "";
 let closedTradesLoadedSummaryStats = {wins:0,losses:0,profit:0,loss:0};
+let apiCapabilityState = {
+  status:"idle",
+  loadedAt:0,
+  lastSuccessAt:0,
+  lastError:null,
+  accountMode:"Invalid",
+  spotReachable:null,
+  futuresReachable:null,
+  permissions:{canTrade:null,canDeposit:null,canWithdraw:null},
+  futuresInfo:{
+    positionMode:null,
+    multiAssetsMode:null,
+    marginType:null,
+    leverage:null,
+    maxNotionalText:"",
+    maintenanceText:"",
+    feeText:"",
+    rateLimitText:""
+  },
+  warning:"",
+  symbol:"",
+  inFlight:null
+};
 
 const OPEN_POSITION_STATE = {
   markers:[],
@@ -4144,6 +4172,53 @@ async function signedGet(url,p,key,sec,off){
   }
 
   return d;
+}
+
+async function signedGetVerbose(url,p,key,sec,off){
+  try{
+    const params = new URLSearchParams({
+      ...p,
+      recvWindow:"5000",
+      timestamp:String(Date.now() + off)
+    });
+    const q = params.toString();
+    const sig = await hmac(sec,q);
+    const r = await API.fetch(url + "?" + q + "&signature=" + sig,{
+      method:"GET",
+      cache:"no-store",
+      headers:{"X-MBX-APIKEY":key}
+    });
+    const raw = await r.text();
+    let data = null;
+    if(raw){
+      try{ data = JSON.parse(raw); }
+      catch(_e){ data = {raw}; }
+    }
+    if(!r.ok){
+      return {
+        ok:false,
+        status:r.status,
+        data,
+        error:{
+          status:r.status,
+          code:data && data.code != null ? data.code : null,
+          message:data && data.msg ? String(data.msg) : "HTTP " + r.status
+        }
+      };
+    }
+    return {ok:true,status:r.status,data,error:null};
+  }catch(error){
+    return {
+      ok:false,
+      status:0,
+      data:null,
+      error:{
+        status:0,
+        code:null,
+        message:error && error.message ? error.message : String(error || "Request failed")
+      }
+    };
+  }
 }
 
 async function timeOffset(){
@@ -16034,6 +16109,361 @@ startTradeAuto();
 (() => {
   "use strict";
 
+  const CARD_ID = "apiCapabilityCard";
+  const GRID_SELECTOR = '#settingsModal .v24-settings-panel[data-tab="apis"] .v24-settings-panel-grid';
+  const esc = value => String(value == null ? "" : value)
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;");
+  const boolValue = value => {
+    if(value === true || String(value).toLowerCase() === "true") return true;
+    if(value === false || String(value).toLowerCase() === "false") return false;
+    return null;
+  };
+  const symbolText = () => {
+    try{ return cfg() && cfg().symbol ? String(cfg().symbol) : ""; }
+    catch(_e){ return ""; }
+  };
+  const badgeHtml = value => {
+    if(value === true) return '<span class="api-capability-badge is-good">Yes</span>';
+    if(value === false) return '<span class="api-capability-badge is-bad">No</span>';
+    return '<span class="api-capability-badge is-neutral">-</span>';
+  };
+  const rowHtml = (label,value,options = {}) => {
+    const wide = options.wide ? " is-wide" : "";
+    const valueClass = options.valueClass ? " " + options.valueClass : "";
+    return `<div class="api-capability-row${wide}"><span class="api-capability-label">${esc(label)}</span><span class="api-capability-value${valueClass}">${value}</span></div>`;
+  };
+  const titleCase = value => {
+    const text = String(value == null ? "" : value).trim();
+    if(!text) return "-";
+    return text
+      .toLowerCase()
+      .split(/[\s_-]+/)
+      .filter(Boolean)
+      .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+      .join("-");
+  };
+  const modeText = (spotReachable,futuresReachable) => {
+    if(spotReachable && futuresReachable) return "Both";
+    if(futuresReachable) return "Futures";
+    if(spotReachable) return "Spot";
+    return "Invalid";
+  };
+  const rateText = value => {
+    const n = Number(value);
+    return Number.isFinite(n) ? (n * 100).toFixed(4) + "%" : "-";
+  };
+  const compactMoney = value => {
+    const n = Number(value);
+    if(!Number.isFinite(n)) return "-";
+    return "$" + n.toLocaleString("en-US",{maximumFractionDigits:2});
+  };
+  const intervalShort = row => {
+    const count = Math.max(1,Number(row && row.intervalNum) || 1);
+    const unit = String(row && row.interval || "").toUpperCase();
+    const suffix = unit.startsWith("SECOND") ? "s" : unit.startsWith("MINUTE") ? "m" : unit.startsWith("HOUR") ? "h" : unit.startsWith("DAY") ? "d" : "";
+    return String(count) + suffix;
+  };
+  function permissionValue(...sources){
+    for(const source of sources){
+      const value = boolValue(source);
+      if(value !== null) return value;
+    }
+    return null;
+  }
+  function permissionText(label,value){
+    return rowHtml(label,badgeHtml(value),{valueClass:"is-badge"});
+  }
+  function findBracketInfo(settings){
+    const list = Array.isArray(settings && settings.leverageBracket && settings.leverageBracket.brackets)
+      ? settings.leverageBracket.brackets.filter(Boolean)
+      : [];
+    if(!list.length) return null;
+    const leverage = Number(settings && settings.leverage);
+    const active = list.find(row => Number(row && row.initialLeverage) >= leverage) || list[0];
+    const caps = list.map(row => Number(row && row.notionalCap)).filter(Number.isFinite);
+    const maint = list.map(row => Number(row && row.maintMarginRatio)).filter(Number.isFinite);
+    return {
+      active,
+      count:list.length,
+      maxCap:caps.length ? Math.max(...caps) : null,
+      minMaint:maint.length ? Math.min(...maint) : null,
+      maxMaint:maint.length ? Math.max(...maint) : null
+    };
+  }
+  function bracketSummary(settings){
+    const info = findBracketInfo(settings);
+    if(!info) return "-";
+    const activeLabel = info.active && info.active.bracket != null ? "Bracket " + info.active.bracket : "Bracket info";
+    const capText = info.maxCap != null ? compactMoney(info.maxCap) + " max" : "Max notional n/a";
+    return activeLabel + " | " + capText + " | " + info.count + " levels";
+  }
+  function maintenanceSummary(settings){
+    const info = findBracketInfo(settings);
+    if(!info || info.minMaint == null || info.maxMaint == null) return "-";
+    return (info.minMaint * 100).toFixed(2) + "% to " + (info.maxMaint * 100).toFixed(2) + "%";
+  }
+  function rateLimitSummary(exchangeInfo){
+    const rates = Array.isArray(exchangeInfo && exchangeInfo.rateLimits) ? exchangeInfo.rateLimits : [];
+    if(!rates.length) return "-";
+    const prioritized = rates.filter(row => /ORDER/i.test(String(row && row.rateLimitType || "")));
+    const pool = prioritized.length ? prioritized : rates;
+    return pool.map(row => {
+      const type = String(row && row.rateLimitType || "RATE").replace(/_/g," ");
+      const limit = Number(row && row.limit);
+      return type + " " + (Number.isFinite(limit) ? limit : "-") + "/" + intervalShort(row);
+    }).join(" | ");
+  }
+  function warningText(mode){
+    if(mode === "Spot"){
+      return "Spot-only access detected. This build still uses Futures signed endpoints for trades, positions, and summaries. Spot trading remains disabled.";
+    }
+    if(mode === "Both"){
+      return "Spot access is detected, but Spot trading remains disabled in this build.";
+    }
+    if(mode === "Invalid"){
+      return "The saved key is not compatible with the current Futures signed flows. Public chart data remains available.";
+    }
+    return "";
+  }
+  function formatApiError(error){
+    if(!error || !error.message) return "-";
+    const prefix = error.label ? error.label + ": " : "";
+    const code = error.code != null && error.code !== "" ? "[" + error.code + "] " : "";
+    return esc(prefix + code + error.message);
+  }
+  function pickApiError(errors){
+    for(let i = errors.length - 1; i >= 0; i--){
+      const error = errors[i];
+      if(error && error.message) return error;
+    }
+    return null;
+  }
+  async function fetchExchangeInfo(symbol){
+    if(!symbol) return null;
+    try{
+      const r = await API.fetch(BINANCE_EXCHANGE_INFO_URL + "?symbol=" + encodeURIComponent(symbol),{cache:"no-store"});
+      if(!r.ok) return null;
+      return await r.json();
+    }catch(_e){
+      return null;
+    }
+  }
+  function renderApiCapabilityCard(){
+    const card = document.getElementById(CARD_ID);
+    if(!card) return;
+    const state = apiCapabilityState || {};
+    const symbol = state.symbol || symbolText() || "-";
+    const futuresInfo = state.futuresInfo || {};
+    const isLoading = state.status === "loading";
+    const statusClass = isLoading ? "is-loading" : state.accountMode === "Invalid" ? "is-bad" : "is-good";
+    const statusText = isLoading ? "Refreshing read-only status..." : "Read-only account detection";
+    const warning = state.warning ? `<div class="api-capability-warning">${esc(state.warning)}</div>` : "";
+    card.innerHTML = `<div class="settings-card-title">API account status</div>
+      <div class="settings-card-desc">Read-only detection for the saved Binance key. Spot trading remains disabled in this build.</div>
+      <div class="api-capability-meta"><span class="api-capability-state ${statusClass}">${esc(statusText)}</span><span class="api-capability-symbol">${esc(symbol)}</span></div>
+      ${warning}
+      <div class="api-capability-grid">
+        ${rowHtml("Detected account mode",esc(state.accountMode || "Invalid"))}
+        ${rowHtml("Last successful sync",esc(state.lastSuccessAt ? formatDateTime(state.lastSuccessAt) : "-"))}
+        ${rowHtml("Futures reachable",badgeHtml(state.futuresReachable),{valueClass:"is-badge"})}
+        ${rowHtml("Spot reachable",badgeHtml(state.spotReachable),{valueClass:"is-badge"})}
+        ${permissionText("canTrade",state.permissions && state.permissions.canTrade)}
+        ${permissionText("canDeposit",state.permissions && state.permissions.canDeposit)}
+        ${permissionText("canWithdraw",state.permissions && state.permissions.canWithdraw)}
+        ${rowHtml("Last API error / message",formatApiError(state.lastError),{wide:true,valueClass:"is-error"})}
+      </div>
+      <div class="api-capability-subtitle">Futures details for ${esc(symbol)}</div>
+      <div class="api-capability-grid">
+        ${rowHtml("Position mode",esc(futuresInfo.positionMode || "-"))}
+        ${rowHtml("Multi-assets mode",esc(futuresInfo.multiAssetsMode || "-"))}
+        ${rowHtml("Margin type",esc(futuresInfo.marginType || "-"))}
+        ${rowHtml("Leverage",esc(futuresInfo.leverage || "-"))}
+        ${rowHtml("Max notional / brackets",esc(futuresInfo.maxNotionalText || "-"),{wide:true})}
+        ${rowHtml("Maint. margin / risk",esc(futuresInfo.maintenanceText || "-"),{wide:true})}
+        ${rowHtml("Maker / taker fee",esc(futuresInfo.feeText || "-"),{wide:true})}
+        ${rowHtml("Order rate limits",esc(futuresInfo.rateLimitText || "-"),{wide:true})}
+      </div>`;
+  }
+  function ensureApiCapabilityCard(){
+    const grid = document.querySelector(GRID_SELECTOR) || document.querySelector("#settingsModal .settings-grid");
+    if(!grid) return null;
+    let card = document.getElementById(CARD_ID);
+    if(card && card.parentNode !== grid) grid.prepend(card);
+    if(card) return card;
+    card = document.createElement("div");
+    card.id = CARD_ID;
+    card.className = "settings-card api-capability-card";
+    const anchor = document.getElementById("openBinanceSettings");
+    const binanceCard = anchor && anchor.closest ? anchor.closest(".settings-card") : null;
+    if(binanceCard && binanceCard.parentNode === grid) binanceCard.insertAdjacentElement("afterend",card);
+    else grid.prepend(card);
+    return card;
+  }
+  async function refreshApiCapabilityInfo(options = {}){
+    ensureApiCapabilityCard();
+    const force = options.force === true;
+    const symbol = symbolText();
+    const now = Date.now();
+    if(!hasKeys()){
+      apiCapabilityState = {
+        ...apiCapabilityState,
+        status:"idle",
+        loadedAt:now,
+        lastSuccessAt:0,
+        lastError:null,
+        accountMode:"Invalid",
+        spotReachable:null,
+        futuresReachable:null,
+        permissions:{canTrade:null,canDeposit:null,canWithdraw:null},
+        futuresInfo:{
+          positionMode:null,
+          multiAssetsMode:null,
+          marginType:null,
+          leverage:null,
+          maxNotionalText:"",
+          maintenanceText:"",
+          feeText:"",
+          rateLimitText:""
+        },
+        warning:"Add an API key and secret to inspect account capability.",
+        symbol,
+        inFlight:null
+      };
+      renderApiCapabilityCard();
+      return apiCapabilityState;
+    }
+    if(!force && apiCapabilityState.inFlight) return apiCapabilityState.inFlight;
+    if(!force && apiCapabilityState.symbol === symbol && apiCapabilityState.loadedAt > 0 && (now - apiCapabilityState.loadedAt) < API_CAPABILITY_CACHE_TTL_MS){
+      renderApiCapabilityCard();
+      return apiCapabilityState;
+    }
+    apiCapabilityState = {...apiCapabilityState,status:"loading",symbol};
+    renderApiCapabilityCard();
+    const request = (async() => {
+      const key = apiKeyEl.value.trim();
+      const sec = apiSecretEl.value.trim();
+      const off = await timeOffset().catch(() => 0);
+      const [spotAccount,futuresAccount,exchangeInfo,symbolSettings] = await Promise.all([
+        signedGetVerbose(BINANCE_SPOT_ACCOUNT_URL,{},key,sec,off),
+        signedGetVerbose(BINANCE_FUTURES_ACCOUNT_URL,{},key,sec,off),
+        fetchExchangeInfo(symbol),
+        fetchSelectedSymbolTradingSettings(symbol,{force:true}).catch(() => null)
+      ]);
+      let multiAssets = null;
+      let commission = null;
+      if(futuresAccount && futuresAccount.ok){
+        [multiAssets,commission] = await Promise.all([
+          signedGetVerbose(BINANCE_MULTI_ASSETS_MODE_URL,{},key,sec,off),
+          signedGetVerbose(BINANCE_COMMISSION_RATE_URL,{symbol},key,sec,off)
+        ]);
+      }
+      const spotReachable = !!(spotAccount && spotAccount.ok);
+      const futuresReachable = !!(futuresAccount && futuresAccount.ok);
+      const accountMode = modeText(spotReachable,futuresReachable);
+      const permissions = {
+        canTrade:permissionValue(spotAccount && spotAccount.data && spotAccount.data.canTrade,futuresAccount && futuresAccount.data && futuresAccount.data.canTrade),
+        canDeposit:permissionValue(spotAccount && spotAccount.data && spotAccount.data.canDeposit,futuresAccount && futuresAccount.data && futuresAccount.data.canDeposit),
+        canWithdraw:permissionValue(spotAccount && spotAccount.data && spotAccount.data.canWithdraw,futuresAccount && futuresAccount.data && futuresAccount.data.canWithdraw)
+      };
+      const settings = symbolSettings && symbolSettings.status === "ready" ? symbolSettings : null;
+      const futuresInfo = {
+        positionMode:settings && settings.positionMode === "HEDGE" ? "Hedge Mode" : settings && settings.positionMode === "ONE_WAY" ? "One-way" : "-",
+        multiAssetsMode:multiAssets && multiAssets.ok
+          ? (boolValue(multiAssets.data && multiAssets.data.multiAssetsMargin) ? "Multi-Assets" : "Single-Asset")
+          : "-",
+        marginType:settings && settings.marginMode ? titleCase(settings.marginMode) : "-",
+        leverage:settings && Number.isFinite(Number(settings.leverage)) ? Math.round(Number(settings.leverage)) + "x" : "-",
+        maxNotionalText:settings ? bracketSummary(settings) : "-",
+        maintenanceText:settings ? maintenanceSummary(settings) : "-",
+        feeText:commission && commission.ok
+          ? rateText(commission.data && commission.data.makerCommissionRate) + " / " + rateText(commission.data && commission.data.takerCommissionRate)
+          : "-",
+        rateLimitText:rateLimitSummary(exchangeInfo)
+      };
+      const lastError = pickApiError([
+        futuresAccount && !futuresAccount.ok ? {label:"Futures account",...(futuresAccount.error || {})} : null,
+        spotAccount && !spotAccount.ok ? {label:"Spot account",...(spotAccount.error || {})} : null,
+        multiAssets && !multiAssets.ok ? {label:"Multi-assets mode",...(multiAssets.error || {})} : null,
+        commission && !commission.ok ? {label:"Commission rate",...(commission.error || {})} : null,
+        symbolSettings && symbolSettings.status === "error" ? {label:"Symbol settings",message:symbolSettings.error || "Unable to load symbol settings"} : null
+      ]);
+      const successAt = spotReachable || futuresReachable ? Date.now() : apiCapabilityState.lastSuccessAt;
+      const nextState = {
+        ...apiCapabilityState,
+        status:"ready",
+        loadedAt:Date.now(),
+        lastSuccessAt:successAt || 0,
+        lastError,
+        accountMode,
+        spotReachable,
+        futuresReachable,
+        permissions,
+        futuresInfo,
+        warning:warningText(accountMode),
+        symbol,
+        inFlight:null
+      };
+      apiCapabilityState = nextState;
+      renderApiCapabilityCard();
+      return nextState;
+    })().catch(error => {
+      apiCapabilityState = {
+        ...apiCapabilityState,
+        status:"ready",
+        loadedAt:Date.now(),
+        lastError:{label:"Capability check",message:error && error.message ? error.message : String(error || "Unable to load API capability")},
+        accountMode:"Invalid",
+        warning:"Unable to refresh account capability right now.",
+        inFlight:null
+      };
+      renderApiCapabilityCard();
+      return apiCapabilityState;
+    });
+    apiCapabilityState = {...apiCapabilityState,inFlight:request};
+    return request;
+  }
+  function install(){
+    ensureApiCapabilityCard();
+    renderApiCapabilityCard();
+  }
+  if(typeof openSettings === "function" && !window.__apiCapabilityOpenSettingsWrapped){
+    window.__apiCapabilityOpenSettingsWrapped = true;
+    const prevOpenSettings = openSettings;
+    openSettings = function(){
+      const result = prevOpenSettings.apply(this,arguments);
+      setTimeout(() => {
+        install();
+        refreshApiCapabilityInfo({force:false}).catch(() => {});
+      },0);
+      return result;
+    };
+  }
+  if(saveApiKeys && !saveApiKeys.__apiCapabilityBound){
+    saveApiKeys.__apiCapabilityBound = true;
+    saveApiKeys.addEventListener("click",() => {
+      setTimeout(() => {
+        install();
+        refreshApiCapabilityInfo({force:true}).catch(() => {});
+      },0);
+    },false);
+  }
+  if(marketEl && !marketEl.__apiCapabilityBound){
+    marketEl.__apiCapabilityBound = true;
+    marketEl.addEventListener("change",() => {
+      if(settingsModal && settingsModal.classList && !settingsModal.classList.contains("hidden")){
+        refreshApiCapabilityInfo({force:true}).catch(() => {});
+      }
+    },false);
+  }
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",install,{once:true});
+  else install();
+})();
+
+(() => {
+  "use strict";
+
   /* =========================================================
      V13_UI_V2_PATCH_25 — price-level formatting + tooltip polish
      - Price level displays use x,xxx format with no decimals.
@@ -21340,6 +21770,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   const WF_GREEN = "#047857";
   const WF_RED = "#7f1d1d";
   const WF_BLACK = "#1e2329";
+  const wfEscape = value => String(value == null ? "" : value)
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;");
 
   let visible = false;
   let hoverTradeIndex = null;
@@ -21358,6 +21792,17 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const n = num(value);
     if(n == null || Math.abs(n) < 1e-12) return WF_BLACK;
     return n > 0 ? WF_GREEN : WF_RED;
+  }
+  function returnPctCell(value){
+    const n = num(value);
+    if(n == null) return {text:"N/A",cls:"is-flat"};
+    if(n <= -5) return {text:pctText(n),cls:"is-deep-loss"};
+    if(n <= -2) return {text:pctText(n),cls:"is-loss"};
+    if(n <= -0.25) return {text:pctText(n),cls:"is-soft-loss"};
+    if(n < 0.25) return {text:pctText(n),cls:"is-flat"};
+    if(n < 1) return {text:pctText(n),cls:"is-soft-gain"};
+    if(n < 3) return {text:pctText(n),cls:"is-gain"};
+    return {text:pctText(n),cls:"is-strong-gain"};
   }
   function wfLineText(line){
     return Array.isArray(line) ? line.map(part => String(part && part.text || "")).join("") : String(line || "");
@@ -21611,7 +22056,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       tooltipLines.push([{text:"Trading Fee | ",color:WF_BLACK},{text:fm(fees),color:wfPnlColor(fees),bold:true}]);
       tooltipLines.push([{text:"Funding Fee | ",color:WF_BLACK},{text:fm(fundingDelta),color:wfPnlColor(fundingDelta),bold:true}]);
       tooltipLines.push("");
-      tooltipLines.push([{text:"Net P/L | ",color:WF_BLACK},{text:fm(net),color:wfPnlColor(net),bold:true}]);
+      tooltipLines.push([
+        {text:"Net P/L | ",color:WF_BLACK,bold:true,large:true},
+        {text:fm(net),color:wfPnlColor(net),bold:true,large:true}
+      ]);
       return {
         id: trade.parentId || ("wf_" + index),
         index,
@@ -21721,13 +22169,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const table = q("wfSummaryTable");
     if(!table) return;
     const ratio = profitRatioCell(model.profitRatio);
+    const returnPct = returnPctCell(model.returnPct);
     table.innerHTML = `<colgroup>
         <col>
         <col>
         <col>
         <col>
         <col>
-        <col>
+        <col class="wf-ratio-col">
         <col class="wf-return-col">
       </colgroup>
       <thead>
@@ -21737,7 +22186,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           <th>Average</th>
           <th>Largest</th>
           <th>Total</th>
-          <th>Profit Ratio</th>
+          <th class="wf-ratio-head">Profit Ratio</th>
           <th class="wf-return-head">Return %</th>
         </tr>
       </thead>
@@ -21749,7 +22198,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           <td>${money(model.largestWin)}</td>
           <td>${money(model.totalWin)}</td>
           <td class="wf-ratio-cell ${ratio.cls}" rowspan="2">${ratio.text}</td>
-          <td class="wf-return-cell" rowspan="2">${pctText(model.returnPct)}</td>
+          <td class="wf-return-cell ${returnPct.cls}" rowspan="2">${returnPct.text}</td>
         </tr>
         <tr>
           <th>Losses</th>
@@ -21817,12 +22266,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       const topY = Math.max(0,Math.min(plotHeight,valueToY(topValue)));
       const bottomY = Math.max(0,Math.min(plotHeight,valueToY(bottomValue)));
       const heightPx = Math.max(2,bottomY - topY);
+      const dirTop = Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
       const cls = trade.net >= 0 ? "is-gain" : "is-loss";
       const connector = index < model.trades.length - 1
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
       return `<div class="wf-bar-col">
-          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"><span class="wf-bar-dir">${trade.dir}</span></div>
+          <div class="wf-bar ${cls}" data-trade-index="${index}" style="top:${topY}px;height:${heightPx}px"></div>
+          <span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>
           ${connector}
         </div>`;
     }).join("");
@@ -21853,9 +22304,15 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     }
     tip.innerHTML = lines.map(line => {
       if(Array.isArray(line)){
-        return `<div>${line.map(part => `<span class="${part && part.bold ? "wf-tip-bold" : ""}" style="color:${String(part && part.color || WF_BLACK)}">${String(part && part.text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</span>`).join("")}</div>`;
+        const lineClass = line.some(part => part && part.large) ? " class=\"wf-tip-line-lg\"" : "";
+        return `<div${lineClass}>${line.map(part => {
+          const classes = [];
+          if(part && part.bold) classes.push("wf-tip-bold");
+          if(part && part.large) classes.push("wf-tip-large");
+          return `<span class="${classes.join(" ")}" style="color:${String(part && part.color || WF_BLACK)}">${wfEscape(part && part.text || "")}</span>`;
+        }).join("")}</div>`;
       }
-      return `<div>${String(line).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</div>`;
+      return `<div>${wfEscape(line)}</div>`;
     }).join("");
     const win = ensureWindow();
     const rect = win.getBoundingClientRect();
