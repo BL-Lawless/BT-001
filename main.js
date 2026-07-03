@@ -16110,6 +16110,8 @@ startTradeAuto();
   "use strict";
 
   const CARD_ID = "apiCapabilityCard";
+  const READ_BTN_ID = "apiCapabilityReadBtn";
+  const MODAL_READ_BTN_ID = "readApiKeys";
   const GRID_SELECTOR = '#settingsModal .v24-settings-panel[data-tab="apis"] .v24-settings-panel-grid';
   const esc = value => String(value == null ? "" : value)
     .replace(/&/g,"&amp;")
@@ -16127,7 +16129,7 @@ startTradeAuto();
   const badgeHtml = value => {
     if(value === true) return '<span class="api-capability-badge is-good">Yes</span>';
     if(value === false) return '<span class="api-capability-badge is-bad">No</span>';
-    return '<span class="api-capability-badge is-neutral">-</span>';
+    return '<span class="api-capability-badge is-neutral">Read</span>';
   };
   const rowHtml = (label,value,options = {}) => {
     const wide = options.wide ? " is-wide" : "";
@@ -16263,6 +16265,7 @@ startTradeAuto();
     card.innerHTML = `<div class="settings-card-title">API account status</div>
       <div class="settings-card-desc">Read-only detection for the saved Binance key. Spot trading remains disabled in this build.</div>
       <div class="api-capability-meta"><span class="api-capability-state ${statusClass}">${esc(statusText)}</span><span class="api-capability-symbol">${esc(symbol)}</span></div>
+      <div class="api-capability-actions"><button id="${READ_BTN_ID}" type="button">Read</button></div>
       ${warning}
       <div class="api-capability-grid">
         ${rowHtml("Detected account mode",esc(state.accountMode || "Invalid"))}
@@ -16285,6 +16288,13 @@ startTradeAuto();
         ${rowHtml("Maker / taker fee",esc(futuresInfo.feeText || "-"),{wide:true})}
         ${rowHtml("Order rate limits",esc(futuresInfo.rateLimitText || "-"),{wide:true})}
       </div>`;
+    const readBtn = document.getElementById(READ_BTN_ID);
+    if(readBtn && !readBtn.__apiCapabilityBound){
+      readBtn.__apiCapabilityBound = true;
+      readBtn.addEventListener("click",() => {
+        refreshApiCapabilityInfo({force:true}).catch(() => {});
+      },false);
+    }
   }
   function ensureApiCapabilityCard(){
     const grid = document.querySelector(GRID_SELECTOR) || document.querySelector("#settingsModal .settings-grid");
@@ -16312,7 +16322,7 @@ startTradeAuto();
         status:"idle",
         loadedAt:now,
         lastSuccessAt:0,
-        lastError:null,
+        lastError:{label:"Read",message:"Enter API key and secret first."},
         accountMode:"Invalid",
         spotReachable:null,
         futuresReachable:null,
@@ -16327,7 +16337,7 @@ startTradeAuto();
           feeText:"",
           rateLimitText:""
         },
-        warning:"Add an API key and secret to inspect account capability.",
+        warning:"Type the API key and secret, then press Read. Saving is optional for this diagnostic check.",
         symbol,
         inFlight:null
       };
@@ -16427,6 +16437,22 @@ startTradeAuto();
   function install(){
     ensureApiCapabilityCard();
     renderApiCapabilityCard();
+    const actions = apiModal && apiModal.querySelector ? apiModal.querySelector(".modal-actions") : null;
+    if(actions && !document.getElementById(MODAL_READ_BTN_ID)){
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = MODAL_READ_BTN_ID;
+      btn.className = "secondary";
+      btn.textContent = "Read";
+      actions.insertBefore(btn, saveApiKeys || null);
+      btn.addEventListener("click",() => {
+        closeApi();
+        openSettings();
+        setTimeout(() => {
+          refreshApiCapabilityInfo({force:true}).catch(() => {});
+        },0);
+      },false);
+    }
   }
   if(typeof openSettings === "function" && !window.__apiCapabilityOpenSettingsWrapped){
     window.__apiCapabilityOpenSettingsWrapped = true;
@@ -17552,9 +17578,76 @@ If there is NO open position, use this Section 2 instead:
   function markerById(id){ try{return (Array.isArray(fillMarkers)?fillMarkers.find(m=>m&&m.id===id):null)||null;}catch(_e){return null;} }
   function chainId(o){ return o&&(o.parentTradeId||o.chainId||o.tradeChainId||null); }
 
-  function loadPromptStore(){ try{ const raw=JSON.parse(localStorage.getItem(STORE_KEY)||"null"); if(raw&&Array.isArray(raw.items)) return raw; }catch(_e){} return {selectedId:"default",nextId:1,items:[]}; }
-  function savePromptStore(store){ try{ localStorage.setItem(STORE_KEY,JSON.stringify(store)); }catch(_e){} }
+  let promptDraftMode = "selected";
+  function normalizePromptStore(store){
+    const items = Array.isArray(store && store.items) ? store.items.filter(Boolean) : [];
+    const nextId = Math.max(1,Number(store && store.nextId) || 1,items.reduce((max,item) => {
+      const raw = String(item && item.id || "");
+      const match = /^p(\d+)$/.exec(raw);
+      return match ? Math.max(max,Number(match[1]) + 1) : max;
+    },1));
+    const selectedId = String(store && store.selectedId || "default");
+    return {selectedId,nextId,items};
+  }
+  function loadPromptStore(){ try{ const raw=JSON.parse(localStorage.getItem(STORE_KEY)||"null"); if(raw&&Array.isArray(raw.items)) return normalizePromptStore(raw); }catch(_e){} return {selectedId:"default",nextId:1,items:[]}; }
+  function savePromptStore(store){ try{ localStorage.setItem(STORE_KEY,JSON.stringify(normalizePromptStore(store))); }catch(_e){} }
   function activePrompt(){ const store=loadPromptStore(); const item=store.items.find(x=>x.id===store.selectedId); return item&&item.text?item.text:DEFAULT_PROMPT; }
+  function nextPromptId(store){
+    const id = "p" + (store.nextId || 1);
+    store.nextId = (store.nextId || 1) + 1;
+    return id;
+  }
+  function setPromptDraft(mode,item){
+    const name=q("v29AssessPromptName");
+    const text=q("v29AssessPromptText");
+    const sel=q("v29AssessPromptSelect");
+    promptDraftMode = mode === "new" ? "new" : "selected";
+    if(sel && mode === "new") sel.value = "__new__";
+    if(name) name.value = item ? (item.name || "") : "";
+    if(text) text.value = item ? (item.text || DEFAULT_PROMPT) : "";
+  }
+  function selectedPromptId(){
+    const sel = q("v29AssessPromptSelect");
+    const value = sel ? String(sel.value || "") : "";
+    return value && value !== "default" && value !== "__new__" ? value : null;
+  }
+  function loadSelectedPromptIntoEditor(){
+    const sel=q("v29AssessPromptSelect");
+    const store=loadPromptStore();
+    const value = sel ? String(sel.value || "default") : "default";
+    if(value === "__new__"){
+      setPromptDraft("new",null);
+      return;
+    }
+    store.selectedId = value;
+    savePromptStore(store);
+    const item=store.items.find(x=>x.id===value) || null;
+    if(item) setPromptDraft("selected",item);
+    else setPromptDraft("selected",{name:"Default prompt",text:DEFAULT_PROMPT});
+  }
+  function upsertPrompt(options = {}){
+    const store=loadPromptStore();
+    const name=q("v29AssessPromptName");
+    const text=q("v29AssessPromptText");
+    const asCopy = options.saveAs === true;
+    let id = selectedPromptId();
+    if(promptDraftMode === "new" || asCopy || !id){
+      id = nextPromptId(store);
+    }
+    let item=store.items.find(x=>x.id===id);
+    if(!item){
+      item={id,created:Date.now()};
+      store.items.push(item);
+    }
+    item.name=(name&&name.value.trim())||("Prompt "+id.replace(/^p/,""));
+    item.text=text?String(text.value || ""):DEFAULT_PROMPT;
+    item.updated=Date.now();
+    store.selectedId=id;
+    savePromptStore(store);
+    promptDraftMode = "selected";
+    refreshPromptControls();
+    return item;
+  }
 
   function installButton(){
     if(q("v29AssessBtn")) return true;
@@ -17587,12 +17680,12 @@ If there is NO open position, use this Section 2 instead:
     const panelsRoot=grid.querySelector(":scope > .v24-settings-panels");
     if(!tabs||!panelsRoot) return false;
     if(!q("v29AssessSettingsTab")){ const btn=document.createElement("button"); btn.type="button"; btn.id="v29AssessSettingsTab"; btn.className="v24-settings-tab"; btn.dataset.tab="assess"; btn.textContent="Assess"; tabs.appendChild(btn); btn.addEventListener("click",()=>setAssessTabActive()); }
-    if(!q("v29AssessSettingsPanel")){ const panel=document.createElement("div"); panel.id="v29AssessSettingsPanel"; panel.className="v24-settings-panel"; panel.dataset.tab="assess"; const inner=document.createElement("div"); inner.className="v24-settings-panel-grid"; inner.innerHTML=`<div class="settings-card v29-assess-settings-card"><div class="settings-card-title">Assess Prompt Templates</div><div class="settings-card-desc">Manual local prompt templates used before the generated data packet. No GPT API call is made.</div><div class="v29-assess-settings-row"><label>Saved prompt <select id="v29AssessPromptSelect"></select></label><label>Name <input id="v29AssessPromptName" type="text" placeholder="Prompt name"></label></div><textarea id="v29AssessPromptText" spellcheck="false"></textarea><div class="v29-assess-settings-actions"><button id="v29AssessPromptSave" type="button">Save</button><button class="secondary" id="v29AssessPromptDelete" type="button">Delete</button><button class="secondary" id="v29AssessPromptDefault" type="button">Reset Default Text</button></div><div class="v29-assess-small-note">Saved locally in this browser. The generated data packet is appended under --- DATA PACKET ---.</div></div>`; panel.appendChild(inner); panelsRoot.appendChild(panel); bindPromptControls(); }
+    if(!q("v29AssessSettingsPanel")){ const panel=document.createElement("div"); panel.id="v29AssessSettingsPanel"; panel.className="v24-settings-panel"; panel.dataset.tab="assess"; const inner=document.createElement("div"); inner.className="v24-settings-panel-grid"; inner.innerHTML=`<div class="settings-card v29-assess-settings-card"><div class="settings-card-title">Assess Prompt Templates</div><div class="settings-card-desc">Manual local prompt templates used before the generated data packet. No GPT API call is made.</div><div class="v29-assess-settings-row"><label>Saved prompt <select id="v29AssessPromptSelect"></select></label><label>Name <input id="v29AssessPromptName" type="text" placeholder="Prompt name"></label></div><textarea id="v29AssessPromptText" spellcheck="false"></textarea><div class="v29-assess-settings-actions"><button class="secondary" id="v29AssessPromptNew" type="button">New</button><button id="v29AssessPromptSave" type="button">Save</button><button class="secondary" id="v29AssessPromptSaveAs" type="button">Save As</button><button class="secondary" id="v29AssessPromptLoad" type="button">Load</button><button class="secondary" id="v29AssessPromptDelete" type="button">Delete</button></div><div class="v29-assess-small-note">Saved locally in this browser. The generated data packet is appended under --- DATA PACKET ---.</div></div>`; panel.appendChild(inner); panelsRoot.appendChild(panel); bindPromptControls(); }
     refreshPromptControls(); return true;
   }
   function setAssessTabActive(){ const root=document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid"); if(!root) return; root.querySelectorAll(".v24-settings-tab").forEach(b=>b.classList.toggle("active",b.dataset.tab==="assess")); root.querySelectorAll(".v24-settings-panel").forEach(p=>p.classList.toggle("active",p.dataset.tab==="assess")); try{localStorage.setItem("btc_futures_chart_v13_24_settings_tab","assess");}catch(_e){} }
-  function bindPromptControls(){ const sel=q("v29AssessPromptSelect"), name=q("v29AssessPromptName"), text=q("v29AssessPromptText"), save=q("v29AssessPromptSave"), del=q("v29AssessPromptDelete"), reset=q("v29AssessPromptDefault"); if(sel) sel.addEventListener("change",()=>{const store=loadPromptStore(); store.selectedId=sel.value; savePromptStore(store); refreshPromptControls();}); if(save) save.addEventListener("click",()=>{const store=loadPromptStore(); let id=sel&&sel.value&&sel.value!=="default"?sel.value:null; if(!id){id="p"+(store.nextId||1); store.nextId=(store.nextId||1)+1;} let item=store.items.find(x=>x.id===id); if(!item){item={id,created:Date.now()}; store.items.push(item);} item.name=(name&&name.value.trim())||("Prompt "+id.replace(/^p/,"")); item.text=text?text.value:DEFAULT_PROMPT; item.updated=Date.now(); store.selectedId=id; savePromptStore(store); refreshPromptControls(); showToast("Assess prompt saved");}); if(del) del.addEventListener("click",()=>{const store=loadPromptStore(); const id=sel&&sel.value; if(!id||id==="default") return; store.items=store.items.filter(x=>x.id!==id); store.selectedId="default"; savePromptStore(store); refreshPromptControls(); showToast("Assess prompt deleted");}); if(reset) reset.addEventListener("click",()=>{if(text)text.value=DEFAULT_PROMPT; showToast("Default prompt loaded");}); }
-  function refreshPromptControls(){ const sel=q("v29AssessPromptSelect"), name=q("v29AssessPromptName"), text=q("v29AssessPromptText"); if(!sel||!name||!text) return; const store=loadPromptStore(); sel.innerHTML=`<option value="default">Default prompt</option>`+store.items.map((it,idx)=>`<option value="${esc(it.id)}">${idx+1}. ${esc(it.name||it.id)}</option>`).join(""); if(!store.items.find(x=>x.id===store.selectedId)) store.selectedId="default"; sel.value=store.selectedId||"default"; const item=store.items.find(x=>x.id===sel.value); name.value=item?(item.name||""):"Default prompt"; text.value=item?(item.text||DEFAULT_PROMPT):DEFAULT_PROMPT; }
+  function bindPromptControls(){ const sel=q("v29AssessPromptSelect"), save=q("v29AssessPromptSave"), saveAs=q("v29AssessPromptSaveAs"), load=q("v29AssessPromptLoad"), del=q("v29AssessPromptDelete"), addNew=q("v29AssessPromptNew"); if(sel && !sel.__v29PromptBound){ sel.__v29PromptBound=true; sel.addEventListener("change",()=>loadSelectedPromptIntoEditor()); } if(addNew && !addNew.__v29PromptBound){ addNew.__v29PromptBound=true; addNew.addEventListener("click",()=>{ const selEl=q("v29AssessPromptSelect"); if(selEl) selEl.value="__new__"; setPromptDraft("new",null); showToast("New Assess prompt"); }); } if(load && !load.__v29PromptBound){ load.__v29PromptBound=true; load.addEventListener("click",()=>{ loadSelectedPromptIntoEditor(); showToast("Assess prompt loaded"); }); } if(save && !save.__v29PromptBound){ save.__v29PromptBound=true; save.addEventListener("click",()=>{ const item=upsertPrompt({saveAs:false}); showToast(item ? "Assess prompt saved" : "Assess prompt save failed"); }); } if(saveAs && !saveAs.__v29PromptBound){ saveAs.__v29PromptBound=true; saveAs.addEventListener("click",()=>{ const item=upsertPrompt({saveAs:true}); showToast(item ? "Assess prompt saved as new" : "Assess prompt save failed"); }); } if(del && !del.__v29PromptBound){ del.__v29PromptBound=true; del.addEventListener("click",()=>{ const store=loadPromptStore(); const id=selectedPromptId(); if(!id) return; store.items=store.items.filter(x=>x.id!==id); store.selectedId="default"; savePromptStore(store); promptDraftMode="selected"; refreshPromptControls(); showToast("Assess prompt deleted"); }); } }
+  function refreshPromptControls(){ const sel=q("v29AssessPromptSelect"), name=q("v29AssessPromptName"), text=q("v29AssessPromptText"); if(!sel||!name||!text) return; const store=loadPromptStore(); if(!store.items.find(x=>x.id===store.selectedId)) store.selectedId="default"; savePromptStore(store); sel.innerHTML=`<option value="default">Default prompt</option><option value="__new__">New unsaved prompt</option>`+store.items.map((it,idx)=>`<option value="${esc(it.id)}">${idx+1}. ${esc(it.name||it.id)}</option>`).join(""); if(promptDraftMode==="new"){ sel.value="__new__"; if(!name.value && !text.value) setPromptDraft("new",null); return; } sel.value=store.selectedId||"default"; const item=store.items.find(x=>x.id===sel.value); if(item) setPromptDraft("selected",item); else setPromptDraft("selected",{name:"Default prompt",text:DEFAULT_PROMPT}); }
 
   function parseKline(row){ return {openTime:n(row[0]),open:n(row[1]),high:n(row[2]),low:n(row[3]),close:n(row[4]),volume:n(row[5]),closeTime:n(row[6]),quoteVolume:n(row[7]),tradeCount:n(row[8]),takerBuyBase:n(row[9]),takerBuyQuote:n(row[10])}; }
   async function fetchJson(url,timeoutMs){ const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),timeoutMs||TIMEOUT_MS); try{ const r=await API.fetch(url,{cache:"no-store",headers:{"Cache-Control":"no-cache","Pragma":"no-cache"},signal:controller.signal}); const data=await r.json().catch(()=>null); if(!r.ok) throw new Error((data&&data.msg)?data.msg:"HTTP "+r.status); return data; }finally{ clearTimeout(timer); } }
@@ -21767,6 +21860,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const pad = value => String(value).padStart(2,"0");
     return pad(dt.getDate()) + "/" + pad(dt.getMonth() + 1) + "/" + dt.getFullYear();
   };
+  const wfTitleDayText = ms => {
+    const dt = new Date(ms);
+    return String(dt.getDate()).padStart(2,"0") + " / " + dt.toLocaleString("en-GB",{month:"short"});
+  };
   const WF_GREEN = "#047857";
   const WF_RED = "#7f1d1d";
   const WF_BLACK = "#1e2329";
@@ -21988,6 +22085,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       chart.addEventListener("pointerleave",() => {
         hoverTradeIndex = null;
         renderHover();
+      },false);
+      chart.addEventListener("click",event => {
+        const bar = event.target.closest ? event.target.closest(".wf-bar[data-trade-index]") : null;
+        if(!bar) return;
+        const next = Number(bar.dataset.tradeIndex);
+        const trade = lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[next] : null;
+        if(trade) bridgeTradeIsolate(trade);
       },false);
     }
     if(collapseBtn && !collapseBtn.__wfBound){
@@ -22215,7 +22319,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const result = q("wfResult");
     const title = q("wfWindowTitle");
     if(!chart) return;
-    if(title && model.period) title.textContent = "From " + dayText(model.period.start) + " to " + dayText(model.period.end);
+    if(title && model.period) title.textContent = "From : " + wfTitleDayText(model.period.start) + " To : " + wfTitleDayText(model.period.end);
     if(false && title && model.period){
       title.textContent = "Waterfall — From " + dayText(model.period.start) + " to " + dayText(model.period.end);
     }
@@ -22266,7 +22370,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       const topY = Math.max(0,Math.min(plotHeight,valueToY(topValue)));
       const bottomY = Math.max(0,Math.min(plotHeight,valueToY(bottomValue)));
       const heightPx = Math.max(2,bottomY - topY);
-      const dirTop = Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
+      const dirTop = trade.dir === "S"
+        ? Math.max(0,topY - 12)
+        : Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
       const cls = trade.net >= 0 ? "is-gain" : "is-loss";
       const connector = index < model.trades.length - 1
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
@@ -22286,6 +22392,40 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function wfTooltipLines(trade){
     return trade && Array.isArray(trade.tooltipLines) ? trade.tooltipLines.slice() : [];
   }
+  function showWfTradesStatus(text){
+    closedTradeStatus(text,{mode:"operational"});
+    clearTimeout(showWfTradesStatus.__timer);
+    showWfTradesStatus.__timer = setTimeout(() => {
+      if(String(closedTradesOperationalText || "") === String(text || "")) closedTradeStatus("",{mode:"operational"});
+    },1800);
+  }
+  function findTradePlHit(trade){
+    const markerId = trade && trade.markerId ? trade.markerId : null;
+    if(!markerId || !Array.isArray(overlayHitItems)) return null;
+    if(typeof syncOverlayHitOwnership === "function") syncOverlayHitOwnership();
+    for(let i = overlayHitItems.length - 1; i >= 0; i--){
+      const item = overlayHitItems[i];
+      if(!item || item.kind !== "plbox" || item.markerId !== markerId) continue;
+      if(typeof window.__v13Patch36IsClosedTradePlBox === "function" && !window.__v13Patch36IsClosedTradePlBox(item)) continue;
+      return item;
+    }
+    return null;
+  }
+  function bridgeTradeIsolate(trade){
+    if(!(tglResults && tglResults.checked)){
+      showWfTradesStatus("Turn Trades ON to isolate trade");
+      return;
+    }
+    let hit = findTradePlHit(trade);
+    if(!hit && typeof draw === "function"){
+      try{ draw(); }catch(_e){}
+      hit = findTradePlHit(trade);
+    }
+    if(hit && typeof window.activateIsolateFromPlLabel === "function"){
+      window.activateIsolateFromPlLabel(hit);
+      return;
+    }
+  }
 
   function renderHover(event){
     const tip = q("wfHoverTip");
@@ -22303,6 +22443,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       return;
     }
     tip.innerHTML = lines.map(line => {
+      if(line === "") return `<div class="wf-tip-spacer"></div>`;
       if(Array.isArray(line)){
         const lineClass = line.some(part => part && part.large) ? " class=\"wf-tip-line-lg\"" : "";
         return `<div${lineClass}>${line.map(part => {
