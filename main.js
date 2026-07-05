@@ -22038,6 +22038,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     closeSyncBusy:false,
     closeSyncBaseline:"",
     liveRefreshKey:"",
+    liveRefreshTimer:null,
     liveTicker:null,
     sideWidthKey:"",
     sideWidthPx:116,
@@ -22068,10 +22069,31 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     }
   }
   function currentLivePrice(){
-    const mark = num(typeof lastMarkPrice !== "undefined" ? lastMarkPrice : null);
-    if(mark != null) return mark;
+    try{
+      if(typeof appCurrentPrice === "function"){
+        const appPrice = num(appCurrentPrice());
+        if(appPrice != null) return appPrice;
+      }
+    }catch(_e){}
     const latest = Array.isArray(candles) && candles.length ? candles[candles.length - 1] : null;
-    return num(latest && latest.close);
+    const close = num(latest && latest.close);
+    if(close != null) return close;
+    return num(typeof lastMarkPrice !== "undefined" ? lastMarkPrice : null);
+  }
+  function wfLiveFloatingForBox(box,price){
+    const livePrice = num(price);
+    if(livePrice != null && typeof openBoxFloating === "function"){
+      const floating = num(openBoxFloating(box,livePrice));
+      if(floating != null) return floating;
+    }
+    return num(box && box.unrealizedPnl);
+  }
+  function wfLiveRefreshSignature(liveTrade){
+    const balance = num(accountBalanceState);
+    return [
+      liveTrade ? liveTrade.liveKey : "",
+      balance == null ? "na" : String(balance)
+    ].join("|");
   }
   function closedTradeSignature(rec){
     const parents = typeof closedTradeParentTrades === "function" ? closedTradeParentTrades(rec || {}) : [];
@@ -22092,12 +22114,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const entries = markers.filter(m => m && m.role === "entry");
     const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const realizedPartials = links.reduce((sum,link) => sum + (num(link && link.netPnl) || 0),0);
+    const livePrice = currentLivePrice();
     const floatingPL = boxes.length
       ? boxes.reduce((sum,box) => {
-          const unrealized = num(box && box.unrealizedPnl);
-          if(unrealized != null) return sum + unrealized;
-          const floating = typeof openBoxFloating === "function" ? openBoxFloating(box,currentLivePrice()) : null;
-          return sum + (num(floating) || 0);
+          const floating = wfLiveFloatingForBox(box,livePrice);
+          return sum + (floating || 0);
         },0)
       : null;
     const netLivePL = floatingPL == null ? null : realizedPartials + floatingPL;
@@ -22123,7 +22144,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       floatingPL,
       tooltipLines,
       markerId:null,
-      liveKey:[parentId,String(realizedPartials),floatingPL == null ? "na" : String(floatingPL),String(startTime || 0)].join(":"),
+      liveKey:[
+        parentId,
+        String(realizedPartials),
+        floatingPL == null ? "na" : String(floatingPL),
+        livePrice == null ? "na" : String(livePrice),
+        String(startTime || 0)
+      ].join(":"),
       start:0,
       end:0
     };
@@ -22217,11 +22244,16 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function maybeRefreshLivePreview(){
     if(!visible) return;
-    const live = livePreviewTrade();
-    const nextKey = live ? live.liveKey : "";
-    if(nextKey === wfSyncState.liveRefreshKey) return;
-    wfSyncState.liveRefreshKey = nextKey;
-    render();
+    if(wfSyncState.liveRefreshTimer) return;
+    wfSyncState.liveRefreshTimer = setTimeout(() => {
+      wfSyncState.liveRefreshTimer = null;
+      if(!visible) return;
+      const live = livePreviewTrade();
+      const nextKey = wfLiveRefreshSignature(live);
+      if(nextKey === wfSyncState.liveRefreshKey) return;
+      wfSyncState.liveRefreshKey = nextKey;
+      render();
+    },60);
   }
   function startLiveRefreshLoop(){
     if(wfSyncState.liveTicker) return;
@@ -22233,6 +22265,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(!wfSyncState.liveTicker) return;
     clearInterval(wfSyncState.liveTicker);
     wfSyncState.liveTicker = null;
+    if(wfSyncState.liveRefreshTimer){
+      clearTimeout(wfSyncState.liveRefreshTimer);
+      wfSyncState.liveRefreshTimer = null;
+    }
   }
   function queueWfResizeRender(){
     if(wfSyncState.resizeQueued || !visible) return;
@@ -23011,7 +23047,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const prevRefreshAccountBalance = refreshAccountBalance;
     refreshAccountBalance = async function(){
       const result = await prevRefreshAccountBalance.apply(this,arguments);
-      if(visible) render();
+      maybeRefreshLivePreview();
       return result;
     };
     if(typeof window !== "undefined") window.refreshAccountBalance = refreshAccountBalance;
@@ -23035,6 +23071,17 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       maybeRefreshLivePreview();
       return result;
     };
+  }
+
+  if(typeof updatePositionStrip === "function" && !window.__bt001WfLivePositionStripBridge){
+    window.__bt001WfLivePositionStripBridge = true;
+    const prevUpdatePositionStripForWfLive = updatePositionStrip;
+    updatePositionStrip = function(){
+      const result = prevUpdatePositionStripForWfLive.apply(this,arguments);
+      maybeRefreshLivePreview();
+      return result;
+    };
+    if(typeof window !== "undefined") window.updatePositionStrip = updatePositionStrip;
   }
 
   if(typeof window !== "undefined" && !window.__bt001WfLiveSyncBound){
