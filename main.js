@@ -715,7 +715,9 @@ function selectedReportPresetMs(){
     case "1d": return 24 * 60 * 60 * 1000;
     case "2w": return 2 * WEEK_MS;
     case "3w": return 3 * WEEK_MS;
-    case "4w": return 4 * WEEK_MS;
+    case "1m": return 31 * 24 * 60 * 60 * 1000;
+    case "2m": return 62 * 24 * 60 * 60 * 1000;
+    case "3m": return 93 * 24 * 60 * 60 * 1000;
     case "1w":
     default: return WEEK_MS;
   }
@@ -733,9 +735,8 @@ function reportRangeMs(){
     const custom = customReportRangeMs();
     if(custom) return custom;
   }
-
-  const end = Date.now();
-  return {start:end - selectedReportPresetMs(), end};
+  const win = closedTradeSessionWindowMs(reportWeeksEl.value,Date.now());
+  return {start:win.start,end:win.end};
 }
 
 function weeks(){
@@ -743,7 +744,9 @@ function weeks(){
     case "1d": return 1 / 7;
     case "2w": return 2;
     case "3w": return 3;
-    case "4w": return 4;
+    case "1m": return 4;
+    case "2m": return 8;
+    case "3m": return 12;
     default: return 1;
   }
 }
@@ -753,7 +756,9 @@ function reportLabel(){
     case "1d": return "1D";
     case "2w": return "2W";
     case "3w": return "3W";
-    case "4w": return "4W";
+    case "1m": return "1M";
+    case "2m": return "2M";
+    case "3m": return "3M";
     case "1w":
     default: return "1W";
   }
@@ -1279,7 +1284,9 @@ function selectedClosedTradePeriod(period){
   if(raw === "1d" || raw === "today") return {value:"1d",weeks:1/7,label:"1D"};
   if(raw === "2w") return {value:"2w",weeks:2,label:"2W"};
   if(raw === "3w") return {value:"3w",weeks:3,label:"3W"};
-  if(raw === "4w") return {value:"4w",weeks:4,label:"4W"};
+  if(raw === "1m") return {value:"1m",weeks:4,label:"1M"};
+  if(raw === "2m") return {value:"2m",weeks:8,label:"2M"};
+  if(raw === "3m") return {value:"3m",weeks:12,label:"3M"};
   return {value:"1w",weeks:1,label:"1W"};
 }
 
@@ -1294,6 +1301,16 @@ function closedTradeBoundaryFallbackMs(period,endMs = Date.now()){
   if(period === "1d") return dayOpen;
   const daysSinceMonday = (d.getUTCDay() + 6) % 7;
   return dayOpen - daysSinceMonday * DAY_MS;
+}
+function closedTradeCalendarMonthStartMs(endMs = Date.now(),monthsBack = 0){
+  const exchangeNowMs = typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now();
+  const refMs = Number.isFinite(Number(endMs))
+    ? Number(endMs)
+    : Number.isFinite(Number(exchangeNowMs))
+      ? Number(exchangeNowMs)
+      : Date.now();
+  const dt = new Date(refMs);
+  return Date.UTC(dt.getUTCFullYear(),dt.getUTCMonth() - Math.max(0,monthsBack),1,0,0,0,0);
 }
 
 function closedTradeCurrentCandleOpenMs(tf,endMs = Date.now()){
@@ -1341,6 +1358,23 @@ function closedTradeSessionWindowMs(period,endMs = Date.now()){
   if(selected.value === "1d" || selected.value === "1w"){
     return {
       start:closedTradeCurrentCandleOpenMs(selected.value,end),
+      end,
+      label:selected.label,
+      period:selected.value
+    };
+  }
+  if(selected.value === "2w" || selected.value === "3w"){
+    return {
+      start:closedTradeBoundaryFallbackMs("1w",end) - (selected.weeks - 1) * WEEK_MS,
+      end,
+      label:selected.label,
+      period:selected.value
+    };
+  }
+  if(selected.value === "1m" || selected.value === "2m" || selected.value === "3m"){
+    const monthsBack = selected.value === "1m" ? 0 : selected.value === "2m" ? 1 : 2;
+    return {
+      start:closedTradeCalendarMonthStartMs(end,monthsBack),
       end,
       label:selected.label,
       period:selected.value
@@ -12254,7 +12288,7 @@ startTradeAuto();
     const sel = document.getElementById('reportWeeks');
     if(!sel) return;
     const specs = [
-      ['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']
+      ['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['1m','1M'],['2m','2M'],['3m','3M']
     ];
     const cur = sel.value || '1d';
     sel.innerHTML = '';
@@ -12270,9 +12304,12 @@ startTradeAuto();
 
   selectedReportPresetMs = function(){
     switch(reportWeeksEl.value){
+      case '1d': return 24 * 60 * 60 * 1000;
       case '2w': return 2 * WEEK_MS;
       case '3w': return 3 * WEEK_MS;
-      case '4w': return 4 * WEEK_MS;
+      case '1m': return 31 * 24 * 60 * 60 * 1000;
+      case '2m': return 62 * 24 * 60 * 60 * 1000;
+      case '3m': return 93 * 24 * 60 * 60 * 1000;
       case '1w':
       default: return WEEK_MS;
     }
@@ -12280,18 +12317,24 @@ startTradeAuto();
 
   weeks = function(){
     switch(reportWeeksEl.value){
+      case '1d': return 1 / 7;
       case '2w': return 2;
       case '3w': return 3;
-      case '4w': return 4;
+      case '1m': return 4;
+      case '2m': return 8;
+      case '3m': return 12;
       default: return 1;
     }
   };
 
   reportLabel = function(){
     switch(reportWeeksEl.value){
+      case '1d': return '1D';
       case '2w': return '2W';
       case '3w': return '3W';
-      case '4w': return '4W';
+      case '1m': return '1M';
+      case '2m': return '2M';
+      case '3m': return '3M';
       case '1w':
       default: return '1W';
     }
@@ -17839,7 +17882,7 @@ If there is NO open position, use this Section 2 instead:
 
   function installReportOptions(){
     const sel=$id('reportWeeks'); if(!sel) return;
-    const specs=[['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['4w','4W']];
+    const specs=[['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['1m','1M'],['2m','2M'],['3m','3M']];
     const saved=localStorage.getItem(K('reportPeriod'));
     const current=(sel.value&&specs.some(x=>x[0]===sel.value))?sel.value:(saved||'1d');
     sel.innerHTML='';
@@ -17880,7 +17923,9 @@ If there is NO open position, use this Section 2 instead:
       case '1d': return 24*60*60*1000;
       case '2w': return 2*WEEK_MS;
       case '3w': return 3*WEEK_MS;
-      case '4w': return 4*WEEK_MS;
+      case '1m': return 31*24*60*60*1000;
+      case '2m': return 62*24*60*60*1000;
+      case '3m': return 93*24*60*60*1000;
       case '1w': default: return WEEK_MS;
     }
   };
@@ -17894,7 +17939,7 @@ If there is NO open position, use this Section 2 instead:
   };
   reportRangeMs=function(){
     const now=Date.now();
-    if(reportWeeksEl && (reportWeeksEl.value === '1d' || reportWeeksEl.value === '1w')){
+    if(reportWeeksEl && ['1d','1w','2w','3w','1m','2m','3m'].includes(reportWeeksEl.value)){
       const win = closedTradeSessionWindowMs(reportWeeksEl.value,now);
       return {start:win.start,end:win.end};
     }
@@ -17902,13 +17947,16 @@ If there is NO open position, use this Section 2 instead:
   };
   reportLabel=function(){
     switch(reportWeeksEl.value){
+      case '1d': return '1D';
       case '2w': return '2W';
       case '3w': return '3W';
-      case '4w': return '4W';
+      case '1m': return '1M';
+      case '2m': return '2M';
+      case '3m': return '3M';
       case '1w': default: return '1W';
     }
   };
-  weeks=function(){ switch(reportWeeksEl.value){ case '2w': return 2; case '3w': return 3; case '4w': return 4; default: return 1; } };
+  weeks=function(){ switch(reportWeeksEl.value){ case '1d': return 1/7; case '2w': return 2; case '3w': return 3; case '1m': return 4; case '2m': return 8; case '3m': return 12; default: return 1; } };
   const prevFilter=typeof filterReconstructionForReport==='function'?filterReconstructionForReport:null;
   if(prevFilter&&!window.__v32r1FilterWrapped){
     window.__v32r1FilterWrapped=true;
@@ -21969,8 +22017,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     return String(dt.getDate()).padStart(2,"0") + " / " + dt.toLocaleString("en-GB",{month:"short"});
   };
   const WF_AXIS_MIN_ABS = 10;
-  const WF_MAX_SCALE_PX_PER_UNIT = 90;
-  const WF_WATERMARK_LINE_PX = 40;
+  const WF_MAX_BAR_WIDTH_PX = 90;
   const WF_GREEN = "#047857";
   const WF_RED = "#7f1d1d";
   const WF_BLACK = "#1e2329";
@@ -22082,74 +22129,35 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const realized = num(trade.realizedPartials) || 0;
     const floating = num(trade.floatingPL);
     const net = num(trade.net);
+    const totalMagnitude = Math.abs(realized) + Math.abs(floating || 0);
+    const closedCls = realized > 0
+      ? ((floating != null && floating < 0) ? "is-grey" : "is-green")
+      : realized < 0
+        ? "is-red"
+        : "is-neutral";
+    const floatingCls = floating == null
+      ? "is-neutral"
+      : floating > 0
+        ? "is-green-float"
+        : floating < 0
+          ? "is-red"
+          : "is-neutral";
+    if(net == null) return `<div class="wf-live-segment is-neutral" style="left:0;width:100%"></div>`;
+    if(!(totalMagnitude > 1e-12)){
+      return `<div class="wf-live-segment ${net > 0 ? "is-green" : net < 0 ? "is-red" : "is-neutral"}" style="left:0;width:100%"></div>`;
+    }
+    const closedShare = Math.abs(realized) > 1e-12 ? Math.abs(realized) / totalMagnitude : 0;
+    const floatingShare = Math.abs(floating || 0) > 1e-12 ? Math.abs(floating || 0) / totalMagnitude : 0;
     const parts = [];
-    const segment = (topPct,heightPct,cls) =>
-      `<div class="wf-live-segment ${cls}" style="top:${topPct}%;height:${Math.max(0.8,heightPct)}%"></div>`;
-    const separator = topPct =>
-      `<div class="wf-live-midline" style="top:${Math.max(0,Math.min(100,topPct))}%"></div>`;
-    const composeStack = segments => {
-      let cursor = 0;
-      segments.forEach((entry,index) => {
-        const share = Math.max(0,Number(entry && entry.share) || 0);
-        if(!(share > 0)) return;
-        parts.push(segment(cursor,share * 100,entry.cls));
-        cursor += share * 100;
-        if(index < segments.length - 1) parts.push(separator(cursor));
-      });
-      return parts.join("");
-    };
-    if(net == null){
-      parts.push(`<div class="wf-live-segment is-neutral" style="top:0;height:100%"></div>`);
-      return parts.join("");
+    if(closedShare > 0){
+      parts.push(`<div class="wf-live-segment ${closedCls}" style="left:0;width:${Math.max(0,closedShare * 100)}%"></div>`);
     }
-    if(Math.abs(realized) < 1e-12){
-      parts.push(segment(0,100,net > 0 ? "is-green" : net < 0 ? "is-red" : "is-neutral"));
-      return parts.join("");
+    if(floatingShare > 0){
+      parts.push(`<div class="wf-live-segment ${floatingCls}" style="left:${Math.max(0,closedShare * 100)}%;width:${Math.max(0,floatingShare * 100)}%"></div>`);
     }
-    if(realized > 0){
-      if(floating != null && floating >= 0){
-        const total = realized + floating;
-        if(!(total > 0)){
-          parts.push(segment(0,100,"is-neutral"));
-          return parts.join("");
-        }
-        return composeStack([
-          {share:floating / total,cls:"is-green-float"},
-          {share:realized / total,cls:"is-green"}
-        ]);
-      }
-      if(floating != null && net >= 0){
-        const base = realized;
-        if(!(base > 0)){
-          parts.push(segment(0,100,"is-green"));
-          return parts.join("");
-        }
-        return composeStack([
-          {share:Math.min(1,Math.abs(floating) / base),cls:"is-red"},
-          {share:Math.min(1,Math.max(0,net) / base),cls:"is-green"}
-        ]);
-      }
-      if(floating != null && net < 0){
-        const base = realized + Math.abs(net);
-        if(!(base > 0)){
-          parts.push(segment(0,100,"is-red"));
-          return parts.join("");
-        }
-        return composeStack([
-          {share:realized / base,cls:"is-grey"},
-          {share:Math.abs(net) / base,cls:"is-red"}
-        ]);
-      }
-      if(net > 0){
-        parts.push(segment(0,100,"is-green"));
-      }else if(net < 0){
-        parts.push(segment(0,100,"is-red"));
-      }else{
-        parts.push(segment(0,100,"is-neutral"));
-      }
-      return parts.join("");
+    if(closedShare > 0 && floatingShare > 0){
+      parts.push(`<div class="wf-live-midline" style="left:${Math.max(0,Math.min(100,closedShare * 100))}%"></div>`);
     }
-    parts.push(segment(0,100,net > 0 ? "is-green" : net < 0 ? "is-red" : "is-neutral"));
     return parts.join("");
   }
   function markClosedTradesLoaded(loaded){
@@ -22712,7 +22720,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const plotHeight = Math.max(1,chart.clientHeight - plotTop - plotBottom);
     let domainMin = num(model.domainMin) != null ? num(model.domainMin) : -WF_AXIS_MIN_ABS;
     let domainMax = num(model.domainMax) != null ? num(model.domainMax) : WF_AXIS_MIN_ABS;
-    const minDomainSpan = Math.max(WF_AXIS_MIN_ABS * 2,plotHeight / WF_MAX_SCALE_PX_PER_UNIT);
+    const minDomainSpan = WF_AXIS_MIN_ABS * 2;
     if(domainMax - domainMin < minDomainSpan){
       const mid = (domainMax + domainMin) / 2;
       domainMin = mid - minDomainSpan / 2;
@@ -22789,14 +22797,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       const y = Math.max(0,Math.min(plotHeight,valueToY(mark.value)));
       const anchorPct = ((mark.index + 0.5) / tradeCount) * 100;
       const cls = index === 0 ? "is-high" : "is-low";
-      return `<div class="wf-watermark ${cls}" style="top:${y}px;left:calc(${anchorPct}% - ${WF_WATERMARK_LINE_PX}px)">
-          <span class="wf-watermark-line"></span>
+      return `<div class="wf-watermark ${cls}" style="top:${y}px;left:${anchorPct}%">
           <span class="wf-watermark-label">${money(mark.value)}</span>
+          <span class="wf-watermark-line"></span>
         </div>`;
     }).join("");
     chart.innerHTML = `<div class="wf-plot">
         <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
-        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,1fr));gap:${gapPx}px">${barsHtml}${watermarkMarkup}</div>
+        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}${watermarkMarkup}</div>
       </div>`;
   }
 
