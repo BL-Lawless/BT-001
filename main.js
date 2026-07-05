@@ -23270,6 +23270,8 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   const DAILY_TF = "1d";
   const DAILY_HISTORY_KEEP = 32;
   const PRESSURE_MODE_KEY = "bt001_pressure_meter_mode";
+  const PRESSURE_LB_KEY = "bt001_pressure_meter_lookback";
+  const TF_LOOKBACKS = [5,10,20,50];
   const n = value => {
     const num = Number(value);
     return Number.isFinite(num) ? num : null;
@@ -23289,6 +23291,15 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     barRects:[],
     toggle1dRect:null,
     toggleTfRect:null,
+    lbRects:[],
+    lookback:(() => {
+      try{
+        const saved = Number(localStorage.getItem(PRESSURE_LB_KEY));
+        return TF_LOOKBACKS.includes(saved) ? saved : 20;
+      }catch(_error){
+        return 20;
+      }
+    })(),
     hoverToggle:false
   };
   function currentSymbol(){
@@ -23308,6 +23319,12 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   function setPressureMode(mode){
     meterState.mode = mode === "tf" ? "tf" : "1d";
     try{ localStorage.setItem(PRESSURE_MODE_KEY,meterState.mode); }catch(_error){}
+    requestRedraw();
+  }
+  function setPressureLookback(value){
+    const next = TF_LOOKBACKS.includes(Number(value)) ? Number(value) : 20;
+    meterState.lookback = next;
+    try{ localStorage.setItem(PRESSURE_LB_KEY,String(next)); }catch(_error){}
     requestRedraw();
   }
   function currentTf(){
@@ -23397,6 +23414,56 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       return false;
     }
   }
+  function validPressureRow(row){
+    if(!row) return false;
+    const volume = n(row.volume);
+    const takerBuy = n(row.takerBuyBase);
+    if(!(volume > 0) || takerBuy == null) return false;
+    if(takerBuy < 0 || takerBuy > volume) return false;
+    const takerSell = volume - takerBuy;
+    return Number.isFinite(takerSell) && takerSell >= 0;
+  }
+  function aggregatePressureRows(rows,tf){
+    const source = Array.isArray(rows) ? rows : [];
+    if(!source.length || source.some(row => !validPressureRow(row))) return null;
+    const first = source[0];
+    const last = source[source.length - 1];
+    const totalVolume = source.reduce((sum,row) => sum + Number(row.volume),0);
+    const takerBuy = source.reduce((sum,row) => sum + Number(row.takerBuyBase),0);
+    const takerSell = totalVolume - takerBuy;
+    if(!(totalVolume > 0) || takerBuy < 0 || takerSell < 0) return null;
+    return {
+      open:n(first.open),
+      high:Math.max(...source.map(row => Number(row.high))),
+      low:Math.min(...source.map(row => Number(row.low))),
+      close:n(last.close),
+      openTime:first.openTime,
+      closeTime:last.closeTime,
+      volume:totalVolume,
+      takerBuyBase:takerBuy,
+      tradeCount:source.reduce((sum,row) => sum + (n(row.tradeCount) || 0),0),
+      final:source.every(row => row.final === true),
+      forming:source.some(row => isRowForming(tf,row))
+    };
+  }
+  function unavailablePressureModel(modeText,lookback,validCount){
+    const model = {
+      mode:modeText,
+      available:false,
+      pressureState:"PRESSURE n/a",
+      splitText:"n/a",
+      volumeState:"N/A",
+      relText:"n/a",
+      rating:"WAIT",
+      buyPct:null,
+      sellPct:null,
+      sourceLookback:lookback || null,
+      validCount:Number.isFinite(Number(validCount)) ? Number(validCount) : null,
+      tooltipLines:null
+    };
+    model.tooltipLines = compactTooltipLines(model);
+    return model;
+  }
   function relativeVolumeState(relVol){
     if(relVol == null) return "N/A";
     if(relVol < 0.50) return "THIN";
@@ -23451,7 +23518,8 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     }
   }
   function compactTooltipLines(model){
-    if(!model || !model.available) return [
+    if(!model || !model.available){
+      const unavailable = [
       "Vol: n/a",
       "Avg: n/a",
       "Rel: n/a",
@@ -23462,9 +23530,13 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       "",
       "Read:",
       "Pressure unavailable."
-    ];
+      ];
+      if(model && model.sourceLookback) unavailable.unshift("LB: " + model.sourceLookback + " candles");
+      return unavailable;
+    }
     const lines = [];
     if(model.forming) lines.push("LIVE");
+    if(model.sourceLookback) lines.push("LB: " + model.sourceLookback + " candles");
     lines.push("Vol: " + fmtVol(model.totalVolume));
     lines.push("Avg: " + fmtVol(model.avgVolume));
     lines.push("Rel: " + (model.relVol == null ? "n/a" : model.relVol.toFixed(2) + "x " + model.volumeState));
@@ -23554,40 +23626,32 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const tf = useDaily ? DAILY_TF : currentTf();
     const modeText = useDaily ? "1D" : "TF";
     const rows = normalizePressureRows(useDaily ? ensureDailyRows() : rowsForTf(tf),tf);
-    if(!rows.length){
-      return {
-      mode:modeText,
-      available:false,
-        pressureState:"UNAVAILABLE",
-        splitText:"n/a",
-        volumeState:"N/A",
-        relText:"n/a",
-        rating:"WAIT",
-        buyPct:null,
-        sellPct:null,
-        tooltipLines:compactTooltipLines(null)
-      };
+    if(!rows.length) return unavailablePressureModel(modeText,useDaily ? null : meterState.lookback,0);
+    const lookback = useDaily ? 1 : meterState.lookback;
+    const validRows = rows.filter(validPressureRow);
+    let current = null;
+    let history = [];
+    let recentVolumes = [];
+    let forming = false;
+    if(useDaily){
+      current = rows[rows.length - 1];
+      if(!validPressureRow(current)) return unavailablePressureModel(modeText,null,validRows.length);
+      forming = isRowForming(tf,current);
+      history = rows.slice(0,-1).filter(validPressureRow);
+      recentVolumes = history.slice(-20).map(row => n(row.volume)).filter(v => v != null);
+    }else{
+      if(validRows.length < lookback) return unavailablePressureModel(modeText,lookback,validRows.length);
+      const selectedRows = validRows.slice(-lookback);
+      current = aggregatePressureRows(selectedRows,tf);
+      if(!current) return unavailablePressureModel(modeText,lookback,validRows.length);
+      forming = current.forming === true;
+      history = validRows.slice(0,-lookback);
+      recentVolumes = history.slice(-Math.max(20,lookback)).map(row => n(row.volume)).filter(v => v != null);
     }
-    const current = rows[rows.length - 1];
-    const forming = isRowForming(tf,current);
-    const history = rows.slice(0,-1).filter(row => n(row.volume) != null);
-    const recentVolumes = history.slice(-20).map(row => n(row.volume)).filter(v => v != null);
     const totalVolume = n(current.volume);
     const takerBuy = n(current.takerBuyBase);
-    const trades = n(current.tradeCount);
-    if(!(totalVolume > 0) || takerBuy == null){
-      return {
-        mode:modeText,
-        available:false,
-        pressureState:"UNAVAILABLE",
-        splitText:"n/a",
-        volumeState:"N/A",
-        relText:"n/a",
-        rating:"WAIT",
-        buyPct:null,
-        sellPct:null,
-        tooltipLines:compactTooltipLines(null)
-      };
+    if(!(totalVolume > 0) || takerBuy == null || takerBuy < 0 || takerBuy > totalVolume){
+      return unavailablePressureModel(modeText,useDaily ? null : lookback,validRows.length);
     }
     const takerSell = Math.max(0,totalVolume - takerBuy);
     const buyPct = totalVolume > 0 ? takerBuy / totalVolume : null;
@@ -23608,7 +23672,8 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       projectedVolume = forming ? totalVolume / elapsedFrac : totalVolume;
     }
     const compareVolume = projectedVolume != null ? projectedVolume : totalVolume;
-    const avgVolume = recentVolumes.length ? recentVolumes.reduce((sum,value) => sum + value,0) / recentVolumes.length : null;
+    const avgBaseVolume = recentVolumes.length ? recentVolumes.reduce((sum,value) => sum + value,0) / recentVolumes.length : null;
+    const avgVolume = avgBaseVolume == null ? null : avgBaseVolume * (useDaily ? 1 : lookback);
     const relVol = avgVolume && avgVolume > 0 ? compareVolume / avgVolume : null;
     const percentile = percentileRank(compareVolume,recentVolumes);
     const volumeState = relativeVolumeState(relVol);
@@ -23658,6 +23723,7 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       takerBuy,
       takerSell,
       delta:takerBuy - takerSell,
+      sourceLookback:useDaily ? null : lookback,
       tooltipLines:null
     };
     model.tooltipLines = compactTooltipLines(model);
@@ -23721,6 +23787,7 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     meterState.barRects = [];
     meterState.toggle1dRect = null;
     meterState.toggleTfRect = null;
+    meterState.lbRects = [];
     meterState.meterRect = null;
     const volume = window.__bt001VolumePanelBounds || null;
     if(!volume) return;
@@ -23740,7 +23807,9 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const toggleY = meterY + 1;
     const toggleH = 14;
     const toggleGap = 8;
-    const strapY = toggleY + toggleH + 4;
+    const lbY = toggleY + toggleH + 3;
+    const lbH = 12;
+    const strapY = lbY + lbH + 3;
     const strapLineGap = 12;
     const axisLeft = Math.round(reserveRight + 3);
     const axisRight = Math.round(canvas.clientWidth - 3);
@@ -23791,6 +23860,35 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     ctx.fillStyle = "#94a3b8";
     ctx.fillText("|",toggleStart + toggle1W + toggleGap / 2 + 1,toggleY + 1);
     drawToggle(toggleTfRect,toggleTfLabel,meterState.mode === "tf");
+    ctx.font = "10px Arial";
+    const lbLabel = "LB";
+    const lbGap = 4;
+    const lbSepW = Math.ceil(ctx.measureText("|").width);
+    const lbValueWs = TF_LOOKBACKS.map(value => Math.ceil(ctx.measureText(String(value)).width) + 6);
+    const lbTotalW = Math.ceil(ctx.measureText(lbLabel).width) + lbGap + lbValueWs.reduce((sum,w) => sum + w,0) + lbSepW * (TF_LOOKBACKS.length - 1);
+    let lbX = Math.round(meterX + (meterW - lbTotalW) / 2);
+    ctx.fillStyle = meterState.mode === "tf" ? "#475569" : "#94a3b8";
+    ctx.fillText(lbLabel,lbX + Math.ceil(ctx.measureText(lbLabel).width) / 2,lbY + 1);
+    lbX += Math.ceil(ctx.measureText(lbLabel).width) + lbGap;
+    meterState.lbRects = [];
+    TF_LOOKBACKS.forEach((value,index) => {
+      const wValue = lbValueWs[index];
+      const active = meterState.lookback === value;
+      const rect = {x:lbX,y:lbY,w:wValue,h:lbH,value};
+      meterState.lbRects.push(rect);
+      ctx.fillStyle = active ? "rgba(15,23,42,.10)" : "rgba(255,255,255,.42)";
+      ctx.fillRect(rect.x,rect.y,rect.w,rect.h);
+      ctx.strokeStyle = active ? "rgba(71,85,105,.42)" : "rgba(203,213,225,.35)";
+      ctx.strokeRect(rect.x + 0.5,rect.y + 0.5,rect.w - 1,rect.h - 1);
+      ctx.fillStyle = active ? "#111827" : "#64748b";
+      ctx.fillText(String(value),rect.x + rect.w / 2,rect.y + 1);
+      lbX += wValue;
+      if(index < TF_LOOKBACKS.length - 1){
+        ctx.fillStyle = "#94a3b8";
+        ctx.fillText("|",lbX + lbSepW / 2,lbY + 1);
+        lbX += lbSepW;
+      }
+    });
     const volumeText = model.volumeState === "N/A" ? "n/a" : model.volumeState + " " + model.relText;
     const strapTop = String(model.pressureState || "N/A");
     const strapBottom = volumeText + " | " + model.rating;
@@ -23838,6 +23936,15 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   function handlePressureToggleEvent(event){
     const point = pressureEventPoint(event);
     if(!point) return false;
+    const lbHit = Array.isArray(meterState.lbRects)
+      ? meterState.lbRects.find(rect => hitRect(rect,point.x,point.y))
+      : null;
+    if(lbHit){
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setPressureLookback(lbHit.value);
+      return true;
+    }
     let nextMode = null;
     if(hitRect(meterState.toggle1dRect,point.x,point.y)) nextMode = "1d";
     else if(hitRect(meterState.toggleTfRect,point.x,point.y)) nextMode = "tf";
@@ -23854,7 +23961,8 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     canvas.addEventListener("click",handlePressureToggleEvent,true);
     canvas.addEventListener("mousemove",event => {
       const point = pressureEventPoint(event);
-      const overToggle = !!(point && (hitRect(meterState.toggle1dRect,point.x,point.y) || hitRect(meterState.toggleTfRect,point.x,point.y)));
+      const overLb = !!(point && Array.isArray(meterState.lbRects) && meterState.lbRects.some(rect => hitRect(rect,point.x,point.y)));
+      const overToggle = !!(point && (hitRect(meterState.toggle1dRect,point.x,point.y) || hitRect(meterState.toggleTfRect,point.x,point.y) || overLb));
       meterState.hoverToggle = overToggle;
       if(overToggle) canvas.style.cursor = "pointer";
     },false);
