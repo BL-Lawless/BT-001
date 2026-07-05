@@ -1952,6 +1952,9 @@ function parseRest(k){
     volume:+k[5],
     baseVolume:+k[5],
     quoteVolume:+k[7],
+    tradeCount:+k[8],
+    takerBuyBase:+k[9],
+    takerBuyQuote:+k[10],
     final:false
   };
 }
@@ -1968,6 +1971,9 @@ function parseWsKline(k){
     volume:+k.v,
     baseVolume:+k.v,
     quoteVolume:+k.q,
+    tradeCount:+k.n,
+    takerBuyBase:+k.V,
+    takerBuyQuote:+k.Q,
     final:!!k.x
   };
 }
@@ -2979,6 +2985,9 @@ const marketDataHub = (() => {
       volume:Number.isFinite(Number(row.volume)) ? Number(row.volume) : 0,
       baseVolume:Number.isFinite(Number(row.baseVolume)) ? Number(row.baseVolume) : (Number.isFinite(Number(row.volume)) ? Number(row.volume) : 0),
       quoteVolume:Number.isFinite(Number(row.quoteVolume)) ? Number(row.quoteVolume) : 0,
+      tradeCount:Number.isFinite(Number(row.tradeCount)) ? Number(row.tradeCount) : 0,
+      takerBuyBase:Number.isFinite(Number(row.takerBuyBase)) ? Number(row.takerBuyBase) : null,
+      takerBuyQuote:Number.isFinite(Number(row.takerBuyQuote)) ? Number(row.takerBuyQuote) : null,
       final:!!final,
       source
     };
@@ -3004,6 +3013,11 @@ const marketDataHub = (() => {
     merged.close = incoming.close;
     const inVol = Number(incoming.volume);
     if(Number.isFinite(inVol)) merged.volume = incoming.volume;
+    if(Number.isFinite(Number(incoming.baseVolume))) merged.baseVolume = incoming.baseVolume;
+    if(Number.isFinite(Number(incoming.quoteVolume))) merged.quoteVolume = incoming.quoteVolume;
+    if(Number.isFinite(Number(incoming.tradeCount))) merged.tradeCount = incoming.tradeCount;
+    if(Number.isFinite(Number(incoming.takerBuyBase))) merged.takerBuyBase = incoming.takerBuyBase;
+    if(Number.isFinite(Number(incoming.takerBuyQuote))) merged.takerBuyQuote = incoming.takerBuyQuote;
     return merged;
   }
   function cloneRow(row){
@@ -23234,19 +23248,27 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   window.__bt001DailyVisualsInstalled = true;
 
   const DAY_SEC = 86400;
-  const DAY_MINUTES = 1440;
-  const DAILY_1M_KEEP = DAY_MINUTES + 1;
-  const DAILY_1M_TF = "1m";
+  const DAILY_TF = "1d";
+  const DAILY_HISTORY_KEEP = 32;
+  const PRESSURE_MODE_KEY = "bt001_pressure_meter_mode";
   const n = value => {
     const num = Number(value);
     return Number.isFinite(num) ? num : null;
   };
-  const splitSourceState = {
-    symbol:"",
-    dayStart:null,
+  const meterState = {
+    mode:(() => {
+      try{
+        const saved = String(localStorage.getItem(PRESSURE_MODE_KEY) || "").toLowerCase();
+        return saved === "tf" ? "tf" : "1d";
+      }catch(_error){
+        return "1d";
+      }
+    })(),
     loading:false,
-    ready:false,
-    promise:null
+    promise:null,
+    meterRect:null,
+    toggle1dRect:null,
+    toggleTfRect:null
   };
   function currentSymbol(){
     try{
@@ -23262,92 +23284,250 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       });
     }catch(_error){}
   }
-  function resetDailySplitSource(symbol,dayStart){
-    splitSourceState.symbol = symbol;
-    splitSourceState.dayStart = dayStart;
-    splitSourceState.loading = false;
-    splitSourceState.ready = false;
-    splitSourceState.promise = null;
+  function setPressureMode(mode){
+    meterState.mode = mode === "tf" ? "tf" : "1d";
+    try{ localStorage.setItem(PRESSURE_MODE_KEY,meterState.mode); }catch(_error){}
+    requestRedraw();
   }
-  function dailyVolumeRows1m(){
-    const start = n(dailyState && dailyState.dayStart);
-    const symbol = currentSymbol();
-    if(start == null || !symbol) return [];
-    if(splitSourceState.symbol !== symbol || splitSourceState.dayStart !== start){
-      resetDailySplitSource(symbol,start);
+  function currentTf(){
+    try{
+      return typeof iv === "function" ? String(iv() || "15m").toLowerCase() : "15m";
+    }catch(_error){
+      return "15m";
     }
+  }
+  function tfLabel(tf){
+    return ({
+      "1m":"1M",
+      "3m":"3M",
+      "5m":"5M",
+      "15m":"15M",
+      "30m":"30M",
+      "1h":"1H",
+      "4h":"4H",
+      "1d":"1D"
+    }[String(tf || "").toLowerCase()] || String(tf || "").toUpperCase());
+  }
+  function rowsForTf(tf){
     const hub = window.PUBLIC_MARKET_DATA_HUB || null;
-    if(!hub || typeof hub.getChartBuffer !== "function") return [];
-    const chartRows = hub.getChartBuffer(DAILY_1M_TF);
-    if(!Array.isArray(chartRows) || !chartRows.length) return [];
-    const end = start + DAY_SEC;
-    const deduped = new Map();
-    for(const row of chartRows){
-      const time = n(row && row.time);
-      if(time == null || time < start || time >= end) continue;
-      deduped.set(time,row);
-    }
-    return Array.from(deduped.values()).sort((a,b) => Number(a.time) - Number(b.time));
+    let rows = [];
+    if(hub && typeof hub.getChartBuffer === "function") rows = hub.getChartBuffer(tf) || [];
+    if((!Array.isArray(rows) || !rows.length) && tf === currentTf() && Array.isArray(candles)) rows = candles;
+    if((!Array.isArray(rows) || !rows.length) && hub && typeof hub.getClosedBuffer === "function") rows = hub.getClosedBuffer(tf) || [];
+    return Array.isArray(rows) ? rows : [];
   }
-  function needsDailyVolumeLoad(rows,start){
-    if(start == null) return false;
-    if(!Array.isArray(rows) || !rows.length) return true;
-    const firstTime = n(rows[0] && rows[0].time);
-    const lastTime = n(rows[rows.length-1] && rows[rows.length-1].time);
-    if(firstTime == null || lastTime == null) return true;
-    if(lastTime < start) return true;
-    return firstTime > start;
-  }
-  function ensureDailyVolumeSource(){
-    const start = n(dailyState && dailyState.dayStart);
-    const symbol = currentSymbol();
-    if(start == null || !symbol) return;
-    if(splitSourceState.symbol !== symbol || splitSourceState.dayStart !== start){
-      resetDailySplitSource(symbol,start);
-    }
+  function ensureDailyRows(){
     const hub = window.PUBLIC_MARKET_DATA_HUB || null;
-    if(!hub || typeof hub.prepareTimeframeBuffer !== "function") return;
-    const rows = dailyVolumeRows1m();
-    if(!needsDailyVolumeLoad(rows,start)){
-      splitSourceState.ready = true;
-      return;
-    }
-    if(splitSourceState.loading && splitSourceState.promise) return;
-    splitSourceState.loading = true;
-    splitSourceState.promise = hub.prepareTimeframeBuffer(DAILY_1M_TF,DAILY_1M_KEEP)
+    const rows = rowsForTf(DAILY_TF);
+    if(rows.length >= 21) return rows;
+    if(!hub || typeof hub.prepareTimeframeBuffer !== "function") return rows;
+    if(meterState.loading && meterState.promise) return rows;
+    meterState.loading = true;
+    meterState.promise = hub.prepareTimeframeBuffer(DAILY_TF,DAILY_HISTORY_KEEP)
       .catch(error => {
-        console.warn(MODULE + " 1m day volume preload failed",error);
+        console.warn(MODULE + " daily preload failed",error);
       })
       .finally(() => {
-        splitSourceState.loading = false;
-        splitSourceState.ready = !needsDailyVolumeLoad(dailyVolumeRows1m(),start);
-        splitSourceState.promise = null;
+        meterState.loading = false;
+        meterState.promise = null;
         requestRedraw();
       });
+    return rows;
   }
-  function bullBearSplit(){
-    ensureDailyVolumeSource();
-    const rows = dailyVolumeRows1m();
-    if(!rows.length || !splitSourceState.ready) return { ready:false, total:0, bullPct:null, bearPct:null };
-    let bull = 0;
-    let bear = 0;
-    for(const row of rows){
-      const open = n(row && row.open);
-      const close = n(row && row.close);
-      const volume = n(row && row.volume);
-      if(open == null || close == null || volume == null || volume <= 0) continue;
-      if(close > open) bull += volume;
-      else if(close < open) bear += volume;
+  function normalizePressureRow(row,tf){
+    if(!row) return null;
+    const openTimeMs = Number.isFinite(Number(row.openTime))
+      ? Number(row.openTime)
+      : (Number.isFinite(Number(row.time)) ? Number(row.time) * 1000 : NaN);
+    const closeTimeMs = Number.isFinite(Number(row.closeTime))
+      ? Number(row.closeTime)
+      : (Number.isFinite(openTimeMs) && typeof ivSec === "function" ? openTimeMs + ivSec(tf) * 1000 - 1 : NaN);
+    const out = {
+      time:Number.isFinite(Number(row.time)) ? Number(row.time) : (Number.isFinite(openTimeMs) ? Math.floor(openTimeMs / 1000) : NaN),
+      openTime:openTimeMs,
+      closeTime:closeTimeMs,
+      open:n(row.open),
+      high:n(row.high),
+      low:n(row.low),
+      close:n(row.close),
+      volume:n(row.baseVolume ?? row.volume),
+      quoteVolume:n(row.quoteVolume),
+      tradeCount:n(row.tradeCount),
+      takerBuyBase:n(row.takerBuyBase),
+      takerBuyQuote:n(row.takerBuyQuote),
+      final:row.final === true
+    };
+    return Number.isFinite(out.time) && out.open != null && out.high != null && out.low != null && out.close != null ? out : null;
+  }
+  function normalizePressureRows(rows,tf){
+    const deduped = new Map();
+    (Array.isArray(rows) ? rows : []).forEach(row => {
+      const normalized = normalizePressureRow(row,tf);
+      if(normalized) deduped.set(normalized.time,normalized);
+    });
+    return Array.from(deduped.values()).sort((a,b) => a.time - b.time);
+  }
+  function isRowForming(tf,row){
+    if(!row) return false;
+    if(row.final === true) return false;
+    try{
+      return typeof isFormingRow === "function" ? isFormingRow(tf,row) : false;
+    }catch(_error){
+      return false;
     }
-    const total = bull + bear;
-    if(!(total > 0)) return { ready:true, total:0, bullPct:null, bearPct:null };
+  }
+  function relativeVolumeState(relVol){
+    if(relVol == null) return "N/A";
+    if(relVol < 0.70) return "LOW";
+    if(relVol <= 1.20) return "NORMAL";
+    if(relVol <= 1.80) return "ACTIVE";
+    if(relVol <= 2.50) return "HIGH";
+    return "EXTREME";
+  }
+  function percentileRank(value,history){
+    if(value == null || !Array.isArray(history) || !history.length) return null;
+    const rows = history.filter(v => Number.isFinite(Number(v))).map(Number).sort((a,b) => a - b);
+    if(!rows.length) return null;
+    let below = 0;
+    rows.forEach(v => { if(v <= value) below += 1; });
+    return below / rows.length * 100;
+  }
+  function roundPct(pct){
+    const value = n(pct);
+    return value == null ? null : Math.max(0,Math.min(100,Math.round(value * 100)));
+  }
+  function fmtVol(value){
+    const num = n(value);
+    if(num == null) return "n/a";
+    try{
+      return typeof fv === "function" ? fv(num) : num.toFixed(2);
+    }catch(_error){
+      return num.toFixed(2);
+    }
+  }
+  function fmtTrades(value){
+    const num = n(value);
+    return num == null ? "n/a" : Math.round(num).toLocaleString("en-US");
+  }
+  function computePressureModel(mode){
+    const useDaily = mode !== "tf";
+    const tf = useDaily ? DAILY_TF : currentTf();
+    const modeText = useDaily ? "1D" : "TF";
+    const rows = normalizePressureRows(useDaily ? ensureDailyRows() : rowsForTf(tf),tf);
+    if(!rows.length){
+      return {
+        mode:modeText,
+        available:false,
+        pressureState:"UNAVAILABLE",
+        splitText:"n/a",
+        volumeState:"N/A",
+        relText:"n/a",
+        rating:"WAIT",
+        buyPct:null,
+        sellPct:null,
+        tooltipLines:["Mode: " + modeText,"Status: unavailable","Data: no candle data loaded yet"]
+      };
+    }
+    const current = rows[rows.length - 1];
+    const forming = isRowForming(tf,current);
+    const history = rows.slice(0,-1).filter(row => n(row.volume) != null);
+    const recentVolumes = history.slice(-20).map(row => n(row.volume)).filter(v => v != null);
+    const totalVolume = n(current.volume);
+    const takerBuy = n(current.takerBuyBase);
+    const trades = n(current.tradeCount);
+    if(!(totalVolume > 0) || takerBuy == null){
+      return {
+        mode:modeText,
+        available:false,
+        pressureState:"UNAVAILABLE",
+        splitText:"n/a",
+        volumeState:"N/A",
+        relText:"n/a",
+        rating:"WAIT",
+        buyPct:null,
+        sellPct:null,
+        tooltipLines:[
+          "Mode: " + modeText + (useDaily ? "" : " (" + tfLabel(tf) + ")"),
+          "Status: " + (forming ? "forming" : "closed"),
+          "Total volume: " + fmtVol(totalVolume),
+          "Taker buy data: unavailable",
+          "Trades: " + fmtTrades(trades),
+          "Read: Taker buy volume is missing, so pressure cannot be inferred safely."
+        ]
+      };
+    }
+    const takerSell = Math.max(0,totalVolume - takerBuy);
+    const buyPct = totalVolume > 0 ? takerBuy / totalVolume : null;
+    const sellPct = totalVolume > 0 ? takerSell / totalVolume : null;
+    const buySide = buyPct != null && sellPct != null ? buyPct >= sellPct : true;
+    const dominantPct = Math.max(buyPct || 0,sellPct || 0);
+    const body = (n(current.close) || 0) - (n(current.open) || 0);
+    const range = Math.max(0,(n(current.high) || 0) - (n(current.low) || 0));
+    const bodyRatio = range > 0 ? Math.abs(body) / range : 0;
+    const priceConfirms = buySide ? body > 0 : body < 0;
+    let projectedVolume = null;
+    if(useDaily && totalVolume > 0){
+      const nowMs = typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now();
+      const spanMs = Math.max(1,Number(current.closeTime) - Number(current.openTime) + 1);
+      const elapsedMs = Math.max(1,Math.min(spanMs,nowMs - Number(current.openTime)));
+      const elapsedFrac = Math.max(1 / 1440,Math.min(1,elapsedMs / spanMs));
+      projectedVolume = forming ? totalVolume / elapsedFrac : totalVolume;
+    }
+    const compareVolume = projectedVolume != null ? projectedVolume : totalVolume;
+    const avgVolume = recentVolumes.length ? recentVolumes.reduce((sum,value) => sum + value,0) / recentVolumes.length : null;
+    const relVol = avgVolume && avgVolume > 0 ? compareVolume / avgVolume : null;
+    const percentile = percentileRank(compareVolume,recentVolumes);
+    const volumeState = relativeVolumeState(relVol);
+    const absCondition = relVol != null && relVol >= 1.8 && dominantPct >= 0.55 && bodyRatio <= 0.22;
+    let pressureState = "BALANCED";
+    if(absCondition) pressureState = "ABS";
+    else if(dominantPct >= 0.60) pressureState = buySide ? "BUY CONTROL" : "SELL CONTROL";
+    else if(dominantPct >= 0.55) pressureState = buySide ? "BUY EDGE" : "SELL EDGE";
+    let rating = "WAIT";
+    if(pressureState === "ABS") rating = "ABS";
+    else if(relVol != null && relVol >= 1.8 && dominantPct >= 0.60 && priceConfirms) rating = "A";
+    else if(relVol != null && relVol >= 1.2 && dominantPct >= 0.55) rating = "B";
+    else if(pressureState !== "BALANCED" || (relVol != null && relVol >= 0.70)) rating = "C";
+    const firstPct = roundPct(buySide ? buyPct : sellPct);
+    const secondPct = roundPct(buySide ? sellPct : buyPct);
+    const splitText = firstPct == null || secondPct == null ? "n/a" : firstPct + "/" + secondPct;
+    const relText = relVol == null ? "n/a" : relVol.toFixed(relVol >= 10 ? 0 : 1) + "x";
+    let read = "Pressure is unavailable.";
+    if(pressureState === "ABS"){
+      read = "Heavy pressure is meeting resistance. Volume is elevated, but price progress is muted. Watch for absorption and failed follow-through.";
+    }else if(pressureState === "BALANCED"){
+      read = "Buyers and sellers are balanced. Edge is weak, so patience is better than forcing a directional read.";
+    }else{
+      const sideWord = buySide ? "Buyers" : "Sellers";
+      const strengthWord = pressureState.includes("CONTROL") ? "clear control" : "mild edge";
+      const confirmWord = priceConfirms ? " Price is confirming that pressure." : " Price has not confirmed it yet.";
+      read = sideWord + " have " + strengthWord + ". Volume is " + String(volumeState || "n/a").toLowerCase() + " versus recent pace." + confirmWord;
+    }
+    const tooltipLines = [
+      "Mode: " + modeText + (useDaily ? "" : " (" + tfLabel(tf) + ")"),
+      "Status: " + (forming ? "forming" : "closed"),
+      "Total volume: " + fmtVol(totalVolume)
+    ];
+    if(useDaily) tooltipLines.push("Projected daily volume: " + fmtVol(projectedVolume));
+    tooltipLines.push("Recent average volume: " + fmtVol(avgVolume));
+    tooltipLines.push("Relative volume: " + (relVol == null ? "n/a" : relVol.toFixed(2) + "x"));
+    tooltipLines.push("Percentile rank: " + (percentile == null ? "n/a" : Math.round(percentile) + "%"));
+    tooltipLines.push("Taker buy: " + fmtVol(takerBuy) + " (" + (roundPct(buyPct) == null ? "n/a" : roundPct(buyPct) + "%") + ")");
+    tooltipLines.push("Taker sell: " + fmtVol(takerSell) + " (" + (roundPct(sellPct) == null ? "n/a" : roundPct(sellPct) + "%") + ")");
+    tooltipLines.push("Delta: " + fmtVol(takerBuy - takerSell));
+    tooltipLines.push("Trades: " + fmtTrades(trades));
+    tooltipLines.push("Read: " + read);
     return {
-      ready:true,
-      bull,
-      bear,
-      total,
-      bullPct:bull / total,
-      bearPct:bear / total
+      mode:modeText,
+      available:true,
+      pressureState,
+      splitText,
+      volumeState,
+      relText,
+      rating,
+      buyPct,
+      sellPct,
+      tooltipLines
     };
   }
   function drawAxisDayRangeVisual(){
@@ -23405,7 +23585,6 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   }
   function drawDailyVolumeSplitVisual(){
     if(!ctx || !canvas) return;
-    const split = bullBearSplit();
     const state = currentPriceLineState || null;
     const chartRight = n(state && state.chartRight);
     const top = n(state && state.top);
@@ -23416,38 +23595,108 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const volH = Math.max(0,canvas.clientHeight - volTop - bottom);
     const axisLeft = chartRight;
     const axisW = Math.max(0,canvas.clientWidth - axisLeft);
-    if(!(volH >= 26) || !(axisW >= 64)) return;
-    const baseY = volTop + Math.max(10,volH - 18);
-    const barZoneH = Math.max(22,volH - 24);
-    const gap = 4;
-    const availableW = Math.max(48,axisW - 10);
-    const barW = Math.max(20,Math.min(28,Math.floor((availableW - gap) / 2)));
+    if(!(volH >= 52) || !(axisW >= 70)) return;
+    const model = computePressureModel(meterState.mode);
+    const meterX = Math.round(axisLeft + 2);
+    const meterW = Math.max(66,axisW - 4);
+    const meterY = volTop + 1;
+    const meterH = Math.max(50,volH - 2);
+    const toggleY = meterY + 2;
+    const toggleH = 12;
+    const toggleGap = 8;
+    const strapY = toggleY + toggleH + 4;
+    const strapLineGap = 10;
+    const barsTop = strapY + strapLineGap * 2 + 4;
+    const baseY = meterY + meterH - 16;
+    const labelY = baseY + 3;
+    const barZoneH = Math.max(16,baseY - barsTop);
+    const gap = 6;
+    const barW = Math.max(16,Math.min(22,Math.floor((meterW - 16 - gap) / 2)));
     const totalBarsW = barW * 2 + gap;
-    const startX = Math.round(axisLeft + Math.max(5,Math.floor((axisW - totalBarsW) / 2)));
-    const hasValidSplit = !!(split && split.ready && Number.isFinite(split.bullPct) && Number.isFinite(split.bearPct));
+    const startX = Math.round(meterX + Math.max(6,Math.floor((meterW - totalBarsW) / 2)));
     const bars = [
-      {x:startX,pct:hasValidSplit ? split.bullPct : 0,color:"rgba(34,197,94,.40)",stroke:"rgba(34,197,94,.18)",textColor:"#4b7b57",label:hasValidSplit ? Math.round(split.bullPct * 100) + "%" : "N/A"},
-      {x:startX + barW + gap,pct:hasValidSplit ? split.bearPct : 0,color:"rgba(239,68,68,.38)",stroke:"rgba(239,68,68,.18)",textColor:"#8b4d4d",label:hasValidSplit ? Math.round(split.bearPct * 100) + "%" : "N/A"}
+      {x:startX,pct:model.available ? model.buyPct : null,color:"rgba(34,197,94,.55)",stroke:"rgba(34,197,94,.78)",textColor:"#166534",label:model.available && model.buyPct != null ? Math.round(model.buyPct * 100) + "%" : "n/a"},
+      {x:startX + barW + gap,pct:model.available ? model.sellPct : null,color:"rgba(239,68,68,.52)",stroke:"rgba(239,68,68,.78)",textColor:"#991b1b",label:model.available && model.sellPct != null ? Math.round(model.sellPct * 100) + "%" : "n/a"}
     ];
     ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,.92)";
+    ctx.fillRect(meterX,meterY,meterW,meterH);
+    ctx.strokeStyle = "rgba(148,163,184,.32)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(meterX + 0.5,meterY + 0.5,meterW - 1,meterH - 1);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.font = "12px Arial";
+    ctx.font = "10px Arial";
+    const toggle1Label = "1D";
+    const toggleTfLabel = "TF";
+    const separatorW = Math.ceil(ctx.measureText("|").width);
+    const toggle1W = Math.ceil(ctx.measureText(toggle1Label).width) + 8;
+    const toggleTfW = Math.ceil(ctx.measureText(toggleTfLabel).width) + 8;
+    const toggleTotalW = toggle1W + toggleTfW + toggleGap + separatorW;
+    const toggleStart = Math.round(meterX + (meterW - toggleTotalW) / 2);
+    const toggle1Rect = {x:toggleStart,y:toggleY,w:toggle1W,h:toggleH};
+    const toggleTfRect = {x:toggleStart + toggle1W + toggleGap + separatorW,y:toggleY,w:toggleTfW,h:toggleH};
+    meterState.toggle1dRect = toggle1Rect;
+    meterState.toggleTfRect = toggleTfRect;
+    const drawToggle = (rect,label,active) => {
+      ctx.fillStyle = active ? "rgba(15,23,42,.10)" : "transparent";
+      if(active) ctx.fillRect(rect.x,rect.y,rect.w,rect.h);
+      ctx.strokeStyle = active ? "rgba(71,85,105,.42)" : "transparent";
+      if(active) ctx.strokeRect(rect.x + 0.5,rect.y + 0.5,rect.w - 1,rect.h - 1);
+      ctx.fillStyle = active ? "#111827" : "#64748b";
+      ctx.fillText(label,rect.x + rect.w / 2,rect.y + 1);
+    };
+    drawToggle(toggle1Rect,toggle1Label,meterState.mode === "1d");
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText("|",toggleStart + toggle1W + toggleGap / 2 + 1,toggleY + 1);
+    drawToggle(toggleTfRect,toggleTfLabel,meterState.mode === "tf");
+    ctx.font = "bold 9px Arial";
+    ctx.fillStyle = "#0f172a";
+    ctx.fillText(model.mode + " | " + model.pressureState,meterX + meterW / 2,strapY);
+    ctx.font = "9px Arial";
+    const volText = model.volumeState === "N/A" ? "VOL n/a" : "VOL " + model.volumeState + " " + model.relText;
+    ctx.fillStyle = "#334155";
+    ctx.fillText(model.splitText + " | " + volText + " | " + model.rating,meterX + meterW / 2,strapY + strapLineGap);
     for(const bar of bars){
-      const height = hasValidSplit ? Math.max(6,Math.round(bar.pct * barZoneH)) : 0;
+      const height = bar.pct == null ? 0 : Math.max(6,Math.round(bar.pct * barZoneH));
       const x = Math.round(bar.x);
       const y = baseY - height;
       if(height > 0){
         ctx.fillStyle = bar.color;
         ctx.fillRect(x,y,barW,height);
       }
-      ctx.strokeStyle = hasValidSplit ? bar.stroke : "rgba(107,114,128,.14)";
+      ctx.strokeStyle = bar.pct == null ? "rgba(107,114,128,.22)" : bar.stroke;
       ctx.lineWidth = 1;
       ctx.strokeRect(x + 0.5,baseY - Math.max(1,height) + 0.5,Math.max(1,barW - 1),Math.max(1,height || 10) - 1);
       ctx.fillStyle = bar.textColor;
-      ctx.fillText(bar.label,x + barW / 2,baseY + 4);
+      ctx.fillText(bar.label,x + barW / 2,labelY);
     }
     ctx.restore();
+    meterState.meterRect = {x:meterX,y:meterY,w:meterW,h:meterH};
+    if(mouse && mouse.x >= meterX && mouse.x <= meterX + meterW && mouse.y >= meterY && mouse.y <= meterY + meterH && typeof tooltip === "function"){
+      tooltip(model.tooltipLines,mouse.x,mouse.y);
+    }
+  }
+
+  if(typeof canvas !== "undefined" && canvas && !canvas.__bt001PressureMeterToggleBound){
+    canvas.__bt001PressureMeterToggleBound = true;
+    canvas.addEventListener("click",event => {
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const hitMode = box => box && x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
+      if(hitMode(meterState.toggle1dRect)){
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setPressureMode("1d");
+        return;
+      }
+      if(hitMode(meterState.toggleTfRect)){
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setPressureMode("tf");
+      }
+    },true);
   }
 
   const prevDraw = draw;
