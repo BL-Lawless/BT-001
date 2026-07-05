@@ -2708,7 +2708,22 @@ button:hover{filter:brightness(1.04)}
 .wf-bar.is-live{
   border-style:dashed;
   border-color:#94a3b8;
-  background:rgba(148,163,184,.08);
+}
+.wf-bar.is-live-realized.is-gain{
+  background:rgb(22,163,74);
+  border-color:rgba(6,95,70,.78);
+}
+.wf-bar.is-live-realized.is-loss{
+  background:rgb(220,38,38);
+  border-color:rgba(127,29,29,.78);
+}
+.wf-bar.is-live-floating.is-gain{
+  background:rgba(22,163,74,.18);
+  border-color:rgba(4,120,87,.95);
+}
+.wf-bar.is-live-floating.is-loss{
+  background:rgba(220,38,38,.18);
+  border-color:rgba(185,28,28,.95);
 }
 .wf-bar-live-flag{
   position:absolute;
@@ -2770,11 +2785,13 @@ button:hover{filter:brightness(1.04)}
   flex-direction:column;
   width:var(--wf-side-width);
   min-width:var(--wf-side-width);
+  flex:0 0 var(--wf-side-width);
   box-sizing:border-box;
   align-items:center;
   justify-content:center;
   padding:10px 8px;
   text-align:center;
+  overflow:hidden;
 }
 .wf-result-label{
   font-size:11px;
@@ -2788,6 +2805,7 @@ button:hover{filter:brightness(1.04)}
   line-height:1.1;
   font-weight:700;
   font-variant-numeric:tabular-nums;
+  white-space:nowrap;
 }
 .wf-result-value.is-gain{color:#17863d}
 .wf-result-value.is-loss{color:#b34a4a}

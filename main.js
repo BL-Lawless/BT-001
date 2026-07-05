@@ -22037,7 +22037,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     closeRetry:0,
     closeSyncBusy:false,
     closeSyncBaseline:"",
-    liveRefreshKey:""
+    liveRefreshKey:"",
+    liveTicker:null,
+    sideWidthKey:"",
+    sideWidthPx:116,
+    resizeQueued:false
   };
   function activeWfTradeKey(){
     try{
@@ -22218,6 +22222,46 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(nextKey === wfSyncState.liveRefreshKey) return;
     wfSyncState.liveRefreshKey = nextKey;
     render();
+  }
+  function startLiveRefreshLoop(){
+    if(wfSyncState.liveTicker) return;
+    wfSyncState.liveTicker = setInterval(() => {
+      try{ maybeRefreshLivePreview(); }catch(_e){}
+    },350);
+  }
+  function stopLiveRefreshLoop(){
+    if(!wfSyncState.liveTicker) return;
+    clearInterval(wfSyncState.liveTicker);
+    wfSyncState.liveTicker = null;
+  }
+  function queueWfResizeRender(){
+    if(wfSyncState.resizeQueued || !visible) return;
+    wfSyncState.resizeQueued = true;
+    requestAnimationFrame(() => {
+      wfSyncState.resizeQueued = false;
+      if(visible) render();
+    });
+  }
+  function updateWfSideWidth(win,result){
+    if(!win || !result) return;
+    const labelNode = result.querySelector(".wf-result-label");
+    const valueNode = result.querySelector(".wf-result-value");
+    if(!valueNode) return;
+    const valueText = String(valueNode.textContent || "");
+    const labelText = String(labelNode && labelNode.textContent || "");
+    const nextKey = valueText + "|" + labelText;
+    if(nextKey === wfSyncState.sideWidthKey && wfSyncState.sideWidthPx > 0) return;
+    const measured = Math.max(
+      116,
+      Math.ceil((labelNode ? labelNode.scrollWidth : 0) + 16),
+      Math.ceil(valueNode.scrollWidth + 20)
+    );
+    const nextWidth = Math.max(116,measured);
+    const changed = Math.abs(nextWidth - wfSyncState.sideWidthPx) >= 2;
+    wfSyncState.sideWidthKey = nextKey;
+    wfSyncState.sideWidthPx = nextWidth;
+    win.style.setProperty("--wf-side-width",nextWidth + "px");
+    if(changed) queueWfResizeRender();
   }
 
   function profitRatioCell(value){
@@ -22600,6 +22644,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const liveTrade = livePreviewTrade();
     const selectedNet = trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
     const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
+    const liveNet = num(liveTrade && liveTrade.net) || 0;
     const returnMetrics = wfReturnMetrics(selectedNet);
     const endBalance = num(accountBalanceState);
     const wins = trades.filter(trade => trade.net > 0);
@@ -22611,10 +22656,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const grossWins = wins.reduce((sum,trade) => sum + Math.max(0,num(trade.net) || 0),0);
     const grossLosses = losses.reduce((sum,trade) => sum + Math.abs(Math.min(0,num(trade.net) || 0)),0);
     const profitRatio = grossLosses > 0 ? grossWins / grossLosses : null;
-    const returnPct = returnMetrics;
+    const headlineNet = selectedNet + liveNet;
+    const headlineGrossWins = grossWins + Math.max(0,liveNet);
+    const headlineGrossLosses = grossLosses + Math.abs(Math.min(0,liveNet));
+    const headlineProfitRatio = headlineGrossLosses > 0 ? headlineGrossWins / headlineGrossLosses : null;
+    const returnPct = liveTrade ? wfReturnMetrics(headlineNet) : returnMetrics;
     const noteParts = [];
     if(Math.abs(fundingExcluded) > 1e-9) noteParts.push("Trade-only; excludes transfers/unallocated funding");
-    if(returnMetrics && returnMetrics.source === "derived") noteParts.push("Return % derived from current balance minus selected-period net P/L");
+    if(returnPct && returnPct.source === "derived") noteParts.push("Return % derived from current balance minus selected-period net P/L");
     const note = noteParts.join(" | ");
     const average = trades.length ? selectedNet / trades.length : null;
     const livePreviewBars = wfLivePreviewBars(liveTrade,trades);
@@ -22641,9 +22690,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       largestLoss,
       totalWin,
       totalLoss,
-      profitRatio,
-      selectedNet,
-      startBalance:returnMetrics.startBalance || returnMetrics.derivedStartBalance || null,
+      profitRatio:headlineProfitRatio,
+      selectedNet:headlineNet,
+      closedSelectedNet:selectedNet,
+      startBalance:returnPct.startBalance || returnPct.derivedStartBalance || null,
       endBalance,
       returnPct,
       note,
@@ -22784,6 +22834,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         : Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
       const cls = [trade.net >= 0 ? "is-gain" : "is-loss"];
       if(trade.live) cls.push("is-live");
+      if(trade.live && trade.liveSegment === "realized") cls.push("is-live-realized");
+      if(trade.live && trade.liveSegment === "floating") cls.push("is-live-floating");
       if(activeKey && tradeKey(trade) === activeKey) cls.push("is-selected");
       const connector = index < chartTrades.length - 1
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
@@ -22909,6 +22961,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     lastModel = model;
     renderSummary(model);
     renderChart(model);
+    updateWfSideWidth(win,q("wfResult"));
     renderHover();
   }
 
@@ -22917,11 +22970,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const win = ensureWindow();
     if(!win) return;
     win.classList.remove("hidden");
+    startLiveRefreshLoop();
     render();
   }
 
   function hide(){
     visible = false;
+    stopLiveRefreshLoop();
     const win = q("wfWindow");
     if(win) win.classList.add("hidden");
   }
