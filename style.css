@@ -2748,20 +2748,27 @@ button:hover{filter:brightness(1.04)}
 }
 .wf-watermark{
   position:absolute;
-  transform:translate(-100%,-50%);
   pointer-events:none;
-  display:flex;
-  align-items:center;
-  gap:6px;
-  z-index:2;
+  z-index:3;
+  overflow:visible;
+  left:0;
+  right:0;
+  height:0;
 }
 .wf-watermark-line{
-  width:40px;
-  height:1px;
-  background:#64748b;
+  position:absolute;
+  right:50%;
+  top:-10px;
+  width:calc(50% + 4px);
+  height:10px;
+  border-top:1px solid #64748b;
+  border-right:1px solid #64748b;
   opacity:.9;
 }
 .wf-watermark-label{
+  position:absolute;
+  right:calc(100% + 4px);
+  bottom:0;
   font-size:12px;
   line-height:1;
   font-weight:400;
@@ -2769,6 +2776,7 @@ button:hover{filter:brightness(1.04)}
   background:rgba(255,255,255,.94);
   padding:1px 3px;
   border:1px solid rgba(148,163,184,.55);
+  white-space:nowrap;
 }
 .wf-empty{
   display:flex;
@@ -2809,6 +2817,7 @@ button:hover{filter:brightness(1.04)}
 }
 .wf-result-value.is-gain{color:#17863d}
 .wf-result-value.is-loss{color:#b34a4a}
+.wf-result-value.is-neutral{color:#334155}
 .wf-summary-table{
   width:100%;
   border-collapse:collapse;
@@ -2897,7 +2906,7 @@ button:hover{filter:brightness(1.04)}
 }
 .wf-hover-tip{
   position:absolute;
-  z-index:2;
+  z-index:6;
   min-width:160px;
   max-width:280px;
   padding:12px;
@@ -2908,6 +2917,13 @@ button:hover{filter:brightness(1.04)}
   line-height:1.4;
   pointer-events:none;
   box-shadow:0 6px 12px rgba(0,0,0,.10);
+  overflow:hidden;
+}
+.wf-tip-columns{
+  column-gap:16px;
+}
+.wf-tip-columns > div{
+  break-inside:avoid;
 }
 .wf-tip-bold{font-weight:700}
 .wf-tip-line-lg{line-height:1.45}

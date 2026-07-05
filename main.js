@@ -5573,7 +5573,7 @@ function lineMiniLabel(txt,x,y,col,clip){
   ctx.restore();
 }
 
-function pnlLabel(txt,x,y,col,clip){
+function pnlLabel(txt,x,y,col,clip,opt=null){
   ctx.save();
 
   ctx.font = "bold 11px Arial";
@@ -5582,7 +5582,10 @@ function pnlLabel(txt,x,y,col,clip){
   const w = ctx.measureText(txt).width + px*2;
   const h = 18;
 
-  const cx = clamp(x, clip.left+w/2+2, clip.left+clip.width-w/2-2);
+  const align = opt && opt.align === "left-of-point" ? "left-of-point" : "center";
+  const anchorGap = Math.max(8, Number(opt && opt.gap) || 0);
+  const rawCx = align === "left-of-point" ? (x - anchorGap - w/2) : x;
+  const cx = clamp(rawCx, clip.left+w/2+2, clip.left+clip.width-w/2-2);
   const cy = clamp(y, clip.top+h/2+2, clip.top+clip.height-h/2-2);
 
   ctx.fillStyle = "rgba(255,255,255,.96)";
@@ -10968,7 +10971,7 @@ startTradeAuto();
           drawnExitLabels.add(key);
           const val = g ? g.pnl : p10Num(m.pnl);
           const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-          pnlLabel(fm(val),x,y - 18,lblCol,clip);
+          pnlLabel(fm(val),x,y - 18,lblCol,clip,{align:(m.isFinalExit || m.letter === 'EX') ? 'center' : 'left-of-point',gap:12});
         }
       }
     }
@@ -11536,7 +11539,7 @@ startTradeAuto();
           drawnExitLabels.add(key);
           const val = g ? g.pnl : p11Num(m.pnl);
           const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-          pnlLabel(fm(val),x,y - 18,lblCol,clip);
+          pnlLabel(fm(val),x,y - 18,lblCol,clip,{align:(m.isFinalExit || m.letter === 'EX') ? 'center' : 'left-of-point',gap:12});
         }
       }else if(showD && m.role === 'close' && !m.unresolved && openChainIds35.has(p11Cid(m))){
         /* PATCH_35: show realized partial P/L for active open parent trade. */
@@ -11546,7 +11549,7 @@ startTradeAuto();
           drawnExitLabels.add(key);
           const val = g ? g.pnl : p11Num(m.pnl);
           const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-          pnlLabel(fm(val),x,y - 18,lblCol,clip);
+          pnlLabel(fm(val),x,y - 18,lblCol,clip,{align:(m.isFinalExit || m.letter === 'EX') ? 'center' : 'left-of-point',gap:12});
         }
       }
     }
@@ -22042,7 +22045,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     liveTicker:null,
     sideWidthKey:"",
     sideWidthPx:116,
-    resizeQueued:false
+    resizeQueued:false,
+    livePriceHint:null,
+    liveFloatingHint:null,
+    hoverClientX:null,
+    hoverClientY:null,
+    hoverInsideChart:false,
+    suppressResizeRender:false,
+    expandedRect:null
   };
   function activeWfTradeKey(){
     try{
@@ -22069,6 +22079,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     }
   }
   function currentLivePrice(){
+    const hinted = num(wfSyncState.livePriceHint);
+    if(hinted != null) return hinted;
     try{
       if(typeof appCurrentPrice === "function"){
         const appPrice = num(appCurrentPrice());
@@ -22115,12 +22127,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const realizedPartials = links.reduce((sum,link) => sum + (num(link && link.netPnl) || 0),0);
     const livePrice = currentLivePrice();
-    const floatingPL = boxes.length
+    const hintedFloating = num(wfSyncState.liveFloatingHint);
+    const floatingPL = hintedFloating != null ? hintedFloating : (boxes.length
       ? boxes.reduce((sum,box) => {
           const floating = wfLiveFloatingForBox(box,livePrice);
           return sum + (floating || 0);
         },0)
-      : null;
+      : null);
     const netLivePL = floatingPL == null ? null : realizedPartials + floatingPL;
     const startTime = num(entries[0] && entries[0].time);
     const tooltipLines = [
@@ -22212,17 +22225,18 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     wfSyncState.closeSyncBaseline = "";
   }
   function scheduleAutoCloseSync(delayMs=1250){
-    if(!wfSyncState.loaded || wfSyncState.symbol !== currentSymbol()) return;
+    if((!wfSyncState.loaded && !visible) || (wfSyncState.loaded && wfSyncState.symbol !== currentSymbol())) return;
     if(wfSyncState.closeTimer || wfSyncState.closeSyncBusy) return;
     wfSyncState.closeSyncBaseline = closedTradeSignature(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection);
+    const period = wfSyncState.period || currentPeriodValue();
     wfSyncState.closeTimer = setTimeout(async () => {
       wfSyncState.closeTimer = null;
       wfSyncState.closeSyncBusy = true;
       try{
         while(wfSyncState.closeRetry < 3){
-          const result = await loadClosedTradesForPeriod(wfSyncState.period || currentPeriodValue(),{silent:true});
+          const result = await loadClosedTradesForPeriod(period,{silent:true});
           const nextSignature = closedTradeSignature(result && result.report);
-          if(result && nextSignature && nextSignature !== wfSyncState.closeSyncBaseline){
+          if(result && (!wfSyncState.closeSyncBaseline || (nextSignature && nextSignature !== wfSyncState.closeSyncBaseline))){
             wfSyncState.closeRetry = 0;
             wfSyncState.closeSyncBaseline = "";
             if(visible) render();
@@ -22242,6 +22256,15 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       }
     },Math.max(250,delayMs));
   }
+  function updateWfLiveStripSnapshot(c){
+    const price = num(c && c.close);
+    wfSyncState.livePriceHint = price != null ? price : currentLivePrice();
+    if(Array.isArray(openPositionBoxes) && openPositionBoxes.length && typeof openBoxesFloating === "function"){
+      wfSyncState.liveFloatingHint = num(openBoxesFloating(wfSyncState.livePriceHint));
+    }else{
+      wfSyncState.liveFloatingHint = null;
+    }
+  }
   function maybeRefreshLivePreview(){
     if(!visible) return;
     if(wfSyncState.liveRefreshTimer) return;
@@ -22254,6 +22277,49 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       wfSyncState.liveRefreshKey = nextKey;
       render();
     },60);
+  }
+  function saveExpandedRect(win){
+    if(!win || win.classList.contains("is-collapsed")) return;
+    const rect = win.getBoundingClientRect();
+    wfSyncState.expandedRect = {
+      left:rect.left,
+      top:rect.top,
+      width:rect.width,
+      height:rect.height
+    };
+  }
+  function applyExpandedRect(win){
+    const rect = wfSyncState.expandedRect;
+    if(!win || !rect) return;
+    win.style.left = Math.max(6,rect.left) + "px";
+    win.style.top = Math.max(6,rect.top) + "px";
+    win.style.right = "auto";
+    win.style.width = Math.max(520,rect.width) + "px";
+    win.style.height = Math.max(360,rect.height) + "px";
+  }
+  function restoreWfHoverTarget(){
+    const chart = q("wfChart");
+    if(!chart || !wfSyncState.hoverInsideChart){
+      hoverTradeIndex = null;
+      renderHover();
+      return;
+    }
+    const chartRect = chart.getBoundingClientRect();
+    const x = wfSyncState.hoverClientX;
+    const y = wfSyncState.hoverClientY;
+    if(!(Number.isFinite(x) && Number.isFinite(y)) || x < chartRect.left || x > chartRect.right || y < chartRect.top || y > chartRect.bottom){
+      hoverTradeIndex = null;
+      wfSyncState.hoverInsideChart = false;
+      renderHover();
+      return;
+    }
+    const bar = hoverTradeIndex == null ? null : chart.querySelector(`.wf-bar[data-trade-index="${hoverTradeIndex}"]`);
+    if(!bar){
+      hoverTradeIndex = null;
+      renderHover();
+      return;
+    }
+    renderHover({clientX:x,clientY:y});
   }
   function startLiveRefreshLoop(){
     if(wfSyncState.liveTicker) return;
@@ -22361,14 +22427,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function wfWatermarks(trades){
     const rows = Array.isArray(trades) ? trades : [];
     let high = null;
-    let low = null;
     rows.forEach((trade,index) => {
       const top = Math.max(num(trade && trade.start) || 0,num(trade && trade.end) || 0);
-      const bottom = Math.min(num(trade && trade.start) || 0,num(trade && trade.end) || 0);
       if(!high || top > high.value) high = {index,value:top};
-      if(!low || bottom < low.value) low = {index,value:bottom};
     });
-    return {high,low};
+    return {high};
   }
   function wfLineText(line){
     return Array.isArray(line) ? line.map(part => String(part && part.text || "")).join("") : String(line || "");
@@ -22445,6 +22508,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       head.__wfDragBound = true;
       head.addEventListener("pointerdown",event => {
         if(event.target.closest("button")) return;
+        saveExpandedRect(win);
         const rect = win.getBoundingClientRect();
         drag = {x:event.clientX,y:event.clientY,left:rect.left,top:rect.top};
         try{head.setPointerCapture(event.pointerId);}catch(_e){}
@@ -22457,6 +22521,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         win.style.right = "auto";
       },false);
       const endDrag = event => {
+        saveExpandedRect(win);
         drag = null;
         try{head.releasePointerCapture(event.pointerId);}catch(_e){}
       };
@@ -22468,6 +22533,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       win.querySelectorAll(".wf-resize-handle").forEach(handle => {
         handle.addEventListener("pointerdown",event => {
           if(win.classList.contains("is-collapsed")) return;
+          saveExpandedRect(win);
           const rect = win.getBoundingClientRect();
           const start = {
             x:event.clientX,
@@ -22517,6 +22583,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
             win.style.right = "auto";
             win.style.width = width + "px";
             win.style.height = height + "px";
+            saveExpandedRect(win);
             if(visible) render();
           };
           const up = endEvent => {
@@ -22532,6 +22599,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       });
       if(typeof ResizeObserver === "function"){
         const observer = new ResizeObserver(() => {
+          if(wfSyncState.suppressResizeRender) return;
           if(visible && !win.classList.contains("is-collapsed")) render();
         });
         observer.observe(win);
@@ -22541,6 +22609,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(chart && !chart.__wfHoverBound){
       chart.__wfHoverBound = true;
       chart.addEventListener("pointermove",event => {
+        wfSyncState.hoverClientX = event.clientX;
+        wfSyncState.hoverClientY = event.clientY;
+        wfSyncState.hoverInsideChart = true;
         const bar = event.target.closest ? event.target.closest(".wf-bar[data-trade-index]") : null;
         if(!bar){
           hoverTradeIndex = null;
@@ -22552,6 +22623,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         renderHover(event);
       },false);
       chart.addEventListener("pointerleave",() => {
+        wfSyncState.hoverInsideChart = false;
         hoverTradeIndex = null;
         renderHover();
       },false);
@@ -22567,7 +22639,23 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(collapseBtn && !collapseBtn.__wfBound){
       collapseBtn.__wfBound = true;
       collapseBtn.addEventListener("click",() => {
-        win.classList.toggle("is-collapsed");
+        if(win.classList.contains("is-collapsed")){
+          wfSyncState.suppressResizeRender = true;
+          applyExpandedRect(win);
+          win.classList.remove("is-collapsed");
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              wfSyncState.suppressResizeRender = false;
+              if(visible) render();
+            });
+          });
+          return;
+        }
+        saveExpandedRect(win);
+        const headNode = q("wfHead");
+        const headerHeight = headNode ? Math.ceil(headNode.getBoundingClientRect().height) + 2 : 28;
+        win.style.height = headerHeight + "px";
+        win.classList.add("is-collapsed");
       },false);
     }
     if(closeBtn && !closeBtn.__wfBound){
@@ -22794,8 +22882,16 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(false && title && model.period){
       title.textContent = "Waterfall — From " + dayText(model.period.start) + " to " + dayText(model.period.end);
     }
+    const watermarks = wfWatermarks(model.trades);
+    const highWatermarkValue = num(watermarks && watermarks.high && watermarks.high.value);
+    const netValue = num(model.selectedNet) || 0;
+    const resultClass = netValue < 0
+      ? "is-loss"
+      : Math.abs(netValue) < 1e-12
+        ? "is-neutral"
+        : (highWatermarkValue != null && netValue > 0 && netValue < highWatermarkValue ? "is-neutral" : "is-gain");
     if(result){
-      result.innerHTML = `<div class="wf-result-label">Net P/L</div><div class="wf-result-value ${model.selectedNet < 0 ? "is-loss" : "is-gain"}">${fmtBigResult(model.selectedNet)}</div>`;
+      result.innerHTML = `<div class="wf-result-label">Net P/L</div><div class="wf-result-value ${resultClass}">${fmtBigResult(model.selectedNet)}</div>`;
     }
     if(!model.trades.length && !model.liveTrade){
       chart.innerHTML = `<div class="wf-empty">No closed trades in the selected period.</div>`;
@@ -22856,7 +22952,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     }).join("");
     const chartTrades = Array.isArray(model.chartTrades) ? model.chartTrades : model.trades;
     const tradeCount = Math.max(1,chartTrades.length);
-    const watermarks = wfWatermarks(model.trades);
     const gapPx = tradeCount > 90 ? 0 : 1;
     const activeKey = activeWfTradeKey();
     const barsHtml = chartTrades.map((trade,index) => {
@@ -22877,24 +22972,22 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
       const barInner = trade.live ? `<span class="wf-bar-live-flag">Live</span>` : "";
+      const mark = watermarks.high && watermarks.high.index === index && !trade.live
+        ? `<div class="wf-watermark is-high" style="top:${topY}px">
+            <span class="wf-watermark-label">${money(watermarks.high.value)}</span>
+            <span class="wf-watermark-line"></span>
+          </div>`
+        : "";
       return `<div class="wf-bar-col">
           <div class="wf-bar ${cls.join(" ")}" data-trade-index="${trade.live ? -1 : index}" style="top:${topY}px;height:${heightPx}px">${barInner}</div>
           <span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>
           ${connector}
-        </div>`;
-    }).join("");
-    const watermarkMarkup = [watermarks.high].filter(Boolean).map((mark,index) => {
-      const y = Math.max(0,Math.min(plotHeight,valueToY(mark.value)));
-      const anchorPct = ((mark.index + 0.5) / tradeCount) * 100;
-      const cls = index === 0 ? "is-high" : "is-low";
-      return `<div class="wf-watermark ${cls}" style="top:${y}px;left:${anchorPct}%">
-          <span class="wf-watermark-label">${money(mark.value)}</span>
-          <span class="wf-watermark-line"></span>
+          ${mark}
         </div>`;
     }).join("");
     chart.innerHTML = `<div class="wf-plot">
         <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
-        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}${watermarkMarkup}</div>
+        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}</div>
       </div>`;
   }
 
@@ -22954,6 +23047,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(hoverTradeIndex == null){
       tip.classList.add("hidden");
       tip.innerHTML = "";
+      tip.style.left = "";
+      tip.style.top = "";
+      tip.style.maxHeight = "";
+      tip.style.columnCount = "";
+      tip.style.maxWidth = "";
+      tip.style.overflowY = "";
       return;
     }
     const trade = hoverTradeIndex < 0
@@ -22963,9 +23062,15 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(!lines.length || !event){
       tip.classList.add("hidden");
       tip.innerHTML = "";
+      tip.style.left = "";
+      tip.style.top = "";
+      tip.style.maxHeight = "";
+      tip.style.columnCount = "";
+      tip.style.maxWidth = "";
+      tip.style.overflowY = "";
       return;
     }
-    tip.innerHTML = lines.map(line => {
+    tip.innerHTML = `<div class="wf-tip-columns">${lines.map(line => {
       if(line === "") return `<div class="wf-tip-spacer"></div>`;
       if(Array.isArray(line)){
         const lineClass = line.some(part => part && part.large) ? " class=\"wf-tip-line-lg\"" : "";
@@ -22977,15 +23082,35 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         }).join("")}</div>`;
       }
       return `<div>${wfEscape(line)}</div>`;
-    }).join("");
+    }).join("")}</div>`;
     const win = ensureWindow();
+    const chart = q("wfChart");
     const rect = win.getBoundingClientRect();
+    const chartRect = chart ? chart.getBoundingClientRect() : rect;
     let left = event.clientX - rect.left + 14;
     let top = event.clientY - rect.top + 14;
     tip.classList.remove("hidden");
+    tip.style.maxHeight = "";
+    tip.style.columnCount = "";
+    tip.style.maxWidth = Math.max(180,Math.floor(chartRect.width - 16)) + "px";
+    const maxHeight = Math.max(120,Math.floor(chartRect.height - 12));
+    const maxWidth = Math.max(180,Math.floor(chartRect.width - 16));
+    for(let columns = 1; columns <= 4; columns += 1){
+      tip.style.columnCount = columns > 1 ? String(columns) : "";
+      tip.style.maxHeight = maxHeight + "px";
+      tip.style.overflowY = columns >= 4 ? "auto" : "hidden";
+      const measured = tip.getBoundingClientRect();
+      if(measured.height <= maxHeight + 1 && measured.width <= maxWidth + 1) break;
+    }
     const tipRect = tip.getBoundingClientRect();
-    if(left + tipRect.width > rect.width - 10) left = Math.max(8,left - tipRect.width - 28);
-    if(top + tipRect.height > rect.height - 10) top = Math.max(8,top - tipRect.height - 28);
+    const chartLeft = chartRect.left - rect.left;
+    const chartTop = chartRect.top - rect.top;
+    const chartRight = chartRect.right - rect.left;
+    const chartBottom = chartRect.bottom - rect.top;
+    if(left + tipRect.width > chartRight - 8) left = Math.max(chartLeft + 8,left - tipRect.width - 28);
+    if(top + tipRect.height > chartBottom - 8) top = Math.max(chartTop + 8,top - tipRect.height - 28);
+    left = clamp(left,chartLeft + 8,Math.max(chartLeft + 8,chartRight - tipRect.width - 8));
+    top = clamp(top,chartTop + 8,Math.max(chartTop + 8,chartBottom - tipRect.height - 8));
     tip.style.left = left + "px";
     tip.style.top = top + "px";
   }
@@ -22998,7 +23123,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     renderSummary(model);
     renderChart(model);
     updateWfSideWidth(win,q("wfResult"));
-    renderHover();
+    restoreWfHoverTarget();
   }
 
   function show(){
@@ -23007,6 +23132,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(!win) return;
     win.classList.remove("hidden");
     startLiveRefreshLoop();
+    applyExpandedRect(win);
     render();
   }
 
@@ -23078,6 +23204,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const prevUpdatePositionStripForWfLive = updatePositionStrip;
     updatePositionStrip = function(){
       const result = prevUpdatePositionStripForWfLive.apply(this,arguments);
+      updateWfLiveStripSnapshot(arguments[0]);
       maybeRefreshLivePreview();
       return result;
     };
@@ -23088,7 +23215,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     window.__bt001WfLiveSyncBound = true;
     window.addEventListener("v13:open-position-change",event => {
       const detail = event && event.detail || {};
-      if(detail && detail.closed) scheduleAutoCloseSync(1250);
+      if(detail && detail.closed && !(detail && detail.sideChanged && detail.current)) scheduleAutoCloseSync(1250);
       else if(detail && detail.opened) clearAutoCloseSync();
       maybeRefreshLivePreview();
     },false);
