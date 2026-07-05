@@ -21968,6 +21968,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const dt = new Date(ms);
     return String(dt.getDate()).padStart(2,"0") + " / " + dt.toLocaleString("en-GB",{month:"short"});
   };
+  const WF_AXIS_MIN_ABS = 10;
+  const WF_MAX_SCALE_PX_PER_UNIT = 90;
+  const WF_WATERMARK_LINE_PX = 40;
   const WF_GREEN = "#047857";
   const WF_RED = "#7f1d1d";
   const WF_BLACK = "#1e2329";
@@ -22122,7 +22125,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           return parts.join("");
         }
         return composeStack([
-          {share:Math.min(1,Math.abs(floating) / base),cls:"is-grey"},
+          {share:Math.min(1,Math.abs(floating) / base),cls:"is-red"},
           {share:Math.min(1,Math.max(0,net) / base),cls:"is-green"}
         ]);
       }
@@ -22219,7 +22222,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     return n > 0 ? WF_GREEN : WF_RED;
   }
   function returnPctCell(value){
-    const n = num(value);
+    const n = num(value && typeof value === "object" ? value.value : value);
     if(n == null) return {text:"N/A",cls:"is-flat"};
     if(n <= -5) return {text:pctText(n),cls:"is-deep-loss"};
     if(n <= -2) return {text:pctText(n),cls:"is-loss"};
@@ -22228,6 +22231,51 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(n < 1) return {text:pctText(n),cls:"is-soft-gain"};
     if(n < 3) return {text:pctText(n),cls:"is-gain"};
     return {text:pctText(n),cls:"is-strong-gain"};
+  }
+  function wfReturnMetrics(selectedNet){
+    const selected = num(selectedNet) || 0;
+    const rec = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection;
+    const explicitStart = [
+      rec && rec.startBalance,
+      rec && rec.selectedPeriodStartBalance,
+      rec && rec.startingBalance
+    ].map(num).find(value => value != null && value > 0) || null;
+    if(explicitStart){
+      const value = selected / explicitStart * 100;
+      return Number.isFinite(value)
+        ? {value,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"start-balance"}
+        : {value:null,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
+    }
+    const currentBalance = num(accountBalanceState);
+    if(currentBalance == null) return {value:null,startBalance:null,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
+    const derivedStartBalance = currentBalance - selected;
+    if(!(derivedStartBalance > 0)) return {value:null,startBalance:null,currentBalance,derivedStartBalance,source:"unavailable"};
+    const value = selected / derivedStartBalance * 100;
+    return Number.isFinite(value)
+      ? {value,startBalance:null,currentBalance,derivedStartBalance,source:"derived"}
+      : {value:null,startBalance:null,currentBalance,derivedStartBalance,source:"unavailable"};
+  }
+  function wfReturnDiagnostics(metrics){
+    if(!metrics || !metrics.source) return "";
+    if(metrics.source === "start-balance"){
+      return "Return source: selected-period starting balance | Start: " + moneyPlain(metrics.startBalance);
+    }
+    if(metrics.source === "derived"){
+      return "Return source: derived from current balance | Current: " + moneyPlain(metrics.currentBalance) + " | Derived start: " + moneyPlain(metrics.derivedStartBalance);
+    }
+    return "Return source: unavailable";
+  }
+  function wfWatermarks(trades){
+    const rows = Array.isArray(trades) ? trades : [];
+    let high = null;
+    let low = null;
+    rows.forEach((trade,index) => {
+      const top = Math.max(num(trade && trade.start) || 0,num(trade && trade.end) || 0);
+      const bottom = Math.min(num(trade && trade.start) || 0,num(trade && trade.end) || 0);
+      if(!high || top > high.value) high = {index,value:top};
+      if(!low || bottom < low.value) low = {index,value:bottom};
+    });
+    return {high,low};
   }
   function wfLineText(line){
     return Array.isArray(line) ? line.map(part => String(part && part.text || "")).join("") : String(line || "");
@@ -22338,7 +22386,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
             dir:handle.dataset.resize || ""
           };
           const minWidth = 520;
-          const minHeight = 260;
+          const minHeight = 360;
           try{handle.setPointerCapture(event.pointerId);}catch(_e){}
           event.preventDefault();
           event.stopPropagation();
@@ -22539,9 +22587,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const liveTrade = livePreviewTrade();
     const selectedNet = trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
     const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
+    const returnMetrics = wfReturnMetrics(selectedNet);
     const endBalance = num(accountBalanceState);
-    const startBalance = endBalance == null ? null : endBalance - selectedNet;
-    const validStartBalance = startBalance != null && startBalance > 0 ? startBalance : null;
     const wins = trades.filter(trade => trade.net > 0);
     const losses = trades.filter(trade => trade.net < 0);
     const totalWin = wins.reduce((sum,trade) => sum + trade.net,0);
@@ -22551,8 +22598,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const grossWins = wins.reduce((sum,trade) => sum + Math.max(0,num(trade.net) || 0),0);
     const grossLosses = losses.reduce((sum,trade) => sum + Math.abs(Math.min(0,num(trade.net) || 0)),0);
     const profitRatio = grossLosses > 0 ? grossWins / grossLosses : null;
-    const returnPct = validStartBalance ? (selectedNet / validStartBalance) * 100 : null;
-    const note = Math.abs(fundingExcluded) > 1e-9 ? "Trade-only; excludes transfers/unallocated funding" : "";
+    const returnPct = returnMetrics;
+    const noteParts = [];
+    if(Math.abs(fundingExcluded) > 1e-9) noteParts.push("Trade-only; excludes transfers/unallocated funding");
+    if(returnMetrics && returnMetrics.source === "derived") noteParts.push("Return % derived from current balance minus selected-period net P/L");
+    const note = noteParts.join(" | ");
     const average = trades.length ? selectedNet / trades.length : null;
     if(liveTrade){
       const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
@@ -22565,22 +22615,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const maxCumulative = values.length ? Math.max(...values) : 0;
     const span = Math.max(1,maxCumulative - minCumulative);
     const pad = span * 0.08;
-    const domainMin = Math.min(0,minCumulative - pad);
-    const domainMax = Math.max(0,maxCumulative + pad);
-    const majorStep = niceStep(domainMax - domainMin);
-    const majorTicks = [];
-    const firstTick = Math.floor(domainMin / majorStep) * majorStep;
-    for(let tick = firstTick; tick <= domainMax + majorStep * 0.5; tick += majorStep){
-      majorTicks.push(Number(tick.toFixed(8)));
-    }
-    const minorTicks = [];
-    const minorStep = majorStep / 2;
-    for(let tick = firstTick - minorStep; tick <= domainMax + minorStep; tick += minorStep){
-      const rounded = Number(tick.toFixed(8));
-      if(majorTicks.some(major => Math.abs(major - rounded) < 1e-8)) continue;
-      if(rounded < domainMin - 1e-8 || rounded > domainMax + 1e-8) continue;
-      minorTicks.push(rounded);
-    }
+    const domainMin = Math.min(-WF_AXIS_MIN_ABS,minCumulative - pad,0);
+    const domainMax = Math.max(WF_AXIS_MIN_ABS,maxCumulative + pad,0);
     const period = selectedPeriodDates();
     return {
       trades,
@@ -22597,14 +22633,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       totalLoss,
       profitRatio,
       selectedNet,
-      startBalance:validStartBalance,
+      startBalance:returnMetrics.startBalance || returnMetrics.derivedStartBalance || null,
       endBalance,
       returnPct,
       note,
       domainMin,
       domainMax,
-      majorTicks,
-      minorTicks,
       period
     };
   }
@@ -22614,6 +22648,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(!table) return;
     const ratio = profitRatioCell(model.profitRatio);
     const returnPct = returnPctCell(model.returnPct);
+    const returnTitle = wfEscape(wfReturnDiagnostics(model.returnPct));
     table.innerHTML = `<colgroup>
         <col>
         <col>
@@ -22642,7 +22677,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           <td>${money(model.largestWin)}</td>
           <td>${money(model.totalWin)}</td>
           <td class="wf-ratio-cell ${ratio.cls}" rowspan="2">${ratio.text}</td>
-          <td class="wf-return-cell ${returnPct.cls}" rowspan="2">${returnPct.text}</td>
+          <td class="wf-return-cell ${returnPct.cls}" rowspan="2" title="${returnTitle}">${returnPct.text}</td>
         </tr>
         <tr>
           <th>Losses</th>
@@ -22675,15 +22710,36 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const plotRight = 10;
     const plotBottom = 18;
     const plotHeight = Math.max(1,chart.clientHeight - plotTop - plotBottom);
+    let domainMin = num(model.domainMin) != null ? num(model.domainMin) : -WF_AXIS_MIN_ABS;
+    let domainMax = num(model.domainMax) != null ? num(model.domainMax) : WF_AXIS_MIN_ABS;
+    const minDomainSpan = Math.max(WF_AXIS_MIN_ABS * 2,plotHeight / WF_MAX_SCALE_PX_PER_UNIT);
+    if(domainMax - domainMin < minDomainSpan){
+      const mid = (domainMax + domainMin) / 2;
+      domainMin = mid - minDomainSpan / 2;
+      domainMax = mid + minDomainSpan / 2;
+    }
+    const majorStep = niceStep(domainMax - domainMin);
+    const majorTicks = [];
+    const firstTick = Math.floor(domainMin / majorStep) * majorStep;
+    for(let tick = firstTick; tick <= domainMax + majorStep * 0.5; tick += majorStep){
+      majorTicks.push(Number(tick.toFixed(8)));
+    }
+    const minorTicks = [];
+    const minorStep = majorStep / 2;
+    for(let tick = firstTick - minorStep; tick <= domainMax + minorStep; tick += minorStep){
+      const rounded = Number(tick.toFixed(8));
+      if(majorTicks.some(major => Math.abs(major - rounded) < 1e-8)) continue;
+      if(rounded < domainMin - 1e-8 || rounded > domainMax + 1e-8) continue;
+      minorTicks.push(rounded);
+    }
     const valueToY = value => {
-      const domain = model.domainMax - model.domainMin;
+      const domain = domainMax - domainMin;
       if(!(domain > 0)) return plotHeight / 2;
-      return ((model.domainMax - value) / domain) * plotHeight;
+      return ((domainMax - value) / domain) * plotHeight;
     };
-    const valueToPct = value => (valueToY(value) / plotHeight) * 100;
     const labelTicks = [];
     const zeroY = valueToY(0);
-    const majorLines = model.majorTicks.map(tick => {
+    const majorLines = majorTicks.map(tick => {
       const y = valueToY(tick);
       if(y < -0.5 || y > plotHeight + 0.5) return "";
       if(!labelTicks.length || Math.abs(y - labelTicks[labelTicks.length - 1].y) >= 14){
@@ -22697,13 +22753,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       return `<div class="${cls || "wf-axis-label"}" style="top:${labelY}px">${moneyPlain(tick).replace("$","")}</div>`;
     }
     ).join("");
-    const minorLines = model.minorTicks.map(tick => {
+    const minorLines = minorTicks.map(tick => {
       const y = valueToY(tick);
       if(y < -0.5 || y > plotHeight + 0.5) return "";
       return `<div class="wf-gridline is-minor" style="top:${y}px"></div>`;
     }).join("");
     const chartTrades = Array.isArray(model.chartTrades) ? model.chartTrades : model.trades;
     const tradeCount = Math.max(1,chartTrades.length);
+    const watermarks = wfWatermarks(model.trades);
     const gapPx = tradeCount > 90 ? 0 : 1;
     const activeKey = activeWfTradeKey();
     const barsHtml = chartTrades.map((trade,index) => {
@@ -22728,9 +22785,18 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           ${connector}
         </div>`;
     }).join("");
+    const watermarkMarkup = [watermarks.high,watermarks.low].filter(Boolean).map((mark,index) => {
+      const y = Math.max(0,Math.min(plotHeight,valueToY(mark.value)));
+      const anchorPct = ((mark.index + 0.5) / tradeCount) * 100;
+      const cls = index === 0 ? "is-high" : "is-low";
+      return `<div class="wf-watermark ${cls}" style="top:${y}px;left:calc(${anchorPct}% - ${WF_WATERMARK_LINE_PX}px)">
+          <span class="wf-watermark-line"></span>
+          <span class="wf-watermark-label">${money(mark.value)}</span>
+        </div>`;
+    }).join("");
     chart.innerHTML = `<div class="wf-plot">
         <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
-        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,1fr));gap:${gapPx}px">${barsHtml}</div>
+        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,1fr));gap:${gapPx}px">${barsHtml}${watermarkMarkup}</div>
       </div>`;
   }
 

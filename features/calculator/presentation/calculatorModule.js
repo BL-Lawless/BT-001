@@ -106,6 +106,7 @@
   let binanceSyncPreservedRows = [];
   let flatCleanupInFlight = false;
   let lastFlatCleanupSignature = "";
+  let lastFlatTransitionPositionContext = null;
   const notifiedExecutionKeys = new Set();
   let lastSettingsRequestedSymbol = "";
 
@@ -751,15 +752,29 @@
       source:"openPositionChangeEvent"
     };
   }
+  function eventPreviousPosition(detail){
+    const previous = detail && detail.previous;
+    if(!previous || !(num(previous.qty) > 0) || !(num(previous.avg) > 0)) return null;
+    return {
+      symbol:String(previous.symbol || currentSymbol()),
+      side:previous.side === "SHORT" ? "SHORT" : "LONG",
+      qty:Math.abs(num(previous.qty)),
+      entry:num(previous.avg),
+      positionSide:toUpper(previous.positionSide || ""),
+      source:"openPositionChangeEvent.previous"
+    };
+  }
   function reconcileOpenPositionRow(detail){
     const signature = openPositionChangeSignature(detail);
     if(signature === lastOpenPositionReconcileSignature) return;
     lastOpenPositionReconcileSignature = signature;
     const position = eventOpenPosition(detail);
+    const previousPosition = eventPreviousPosition(detail);
     const container = q("calcModuleEntryRows");
     if(!container) return;
     const openRows = rows("calcModuleEntryRows").filter(isOpenPositionRow);
     if(position){
+      lastFlatTransitionPositionContext = null;
       syncPositionGroup(position);
       setDirection(position.side);
       let row = openRows.shift() || null;
@@ -781,6 +796,7 @@
       }
       if(row && container.firstElementChild !== row) container.insertBefore(row,container.firstElementChild);
     }else{
+      if(detail && detail.closed && previousPosition) lastFlatTransitionPositionContext = previousPosition;
       openRows.forEach(row => row.remove());
     }
     lastKnownLiveOpenPositionQty = position ? position.qty : 0;
@@ -4430,6 +4446,15 @@
     return !approxEqual(refQty,liveQty,1e-9);
   }
   function lastKnownOpenPositionContext(){
+    if(lastFlatTransitionPositionContext && num(lastFlatTransitionPositionContext.qty) > 0 && num(lastFlatTransitionPositionContext.entry) > 0){
+      return {
+        symbol:String(lastFlatTransitionPositionContext.symbol || currentSymbol()),
+        side:lastFlatTransitionPositionContext.side === "SHORT" ? "SHORT" : "LONG",
+        qty:num(lastFlatTransitionPositionContext.qty),
+        entry:num(lastFlatTransitionPositionContext.entry),
+        positionSide:toUpper(lastFlatTransitionPositionContext.positionSide || "")
+      };
+    }
     const ref = lastReadStateSnapshot && lastReadStateSnapshot.openPosition ? lastReadStateSnapshot.openPosition : currentOpenPositionRowSnapshot();
     if(!ref || !(num(ref.qty) > 0) || !(num(ref.entry) > 0)) return null;
     return {
@@ -6763,6 +6788,7 @@
         diag.openOrdersReadStatus = normalErr && algoErr ? "error" : (normalErr || algoErr ? "partial" : "ok");
         if(!pos && previousLivePosition){
           const cleanup = await autoCleanupFlatPositionOrphans(previousLivePosition,snapshot,{source});
+          lastFlatTransitionPositionContext = null;
           if(cleanup && cleanup.position){
             pos = cleanup.position;
             syncPositionGroup(pos);
