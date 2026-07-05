@@ -10865,7 +10865,7 @@ startTradeAuto();
         if(!dragging) return;
         const r = canvasEl.getBoundingClientRect();
         const y = e.clientY - r.top;
-        const top = 18, bottom = 42, gap = 20;
+        const top = 18, bottom = 42, gap = 0;
         const usable = Math.max(120,r.height - top - bottom - gap);
         const priceH = Math.max(120,Math.min(usable-45,y-top));
         const volFrac = Math.max(.10,Math.min(.45,1 - (priceH / usable)));
@@ -11062,6 +11062,7 @@ startTradeAuto();
     const h = surface.h;
     overlayHitItems = [];
     ctx.clearRect(0,0,surface.clearW,surface.clearH);
+    window.__bt001VolumePanelBounds = null;
     const r = range();
     const vis = candles.slice(r.start,r.end);
     const future = r.futureBars;
@@ -11074,13 +11075,29 @@ startTradeAuto();
     /* PATCH_35: reclaim header-text vertical space for chart area. */
     const top = 8;
     const bottom = 42;
-    const gap = 20;
+    const gap = 0;
     const usable = Math.max(120,h-top-bottom-gap);
     const volFrac = Math.max(.10,Math.min(.45,window.__p10VolumeFrac || .22));
     const volH = Math.max(38,Math.floor(usable * volFrac));
     const priceH = Math.max(120,usable - volH);
     const volTop = top + priceH + gap;
     const chartW = w - left - right;
+    const pressureReserveW = Math.max(125,Math.min(140,Math.floor(chartW * 0.24)));
+    const volumeRight = w - right;
+    const pressureReserveLeft = Math.max(left,volumeRight - pressureReserveW);
+    const volumeBarsRight = Math.max(left,pressureReserveLeft - 6);
+    window.__bt001VolumePanelBounds = {
+      left,
+      right:volumeRight,
+      top:volTop,
+      bottom:volTop + volH,
+      width:chartW,
+      height:volH,
+      reserveLeft:pressureReserveLeft,
+      reserveRight:volumeRight,
+      reserveWidth:volumeRight - pressureReserveLeft,
+      barsRight:volumeBarsRight
+    };
     if(handle){ handle.style.top = (volTop - 5) + 'px'; handle.style.right = right + 'px'; }
 
     const yr = yRange(vis);
@@ -11088,11 +11105,12 @@ startTradeAuto();
     const maxP = yr.max;
     lastYMin = minP; lastYMax = maxP; lastRange = maxP - minP; lastAreaH = priceH;
     const maxVol = Math.max(...vis.map(c => c.volume),1);
+    const maxVolScaled = Math.max(1,maxVol / 0.88);
     const slot = chartW / total;
     const candleW = Math.max(2,Math.min(13,slot*.68));
     const mapX = i => left + i*slot + slot/2;
     const mapY = p => top + ((maxP-p)/(maxP-minP))*priceH;
-    const mapV = v => volTop + volH - (v/maxVol)*volH;
+    const mapV = v => volTop + volH - (v/maxVolScaled)*volH;
     const clip = {left,top,width:chartW,height:priceH};
     const latest = vis[vis.length-1];
     const latestY = mapY(latest.close);
@@ -11124,7 +11142,7 @@ startTradeAuto();
       const x = px(left + chartW*i/5);
       ctx.strokeStyle = '#f4f5f7'; ctx.beginPath(); ctx.moveTo(x,px(top)); ctx.lineTo(x,px(h-bottom)); ctx.stroke();
     }
-    ctx.strokeStyle = '#edf0f2'; ctx.beginPath(); ctx.moveTo(px(left),px(volTop)); ctx.lineTo(px(w-right),px(volTop)); ctx.stroke();
+    ctx.strokeStyle = '#d9dce1'; ctx.beginPath(); ctx.moveTo(px(left),px(volTop)+0.5); ctx.lineTo(px(w-right),px(volTop)+0.5); ctx.stroke();
 
     ctx.save(); ctx.beginPath(); ctx.rect(left,top,chartW,priceH); ctx.clip();
     for(let i=0;i<vis.length;i++){
@@ -11167,6 +11185,7 @@ startTradeAuto();
 
     for(let i=0;i<vis.length;i++){
       const c = vis[i], x = mapX(i), y = mapV(c.volume), bull = c.close >= c.open;
+      if(x + candleW / 2 > volumeBarsRight) continue;
       ctx.fillStyle = bull ? 'rgba(95,95,95,.42)' : 'rgba(122,122,122,.58)';
       ctx.fillRect(ix(x-candleW/2),ix(y),Math.max(2,ix(candleW)),Math.max(1,ix(volTop+volH-y)));
     }
@@ -17205,7 +17224,7 @@ startTradeAuto();
     const right = typeof RIGHT_AXIS !== "undefined" ? RIGHT_AXIS : 86;
     const top = 18;
     const bottom = 42;
-    const gap = 20;
+    const gap = 0;
     const usable = Math.max(120,h-top-bottom-gap);
     const volFrac = Math.max(.10,Math.min(.45,window.__p10VolumeFrac || .22));
     const volH = Math.max(38,Math.floor(usable * volFrac));
@@ -23267,8 +23286,10 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     loading:false,
     promise:null,
     meterRect:null,
+    barRects:[],
     toggle1dRect:null,
-    toggleTfRect:null
+    toggleTfRect:null,
+    hoverToggle:false
   };
   function currentSymbol(){
     try{
@@ -23378,10 +23399,11 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   }
   function relativeVolumeState(relVol){
     if(relVol == null) return "N/A";
+    if(relVol < 0.50) return "THIN";
     if(relVol < 0.70) return "LOW";
-    if(relVol <= 1.20) return "NORMAL";
-    if(relVol <= 1.80) return "ACTIVE";
-    if(relVol <= 2.50) return "HIGH";
+    if(relVol < 1.20) return "NORMAL";
+    if(relVol < 1.80) return "ACTIVE";
+    if(relVol < 2.50) return "HIGH";
     return "EXTREME";
   }
   function percentileRank(value,history){
@@ -23409,6 +23431,124 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const num = n(value);
     return num == null ? "n/a" : Math.round(num).toLocaleString("en-US");
   }
+  function compactRead(model){
+    if(!model || !model.available) return "Pressure unavailable.";
+    const volume = String(model.volumeState || "").toUpperCase();
+    const lowVolume = volume === "THIN" || volume === "LOW";
+    switch(String(model.pressureState || "").toUpperCase()){
+      case "ABS": return "Absorption-style pressure. Elevated volume, limited price progress.";
+      case "BUY CONTROL": return "Buyers in control." + (lowVolume ? " Low volume." : "");
+      case "SELL CONTROL": return "Sellers in control." + (lowVolume ? " Low volume." : "");
+      case "BUY STRONG": return "Strong buyer pressure." + (lowVolume ? " Low volume." : "");
+      case "SELL STRONG": return "Strong seller pressure." + (lowVolume ? " Low volume." : "");
+      case "BUY PRESSURE": return "Buyer pressure." + (lowVolume ? " Low volume." : "");
+      case "SELL PRESSURE": return "Seller pressure." + (lowVolume ? " Low volume." : "");
+      case "BUY EDGE": return "Buyers have mild edge." + (lowVolume ? " Low volume." : "");
+      case "SELL EDGE": return "Sellers have mild edge." + (lowVolume ? " Low volume." : "");
+      case "BUY LEAN": return "Buyers lean slightly stronger." + (lowVolume ? " Low volume." : "");
+      case "SELL LEAN": return "Sellers lean slightly stronger." + (lowVolume ? " Low volume." : "");
+      default: return "Balanced." + (lowVolume ? " Low volume." : "");
+    }
+  }
+  function compactTooltipLines(model){
+    if(!model || !model.available) return [
+      "Vol: n/a",
+      "Avg: n/a",
+      "Rel: n/a",
+      "",
+      "Buy: n/a",
+      "Sell: n/a",
+      "Delta: n/a",
+      "",
+      "Read:",
+      "Pressure unavailable."
+    ];
+    const lines = [];
+    if(model.forming) lines.push("LIVE");
+    lines.push("Vol: " + fmtVol(model.totalVolume));
+    lines.push("Avg: " + fmtVol(model.avgVolume));
+    lines.push("Rel: " + (model.relVol == null ? "n/a" : model.relVol.toFixed(2) + "x " + model.volumeState));
+    lines.push("");
+    lines.push("Buy: " + fmtVol(model.takerBuy) + " " + (roundPct(model.buyPct) == null ? "n/a" : roundPct(model.buyPct) + "%"));
+    lines.push("Sell: " + fmtVol(model.takerSell) + " " + (roundPct(model.sellPct) == null ? "n/a" : roundPct(model.sellPct) + "%"));
+    lines.push("Delta: " + fmtVol(model.delta));
+    lines.push("");
+    lines.push("Read:");
+    lines.push(compactRead(model));
+    return lines;
+  }
+  function drawCompactMeterTooltip(lines,x,y){
+    if(!ctx || !canvas || !Array.isArray(lines) || !lines.length) return;
+    ctx.save();
+    ctx.font = "12px Arial";
+    const pad = 8;
+    const lh = 15;
+    const maxWidth = 200;
+    const wrapLine = text => {
+      const raw = String(text == null ? "" : text);
+      const words = raw.split(/\s+/).filter(Boolean);
+      if(!words.length) return [raw];
+      const out = [];
+      let line = "";
+      for(const word of words){
+        const next = line ? line + " " + word : word;
+        if(ctx.measureText(next).width <= maxWidth - pad * 2 || !line){
+          line = next;
+        }else{
+          out.push(line);
+          line = word;
+        }
+      }
+      if(line) out.push(line);
+      return out;
+    };
+    const wrapped = lines.flatMap(wrapLine);
+    const contentWidth = wrapped.length ? Math.max(...wrapped.map(s => ctx.measureText(s).width)) : 0;
+    const w = Math.min(maxWidth,Math.ceil(contentWidth) + pad * 2);
+    const h = wrapped.length * lh + pad * 2;
+    let tx = x + 12;
+    let ty = y + 12;
+    if(tx + w > canvas.clientWidth - 6) tx = Math.max(6,x - w - 12);
+    if(ty + h > canvas.clientHeight - 6) ty = Math.max(6,y - h - 12);
+    ctx.fillStyle = "rgba(17,24,39,.94)";
+    ctx.strokeStyle = "rgba(148,163,184,.45)";
+    ctx.fillRect(tx,ty,w,h);
+    ctx.strokeRect(tx,ty,w,h);
+    ctx.fillStyle = "#f8fafc";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    wrapped.forEach((line,index) => ctx.fillText(line,tx + pad,ty + pad + index * lh));
+    ctx.restore();
+  }
+  function pressureAbbrev(value){
+    switch(String(value || "").toUpperCase()){
+      case "BALANCED": return "BAL";
+      case "BUY LEAN": return "BUY LEAN";
+      case "SELL LEAN": return "SELL LEAN";
+      case "BUY EDGE": return "BUY EDG";
+      case "SELL EDGE": return "SELL EDG";
+      case "BUY PRESSURE": return "BUY PRESS";
+      case "SELL PRESSURE": return "SELL PRESS";
+      case "BUY STRONG": return "BUY STRONG";
+      case "SELL STRONG": return "SELL STRONG";
+      case "BUY CONTROL": return "BUY CTRL";
+      case "SELL CONTROL": return "SELL CTRL";
+      default: return String(value || "N/A");
+    }
+  }
+  function drawCenteredClippedText(text,x,y,maxW,font,fill){
+    ctx.save();
+    ctx.font = font;
+    ctx.fillStyle = fill;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    let out = String(text || "");
+    while(out.length > 1 && ctx.measureText(out).width > maxW){
+      out = out.slice(0,-2).trimEnd() + ".";
+    }
+    ctx.fillText(out,x,y);
+    ctx.restore();
+  }
   function computePressureModel(mode){
     const useDaily = mode !== "tf";
     const tf = useDaily ? DAILY_TF : currentTf();
@@ -23416,8 +23556,8 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const rows = normalizePressureRows(useDaily ? ensureDailyRows() : rowsForTf(tf),tf);
     if(!rows.length){
       return {
-        mode:modeText,
-        available:false,
+      mode:modeText,
+      available:false,
         pressureState:"UNAVAILABLE",
         splitText:"n/a",
         volumeState:"N/A",
@@ -23425,7 +23565,7 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
         rating:"WAIT",
         buyPct:null,
         sellPct:null,
-        tooltipLines:["Mode: " + modeText,"Status: unavailable","Data: no candle data loaded yet"]
+        tooltipLines:compactTooltipLines(null)
       };
     }
     const current = rows[rows.length - 1];
@@ -23446,14 +23586,7 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
         rating:"WAIT",
         buyPct:null,
         sellPct:null,
-        tooltipLines:[
-          "Mode: " + modeText + (useDaily ? "" : " (" + tfLabel(tf) + ")"),
-          "Status: " + (forming ? "forming" : "closed"),
-          "Total volume: " + fmtVol(totalVolume),
-          "Taker buy data: unavailable",
-          "Trades: " + fmtTrades(trades),
-          "Read: Taker buy volume is missing, so pressure cannot be inferred safely."
-        ]
+        tooltipLines:compactTooltipLines(null)
       };
     }
     const takerSell = Math.max(0,totalVolume - takerBuy);
@@ -23465,6 +23598,7 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const range = Math.max(0,(n(current.high) || 0) - (n(current.low) || 0));
     const bodyRatio = range > 0 ? Math.abs(body) / range : 0;
     const priceConfirms = buySide ? body > 0 : body < 0;
+    const priceRejects = bodyRatio >= 0.35 && (buySide ? body < 0 : body > 0);
     let projectedVolume = null;
     if(useDaily && totalVolume > 0){
       const nowMs = typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now();
@@ -23479,13 +23613,17 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     const percentile = percentileRank(compareVolume,recentVolumes);
     const volumeState = relativeVolumeState(relVol);
     const absCondition = relVol != null && relVol >= 1.8 && dominantPct >= 0.55 && bodyRatio <= 0.22;
+    const controlAllowed = dominantPct >= 0.65 && relVol != null && relVol >= 1.20 && !priceRejects;
     let pressureState = "BALANCED";
     if(absCondition) pressureState = "ABS";
-    else if(dominantPct >= 0.60) pressureState = buySide ? "BUY CONTROL" : "SELL CONTROL";
-    else if(dominantPct >= 0.55) pressureState = buySide ? "BUY EDGE" : "SELL EDGE";
+    else if(controlAllowed) pressureState = buySide ? "BUY CONTROL" : "SELL CONTROL";
+    else if(dominantPct >= 0.70) pressureState = buySide ? "BUY STRONG" : "SELL STRONG";
+    else if(dominantPct >= 0.65) pressureState = buySide ? "BUY PRESSURE" : "SELL PRESSURE";
+    else if(dominantPct >= 0.60) pressureState = buySide ? "BUY EDGE" : "SELL EDGE";
+    else if(dominantPct >= 0.55) pressureState = buySide ? "BUY LEAN" : "SELL LEAN";
     let rating = "WAIT";
     if(pressureState === "ABS") rating = "ABS";
-    else if(relVol != null && relVol >= 1.8 && dominantPct >= 0.60 && priceConfirms) rating = "A";
+    else if(relVol != null && relVol >= 1.8 && dominantPct >= 0.70 && priceConfirms) rating = "A";
     else if(relVol != null && relVol >= 1.2 && dominantPct >= 0.55) rating = "B";
     else if(pressureState !== "BALANCED" || (relVol != null && relVol >= 0.70)) rating = "C";
     const firstPct = roundPct(buySide ? buyPct : sellPct);
@@ -23499,25 +23637,11 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       read = "Buyers and sellers are balanced. Edge is weak, so patience is better than forcing a directional read.";
     }else{
       const sideWord = buySide ? "Buyers" : "Sellers";
-      const strengthWord = pressureState.includes("CONTROL") ? "clear control" : "mild edge";
+      const strengthWord = pressureState.includes("CONTROL") ? "clear control" : pressureState.includes("STRONG") || pressureState.includes("PRESSURE") ? "clear pressure" : "mild edge";
       const confirmWord = priceConfirms ? " Price is confirming that pressure." : " Price has not confirmed it yet.";
       read = sideWord + " have " + strengthWord + ". Volume is " + String(volumeState || "n/a").toLowerCase() + " versus recent pace." + confirmWord;
     }
-    const tooltipLines = [
-      "Mode: " + modeText + (useDaily ? "" : " (" + tfLabel(tf) + ")"),
-      "Status: " + (forming ? "forming" : "closed"),
-      "Total volume: " + fmtVol(totalVolume)
-    ];
-    if(useDaily) tooltipLines.push("Projected daily volume: " + fmtVol(projectedVolume));
-    tooltipLines.push("Recent average volume: " + fmtVol(avgVolume));
-    tooltipLines.push("Relative volume: " + (relVol == null ? "n/a" : relVol.toFixed(2) + "x"));
-    tooltipLines.push("Percentile rank: " + (percentile == null ? "n/a" : Math.round(percentile) + "%"));
-    tooltipLines.push("Taker buy: " + fmtVol(takerBuy) + " (" + (roundPct(buyPct) == null ? "n/a" : roundPct(buyPct) + "%") + ")");
-    tooltipLines.push("Taker sell: " + fmtVol(takerSell) + " (" + (roundPct(sellPct) == null ? "n/a" : roundPct(sellPct) + "%") + ")");
-    tooltipLines.push("Delta: " + fmtVol(takerBuy - takerSell));
-    tooltipLines.push("Trades: " + fmtTrades(trades));
-    tooltipLines.push("Read: " + read);
-    return {
+    const model = {
       mode:modeText,
       available:true,
       pressureState,
@@ -23527,8 +23651,17 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
       rating,
       buyPct,
       sellPct,
-      tooltipLines
+      forming,
+      totalVolume,
+      avgVolume,
+      relVol,
+      takerBuy,
+      takerSell,
+      delta:takerBuy - takerSell,
+      tooltipLines:null
     };
+    model.tooltipLines = compactTooltipLines(model);
+    return model;
   }
   function drawAxisDayRangeVisual(){
     if(!ctx || !canvas) return;
@@ -23585,48 +23718,56 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
   }
   function drawDailyVolumeSplitVisual(){
     if(!ctx || !canvas) return;
-    const state = currentPriceLineState || null;
-    const chartRight = n(state && state.chartRight);
-    const top = n(state && state.top);
-    const priceH = n(state && state.priceH);
-    if(chartRight == null || top == null || priceH == null) return;
-    const volTop = Math.round(top + priceH + 20);
-    const bottom = 30;
-    const volH = Math.max(0,canvas.clientHeight - volTop - bottom);
-    const axisLeft = chartRight;
-    const axisW = Math.max(0,canvas.clientWidth - axisLeft);
-    if(!(volH >= 52) || !(axisW >= 70)) return;
+    meterState.barRects = [];
+    meterState.toggle1dRect = null;
+    meterState.toggleTfRect = null;
+    meterState.meterRect = null;
+    const volume = window.__bt001VolumePanelBounds || null;
+    if(!volume) return;
+    const reserveLeft = n(volume.reserveLeft);
+    const reserveRight = n(volume.reserveRight);
+    const volumeTop = n(volume.top);
+    const volumeHeight = n(volume.height);
+    if(reserveLeft == null || reserveRight == null || volumeTop == null || volumeHeight == null) return;
+    const reserveWidth = reserveRight - reserveLeft;
+    if(!(volumeHeight >= 52) || !(reserveWidth >= 110)) return;
     const model = computePressureModel(meterState.mode);
-    const meterX = Math.round(axisLeft + 2);
-    const meterW = Math.max(66,axisW - 4);
-    const meterY = volTop + 1;
-    const meterH = Math.max(50,volH - 2);
-    const toggleY = meterY + 2;
-    const toggleH = 12;
+    const pad = 6;
+    const meterX = Math.round(reserveLeft + pad);
+    const meterW = Math.max(96,reserveWidth - pad * 2);
+    const meterY = Math.round(volumeTop + 3);
+    const meterH = Math.max(48,volumeHeight - 6);
+    const toggleY = meterY + 1;
+    const toggleH = 14;
     const toggleGap = 8;
     const strapY = toggleY + toggleH + 4;
-    const strapLineGap = 10;
-    const barsTop = strapY + strapLineGap * 2 + 4;
-    const baseY = meterY + meterH - 16;
+    const strapLineGap = 12;
+    const axisLeft = Math.round(reserveRight + 3);
+    const axisRight = Math.round(canvas.clientWidth - 3);
+    const axisW = Math.max(0,axisRight - axisLeft);
+    const barsTop = Math.round(volumeTop + 6);
+    const baseY = Math.round(volumeTop + volumeHeight - 15);
     const labelY = baseY + 3;
-    const barZoneH = Math.max(16,baseY - barsTop);
-    const gap = 6;
-    const barW = Math.max(16,Math.min(22,Math.floor((meterW - 16 - gap) / 2)));
+    const barZoneH = Math.max(28,baseY - barsTop);
+    const gap = 8;
+    const barW = Math.max(18,Math.min(26,Math.floor((axisW - 12 - gap) / 2)));
     const totalBarsW = barW * 2 + gap;
-    const startX = Math.round(meterX + Math.max(6,Math.floor((meterW - totalBarsW) / 2)));
+    const startX = Math.round(axisLeft + Math.max(4,Math.floor((axisW - totalBarsW) / 2)));
     const bars = [
       {x:startX,pct:model.available ? model.buyPct : null,color:"rgba(34,197,94,.55)",stroke:"rgba(34,197,94,.78)",textColor:"#166534",label:model.available && model.buyPct != null ? Math.round(model.buyPct * 100) + "%" : "n/a"},
       {x:startX + barW + gap,pct:model.available ? model.sellPct : null,color:"rgba(239,68,68,.52)",stroke:"rgba(239,68,68,.78)",textColor:"#991b1b",label:model.available && model.sellPct != null ? Math.round(model.sellPct * 100) + "%" : "n/a"}
     ];
     ctx.save();
-    ctx.fillStyle = "rgba(255,255,255,.92)";
-    ctx.fillRect(meterX,meterY,meterW,meterH);
-    ctx.strokeStyle = "rgba(148,163,184,.32)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(meterX + 0.5,meterY + 0.5,meterW - 1,meterH - 1);
+    ctx.fillStyle = "rgba(255,255,255,.54)";
+    ctx.fillRect(Math.round(reserveLeft),Math.round(volumeTop + 1),Math.round(reserveWidth),Math.round(volumeHeight - 2));
+    ctx.strokeStyle = "rgba(203,213,225,.55)";
+    ctx.beginPath();
+    ctx.moveTo(Math.round(reserveLeft) + 0.5,Math.round(volumeTop + 4));
+    ctx.lineTo(Math.round(reserveLeft) + 0.5,Math.round(volumeTop + volumeHeight - 4));
+    ctx.stroke();
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.font = "10px Arial";
+    ctx.font = "11px Arial";
     const toggle1Label = "1D";
     const toggleTfLabel = "TF";
     const separatorW = Math.ceil(ctx.measureText("|").width);
@@ -23639,10 +23780,10 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     meterState.toggle1dRect = toggle1Rect;
     meterState.toggleTfRect = toggleTfRect;
     const drawToggle = (rect,label,active) => {
-      ctx.fillStyle = active ? "rgba(15,23,42,.10)" : "transparent";
-      if(active) ctx.fillRect(rect.x,rect.y,rect.w,rect.h);
-      ctx.strokeStyle = active ? "rgba(71,85,105,.42)" : "transparent";
-      if(active) ctx.strokeRect(rect.x + 0.5,rect.y + 0.5,rect.w - 1,rect.h - 1);
+      ctx.fillStyle = active ? "rgba(15,23,42,.10)" : "rgba(255,255,255,.70)";
+      ctx.fillRect(rect.x,rect.y,rect.w,rect.h);
+      ctx.strokeStyle = active ? "rgba(71,85,105,.42)" : "rgba(203,213,225,.55)";
+      ctx.strokeRect(rect.x + 0.5,rect.y + 0.5,rect.w - 1,rect.h - 1);
       ctx.fillStyle = active ? "#111827" : "#64748b";
       ctx.fillText(label,rect.x + rect.w / 2,rect.y + 1);
     };
@@ -23650,53 +23791,73 @@ window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
     ctx.fillStyle = "#94a3b8";
     ctx.fillText("|",toggleStart + toggle1W + toggleGap / 2 + 1,toggleY + 1);
     drawToggle(toggleTfRect,toggleTfLabel,meterState.mode === "tf");
-    ctx.font = "bold 9px Arial";
-    ctx.fillStyle = "#0f172a";
-    ctx.fillText(model.mode + " | " + model.pressureState,meterX + meterW / 2,strapY);
-    ctx.font = "9px Arial";
-    const volText = model.volumeState === "N/A" ? "VOL n/a" : "VOL " + model.volumeState + " " + model.relText;
-    ctx.fillStyle = "#334155";
-    ctx.fillText(model.splitText + " | " + volText + " | " + model.rating,meterX + meterW / 2,strapY + strapLineGap);
-    for(const bar of bars){
-      const height = bar.pct == null ? 0 : Math.max(6,Math.round(bar.pct * barZoneH));
-      const x = Math.round(bar.x);
-      const y = baseY - height;
-      if(height > 0){
-        ctx.fillStyle = bar.color;
-        ctx.fillRect(x,y,barW,height);
+    const volumeText = model.volumeState === "N/A" ? "n/a" : model.volumeState + " " + model.relText;
+    const strapTop = String(model.pressureState || "N/A");
+    const strapBottom = volumeText + " | " + model.rating;
+    drawCenteredClippedText(strapTop,meterX + meterW / 2,strapY,meterW,"bold 12px Arial","#0f172a");
+    drawCenteredClippedText(strapBottom,meterX + meterW / 2,strapY + strapLineGap,meterW,"bold 11px Arial","#334155");
+    if(axisW >= 46){
+      ctx.fillStyle = "rgba(255,255,255,.58)";
+      ctx.fillRect(axisLeft - 2,Math.round(volumeTop + 1),axisW + 4,Math.round(volumeHeight - 2));
+      ctx.strokeStyle = "rgba(203,213,225,.45)";
+      ctx.beginPath();
+      ctx.moveTo(axisLeft - 2.5,Math.round(volumeTop + 4));
+      ctx.lineTo(axisLeft - 2.5,Math.round(volumeTop + volumeHeight - 4));
+      ctx.stroke();
+      for(const bar of bars){
+        const height = bar.pct == null ? 0 : Math.max(8,Math.round(bar.pct * barZoneH));
+        const x = Math.round(bar.x);
+        const y = baseY - height;
+        meterState.barRects.push({x,y,w:barW,h:height});
+        if(height > 0){
+          ctx.fillStyle = bar.color;
+          ctx.fillRect(x,y,barW,height);
+        }
+        ctx.strokeStyle = bar.pct == null ? "rgba(107,114,128,.22)" : bar.stroke;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5,baseY - Math.max(1,height) + 0.5,Math.max(1,barW - 1),Math.max(1,height || 10) - 1);
+        ctx.fillStyle = bar.textColor;
+        ctx.fillText(bar.label,x + barW / 2,labelY);
       }
-      ctx.strokeStyle = bar.pct == null ? "rgba(107,114,128,.22)" : bar.stroke;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(x + 0.5,baseY - Math.max(1,height) + 0.5,Math.max(1,barW - 1),Math.max(1,height || 10) - 1);
-      ctx.fillStyle = bar.textColor;
-      ctx.fillText(bar.label,x + barW / 2,labelY);
     }
     ctx.restore();
     meterState.meterRect = {x:meterX,y:meterY,w:meterW,h:meterH};
-    if(mouse && mouse.x >= meterX && mouse.x <= meterX + meterW && mouse.y >= meterY && mouse.y <= meterY + meterH && typeof tooltip === "function"){
-      tooltip(model.tooltipLines,mouse.x,mouse.y);
+    const hoverBar = mouse && meterState.barRects.find(rect => mouse.x >= rect.x && mouse.x <= rect.x + rect.w && mouse.y >= rect.y && mouse.y <= rect.y + rect.h);
+    if(hoverBar){
+      drawCompactMeterTooltip(model.tooltipLines,mouse.x,mouse.y);
     }
+  }
+  function hitRect(rect,x,y){
+    return !!(rect && x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h);
+  }
+  function pressureEventPoint(event){
+    if(!canvas || !event) return null;
+    const rect = canvas.getBoundingClientRect();
+    return {x:event.clientX - rect.left,y:event.clientY - rect.top};
+  }
+  function handlePressureToggleEvent(event){
+    const point = pressureEventPoint(event);
+    if(!point) return false;
+    let nextMode = null;
+    if(hitRect(meterState.toggle1dRect,point.x,point.y)) nextMode = "1d";
+    else if(hitRect(meterState.toggleTfRect,point.x,point.y)) nextMode = "tf";
+    if(!nextMode) return false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    setPressureMode(nextMode);
+    return true;
   }
 
   if(typeof canvas !== "undefined" && canvas && !canvas.__bt001PressureMeterToggleBound){
     canvas.__bt001PressureMeterToggleBound = true;
-    canvas.addEventListener("click",event => {
-      const rect = canvas.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const hitMode = box => box && x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
-      if(hitMode(meterState.toggle1dRect)){
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        setPressureMode("1d");
-        return;
-      }
-      if(hitMode(meterState.toggleTfRect)){
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        setPressureMode("tf");
-      }
-    },true);
+    canvas.addEventListener("mousedown",handlePressureToggleEvent,true);
+    canvas.addEventListener("click",handlePressureToggleEvent,true);
+    canvas.addEventListener("mousemove",event => {
+      const point = pressureEventPoint(event);
+      const overToggle = !!(point && (hitRect(meterState.toggle1dRect,point.x,point.y) || hitRect(meterState.toggleTfRect,point.x,point.y)));
+      meterState.hoverToggle = overToggle;
+      if(overToggle) canvas.style.cursor = "pointer";
+    },false);
   }
 
   const prevDraw = draw;
