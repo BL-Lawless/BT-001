@@ -2582,7 +2582,7 @@ button:hover{filter:brightness(1.04)}
   display:flex;
   flex-direction:column;
   gap:0;
-  padding:6px 6px 0;
+  padding:6px;
   overflow:auto;
 }
 .wf-summary,.wf-chart-card{
@@ -2599,6 +2599,7 @@ button:hover{filter:brightness(1.04)}
   margin-top:-1px;
   flex:0 0 auto;
   min-height:auto;
+  padding-bottom:0;
 }
 .wf-chart-title{font-size:12px;font-weight:700;text-transform:uppercase}
 .wf-chart-card{
@@ -2708,24 +2709,6 @@ button:hover{filter:brightness(1.04)}
   border-style:dashed;
   border-color:#94a3b8;
   background:rgba(148,163,184,.08);
-}
-.wf-live-segment{
-  position:absolute;
-  top:0;
-  bottom:0;
-}
-.wf-live-segment.is-green{background:rgba(22,163,74,.72)}
-.wf-live-segment.is-green-float{background:rgba(22,163,74,.46)}
-.wf-live-segment.is-red{background:rgba(220,38,38,.72)}
-.wf-live-segment.is-grey{background:rgba(148,163,184,.56)}
-.wf-live-segment.is-neutral{background:rgba(148,163,184,.24)}
-.wf-live-midline{
-  position:absolute;
-  top:1px;
-  bottom:1px;
-  width:1px;
-  background:rgba(107,114,128,.8);
-  transform:translateX(-0.5px);
 }
 .wf-bar-live-flag{
   position:absolute;

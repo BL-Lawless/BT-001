@@ -22124,41 +22124,46 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       end:0
     };
   }
-  function liveSegmentMarkup(trade,model){
-    if(!trade || !trade.live || !model) return "";
-    const realized = num(trade.realizedPartials) || 0;
-    const floating = num(trade.floatingPL);
-    const net = num(trade.net);
-    const totalMagnitude = Math.abs(realized) + Math.abs(floating || 0);
-    const closedCls = realized > 0
-      ? ((floating != null && floating < 0) ? "is-grey" : "is-green")
-      : realized < 0
-        ? "is-red"
-        : "is-neutral";
-    const floatingCls = floating == null
-      ? "is-neutral"
-      : floating > 0
-        ? "is-green-float"
-        : floating < 0
-          ? "is-red"
-          : "is-neutral";
-    if(net == null) return `<div class="wf-live-segment is-neutral" style="left:0;width:100%"></div>`;
-    if(!(totalMagnitude > 1e-12)){
-      return `<div class="wf-live-segment ${net > 0 ? "is-green" : net < 0 ? "is-red" : "is-neutral"}" style="left:0;width:100%"></div>`;
+  function wfLivePreviewBars(liveTrade,trades){
+    if(!liveTrade) return [];
+    const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
+    const realized = num(liveTrade.realizedPartials);
+    const floating = num(liveTrade.floatingPL);
+    const bars = [];
+    let cursor = cumulative;
+    if(realized != null && Math.abs(realized) > 1e-12){
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_realized",
+        liveSegment:"realized",
+        net:realized,
+        start:cursor,
+        end:cursor + realized
+      });
+      cursor += realized;
     }
-    const closedShare = Math.abs(realized) > 1e-12 ? Math.abs(realized) / totalMagnitude : 0;
-    const floatingShare = Math.abs(floating || 0) > 1e-12 ? Math.abs(floating || 0) / totalMagnitude : 0;
-    const parts = [];
-    if(closedShare > 0){
-      parts.push(`<div class="wf-live-segment ${closedCls}" style="left:0;width:${Math.max(0,closedShare * 100)}%"></div>`);
+    if(floating != null && Math.abs(floating) > 1e-12){
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_floating",
+        liveSegment:"floating",
+        net:floating,
+        start:cursor,
+        end:cursor + floating
+      });
+      cursor += floating;
     }
-    if(floatingShare > 0){
-      parts.push(`<div class="wf-live-segment ${floatingCls}" style="left:${Math.max(0,closedShare * 100)}%;width:${Math.max(0,floatingShare * 100)}%"></div>`);
+    if(!bars.length){
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_flat",
+        liveSegment:"net",
+        net:num(liveTrade.net) || 0,
+        start:cumulative,
+        end:cumulative + (num(liveTrade.net) || 0)
+      });
     }
-    if(closedShare > 0 && floatingShare > 0){
-      parts.push(`<div class="wf-live-midline" style="left:${Math.max(0,Math.min(100,closedShare * 100))}%"></div>`);
-    }
-    return parts.join("");
+    return bars;
   }
   function markClosedTradesLoaded(loaded){
     wfSyncState.loaded = !!loaded;
@@ -22612,12 +22617,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(returnMetrics && returnMetrics.source === "derived") noteParts.push("Return % derived from current balance minus selected-period net P/L");
     const note = noteParts.join(" | ");
     const average = trades.length ? selectedNet / trades.length : null;
-    if(liveTrade){
-      const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
-      liveTrade.start = cumulative;
-      liveTrade.end = cumulative + (num(liveTrade.net) || 0);
-    }
-    const chartTrades = liveTrade ? trades.concat(liveTrade) : trades.slice();
+    const livePreviewBars = wfLivePreviewBars(liveTrade,trades);
+    const chartTrades = livePreviewBars.length ? trades.concat(livePreviewBars) : trades.slice();
     const values = [0].concat(chartTrades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
     const minCumulative = values.length ? Math.min(...values) : 0;
     const maxCumulative = values.length ? Math.max(...values) : 0;
@@ -22630,6 +22631,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       trades,
       chartTrades,
       liveTrade,
+      livePreviewBars,
       wins:wins.length,
       losses:losses.length,
       average,
@@ -22786,14 +22788,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       const connector = index < chartTrades.length - 1
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
-      const barInner = trade.live ? `${liveSegmentMarkup(trade,model)}<span class="wf-bar-live-flag">Live</span>` : "";
+      const barInner = trade.live ? `<span class="wf-bar-live-flag">Live</span>` : "";
       return `<div class="wf-bar-col">
           <div class="wf-bar ${cls.join(" ")}" data-trade-index="${trade.live ? -1 : index}" style="top:${topY}px;height:${heightPx}px">${barInner}</div>
           <span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>
           ${connector}
         </div>`;
     }).join("");
-    const watermarkMarkup = [watermarks.high,watermarks.low].filter(Boolean).map((mark,index) => {
+    const watermarkMarkup = [watermarks.high].filter(Boolean).map((mark,index) => {
       const y = Math.max(0,Math.min(plotHeight,valueToY(mark.value)));
       const anchorPct = ((mark.index + 0.5) / tradeCount) * 100;
       const cls = index === 0 ? "is-high" : "is-low";
