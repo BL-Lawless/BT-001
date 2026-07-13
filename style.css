@@ -3118,3 +3118,153 @@ button:hover{filter:brightness(1.04)}
   .calc-module-stop{grid-template-columns:62px minmax(74px,1fr) 30px 64px 25px minmax(66px,max-content)}
   .calc-module-binance-actions{grid-template-columns:1fr 1fr 1fr}
 }
+
+.pressure-signal-toolbar{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  flex:0 0 auto;
+  min-width:0;
+  white-space:nowrap;
+}
+.pressure-signal-chip,
+.pressure-signal-pill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:24px;
+  padding:0 8px;
+  border-radius:0;
+  border:1px solid #d7dce2;
+  background:#f8fafc;
+  color:#4b5563;
+  font-size:11px;
+  font-weight:700;
+  line-height:1;
+}
+.pressure-signal-chip{
+  cursor:pointer;
+  user-select:none;
+}
+.pressure-signal-chip.is-active{
+  background:#e8edf3;
+  border-color:#b8c2cf;
+  color:#111827;
+}
+.pressure-signal-pill{
+  max-width:260px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+#pressureSignalEntry{
+  cursor:pointer;
+}
+#pressureSignalEntry:focus-visible{
+  outline:2px solid #64748b;
+  outline-offset:1px;
+}
+.pressure-signal-pill[data-tone="green"]{
+  background:rgba(14,203,129,.12);
+  border-color:rgba(14,203,129,.32);
+  color:#166534;
+}
+.pressure-signal-pill[data-tone="red"]{
+  background:rgba(246,70,93,.10);
+  border-color:rgba(246,70,93,.28);
+  color:#991b1b;
+}
+.pressure-signal-pill[data-tone="orange"]{
+  background:rgba(245,158,11,.12);
+  border-color:rgba(245,158,11,.30);
+  color:#9a3412;
+}
+.pressure-signal-pill[data-tone="gray"]{
+  background:#f8fafc;
+  border-color:#d7dce2;
+  color:#4b5563;
+}
+.pressure-signal-details{
+  position:fixed;
+  left:8px;
+  top:8px;
+  z-index:10000;
+  display:none;
+  width:min(400px,calc(100vw - 16px));
+  height:min(420px,calc(100vh - 16px));
+  min-width:min(300px,calc(100vw - 16px));
+  min-height:min(200px,calc(100vh - 16px));
+  max-width:calc(100vw - 16px);
+  max-height:min(520px,calc(100vh - 16px));
+  overflow:hidden;
+  resize:both;
+  box-sizing:border-box;
+  padding:0;
+  border:1px solid #b8c2cf;
+  border-radius:0;
+  background:#fff;
+  color:#1f2937;
+  box-shadow:0 8px 24px rgba(15,23,42,.18);
+  font-size:12px;
+  font-weight:400;
+  font-variant-numeric:tabular-nums;
+  line-height:1.45;
+  text-align:left;
+}
+.pressure-signal-details.is-open{
+  display:flex;
+  flex-direction:column;
+}
+.pressure-signal-details-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  flex:0 0 auto;
+  min-height:30px;
+  padding:3px 5px 3px 10px;
+  border-bottom:1px solid #d7dce2;
+  background:#f8fafc;
+  cursor:move;
+  user-select:none;
+  touch-action:none;
+}
+.pressure-signal-details-title{
+  min-width:0;
+  overflow:hidden;
+  color:#334155;
+  font-size:12px;
+  font-weight:500;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.pressure-signal-details.is-dragging .pressure-signal-details-header{
+  cursor:grabbing;
+}
+.pressure-signal-details-body{
+  flex:1 1 auto;
+  min-height:0;
+  overflow:auto;
+  padding:10px 14px 14px;
+  font:inherit;
+  font-weight:400;
+  white-space:pre-line;
+}
+.pressure-signal-details-close{
+  flex:0 0 auto;
+  min-width:22px;
+  min-height:22px;
+  margin:0;
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:#64748b;
+  font-size:18px;
+  font-weight:400;
+  line-height:20px;
+  cursor:pointer;
+}
+.pressure-signal-details-close:hover{
+  color:#111827;
+  background:#eef2f6;
+}
