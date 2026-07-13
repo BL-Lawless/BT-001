@@ -11,6 +11,7 @@ const $ = id => document.getElementById(id);
 
 const canvas = $("chart");
 const ctx = canvas.getContext("2d");
+const BLACK_CROSSHAIR_CURSOR = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='17' height='17' viewBox='0 0 17 17'%3E%3Cg stroke='%23000' stroke-width='1.5' stroke-linecap='square'%3E%3Cpath d='M8.5 0v6M8.5 11v6M0 8.5h6M11 8.5h6'/%3E%3C/g%3E%3Crect x='7.25' y='7.25' width='2.5' height='2.5' fill='%23000'/%3E%3C/svg%3E\") 8 8, crosshair";
 
 const marketEl = $("market");
 const intervalEl = $("interval");
@@ -4414,9 +4415,10 @@ const marketDataHub = (() => {
         header.addEventListener("pointermove",event => {
           if(!drag) return;
           const rect = details.getBoundingClientRect();
-          const margin = 8;
-          const left = Math.max(margin,Math.min(drag.left + event.clientX - drag.x,window.innerWidth - rect.width - margin));
-          const top = Math.max(margin,Math.min(drag.top + event.clientY - drag.y,window.innerHeight - rect.height - margin));
+          const bounds = signalDetailsBounds37();
+          if(!bounds) return;
+          const left = Math.max(bounds.left,Math.min(drag.left + event.clientX - drag.x,bounds.right - rect.width));
+          const top = Math.max(bounds.top,Math.min(drag.top + event.clientY - drag.y,bounds.bottom - rect.height));
           details.style.left = `${Math.round(left)}px`;
           details.style.top = `${Math.round(top)}px`;
           state.detailsPositioned = true;
@@ -4448,6 +4450,11 @@ const marketDataHub = (() => {
           }
         });
         observer.observe(details);
+        const chart = document.getElementById("chart");
+        const metrics = document.querySelector(".metrics");
+        if(chart) observer.observe(chart);
+        if(metrics) observer.observe(metrics);
+        observer.observe(topbar);
       }
     }
     return root;
@@ -4571,6 +4578,7 @@ const marketDataHub = (() => {
     const vwapValue = latestSeriesValue37(typeof VWAP === "function" ? VWAP(rows) : []);
     const ema9Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,9) : []);
     const ema21Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,21) : []);
+    const ema55Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,55) : []);
     const emaValue = emaPeriod === 9 ? ema9Value : emaPeriod === 21 ? ema21Value : latestSeriesValue37(typeof EMA === "function" ? EMA(rows,emaPeriod) : []);
     const structureRows = validRows.slice(-Math.max(3,lookback + 1),-1);
     const recentHigh = structureRows.length ? Math.max(...structureRows.map(row => Number(row.high)).filter(Number.isFinite)) : null;
@@ -4605,6 +4613,7 @@ const marketDataHub = (() => {
       emaValue,
       ema9Value,
       ema21Value,
+      ema55Value,
       recentHigh:Number.isFinite(recentHigh) ? recentHigh : null,
       recentLow:Number.isFinite(recentLow) ? recentLow : null,
       stuckNearVwap:lastPrice != null && vwapValue != null ? Math.abs(lastPrice - vwapValue) / Math.max(Math.abs(lastPrice),1) <= 0.0015 : false
@@ -4833,8 +4842,8 @@ const marketDataHub = (() => {
   function tooltipSignedPoints37(value){
     const points = num37(value) == null ? null : Number(value) * 100;
     if(points == null) return null;
-    const rounded = Math.round(points * 10) / 10;
-    return `${rounded >= 0 ? "+" : ""}${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}pp`;
+    const rounded = Math.round(Math.abs(points) * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)} points`;
   }
   function tooltipPressureLine37(sample,qualifier){
     if(!sample || !sample.available) return `${tooltipBasis37(sample)} pressure unavailable`;
@@ -4848,8 +4857,10 @@ const marketDataHub = (() => {
     const otherValue = bearish ? bull : bear;
     const delta = bearish ? sample.bearDelta : sample.bullDelta;
     const deltaText = tooltipSignedPoints37(delta);
-    const movement = deltaText ? `${Number(delta) > 0.005 ? "rising" : Number(delta) < -0.005 ? "falling" : "change"} ${deltaText}` : null;
-    return `${tooltipBasis37(sample)} ${dominantLabel} pressure: ${dominantValue} vs ${otherLabel} ${otherValue}${movement ? `, ${movement}` : ""}${qualifier ? `; ${qualifier}` : ""}`;
+    const movement = deltaText && Math.abs(Number(delta)) > 0.005
+      ? `${bearish ? "Bear" : "Bull"} pressure ${Number(delta) > 0 ? "strengthening" : "weakening"} by ${deltaText}`
+      : null;
+    return `${tooltipBasis37(sample)} ${dominantLabel} pressure: ${dominantValue} vs ${otherLabel} ${otherValue}${movement ? `; ${movement}` : ""}${qualifier ? `; ${qualifier}` : ""}`;
   }
   function tooltipPrice37(value){
     const price = num37(value);
@@ -5138,24 +5149,37 @@ const marketDataHub = (() => {
     }
     const ema9 = num37(main.ema9Value);
     const ema21 = num37(main.ema21Value);
+    const ema55 = num37(main.ema55Value);
     const vwap = num37(main.vwapValue);
+    const currentPrice = num37(main.currentPrice);
     const recentHigh = num37(main.recentHigh);
     const recentLow = num37(main.recentLow);
-    const zone = ema9 != null && ema21 != null
-      ? `EMA9 ${tooltipPrice37(ema9)}–EMA21 ${tooltipPrice37(ema21)}`
-      : ema9 != null ? `EMA9 ${tooltipPrice37(ema9)}` : ema21 != null ? `EMA21 ${tooltipPrice37(ema21)}` : null;
+    const confluenceLimit = state.horizon === "6_8h" ? 0.004 : state.horizon === "2_3h" ? 0.0025 : 0.0015;
+    const closeConfluence = ema9 != null && ema21 != null && currentPrice != null
+      && Math.abs(ema9 - ema21) / Math.max(Math.abs(currentPrice),1) <= confluenceLimit;
+    const confluenceText = closeConfluence
+      ? (ema9 <= ema21
+        ? `EMA9 ${tooltipPrice37(ema9)}–EMA21 ${tooltipPrice37(ema21)}`
+        : `EMA21 ${tooltipPrice37(ema21)}–EMA9 ${tooltipPrice37(ema9)}`)
+      : null;
     const lines = [];
     if(direction === "LONG"){
-      if(zone) lines.push(`Buy pullback: ${zone}`);
-      if(recentLow != null) lines.push(`Tighten below: latest higher low ${tooltipPrice37(recentLow)}`);
-      if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} rejects again`);
-      if(recentLow != null) lines.push(`Invalidation below: swing low ${tooltipPrice37(recentLow)}`);
-      if(vwap != null) lines.push(`Major confirmation: VWAP ${tooltipPrice37(vwap)} reclaimed and held`);
+      if(closeConfluence) lines.push(`Buy-pullback zone: ${confluenceText}`);
+      else{
+        if(ema9 != null) lines.push(`Tighten below: EMA9 ${tooltipPrice37(ema9)}`);
+        if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} ${currentPrice != null && currentPrice >= ema21 ? "is lost" : "rejects again"}`);
+      }
+      if(recentLow != null) lines.push(`Local structure: latest higher low ${tooltipPrice37(recentLow)}`);
+      if(ema55 != null) lines.push(`Stronger warning: EMA55 ${tooltipPrice37(ema55)} lost`);
+      if(vwap != null) lines.push(`Major invalidation: VWAP ${tooltipPrice37(vwap)} lost and held below`);
     }else{
-      if(zone) lines.push(`Sell bounce: ${zone}`);
-      if(recentHigh != null) lines.push(`Tighten above: latest lower high ${tooltipPrice37(recentHigh)}`);
-      if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} is reclaimed`);
-      if(recentHigh != null) lines.push(`Invalidation above: swing high ${tooltipPrice37(recentHigh)}`);
+      if(closeConfluence) lines.push(`Sell-bounce zone: ${confluenceText}`);
+      else{
+        if(ema9 != null) lines.push(`Tighten above: EMA9 ${tooltipPrice37(ema9)}`);
+        if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} reclaimed`);
+      }
+      if(recentHigh != null) lines.push(`Local structure: latest lower high ${tooltipPrice37(recentHigh)}`);
+      if(ema55 != null) lines.push(`Stronger warning: EMA55 ${tooltipPrice37(ema55)} reclaimed`);
       if(vwap != null) lines.push(`Major invalidation: VWAP ${tooltipPrice37(vwap)} reclaimed and held`);
     }
     if(!lines.length) lines.push("Direction-specific advisory levels unavailable");
@@ -5171,6 +5195,12 @@ const marketDataHub = (() => {
       management:`Management for ${position.side}: ${exitDisplayText37(signal.exit)}`
     };
   }
+  function alignmentCondition37(label,direction){
+    const normalized = String(label || "wait").toLowerCase().replace(/\s+/g,"-");
+    if(direction === "LONG" || direction === "SHORT") return `${normalized}-${direction.toLowerCase()} conditions`;
+    if(normalized === "long" || normalized === "short") return `${normalized}-bias conditions`;
+    return `${normalized} conditions`;
+  }
   function tooltipText37(signal,thesis){
     const bias = entryDisplayText37(signal.entry);
     const position = positionDetails37(signal);
@@ -5179,13 +5209,20 @@ const marketDataHub = (() => {
       `Direction mode: ${state.direction}`,
       `Selected horizon: ${horizonLabel37(state.horizon)}`,
       ...(state.direction === "AUTO"
-        ? [`Independent market bias: ${bias} ${signal.confidence}%`]
-        : [`${state.direction === "LONG" ? "Long" : "Short"}-thesis status: ${thesis.status} ${thesis.confidence}%`,`Independent market bias: ${bias} ${signal.confidence}%`]),
+        ? [`Independent market bias: ${bias} ${signal.confidence}%`,`Alignment: ${signal.confidence}% with ${alignmentCondition37(bias)}`]
+        : [
+          `${state.direction === "LONG" ? "Long" : "Short"}-thesis status: ${thesis.status} ${thesis.confidence}%`,
+          `Alignment: ${thesis.confidence}% with ${alignmentCondition37(thesis.status,state.direction)}`,
+          `Independent market bias: ${bias} ${signal.confidence}%`,
+          `Independent market alignment: ${signal.confidence}% with ${alignmentCondition37(bias)}`
+        ]),
       position.position,
       position.management
     ];
     const targetDirection = state.direction === "AUTO" ? signal.marketDirection : state.direction;
-    const levels = advisoryLevels37(signal,targetDirection);
+    const openDirection = signal.position && signal.position.side;
+    const levelDirection = targetDirection || openDirection || null;
+    const levels = advisoryLevels37(signal,levelDirection);
     const sections = [];
     if(targetDirection){
       const evidenceSignal = state.direction === "AUTO" ? signal : {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact};
@@ -5197,22 +5234,41 @@ const marketDataHub = (() => {
     }else{
       sections.push(`Evidence:\n${detailBulletList37(tooltipReasons37(signal))}`);
     }
-    sections.push(`${levels.direction ? `Levels for ${levels.direction}` : "Levels"}:\n${detailBulletList37(levels.lines)}`);
+    const levelsHeading = targetDirection
+      ? `Levels for ${levels.direction}`
+      : openDirection
+        ? `Management anchors for open ${openDirection}`
+        : "Levels";
+    sections.push(`${levelsHeading}:\n${detailBulletList37(levels.lines)}`);
+    if(targetDirection && openDirection && openDirection !== targetDirection){
+      const managementLevels = advisoryLevels37(signal,openDirection);
+      sections.push(`Management anchors for open ${openDirection}:\n${detailBulletList37(managementLevels.lines)}`);
+    }
     sections.push("All levels are advisory only.");
     sections.push(`Signal recalculated: ${tooltipTime37()}${dataAge ? `\nData age: ${dataAge}` : ""}\nData: ${tooltipDataHealth37(signal)}`);
     return `${header.join("\n")}\n\n${sections.join("\n\n")}`;
   }
+  function signalDetailsBounds37(){
+    const chart = document.getElementById("chart");
+    if(!chart) return null;
+    const rect = chart.getBoundingClientRect();
+    if(!(rect.width > 0) || !(rect.height > 0)) return null;
+    return {left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height};
+  }
   function clampToolbarSignalDetails37(){
     if(!state.details || !state.details.classList.contains("is-open")) return;
-    const margin = 8;
+    const bounds = signalDetailsBounds37();
+    if(!bounds) return;
+    state.details.style.maxWidth = `${Math.floor(bounds.width)}px`;
+    state.details.style.maxHeight = `${Math.floor(bounds.height)}px`;
+    state.details.style.minWidth = `${Math.min(300,Math.floor(bounds.width))}px`;
+    state.details.style.minHeight = `${Math.min(200,Math.floor(bounds.height))}px`;
     let rect = state.details.getBoundingClientRect();
-    const maxWidth = Math.max(280,window.innerWidth - margin * 2);
-    const maxHeight = Math.max(180,window.innerHeight - margin * 2);
-    if(rect.width > maxWidth) state.details.style.width = `${Math.floor(maxWidth)}px`;
-    if(rect.height > maxHeight) state.details.style.height = `${Math.floor(maxHeight)}px`;
+    if(rect.width > bounds.width) state.details.style.width = `${Math.floor(bounds.width)}px`;
+    if(rect.height > bounds.height) state.details.style.height = `${Math.floor(bounds.height)}px`;
     rect = state.details.getBoundingClientRect();
-    const left = Math.max(margin,Math.min(rect.left,window.innerWidth - rect.width - margin));
-    const top = Math.max(margin,Math.min(rect.top,window.innerHeight - rect.height - margin));
+    const left = Math.max(bounds.left,Math.min(rect.left,bounds.right - rect.width));
+    const top = Math.max(bounds.top,Math.min(rect.top,bounds.bottom - rect.height));
     state.details.style.left = `${Math.round(left)}px`;
     state.details.style.top = `${Math.round(top)}px`;
   }
@@ -5223,16 +5279,11 @@ const marketDataHub = (() => {
       return;
     }
     const rect = state.entry.getBoundingClientRect();
-    const margin = 8;
-    const gap = 6;
-    const availableBelow = Math.max(0,window.innerHeight - rect.bottom - gap - margin);
-    const availableAbove = Math.max(0,rect.top - gap - margin);
-    const openBelow = availableBelow >= Math.min(200,state.details.offsetHeight) || availableBelow >= availableAbove;
-    const availableHeight = Math.max(180,openBelow ? availableBelow : availableAbove);
-    if(state.details.offsetHeight > availableHeight) state.details.style.height = `${Math.floor(availableHeight)}px`;
+    const bounds = signalDetailsBounds37();
+    if(!bounds) return;
     const detailsRect = state.details.getBoundingClientRect();
-    const left = Math.max(margin,Math.min(rect.left,window.innerWidth - detailsRect.width - margin));
-    const top = openBelow ? rect.bottom + gap : Math.max(margin,rect.top - detailsRect.height - gap);
+    const left = Math.max(bounds.left,Math.min(rect.left,bounds.right - detailsRect.width));
+    const top = bounds.top;
     state.details.style.left = `${Math.round(left)}px`;
     state.details.style.top = `${Math.round(top)}px`;
     state.detailsPositioned = true;
@@ -5243,6 +5294,12 @@ const marketDataHub = (() => {
     state.details.classList.add("is-open");
     state.details.setAttribute("aria-hidden","false");
     state.entry.setAttribute("aria-expanded","true");
+    const bounds = signalDetailsBounds37();
+    if(bounds && state.details.dataset.sizeInitialized !== "true"){
+      state.details.dataset.sizeInitialized = "true";
+      state.details.style.width = `${Math.min(400,Math.floor(bounds.width))}px`;
+      state.details.style.height = `${Math.min(420,Math.floor(bounds.height))}px`;
+    }
     positionToolbarSignalDetails37();
   }
   function hideToolbarSignalDetails37(){
@@ -7997,7 +8054,7 @@ window.addEventListener("mouseup",() => {
   dragChart = false;
   dragAxis = false;
   dragManualY = false;
-  canvas.style.cursor = "crosshair";
+  canvas.style.cursor = BLACK_CROSSHAIR_CURSOR;
 });
 
 canvas.addEventListener("mousemove",e => {
@@ -8009,7 +8066,7 @@ canvas.addEventListener("mousemove",e => {
   };
 
   if(!dragChart && !dragAxis){
-    canvas.style.cursor = rightAxis(mouse.x) ? "ns-resize" : "crosshair";
+    canvas.style.cursor = rightAxis(mouse.x) ? "ns-resize" : BLACK_CROSSHAIR_CURSOR;
   }
 
   if(dragAxis){
@@ -8060,7 +8117,7 @@ canvas.addEventListener("mouseleave",() => {
   mouse = null;
 
   if(!dragChart && !dragAxis){
-    canvas.style.cursor = "crosshair";
+    canvas.style.cursor = BLACK_CROSSHAIR_CURSOR;
   }
 
   draw();
