@@ -4577,6 +4577,171 @@ const marketDataHub = (() => {
       stuckNearVwap:lastPrice != null && vwapValue != null ? Math.abs(lastPrice - vwapValue) / Math.max(Math.abs(lastPrice),1) <= 0.0015 : false
     };
   }
+  function maFreshness37(horizonId){
+    if(horizonId === "2_3h") return {primaryTfs:["5m","15m"],freshMax:5,validMax:8};
+    if(horizonId === "6_8h") return {primaryTfs:["15m","1h"],freshMax:5,validMax:10};
+    return {primaryTfs:["3m","5m"],freshMax:3,validMax:5};
+  }
+  function maSeriesMap37(series){
+    return new Map((Array.isArray(series) ? series : []).map(point => [Number(point.time),num37(point.value)]));
+  }
+  function maEventBaseImpact37(type,fresh){
+    if(type === "rejection" || type === "bounce") return fresh ? 8 : 3;
+    if(type === "failed reclaim" || type === "failed breakdown") return fresh ? 7 : 2;
+    if(type === "loss" || type === "reclaim") return fresh ? 6 : 2;
+    return fresh ? 4 : 1;
+  }
+  function detectMaEvent37(tf,freshness){
+    const rows = signalRows37(tf);
+    if(!Array.isArray(rows) || rows.length < 3){
+      return {tf,state:"unknown",impact:0,reason:`${tf} MA event data unavailable`};
+    }
+    const anchors = [
+      {label:"EMA21",kind:"ma",values:maSeriesMap37(typeof EMA === "function" ? EMA(rows,21) : [])},
+      {label:"EMA55",kind:"ma",values:maSeriesMap37(typeof EMA === "function" ? EMA(rows,55) : [])},
+      {label:"VWAP",kind:"vwap",values:maSeriesMap37(typeof VWAP === "function" ? VWAP(rows) : [])}
+    ];
+    const lastIndex = rows.length - 1;
+    const candidates = [];
+    const add = (row,index,anchor,type,direction,rank) => {
+      const age = lastIndex - index;
+      const fresh = age <= freshness.freshMax;
+      const validAge = age <= freshness.validMax;
+      const potential = validAge ? maEventBaseImpact37(type,fresh) : 0;
+      candidates.push({
+        tf,
+        type,
+        direction,
+        anchor:anchor.label,
+        anchorKind:anchor.kind,
+        age,
+        rank,
+        potential,
+        eventClose:num37(row.close),
+        eventHigh:num37(row.high),
+        eventLow:num37(row.low),
+        eventTime:Number(row.time),
+        anchorNow:anchor.values.get(Number(rows[lastIndex].time)),
+        eventAnchor:anchor.values.get(Number(row.time))
+      });
+    };
+    const start = Math.max(1,lastIndex - Math.max(16,freshness.validMax + 8));
+    anchors.forEach(anchor => {
+      for(let index=start;index<=lastIndex;index++){
+        const row = rows[index];
+        const previous = rows[index - 1];
+        const level = anchor.values.get(Number(row.time));
+        const previousLevel = anchor.values.get(Number(previous.time));
+        if(level == null || previousLevel == null) continue;
+        const tolerance = Math.max(Math.abs(level) * 0.0004,1e-8);
+        const touched = Number(row.low) <= level + tolerance && Number(row.high) >= level - tolerance;
+        const failedReclaim = Number(previous.close) < previousLevel && Number(row.high) >= level - tolerance && Number(row.close) < level;
+        const failedBreakdown = Number(previous.close) > previousLevel && Number(row.low) <= level + tolerance && Number(row.close) > level;
+        if(failedReclaim) add(row,index,anchor,"failed reclaim",-1,5);
+        else if(failedBreakdown) add(row,index,anchor,"failed breakdown",1,5);
+        else if(touched && Number(row.close) < level && Number(row.close) <= Number(row.open)) add(row,index,anchor,"rejection",-1,5);
+        else if(touched && Number(row.close) > level && Number(row.close) >= Number(row.open)) add(row,index,anchor,"bounce",1,5);
+        else if(Number(previous.close) >= previousLevel && Number(row.close) < level) add(row,index,anchor,"loss",-1,4);
+        else if(Number(previous.close) <= previousLevel && Number(row.close) > level) add(row,index,anchor,"reclaim",1,4);
+      }
+    });
+    const ema21 = anchors[0];
+    const ema55 = anchors[1];
+    for(let index=start;index<=lastIndex;index++){
+      const row = rows[index];
+      const previous = rows[index - 1];
+      const fast = ema21.values.get(Number(row.time));
+      const slow = ema55.values.get(Number(row.time));
+      const previousFast = ema21.values.get(Number(previous.time));
+      const previousSlow = ema55.values.get(Number(previous.time));
+      if(fast == null || slow == null || previousFast == null || previousSlow == null) continue;
+      if(previousFast <= previousSlow && fast > slow) add(row,index,{label:"EMA21/EMA55",kind:"cross",values:ema21.values},"bullish crossover",1,2);
+      else if(previousFast >= previousSlow && fast < slow) add(row,index,{label:"EMA21/EMA55",kind:"cross",values:ema21.values},"bearish crossover",-1,2);
+    }
+    if(!candidates.length){
+      return {tf,state:"unknown",impact:0,reason:`${tf} MA event unavailable in recent data`};
+    }
+    candidates.sort((a,b) => (b.potential - a.potential) || (b.rank - a.rank) || (a.age - b.age));
+    const event = candidates[0];
+    const latest = rows[lastIndex];
+    const previousLatest = rows[Math.max(0,lastIndex - 1)];
+    const currentPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : num37(latest.close);
+    const priceOnValidSide = currentPrice != null && event.anchorNow != null
+      ? (event.direction > 0 ? currentPrice >= event.anchorNow : currentPrice <= event.anchorNow)
+      : null;
+    const previousAnchor = anchors.find(anchor => anchor.label === event.anchor)?.values.get(Number(previousLatest.time));
+    const heldBeyondAnchor = currentPrice != null && event.anchorNow != null && previousAnchor != null
+      ? (event.direction > 0
+        ? currentPrice < event.anchorNow && Number(previousLatest.close) < previousAnchor
+        : currentPrice > event.anchorNow && Number(previousLatest.close) > previousAnchor)
+      : false;
+    const afterEvent = rows.slice(Math.max(0,lastIndex - event.age + 1));
+    const structureIntact = event.direction > 0
+      ? (event.eventLow == null || !afterEvent.length || Math.min(...afterEvent.map(row => Number(row.low))) >= event.eventLow * 0.9985)
+      : (event.eventHigh == null || !afterEvent.length || Math.max(...afterEvent.map(row => Number(row.high))) <= event.eventHigh * 1.0015);
+    const priceRefuses = event.age >= 2 && currentPrice != null && event.eventClose != null
+      ? (event.direction > 0 ? currentPrice <= event.eventClose : currentPrice >= event.eventClose)
+      : false;
+    const latestEma21 = ema21.values.get(Number(latest.time));
+    const latestEma55 = ema55.values.get(Number(latest.time));
+    const crossOrderValid = event.anchorKind === "cross" && latestEma21 != null && latestEma55 != null
+      ? (event.direction > 0 ? latestEma21 > latestEma55 : latestEma21 < latestEma55)
+      : null;
+    return {
+      ...event,
+      currentPrice,
+      priceOnValidSide,
+      heldBeyondAnchor,
+      structureIntact,
+      priceRefuses,
+      crossOrderValid
+    };
+  }
+  function evaluateMaEvents37(horizonId,pressureSamples,signalDirection){
+    const freshness = maFreshness37(horizonId);
+    const samples = Array.isArray(pressureSamples) ? pressureSamples : [];
+    const availablePressure = samples.filter(sample => sample.available);
+    const pressureDirection = availablePressure.length
+      ? Math.sign(availablePressure.reduce((sum,sample) => sum + sample.sideSign * sample.weight,0))
+      : 0;
+    const events = freshness.primaryTfs.map(tf => {
+      const event = detectMaEvent37(tf,freshness);
+      if(event.state === "unknown") return event;
+      if(event.priceOnValidSide == null){
+        return {...event,state:"unknown",impact:0,appliedImpact:0,reason:`${tf} ${event.anchor} current behavior unavailable`};
+      }
+      const matchingPressure = availablePressure.filter(sample => sample.tf === tf || (tf === "1h" && sample.tf === "15m"));
+      const sharplyFading = matchingPressure.some(sample => {
+        const delta = event.direction > 0 ? sample.bullDelta : sample.bearDelta;
+        return delta != null && delta < -0.03;
+      });
+      const pressureOpposes = pressureDirection !== 0 && pressureDirection !== event.direction;
+      const invalidated = event.priceOnValidSide === false || event.heldBeyondAnchor || !event.structureIntact || event.crossOrderValid === false || pressureOpposes || event.priceRefuses;
+      let stateName = "stale";
+      if(event.age > freshness.validMax) stateName = "stale";
+      else if(invalidated) stateName = "invalidated";
+      else if(event.age <= freshness.freshMax && !sharplyFading) stateName = "fresh";
+      else if(event.age <= freshness.validMax) stateName = "aging";
+      let rawImpact = 0;
+      if(stateName === "fresh") rawImpact = maEventBaseImpact37(event.type,true);
+      else if(stateName === "aging") rawImpact = maEventBaseImpact37(event.type,false);
+      else if(stateName === "invalidated") rawImpact = event.rank <= 2 ? -5 : -8;
+      let appliedImpact = 0;
+      if(signalDirection){
+        if(stateName === "invalidated") appliedImpact = event.direction === signalDirection ? rawImpact : 0;
+        else if(stateName === "fresh" || stateName === "aging") appliedImpact = event.direction === signalDirection ? rawImpact : -Math.min(rawImpact,6);
+      }
+      return {...event,state:stateName,sharplyFading,pressureOpposes,impact:rawImpact,appliedImpact};
+    });
+    const impact = Math.max(-12,Math.min(10,events.reduce((sum,event) => sum + Number(event.appliedImpact || 0),0)));
+    return {
+      events,
+      impact,
+      invalidatedSupport:!!signalDirection && events.some(event => event.direction === signalDirection && event.state === "invalidated"),
+      priceRefusal:!!signalDirection && events.some(event => event.direction === signalDirection && event.priceRefuses),
+      weakening:!!signalDirection && events.some(event => event.direction === signalDirection && (event.sharplyFading || event.state === "aging"))
+    };
+  }
   function entryActionText37(entry){
     switch(entry){
       case "ENTRY LONG": return "Buy pullbacks";
@@ -4717,6 +4882,46 @@ const marketDataHub = (() => {
     }
     return ["No anchored level suggestion is available"];
   }
+  function tooltipMaEvents37(signal){
+    const events = Array.isArray(signal && signal.maEvents) ? signal.maEvents : [];
+    if(!events.length) return ["MA event state unavailable","No MA-event confidence boost applied"];
+    const lines = [];
+    events.forEach(event => {
+      if(!event || event.state === "unknown"){
+        lines.push(event && event.reason ? event.reason : "MA event age/current state unavailable");
+        lines.push("No MA-event confidence boost applied");
+        return;
+      }
+      const stateLabel = event.state === "fresh"
+        ? "fresh and still valid"
+        : event.state === "aging"
+          ? "aging but still valid"
+          : event.state === "stale"
+            ? "stale/context only"
+            : "invalidated";
+      lines.push(`${event.tf} ${event.anchor} ${event.type}, ${event.age} candle${event.age === 1 ? "" : "s"} ago, ${stateLabel}`);
+      const current = num37(event.currentPrice);
+      const anchor = num37(event.anchorNow);
+      if(current != null && anchor != null){
+        const distance = `$${tooltipPrice37(Math.abs(current - anchor))}`;
+        if(event.direction < 0){
+          lines.push(current <= anchor ? `Price remains ${distance} below ${event.anchor}` : `Price reclaimed ${event.anchor} by ${distance}`);
+        }else{
+          lines.push(current >= anchor ? `Price remains ${distance} above ${event.anchor}` : `Price lost ${event.anchor} by ${distance}`);
+        }
+      }
+      if(event.structureIntact === true) lines.push(event.direction < 0 ? "Lower-high structure intact" : "Higher-low structure intact");
+      else if(event.structureIntact === false) lines.push(event.direction < 0 ? "Lower-high structure broken" : "Higher-low structure broken");
+      if(event.priceRefuses) lines.push(event.direction < 0 ? "Price refuses to fall after the event" : "Price refuses to rise after the event");
+      if(event.sharplyFading) lines.push(event.direction < 0 ? "Bear pressure is sharply fading" : "Bull pressure is sharply fading");
+      const impact = Number(event.appliedImpact || 0);
+      if(impact) lines.push(`Confidence impact: ${impact > 0 ? "+" : ""}${impact}%`);
+      else lines.push("No MA-event confidence boost applied");
+    });
+    const netImpact = Number(signal && signal.maImpact || 0);
+    if(netImpact) lines.push(`Net MA confidence impact: ${netImpact > 0 ? "+" : ""}${netImpact}%`);
+    return lines;
+  }
   function tooltipReasons37(signal){
     const bias = entryDisplayText37(signal && signal.entry);
     const samples = Array.isArray(signal && signal.samples) ? signal.samples : [];
@@ -4825,10 +5030,11 @@ const marketDataHub = (() => {
   function tooltipText37(signal){
     const bias = entryDisplayText37(signal.entry);
     const levels = tooltipLevels37(signal).map(level => `• ${level}`).join("\n");
+    const maEvents = tooltipMaEvents37(signal).map(line => `• ${line}`).join("\n");
     const reasons = tooltipReasons37(signal).map(reason => `• ${reason}`).join("\n");
     const invalidations = tooltipInvalidations37(signal).map(reason => `• ${reason}`).join("\n");
     const dataAge = tooltipDataAge37();
-    return `${horizonLabel37(state.horizon)} · ${bias} ${signal.confidence}%\nAction: ${signal.action}\nManagement: ${exitDisplayText37(signal.exit)}\n\nLevels:\n${levels}\n\nWhy:\n${reasons}\n\nInvalid if:\n${invalidations}\n\nSignal recalculated: ${tooltipTime37()}${dataAge ? `\nData age: ${dataAge}` : ""}\nData: ${tooltipDataHealth37(signal)}`;
+    return `${horizonLabel37(state.horizon)} · ${bias} ${signal.confidence}%\nAction: ${signal.action}\nManagement: ${exitDisplayText37(signal.exit)}\n\nLevels:\n${levels}\n\nMA events:\n${maEvents}\n\nWhy:\n${reasons}\n\nInvalid if:\n${invalidations}\n\nSignal recalculated: ${tooltipTime37()}${dataAge ? `\nData age: ${dataAge}` : ""}\nData: ${tooltipDataHealth37(signal)}`;
   }
   function clampToolbarSignalDetails37(){
     if(!state.details || !state.details.classList.contains("is-open")) return;
@@ -4907,12 +5113,15 @@ const marketDataHub = (() => {
     const configsForHorizon = configs[horizonId] || configs.quick;
     const samples = configsForHorizon.map(item => ({...samplePressureSignal37(item.tf,item.lookback,item.ema),weight:item.weight}));
     if(samples.some(sample => !sample.available)){
+      const maEvaluation = evaluateMaEvents37(horizonId,samples,0);
       return {
         entry:"ENTRY WAIT",
         confidence:51,
         action:"No edge",
         exit:"EXIT WAIT",
-        samples
+        samples,
+        maEvents:maEvaluation.events,
+        maImpact:0
       };
     }
     const score = samples.reduce((sum,sample) => {
@@ -4937,11 +5146,27 @@ const marketDataHub = (() => {
     else if(fadeRisk) entry = "ENTRY FADE RISK";
     else if(!conflict && !balanced && !main.stuckNearVwap && dominantSide > 0 && supportiveContext) entry = "ENTRY LONG";
     else if(!conflict && !balanced && !main.stuckNearVwap && dominantSide < 0 && supportiveContext) entry = "ENTRY SHORT";
-    const confidence = (() => {
+    let confidence = (() => {
       if(entry === "ENTRY WAIT") return 51;
-      if(entry === "ENTRY ABSORPTION" || entry === "ENTRY FADE RISK") return 56;
+      if(entry === "ENTRY ABSORPTION" || entry === "ENTRY FADE RISK") return 58;
       return Math.max(54,Math.min(72,Math.round(54 + Math.min(1,Math.abs(normalized) / 0.26) * 14 + (supportiveContext ? 3 : 0))));
     })();
+    const signalDirection = entry === "ENTRY LONG" ? 1 : entry === "ENTRY SHORT" ? -1 : 0;
+    const maEvaluation = evaluateMaEvents37(horizonId,samples,signalDirection);
+    if(signalDirection && (maEvaluation.invalidatedSupport || maEvaluation.impact <= -5)){
+      if(maEvaluation.priceRefusal && main && main.dominantPct >= 0.62){
+        entry = "ENTRY ABSORPTION";
+        confidence = 58;
+      }else if(fadeRisk || maEvaluation.weakening){
+        entry = "ENTRY FADE RISK";
+        confidence = 58;
+      }else{
+        entry = "ENTRY WAIT";
+        confidence = 54;
+      }
+    }else if(signalDirection && maEvaluation.impact){
+      confidence = Math.max(51,Math.min(80,confidence + maEvaluation.impact));
+    }
     const position = openPositionSignal37();
     let exit = "EXIT WAIT";
     if(position){
@@ -4964,7 +5189,9 @@ const marketDataHub = (() => {
       confidence,
       action:entryActionText37(entry),
       exit,
-      samples
+      samples,
+      maEvents:maEvaluation.events,
+      maImpact:maEvaluation.impact
     };
   }
   function renderToolbarSignal37(){
