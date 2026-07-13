@@ -235,7 +235,9 @@ const CLOSED_TRADES_STATE = {
   fundingIncomeFetchStats:{rows:0,start:0,end:0,symbol:""},
   unresolvedCount:0,
   fullReconstruction:null,
-  reportProjection:null
+  reportProjection:null,
+  wfMode:"none",
+  fastReport:null
 };
 
 function stateChainId(o){
@@ -269,6 +271,8 @@ function clearClosedTradesOwner(){
   CLOSED_TRADES_STATE.unresolvedCount = 0;
   CLOSED_TRADES_STATE.fullReconstruction = null;
   CLOSED_TRADES_STATE.reportProjection = null;
+  CLOSED_TRADES_STATE.wfMode = "none";
+  CLOSED_TRADES_STATE.fastReport = null;
   syncLegacyTradeGlobalsFromOwners();
 }
 
@@ -1615,6 +1619,244 @@ function closedTradeLoadedSummary(rec){
   return {parents,wins,losses,profit,loss,net:profit + loss};
 }
 
+function closedTradeIncomeValue(row){
+  return closedTradeNumber(row && row.income);
+}
+
+function closedTradeFastContextBounds(period){
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const value = selectedClosedTradePeriod(period).value;
+  if(value === "1d") return {initial:3 * DAY_MS,max:21 * DAY_MS,step:3 * DAY_MS};
+  if(value === "1w") return {initial:10 * DAY_MS,max:35 * DAY_MS,step:7 * DAY_MS};
+  if(value === "2w") return {initial:14 * DAY_MS,max:42 * DAY_MS,step:7 * DAY_MS};
+  if(value === "3w") return {initial:21 * DAY_MS,max:56 * DAY_MS,step:7 * DAY_MS};
+  if(value === "1m") return {initial:21 * DAY_MS,max:56 * DAY_MS,step:7 * DAY_MS};
+  if(value === "2m") return {initial:28 * DAY_MS,max:70 * DAY_MS,step:7 * DAY_MS};
+  return {initial:35 * DAY_MS,max:84 * DAY_MS,step:7 * DAY_MS};
+}
+
+function closedTradeFastSummarySideFromRaw(rawSide){
+  return String(rawSide || "").toUpperCase() === "BUY" ? "SHORT" : "LONG";
+}
+
+function closedTradeFastSummaryDirection(side){
+  return String(side || "").toUpperCase() === "SHORT" ? "S" : "L";
+}
+
+function closedTradeFastWeightedPrice(rows){
+  const items = Array.isArray(rows) ? rows : [];
+  const totalQty = items.reduce((sum,row) => sum + closedTradeNumber(row && row.qty),0);
+  if(!(totalQty > 0)) return null;
+  const totalValue = items.reduce((sum,row) => sum + closedTradeNumber(row && row.qty) * closedTradeNumber(row && row.price),0);
+  return totalValue / totalQty;
+}
+
+function buildClosedTradeFastResolvedSummaries(rec,win){
+  const periodRec = filterClosedReconstructionForPeriod(rec,win);
+  const parents = closedTradeParentTrades(periodRec);
+  return parents.map((trade,index) => {
+    const entries = Array.isArray(trade && trade.entries) ? trade.entries.slice() : [];
+    const exits = Array.isArray(trade && trade.exits) ? trade.exits.slice() : [];
+    const links = Array.isArray(trade && trade.links) ? trade.links.slice() : [];
+    const qty = links.length
+      ? links.reduce((sum,link) => sum + closedTradeNumber(link && link.qty),0)
+      : exits.reduce((sum,marker) => sum + closedTradeNumber(marker && marker.qty),0);
+    const realized = links.length
+      ? links.reduce((sum,link) => sum + closedTradeRealizedValue(link),0)
+      : exits.reduce((sum,marker) => sum + closedTradeNumber(marker && (marker.binanceRealizedPnl ?? marker.realizedPnl ?? marker.pnl)),0);
+    const fees = links.length
+      ? links.reduce((sum,link) => sum + closedTradeSignedFeeValue(link && (link.fees ?? link.fee)),0)
+      : exits.reduce((sum,marker) => sum + closedTradeSignedFeeValue(marker && marker.fee),0);
+    const side = String(entries[0] && entries[0].side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const closeMarker = trade && trade.finalExit ? trade.finalExit : (exits.length ? exits[exits.length - 1] : null);
+    return {
+      id:"wf_fast_pos_" + index + "_" + String(trade && trade.parentId || ""),
+      parentTradeId:trade && trade.parentId ? trade.parentId : null,
+      detailChainId:trade && trade.parentId ? trade.parentId : null,
+      markerId:closeMarker && closeMarker.id ? closeMarker.id : null,
+      symbol:String((entries[0] && entries[0].symbol) || (closeMarker && closeMarker.symbol) || cfg().symbol || "").toUpperCase(),
+      side,
+      dir:closedTradeFastSummaryDirection(side),
+      openTime:closedTradeNumber(entries[0] && entries[0].time) || null,
+      closeTime:closedTradeNumber(closeMarker && closeMarker.time) || null,
+      qty,
+      realized,
+      fees,
+      net:realized + fees,
+      avgOpenPrice:closedTradeFastWeightedPrice(entries),
+      avgClosePrice:closedTradeFastWeightedPrice(exits),
+      limited:false,
+      limitedReason:"",
+      tradeIds:[...new Set(links.map(link => link && link.tradeId).filter(value => value != null))],
+      orderIds:[...new Set(links.map(link => link && link.orderId).filter(value => value != null))]
+    };
+  });
+}
+
+function buildClosedTradeFastLimitedSummaries(rec,win){
+  const startSec = Math.floor(win.start / 1000);
+  const endSec = Math.floor(win.end / 1000);
+  const unresolved = (rec && rec.markers || [])
+    .filter(marker =>
+      marker &&
+      marker.role === "close" &&
+      marker.unresolved &&
+      Number(marker.time) >= startSec &&
+      Number(marker.time) <= endSec
+    )
+    .sort((a,b) => closedTradeNumber(a && a.time) - closedTradeNumber(b && b.time));
+  const groups = [];
+  let current = null;
+  unresolved.forEach(marker => {
+    const side = closedTradeFastSummarySideFromRaw(marker && marker.rawSide);
+    const time = closedTradeNumber(marker && marker.time);
+    const orderId = marker && marker.orderId != null ? marker.orderId : null;
+    const shouldSplit = !current ||
+      current.side !== side ||
+      (orderId != null && current.orderId != null && String(orderId) !== String(current.orderId)) ||
+      (time - current.lastTime) > 1800;
+    if(shouldSplit){
+      current = {
+        side,
+        orderId,
+        lastTime:time,
+        markers:[marker]
+      };
+      groups.push(current);
+      return;
+    }
+    current.markers.push(marker);
+    current.lastTime = time;
+  });
+  return groups.map((group,index) => {
+    const markers = group.markers;
+    const qty = markers.reduce((sum,marker) => sum + closedTradeNumber(marker && marker.qty),0);
+    const realized = markers.reduce((sum,marker) => sum + closedTradeNumber(marker && (marker.binanceRealizedPnl ?? marker.realizedPnl ?? marker.pnl)),0);
+    const fees = markers.reduce((sum,marker) => sum + closedTradeSignedFeeValue(marker && marker.fee),0);
+    const lastMarker = markers[markers.length - 1] || null;
+    return {
+      id:"wf_fast_limited_" + index + "_" + String(group.side || "") + "_" + String(lastMarker && lastMarker.time || 0),
+      parentTradeId:null,
+      detailChainId:null,
+      markerId:lastMarker && lastMarker.id ? lastMarker.id : null,
+      symbol:String(lastMarker && lastMarker.symbol || cfg().symbol || "").toUpperCase(),
+      side:group.side,
+      dir:closedTradeFastSummaryDirection(group.side),
+      openTime:null,
+      closeTime:closedTradeNumber(lastMarker && lastMarker.time) || null,
+      qty,
+      realized,
+      fees,
+      net:realized + fees,
+      avgOpenPrice:null,
+      avgClosePrice:closedTradeFastWeightedPrice(markers),
+      limited:true,
+      limitedReason:"Partial context",
+      tradeIds:[...new Set(markers.map(marker => marker && marker.tradeId).filter(value => value != null))],
+      orderIds:[...new Set(markers.map(marker => marker && marker.orderId).filter(value => value != null))]
+    };
+  });
+}
+
+function buildClosedTradeFastReport(rec,win,symbol,contextLimited){
+  const resolved = buildClosedTradeFastResolvedSummaries(rec,win);
+  const limited = buildClosedTradeFastLimitedSummaries(rec,win);
+  const summaries = resolved.concat(limited).sort((a,b) =>
+    closedTradeNumber(a && a.closeTime) - closedTradeNumber(b && b.closeTime) ||
+    String(a && a.id || "").localeCompare(String(b && b.id || ""))
+  );
+  const wins = summaries.filter(item => closedTradeNumber(item && item.net) > 0);
+  const losses = summaries.filter(item => closedTradeNumber(item && item.net) < 0);
+  const profit = wins.reduce((sum,item) => sum + closedTradeNumber(item && item.net),0);
+  const loss = losses.reduce((sum,item) => sum + closedTradeNumber(item && item.net),0);
+  return {
+    mode:"fast",
+    symbol:String(symbol || "").toUpperCase(),
+    period:win,
+    summaries,
+    contextLimited:!!contextLimited || summaries.some(item => item && item.limited),
+    summary:{
+      wins:wins.length,
+      losses:losses.length,
+      profit,
+      loss,
+      grossWins:profit,
+      grossLosses:Math.abs(loss),
+      realizedTotal:summaries.reduce((sum,item) => sum + closedTradeNumber(item && item.realized),0),
+      commissionTotal:summaries.reduce((sum,item) => sum + closedTradeNumber(item && item.fees),0),
+      netTotal:summaries.reduce((sum,item) => sum + closedTradeNumber(item && item.net),0),
+      limitedCount:summaries.filter(item => item && item.limited).length
+    }
+  };
+}
+
+async function loadClosedTradesFastForPeriod(period,opt={}){
+  const silent = !!opt.silent;
+  const key = apiKeyEl.value.trim();
+  const sec = apiSecretEl.value.trim();
+
+  saveKeysLocal();
+  if(!key || !sec){
+    updateApiStatus();
+    return null;
+  }
+  if(closedTradesLoading) return null;
+  closedTradesLoading = true;
+
+  try{
+    if(!silent) closedTradeStatus("Loading WF closed positions...");
+    await ensureClosedTradeSessionBoundary(period || opt.period);
+    const win = closedTradePeriodWindowMs(period || opt.period);
+    const off = opt.off != null ? opt.off : await timeOffset();
+    const symbol = String(cfg().symbol || "").toUpperCase();
+    const bounds = closedTradeFastContextBounds(win.period);
+    const maxContextStart = Math.max(0,win.start - bounds.max);
+    let start = Math.max(0,win.start - bounds.initial);
+    let rows = await getUserTradesRange(key,sec,off,start,win.end);
+    let rec = reconstruct(rows,symbol);
+    while(hasPeriodUnresolvedClose(rec,win) && start > maxContextStart){
+      if(!silent) closedTradeStatus("Resolving WF context...");
+      start = Math.max(maxContextStart,start - bounds.step);
+      rows = await getUserTradesRange(key,sec,off,start,win.end);
+      rec = reconstruct(rows,symbol);
+    }
+    const contextLimited = hasPeriodUnresolvedClose(rec,win);
+    const fastReport = buildClosedTradeFastReport(rec,win,symbol,contextLimited);
+
+    CLOSED_TRADES_STATE.fastReport = fastReport;
+    CLOSED_TRADES_STATE.wfMode = "fast";
+    closedTradesLoadedSummaryStats = {
+      wins:fastReport.summary.wins,
+      losses:fastReport.summary.losses,
+      profit:fastReport.summary.profit,
+      loss:fastReport.summary.loss
+    };
+
+    closedTradeStatus("",{mode:"operational"});
+    if(fastReport.summaries.length){
+      const limitedText = fastReport.summary.limitedCount > 0 ? " | limited: " + fastReport.summary.limitedCount : "";
+      closedTradeStatus(
+        "Fast " + fastReport.period.label +
+        " | Closed positions: " + fastReport.summaries.length +
+        limitedText +
+        " | net P/L: " + closedTradeSignedMoney(fastReport.summary.netTotal),
+        {mode:"summary"}
+      );
+    }else{
+      closedTradeStatus("",{mode:"summary"});
+      if(!silent) closedTradeStatus("No closed positions in range");
+    }
+    return fastReport;
+  }catch(e){
+    console.error("WF fast load failed",e);
+    if(!silent) closedTradeStatus("WF closed positions: error");
+    return null;
+  }finally{
+    closedTradesLoading = false;
+    updateApiStatus();
+  }
+}
+
 async function loadClosedTradesForPeriod(period,opt={}){
   const silent = !!opt.silent;
   const key = apiKeyEl.value.trim();
@@ -1654,6 +1896,8 @@ async function loadClosedTradesForPeriod(period,opt={}){
     });
 
     const rec = filterClosedReconstructionForPeriod(full,win);
+    rec.period = win;
+    rec.symbol = String(cfg().symbol || "").toUpperCase();
     const summary = closedTradeLoadedSummary(rec);
     const netPnl = summary.net;
     closedTradesLoadedSummaryStats = {
@@ -1670,6 +1914,7 @@ async function loadClosedTradesForPeriod(period,opt={}){
     CLOSED_TRADES_STATE.unresolvedCount = rec.unresolved;
     CLOSED_TRADES_STATE.fullReconstruction = full;
     CLOSED_TRADES_STATE.reportProjection = rec;
+    CLOSED_TRADES_STATE.wfMode = "detail";
     unresolvedCount = CLOSED_TRADES_STATE.unresolvedCount;
     syncLegacyTradeGlobalsFromOwners();
 
@@ -5597,7 +5842,7 @@ function pnlLabel(txt,x,y,col,clip,opt=null){
   const h = 18;
 
   const align = opt && opt.align === "left-of-point" ? "left-of-point" : "center";
-  const anchorGap = Math.max(8, Number(opt && opt.gap) || 0);
+  const anchorGap = align === "left-of-point" ? Math.max(4, Number(opt && opt.gap) || 0) : Math.max(8, Number(opt && opt.gap) || 0);
   const rawCx = align === "left-of-point" ? (x - anchorGap - w/2) : x;
   const cx = clamp(rawCx, clip.left+w/2+2, clip.left+clip.width-w/2-2);
   const cy = clamp(y, clip.top+h/2+2, clip.top+clip.height-h/2-2);
@@ -7101,12 +7346,21 @@ startTradeAuto();
     const pad = opt.pad == null ? 4 : opt.pad;
     const w = ctx.measureText(txt).width + pad*2;
     const h = opt.h || 16;
+    const align = opt.align === 'left-of-point' ? 'left-of-point' : 'center';
+    const gap = align === 'left-of-point' ? Math.max(4, Number(opt.gap) || 0) : Math.max(8, Number(opt.gap) || 0);
     const fixedX = !!opt.fixedX;
     const fillBg = opt.fillBg !== false;
     const edge = opt.edge || null;
-    const baseX = x + (Number(opt.xShift) || 0);
+    const baseXRaw = align === 'left-of-point'
+      ? x - gap - w/2
+      : x;
+    const baseX = baseXRaw + (Number(opt.xShift) || 0);
     const baseY = edge === 'top' ? (clip.top + (Number(opt.edgeMargin) || 26)) : edge === 'bottom' ? (clip.top + clip.height - (Number(opt.edgeMargin) || 26)) : y;
-    const offsets = opt.offsets || (edge === 'top' ? [0,24,48,72,96,120] : edge === 'bottom' ? [0,-24,-48,-72,-96,-120] : [-12,12,-28,28,-44,44,-60,60,-76,76]);
+    const offsets = opt.offsets || (
+      align === 'left-of-point'
+        ? [0]
+        : (edge === 'top' ? [0,24,48,72,96,120] : edge === 'bottom' ? [0,-24,-48,-72,-96,-120] : [-12,12,-28,28,-44,44,-60,60,-76,76])
+    );
     let chosen = null;
     for(const off of offsets){
       const cx = fixedX ? baseX : clamp(baseX, clip.left+w/2+2, clip.left+clip.width-w/2-2);
@@ -7217,7 +7471,7 @@ startTradeAuto();
           const labelColor15 = val >= 0 ? '#1e88e5' : '#f6465d';
           const labelOpt15 = isExLabel15
             ? {fixedX:false,edge:(val >= 0 ? 'top' : 'bottom'),edgeMargin:(val >= 0 ? 66 : 28),xShift:8,font:'bold 13px Arial',pad:7,h:22,bg:(val >= 0 ? '#eaf3ff' : '#ffe8ec'),offsets:(val >= 0 ? [0,10,20,30,40,50,60,70,80] : [0,-10,-20,-30,-40,-50,-60,-70,-80]),hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}}
-            : {fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]};
+            : {align:'left-of-point',gap:6,hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}};
           reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(val):fm(val).replace(/[+-]/,'')),x,y,labelColor15,clip,placedLabels,labelOpt15);
         }
       }
@@ -7250,7 +7504,7 @@ startTradeAuto();
       const links = openPositionLinksForRender().filter(l => l.exitMarkerId === m.id);
       const val = links.length ? realizedSum15(links) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
       const col = val >= 0 ? '#1e88e5' : '#f6465d';
-      reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y - 18,col,clip,placedLabels,{fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]});
+      reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y,col,clip,placedLabels,{align:'left-of-point',gap:6,hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m),owner:'open'}});
     }
 
     // Open lot connectors and lot labels: independent of Trades / Positions / Lots.
@@ -10539,7 +10793,8 @@ startTradeAuto();
       if(showR && showD && m.role === 'close' && !m.unresolved){
         const val = p9CloseDisplayPnl(m);
         const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-        pnlLabel(fm(val),x,y - 18,lblCol,clip);
+        const isExLabel = !!(m.isFinalExit || m.letter === 'EX');
+        pnlLabel(fm(val),x,isExLabel ? (y - 18) : y,lblCol,clip,isExLabel ? null : {align:'left-of-point',gap:6});
       }
     }
 
@@ -10985,7 +11240,8 @@ startTradeAuto();
           drawnExitLabels.add(key);
           const val = g ? g.pnl : p10Num(m.pnl);
           const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-          pnlLabel(fm(val),x,y - 18,lblCol,clip,{align:(m.isFinalExit || m.letter === 'EX') ? 'center' : 'left-of-point',gap:12});
+          const isExLabel = !!(m.isFinalExit || m.letter === 'EX');
+          pnlLabel(fm(val),x,isExLabel ? (y - 18) : y,lblCol,clip,{align:isExLabel ? 'center' : 'left-of-point',gap:6});
         }
       }
     }
@@ -11572,7 +11828,8 @@ startTradeAuto();
           drawnExitLabels.add(key);
           const val = g ? g.pnl : p11Num(m.pnl);
           const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-          pnlLabel(fm(val),x,y - 18,lblCol,clip,{align:(m.isFinalExit || m.letter === 'EX') ? 'center' : 'left-of-point',gap:12});
+          const isExLabel = !!(m.isFinalExit || m.letter === 'EX');
+          pnlLabel(fm(val),x,isExLabel ? (y - 18) : y,lblCol,clip,{align:isExLabel ? 'center' : 'left-of-point',gap:6});
         }
       }else if(showD && m.role === 'close' && !m.unresolved && openChainIds35.has(p11Cid(m))){
         /* PATCH_35: show realized partial P/L for active open parent trade. */
@@ -11582,7 +11839,8 @@ startTradeAuto();
           drawnExitLabels.add(key);
           const val = g ? g.pnl : p11Num(m.pnl);
           const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-          pnlLabel(fm(val),x,y - 18,lblCol,clip,{align:(m.isFinalExit || m.letter === 'EX') ? 'center' : 'left-of-point',gap:12});
+          const isExLabel = !!(m.isFinalExit || m.letter === 'EX');
+          pnlLabel(fm(val),x,isExLabel ? (y - 18) : y,lblCol,clip,{align:isExLabel ? 'center' : 'left-of-point',gap:6});
         }
       }
     }
@@ -12227,7 +12485,8 @@ startTradeAuto();
           drawnCloseLabels.add(key);
           const val = ev ? ev.pnl : n12(m.pnl);
           const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-          pnlLabel(fm(val),x,y - 18,lblCol,clip);
+          const isExLabel = !!(m.isFinalExit || m.letter === 'EX');
+          pnlLabel(fm(val),x,isExLabel ? (y - 18) : y,lblCol,clip,isExLabel ? null : {align:'left-of-point',gap:6});
         }
       }
     }
@@ -12738,7 +12997,8 @@ startTradeAuto();
             drawnCloseLabels.add(key);
             const val = ev ? ev.pnl : n13(m.pnl);
             const lblCol = val >= 0 ? '#1e88e5' : '#f6465d';
-            pnlLabel(fm(val),x,y - 18,lblCol,clip);
+            const isExLabel = !!(m.isFinalExit || m.letter === 'EX');
+            pnlLabel(fm(val),x,isExLabel ? (y - 18) : y,lblCol,clip,isExLabel ? null : {align:'left-of-point',gap:6});
           }
         }
       }
@@ -13796,12 +14056,21 @@ startTradeAuto();
     const pad = opt.pad == null ? 4 : opt.pad;
     const w = ctx.measureText(txt).width + pad*2;
     const h = opt.h || 16;
+    const align = opt.align === 'left-of-point' ? 'left-of-point' : 'center';
+    const gap = align === 'left-of-point' ? Math.max(4, Number(opt.gap) || 0) : Math.max(8, Number(opt.gap) || 0);
     const fixedX = !!opt.fixedX;
     const fillBg = opt.fillBg !== false;
     const edge = opt.edge || null;
-    const baseX = x + (Number(opt.xShift) || 0);
+    const baseXRaw = align === 'left-of-point'
+      ? x - gap - w/2
+      : x;
+    const baseX = baseXRaw + (Number(opt.xShift) || 0);
     const baseY = edge === 'top' ? (clip.top + (Number(opt.edgeMargin) || 26)) : edge === 'bottom' ? (clip.top + clip.height - (Number(opt.edgeMargin) || 26)) : y;
-    const offsets = opt.offsets || (edge === 'top' ? [0,24,48,72,96,120] : edge === 'bottom' ? [0,-24,-48,-72,-96,-120] : [-12,12,-28,28,-44,44,-60,60,-76,76]);
+    const offsets = opt.offsets || (
+      align === 'left-of-point'
+        ? [0]
+        : (edge === 'top' ? [0,24,48,72,96,120] : edge === 'bottom' ? [0,-24,-48,-72,-96,-120] : [-12,12,-28,28,-44,44,-60,60,-76,76])
+    );
     let chosen = null;
     for(const off of offsets){
       const cx = fixedX ? baseX : clamp(baseX, clip.left+w/2+2, clip.left+clip.width-w/2-2);
@@ -13929,7 +14198,7 @@ startTradeAuto();
           const labelColor15 = val >= 0 ? '#1e88e5' : '#f6465d';
           const labelOpt15 = isExLabel15
             ? {fixedX:false,edge:(val >= 0 ? 'top' : 'bottom'),edgeMargin:(val >= 0 ? 66 : 28),xShift:8,font:'bold 13px Arial',pad:7,h:22,bg:(val >= 0 ? '#eaf3ff' : '#ffe8ec'),offsets:(val >= 0 ? [0,10,20,30,40,50,60,70,80] : [0,-10,-20,-30,-40,-50,-60,-70,-80]),hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}}
-            : {fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]};
+            : {align:'left-of-point',gap:6,hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m)}};
           reserveLabel15((typeof fmPnlBox==='function'?fmPnlBox(val):fm(val).replace(/[+-]/,'')),x,y,labelColor15,clip,placedLabels,labelOpt15);
         }
       }
@@ -13962,7 +14231,7 @@ startTradeAuto();
       const links = openPositionLinksForRender().filter(l => l.exitMarkerId === m.id);
       const val = links.length ? realizedSum15(links) : n15(m.binanceRealizedPnl ?? m.realizedPnl ?? m.pnl);
       const col = val >= 0 ? '#1e88e5' : '#f6465d';
-      reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y - 18,col,clip,placedLabels,{fixedX:true,offsets:[-24,24,-40,40,-56,56,-72,72]});
+      reserveLabel15((typeof fmPnlBox === 'function' ? fmPnlBox(val) : fm(val).replace(/[+-]/,'')),x,y,col,clip,placedLabels,{align:'left-of-point',gap:6,hit:{markerId:m.id,chainId:cid15(m),parentTradeId:cid15(m),owner:'open'}});
     }
 
     // Open lot connectors and lot labels: independent of Trades / Positions / Lots.
@@ -22106,9 +22375,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function currentPeriodValue(){
     try{
-      return String((reportWeeksEl && reportWeeksEl.value) || "1w").toLowerCase();
+      return String((reportWeeksEl && reportWeeksEl.value) || "1d").toLowerCase();
     }catch(_e){
-      return "1w";
+      return "1d";
     }
   }
   function currentLivePrice(){
@@ -22147,6 +22416,58 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       String(num(trade && trade.finalExit && trade.finalExit.time) || 0),
       String(num(trade && trade.netTotal) || 0)
     ].join(":")).join("|");
+  }
+  function closedTradeFastSignature(report){
+    const rows = report && Array.isArray(report.summaries) ? report.summaries : [];
+    const summary = report && report.summary || {};
+    return rows.map(row => [
+      String(row && row.id || ""),
+      String(num(row && row.closeTime) || 0),
+      String(num(row && row.net) || 0)
+    ].join(":")).join("|") + "|net:" + String(num(summary && summary.netTotal) || 0);
+  }
+  function wfDataMode(){
+    return String(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.wfMode || "none");
+  }
+  function activeWfReport(){
+    const mode = wfDataMode();
+    if(mode === "fast" && wfHasCurrentFastReport()) return CLOSED_TRADES_STATE.fastReport;
+    if(mode === "detail" && wfHasCurrentDetailReport()) return CLOSED_TRADES_STATE.reportProjection;
+    return null;
+  }
+  function activeWfSignature(){
+    const mode = wfDataMode();
+    if(mode === "fast") return closedTradeFastSignature(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.fastReport);
+    return closedTradeSignature(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection);
+  }
+  function wfHasCurrentFastReport(){
+    const report = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.fastReport;
+    const period = report && report.period;
+    return !!(
+      report &&
+      String(report.symbol || "").toUpperCase() === currentSymbol() &&
+      period &&
+      String(period.period || "").toLowerCase() === currentPeriodValue()
+    );
+  }
+  function wfHasCurrentDetailReport(){
+    const report = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection;
+    const period = report && report.period;
+    return !!(
+      report &&
+      String(report.symbol || "").toUpperCase() === currentSymbol() &&
+      period &&
+      String(period.period || "").toLowerCase() === currentPeriodValue()
+    );
+  }
+  async function reloadCurrentWfData(period,opt={}){
+    if(wfDataMode() === "detail") return loadClosedTradesForPeriod(period,opt);
+    return loadClosedTradesFastForPeriod(period,opt);
+  }
+  async function ensureFastWfData(opt={}){
+    if(typeof hasKeys !== "function" || !hasKeys()) return null;
+    if(!opt.force && wfHasCurrentFastReport()) return CLOSED_TRADES_STATE.fastReport;
+    return loadClosedTradesFastForPeriod(opt.period || currentPeriodValue(),opt);
   }
   function livePreviewTrade(){
     const chainIds = Array.from((OPEN_POSITION_STATE && OPEN_POSITION_STATE.activeParentChainIds) || []).filter(Boolean);
@@ -22260,15 +22581,17 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function scheduleAutoCloseSync(delayMs=1250){
     if((!wfSyncState.loaded && !visible) || (wfSyncState.loaded && wfSyncState.symbol !== currentSymbol())) return;
     if(wfSyncState.closeTimer || wfSyncState.closeSyncBusy) return;
-    wfSyncState.closeSyncBaseline = closedTradeSignature(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection);
+    wfSyncState.closeSyncBaseline = activeWfSignature();
     const period = wfSyncState.period || currentPeriodValue();
     wfSyncState.closeTimer = setTimeout(async () => {
       wfSyncState.closeTimer = null;
       wfSyncState.closeSyncBusy = true;
       try{
         while(wfSyncState.closeRetry < 3){
-          const result = await loadClosedTradesForPeriod(period,{silent:true});
-          const nextSignature = closedTradeSignature(result && result.report);
+          const result = await reloadCurrentWfData(period,{silent:true});
+          const nextSignature = wfDataMode() === "fast"
+            ? closedTradeFastSignature(result)
+            : closedTradeSignature(result && result.report);
           if(result && (!wfSyncState.closeSyncBaseline || (nextSignature && nextSignature !== wfSyncState.closeSyncBaseline))){
             wfSyncState.closeRetry = 0;
             wfSyncState.closeSyncBaseline = "";
@@ -22426,7 +22749,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function wfReturnMetrics(selectedNet){
     const selected = num(selectedNet) || 0;
-    const rec = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection;
+    const rec = activeWfReport();
     const explicitStart = [
       rec && rec.startBalance,
       rec && rec.selectedPeriodStartBalance,
@@ -22478,6 +22801,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
     return String(hours).padStart(2,"0") + ":" + String(minutes).padStart(2,"0");
+  }
+  function wfHeaderModeText(mode){
+    return mode === "detail" ? "Detailed Reconstruct" : "Totals";
   }
 
   function ensureToggle(){
@@ -22701,7 +23027,54 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     }
   }
 
+  function buildFastTradeRows(report){
+    const rows = report && Array.isArray(report.summaries) ? report.summaries : [];
+    let cumulative = 0;
+    return rows.map((row,index) => {
+      const net = num(row && row.net) || 0;
+      const realized = net;
+      const fees = num(row && row.fees);
+      const qty = num(row && row.qty);
+      const openTime = num(row && row.openTime);
+      const closeTime = num(row && row.closeTime);
+      const side = String(row && row.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+      const duration = openTime != null && closeTime != null ? wfDurationText(openTime,closeTime) : "";
+      const tooltipLines = [];
+      tooltipLines.push("Direction: " + (side === "SHORT" ? "Short" : "Long"));
+      if(duration) tooltipLines.push("Duration: " + duration);
+      if(qty != null) tooltipLines.push("Closed Volume: " + fq(qty));
+      tooltipLines.push([{text:"Realized P/L: ",color:WF_BLACK},{text:fm(realized),color:wfPnlColor(realized),bold:true}]);
+      if(fees != null) tooltipLines.push([{text:"Commission / Fees: ",color:WF_BLACK},{text:fm(fees),color:wfPnlColor(fees),bold:true}]);
+      if(row && row.limited) tooltipLines.push("Limited detail: partial context");
+      const trade = {
+        id:row && row.id ? row.id : ("wf_fast_" + index),
+        parentTradeId:row && row.parentTradeId ? row.parentTradeId : null,
+        chainId:row && (row.detailChainId || row.parentTradeId) ? (row.detailChainId || row.parentTradeId) : null,
+        index,
+        when:closeTime == null ? "-" : shortDate(closeTime),
+        net,
+        realized,
+        fees,
+        fundingDelta:null,
+        dir:String(row && row.dir || closedTradeFastSummaryDirection(side)),
+        tooltipLines,
+        finalExit:null,
+        links:[],
+        finalExitTime:closeTime,
+        markerId:row && row.markerId ? row.markerId : null,
+        start:cumulative,
+        end:cumulative + net,
+        limited:!!(row && row.limited)
+      };
+      cumulative = trade.end;
+      return trade;
+    });
+  }
+
   function buildTradeRows(){
+    const mode = wfDataMode();
+    if(mode === "fast") return wfHasCurrentFastReport() ? buildFastTradeRows(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.fastReport) : [];
+    if(mode === "detail" && !wfHasCurrentDetailReport()) return [];
     const rec = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection;
     const parents = typeof closedTradeParentTrades === "function" ? closedTradeParentTrades(rec || {}) : [];
     const trades = parents.map((trade,index) => {
@@ -22797,9 +23170,15 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
 
   function buildViewModel(){
+    const mode = wfDataMode();
+    const wfReport = activeWfReport();
     const trades = buildTradeRows();
     const liveTrade = livePreviewTrade();
-    const selectedNet = trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
+    const fastSummary = mode === "fast" && wfReport && wfReport.summary ? wfReport.summary : null;
+    const selectedNetBase = mode === "fast"
+      ? (num(fastSummary && fastSummary.netTotal) || 0)
+      : trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
+    const selectedNet = selectedNetBase;
     const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
     const liveNet = num(liveTrade && liveTrade.net) || 0;
     const returnMetrics = wfReturnMetrics(selectedNet);
@@ -22854,6 +23233,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       endBalance,
       returnPct,
       note,
+      mode,
       domainMin,
       domainMax,
       period
@@ -22911,7 +23291,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const result = q("wfResult");
     const title = q("wfWindowTitle");
     if(!chart) return;
-    if(title && model.period) title.textContent = "From : " + wfTitleDayText(model.period.start) + " To : " + wfTitleDayText(model.period.end);
+    if(title && model.period) title.textContent = "Closed positions | From : " + wfTitleDayText(model.period.start) + " To : " + wfTitleDayText(model.period.end) + " | " + wfHeaderModeText(model.mode);
     if(false && title && model.period){
       title.textContent = "Waterfall — From " + dayText(model.period.start) + " to " + dayText(model.period.end);
     }
@@ -22927,7 +23307,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       result.innerHTML = `<div class="wf-result-label">Net P/L</div><div class="wf-result-value ${resultClass}">${fmtBigResult(model.selectedNet)}</div>`;
     }
     if(!model.trades.length && !model.liveTrade){
-      chart.innerHTML = `<div class="wf-empty">No closed trades in the selected period.</div>`;
+      chart.innerHTML = `<div class="wf-empty">${model.mode === "fast" ? "No closed positions in the selected period." : "No closed trades in the selected period."}</div>`;
       return;
     }
     const plotTop = 10;
@@ -23167,6 +23547,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     startLiveRefreshLoop();
     applyExpandedRect(win);
     render();
+    if(wfDataMode() === "detail" && wfHasCurrentDetailReport()) return;
+    ensureFastWfData({silent:false}).catch(error => {
+      console.warn(MODULE + " fast WF auto-load failed",error);
+    });
   }
 
   function hide(){
@@ -23179,7 +23563,31 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function install(){
     ensureToggle();
     ensureWindow();
+    if(reportWeeksEl && !reportWeeksEl.__bt001WfFastReloadBound){
+      reportWeeksEl.__bt001WfFastReloadBound = true;
+      reportWeeksEl.addEventListener("change",() => {
+        ensureFastWfData({force:true,silent:true,period:currentPeriodValue()}).catch(error => {
+          console.warn(MODULE + " fast WF period reload failed",error);
+        });
+      },false);
+    }
+    if(typeof hasKeys === "function" && hasKeys()){
+      setTimeout(() => {
+        ensureFastWfData({silent:true}).catch(error => {
+          console.warn(MODULE + " fast WF initial load failed",error);
+        });
+      },60);
+    }
   }
+
+  const prevLoadClosedTradesFastForPeriod = loadClosedTradesFastForPeriod;
+  loadClosedTradesFastForPeriod = async function(){
+    const result = await prevLoadClosedTradesFastForPeriod.apply(this,arguments);
+    if(result) markClosedTradesLoaded(true);
+    if(visible) render();
+    return result;
+  };
+  if(typeof window !== "undefined") window.loadClosedTradesFastForPeriod = loadClosedTradesFastForPeriod;
 
   const prevLoadClosedTradesForPeriod = loadClosedTradesForPeriod;
   loadClosedTradesForPeriod = async function(){
