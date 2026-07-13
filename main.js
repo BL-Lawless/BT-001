@@ -4242,6 +4242,8 @@ const marketDataHub = (() => {
 
   const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
   const STORAGE_KEY = "bt001_topbar_pressure_signal_horizon";
+  const DIRECTION_STORAGE_KEY = "bt001_topbar_pressure_signal_direction";
+  const DIRECTIONS = ["AUTO","LONG","SHORT"];
   const HORIZONS = [
     {id:"quick",label:"Quick"},
     {id:"2_3h",label:"2–3H"},
@@ -4249,7 +4251,9 @@ const marketDataHub = (() => {
   ];
   const state = {
     horizon:readStoredHorizon(),
+    direction:readStoredDirection(),
     root:null,
+    directionChip:null,
     entry:null,
     exit:null,
     details:null,
@@ -4278,6 +4282,23 @@ const marketDataHub = (() => {
     try{ localStorage.setItem(STORAGE_KEY,state.horizon); }catch(_e){}
     scheduleToolbarSignalRefresh37(true);
   }
+  function readStoredDirection(){
+    try{
+      const saved = String(localStorage.getItem(DIRECTION_STORAGE_KEY) || "").toUpperCase();
+      return DIRECTIONS.includes(saved) ? saved : "AUTO";
+    }catch(_e){
+      return "AUTO";
+    }
+  }
+  function setStoredDirection(next){
+    state.direction = DIRECTIONS.includes(next) ? next : "AUTO";
+    try{ localStorage.setItem(DIRECTION_STORAGE_KEY,state.direction); }catch(_e){}
+    scheduleToolbarSignalRefresh37(true);
+  }
+  function cycleStoredDirection37(){
+    const index = DIRECTIONS.indexOf(state.direction);
+    setStoredDirection(DIRECTIONS[(index + 1) % DIRECTIONS.length]);
+  }
   function ensureToolbarSignalUi37(){
     const topbar = document.querySelector(".topbar");
     const toggles = topbar && topbar.querySelector(".toggles");
@@ -4287,6 +4308,13 @@ const marketDataHub = (() => {
       root = document.createElement("div");
       root.id = "pressureSignalToolbar";
       root.className = "pressure-signal-toolbar";
+      const directionChip = document.createElement("button");
+      directionChip.type = "button";
+      directionChip.id = "pressureSignalDirection";
+      directionChip.className = "pressure-signal-chip pressure-signal-direction";
+      directionChip.addEventListener("click",cycleStoredDirection37,false);
+      root.appendChild(directionChip);
+      state.directionChip = directionChip;
       HORIZONS.forEach(item => {
         const chip = document.createElement("button");
         chip.type = "button";
@@ -4314,6 +4342,7 @@ const marketDataHub = (() => {
     if(label) label.remove();
     if(!state.entry) state.entry = document.getElementById("pressureSignalEntry");
     if(!state.exit) state.exit = document.getElementById("pressureSignalExit");
+    if(!state.directionChip) state.directionChip = document.getElementById("pressureSignalDirection");
     HORIZONS.forEach(item => {
       if(!state.chips.has(item.id)){
         const chip = root.querySelector(`[data-horizon="${item.id}"]`);
@@ -4540,7 +4569,9 @@ const marketDataHub = (() => {
     const priceRefuses = sideSign !== 0 && (!priceFollows || bodyRatio <= 0.18);
     const lastPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : close;
     const vwapValue = latestSeriesValue37(typeof VWAP === "function" ? VWAP(rows) : []);
-    const emaValue = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,emaPeriod) : []);
+    const ema9Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,9) : []);
+    const ema21Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,21) : []);
+    const emaValue = emaPeriod === 9 ? ema9Value : emaPeriod === 21 ? ema21Value : latestSeriesValue37(typeof EMA === "function" ? EMA(rows,emaPeriod) : []);
     const structureRows = validRows.slice(-Math.max(3,lookback + 1),-1);
     const recentHigh = structureRows.length ? Math.max(...structureRows.map(row => Number(row.high)).filter(Number.isFinite)) : null;
     const recentLow = structureRows.length ? Math.min(...structureRows.map(row => Number(row.low)).filter(Number.isFinite)) : null;
@@ -4572,6 +4603,8 @@ const marketDataHub = (() => {
       currentPrice:lastPrice,
       vwapValue,
       emaValue,
+      ema9Value,
+      ema21Value,
       recentHigh:Number.isFinite(recentHigh) ? recentHigh : null,
       recentLow:Number.isFinite(recentLow) ? recentLow : null,
       stuckNearVwap:lastPrice != null && vwapValue != null ? Math.abs(lastPrice - vwapValue) / Math.max(Math.abs(lastPrice),1) <= 0.0015 : false
@@ -4694,7 +4727,9 @@ const marketDataHub = (() => {
       heldBeyondAnchor,
       structureIntact,
       priceRefuses,
-      crossOrderValid
+      crossOrderValid,
+      ema21Now:latestEma21,
+      ema55Now:latestEma55
     };
   }
   function evaluateMaEvents37(horizonId,pressureSamples,signalDirection){
@@ -4754,13 +4789,16 @@ const marketDataHub = (() => {
   function pillTone37(value){
     switch(String(value || "")){
       case "ENTRY LONG":
+      case "THESIS SUPPORTIVE":
       case "EXIT HOLD":
         return "green";
       case "ENTRY SHORT":
+      case "THESIS INVALID":
       case "EXIT EXIT":
         return "red";
       case "ENTRY ABSORPTION":
       case "ENTRY FADE RISK":
+      case "THESIS ADVERSE":
       case "EXIT TRIM":
       case "EXIT TIGHTEN SL":
         return "orange";
@@ -4824,7 +4862,7 @@ const marketDataHub = (() => {
     const level = num37(anchor);
     if(current == null || level == null) return null;
     const relation = current >= level ? "above" : "below";
-    return `Price ${relation} ${label} by $${tooltipPrice37(Math.abs(current - level))}`;
+    return `Price ${relation} ${label} ${tooltipPrice37(level)} by ${tooltipPrice37(Math.abs(current - level))}`;
   }
   function tooltipMainSample37(signal){
     const samples = Array.isArray(signal && signal.samples) ? signal.samples.filter(sample => sample.available) : [];
@@ -4899,15 +4937,16 @@ const marketDataHub = (() => {
           : event.state === "stale"
             ? "stale/context only"
             : "invalidated";
-      lines.push(`${event.tf} ${event.anchor} ${event.type}, ${event.age} candle${event.age === 1 ? "" : "s"} ago, ${stateLabel}`);
+      const anchorLevel = num37(event.anchorNow);
+      lines.push(`${event.tf} ${event.anchor}${anchorLevel != null ? ` ${tooltipPrice37(anchorLevel)}` : " level unavailable"} ${event.type}, ${event.age} candle${event.age === 1 ? "" : "s"} ago, ${stateLabel}`);
       const current = num37(event.currentPrice);
       const anchor = num37(event.anchorNow);
       if(current != null && anchor != null){
         const distance = `$${tooltipPrice37(Math.abs(current - anchor))}`;
         if(event.direction < 0){
-          lines.push(current <= anchor ? `Price remains ${distance} below ${event.anchor}` : `Price reclaimed ${event.anchor} by ${distance}`);
+          lines.push(current <= anchor ? `Price remains ${distance} below ${event.anchor} ${tooltipPrice37(anchor)}` : `Price reclaimed ${event.anchor} ${tooltipPrice37(anchor)} by ${distance}`);
         }else{
-          lines.push(current >= anchor ? `Price remains ${distance} above ${event.anchor}` : `Price lost ${event.anchor} by ${distance}`);
+          lines.push(current >= anchor ? `Price remains ${distance} above ${event.anchor} ${tooltipPrice37(anchor)}` : `Price lost ${event.anchor} ${tooltipPrice37(anchor)} by ${distance}`);
         }
       }
       if(event.structureIntact === true) lines.push(event.direction < 0 ? "Lower-high structure intact" : "Higher-low structure intact");
@@ -4954,7 +4993,8 @@ const marketDataHub = (() => {
       const reasons = available.map(sample => tooltipPressureLine37(sample));
       if(sides.size > 1) reasons.push("Relevant timeframes show conflicting pressure");
       else reasons.push("Pressure is balanced or lacks a clean directional edge");
-      if(available.some(sample => sample.stuckNearVwap)) reasons.push("Price remains close to VWAP");
+      const nearVwap = available.find(sample => sample.stuckNearVwap && num37(sample.vwapValue) != null);
+      if(nearVwap) reasons.push(`Price remains close to VWAP ${tooltipPrice37(nearVwap.vwapValue)}`);
       reasons.push("Waiting for pressure and price context to align");
       return reasons.slice(0,5);
     }
@@ -5027,14 +5067,140 @@ const marketDataHub = (() => {
       return null;
     }
   }
-  function tooltipText37(signal){
+  function detailBulletList37(lines){
+    const items = Array.isArray(lines) && lines.length ? lines : ["None identified from available data"];
+    return items.map(line => `• ${line}`).join("\n");
+  }
+  function directionEvidence37(signal,direction){
+    const desired = direction === "SHORT" ? -1 : 1;
+    const samples = Array.isArray(signal && signal.samples) ? signal.samples : [];
+    const supportive = [];
+    const adverse = [];
+    const missing = [];
+    samples.slice().sort((a,b) => Number(b.weight || 0) - Number(a.weight || 0)).forEach(sample => {
+      if(!sample.available){
+        missing.push(`${tooltipBasis37(sample)} pressure unavailable`);
+        return;
+      }
+      (sample.sideSign === desired ? supportive : adverse).push(tooltipPressureLine37(sample));
+    });
+    const main = tooltipMainSample37(signal);
+    if(main){
+      [
+        {label:"EMA9",value:main.ema9Value},
+        {label:"EMA21",value:main.ema21Value},
+        {label:"VWAP",value:main.vwapValue}
+      ].forEach(anchor => {
+        const price = num37(main.currentPrice);
+        const level = num37(anchor.value);
+        if(price == null || level == null){
+          missing.push(`${anchor.label} live level unavailable`);
+          return;
+        }
+        const supports = desired > 0 ? price >= level : price <= level;
+        const relation = price >= level ? "above" : "below";
+        (supports ? supportive : adverse).push(`Price ${relation} ${anchor.label} ${tooltipPrice37(level)}`);
+      });
+      const structureLevel = num37(desired > 0 ? main.recentLow : main.recentHigh);
+      const price = num37(main.currentPrice);
+      if(structureLevel != null && price != null){
+        const intact = desired > 0 ? price >= structureLevel : price <= structureLevel;
+        const label = desired > 0 ? "Higher low" : "Lower high";
+        (intact ? supportive : adverse).push(`${label} ${tooltipPrice37(structureLevel)} ${intact ? "remains intact" : "has broken"}`);
+      }else{
+        missing.push(`${desired > 0 ? "Higher-low" : "Lower-high"} structure level unavailable`);
+      }
+    }
+    const events = Array.isArray(signal && signal.maEvents) ? signal.maEvents : [];
+    events.forEach(event => {
+      if(!event || event.state === "unknown"){
+        missing.push(event && event.reason ? event.reason : "MA event data unavailable");
+        return;
+      }
+      const level = num37(event.anchorNow);
+      const ema21 = num37(event.ema21Now);
+      const ema55 = num37(event.ema55Now);
+      const anchorText = event.anchorKind === "cross"
+        ? `EMA21${ema21 != null ? ` ${tooltipPrice37(ema21)}` : " live level unavailable"} / EMA55${ema55 != null ? ` ${tooltipPrice37(ema55)}` : " live level unavailable"}`
+        : `${event.anchor}${level != null ? ` ${tooltipPrice37(level)}` : " live level unavailable"}`;
+      const line = `${event.tf} ${anchorText} ${event.type} is ${event.state}`;
+      const eventSupports = event.direction === desired && event.state !== "invalidated";
+      const eventAdverse = event.direction === -desired && event.state !== "invalidated";
+      if(eventSupports) supportive.push(line);
+      else if(eventAdverse || (event.direction === desired && event.state === "invalidated")) adverse.push(line);
+    });
+    return {supportive,adverse,missing};
+  }
+  function advisoryLevels37(signal,direction){
+    const main = tooltipMainSample37(signal);
+    if(!main || (direction !== "LONG" && direction !== "SHORT")){
+      return {direction:null,lines:["No direction-specific level is available while the market read has no direction"]};
+    }
+    const ema9 = num37(main.ema9Value);
+    const ema21 = num37(main.ema21Value);
+    const vwap = num37(main.vwapValue);
+    const recentHigh = num37(main.recentHigh);
+    const recentLow = num37(main.recentLow);
+    const zone = ema9 != null && ema21 != null
+      ? `EMA9 ${tooltipPrice37(ema9)}–EMA21 ${tooltipPrice37(ema21)}`
+      : ema9 != null ? `EMA9 ${tooltipPrice37(ema9)}` : ema21 != null ? `EMA21 ${tooltipPrice37(ema21)}` : null;
+    const lines = [];
+    if(direction === "LONG"){
+      if(zone) lines.push(`Buy pullback: ${zone}`);
+      if(recentLow != null) lines.push(`Tighten below: latest higher low ${tooltipPrice37(recentLow)}`);
+      if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} rejects again`);
+      if(recentLow != null) lines.push(`Invalidation below: swing low ${tooltipPrice37(recentLow)}`);
+      if(vwap != null) lines.push(`Major confirmation: VWAP ${tooltipPrice37(vwap)} reclaimed and held`);
+    }else{
+      if(zone) lines.push(`Sell bounce: ${zone}`);
+      if(recentHigh != null) lines.push(`Tighten above: latest lower high ${tooltipPrice37(recentHigh)}`);
+      if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} is reclaimed`);
+      if(recentHigh != null) lines.push(`Invalidation above: swing high ${tooltipPrice37(recentHigh)}`);
+      if(vwap != null) lines.push(`Major invalidation: VWAP ${tooltipPrice37(vwap)} reclaimed and held`);
+    }
+    if(!lines.length) lines.push("Direction-specific advisory levels unavailable");
+    return {direction,lines};
+  }
+  function positionDetails37(signal){
+    const position = signal && signal.position;
+    if(!position) return {position:"Open position: None",management:"Management: No open position"};
+    const qty = num37(position.qty);
+    const quantity = qty == null ? "quantity unavailable" : Math.abs(qty).toLocaleString(undefined,{maximumFractionDigits:8});
+    return {
+      position:`Open position: ${position.side} ${quantity}`,
+      management:`Management for ${position.side}: ${exitDisplayText37(signal.exit)}`
+    };
+  }
+  function tooltipText37(signal,thesis){
     const bias = entryDisplayText37(signal.entry);
-    const levels = tooltipLevels37(signal).map(level => `• ${level}`).join("\n");
-    const maEvents = tooltipMaEvents37(signal).map(line => `• ${line}`).join("\n");
-    const reasons = tooltipReasons37(signal).map(reason => `• ${reason}`).join("\n");
-    const invalidations = tooltipInvalidations37(signal).map(reason => `• ${reason}`).join("\n");
+    const position = positionDetails37(signal);
     const dataAge = tooltipDataAge37();
-    return `${horizonLabel37(state.horizon)} · ${bias} ${signal.confidence}%\nAction: ${signal.action}\nManagement: ${exitDisplayText37(signal.exit)}\n\nLevels:\n${levels}\n\nMA events:\n${maEvents}\n\nWhy:\n${reasons}\n\nInvalid if:\n${invalidations}\n\nSignal recalculated: ${tooltipTime37()}${dataAge ? `\nData age: ${dataAge}` : ""}\nData: ${tooltipDataHealth37(signal)}`;
+    const header = [
+      `Direction mode: ${state.direction}`,
+      `Selected horizon: ${horizonLabel37(state.horizon)}`,
+      ...(state.direction === "AUTO"
+        ? [`Independent market bias: ${bias} ${signal.confidence}%`]
+        : [`${state.direction === "LONG" ? "Long" : "Short"}-thesis status: ${thesis.status} ${thesis.confidence}%`,`Independent market bias: ${bias} ${signal.confidence}%`]),
+      position.position,
+      position.management
+    ];
+    const targetDirection = state.direction === "AUTO" ? signal.marketDirection : state.direction;
+    const levels = advisoryLevels37(signal,targetDirection);
+    const sections = [];
+    if(targetDirection){
+      const evidenceSignal = state.direction === "AUTO" ? signal : {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact};
+      const evidence = directionEvidence37(evidenceSignal,targetDirection);
+      const prefix = state.direction === "AUTO" ? `independent ${targetDirection}` : targetDirection;
+      sections.push(`Supportive for ${prefix}:\n${detailBulletList37(evidence.supportive)}`);
+      sections.push(`Adverse for ${prefix}:\n${detailBulletList37(evidence.adverse)}`);
+      if(evidence.missing.length) sections.push(`Missing data:\n${detailBulletList37(evidence.missing)}`);
+    }else{
+      sections.push(`Evidence:\n${detailBulletList37(tooltipReasons37(signal))}`);
+    }
+    sections.push(`${levels.direction ? `Levels for ${levels.direction}` : "Levels"}:\n${detailBulletList37(levels.lines)}`);
+    sections.push("All levels are advisory only.");
+    sections.push(`Signal recalculated: ${tooltipTime37()}${dataAge ? `\nData age: ${dataAge}` : ""}\nData: ${tooltipDataHealth37(signal)}`);
+    return `${header.join("\n")}\n\n${sections.join("\n\n")}`;
   }
   function clampToolbarSignalDetails37(){
     if(!state.details || !state.details.classList.contains("is-open")) return;
@@ -5119,6 +5285,10 @@ const marketDataHub = (() => {
         confidence:51,
         action:"No edge",
         exit:"EXIT WAIT",
+        normalized:0,
+        dominantSide:0,
+        marketDirection:null,
+        position:openPositionSignal37(),
         samples,
         maEvents:maEvaluation.events,
         maImpact:0
@@ -5189,21 +5359,87 @@ const marketDataHub = (() => {
       confidence,
       action:entryActionText37(entry),
       exit,
+      normalized,
+      dominantSide,
+      marketDirection:dominantSide > 0 ? "LONG" : dominantSide < 0 ? "SHORT" : null,
+      position,
       samples,
       maEvents:maEvaluation.events,
       maImpact:maEvaluation.impact
     };
   }
+  function evaluateDirectionThesis37(market,direction,horizonId){
+    const desired = direction === "SHORT" ? -1 : 1;
+    const samples = Array.isArray(market && market.samples) ? market.samples : [];
+    if(!samples.length || samples.some(sample => !sample.available)){
+      return {
+        status:"MIXED",
+        confidence:51,
+        action:"Wait for confirmation",
+        direction,
+        maEvents:[],
+        maImpact:0,
+        missing:true
+      };
+    }
+    const main = tooltipMainSample37(market);
+    const oriented = Number(market.normalized || 0) * desired;
+    const maEvaluation = evaluateMaEvents37(horizonId,samples,desired);
+    const currentPrice = main && num37(main.currentPrice);
+    const structureLevel = main && num37(desired > 0 ? main.recentLow : main.recentHigh);
+    const structureBroken = currentPrice != null && structureLevel != null
+      ? (desired > 0 ? currentPrice < structureLevel : currentPrice > structureLevel)
+      : false;
+    const contextOpposes = !!(main && main.contextSide === -desired);
+    const contextSupports = !!(main && main.contextSide === desired);
+    let status = "MIXED";
+    if(structureBroken && (oriented < -0.08 || contextOpposes)) status = "INVALID";
+    else if(oriented <= -0.10 || contextOpposes || maEvaluation.impact <= -5) status = "ADVERSE";
+    else if(oriented >= 0.11 && !contextOpposes && maEvaluation.impact > -5) status = "SUPPORTIVE";
+    const confidence = (() => {
+      if(status === "MIXED") return Math.max(51,Math.min(59,Math.round(52 + Math.abs(oriented) * 12)));
+      if(status === "INVALID") return Math.max(68,Math.min(80,Math.round(70 + Math.abs(oriented) * 8 + (contextOpposes ? 3 : 0))));
+      return Math.max(56,Math.min(76,Math.round(57 + Math.abs(oriented) * 14 + (contextSupports || contextOpposes ? 3 : 0) + Math.min(4,Math.abs(maEvaluation.impact)))));
+    })();
+    const action = status === "SUPPORTIVE"
+      ? (direction === "LONG" ? "Buy pullbacks" : "Sell bounces")
+      : status === "MIXED"
+        ? "Wait for confirmation"
+        : status === "ADVERSE"
+          ? "Avoid adds"
+          : `${direction === "LONG" ? "Long" : "Short"} thesis failed`;
+    return {
+      status,
+      confidence,
+      action,
+      direction,
+      oriented,
+      structureBroken,
+      maEvents:maEvaluation.events,
+      maImpact:maEvaluation.impact,
+      missing:false
+    };
+  }
   function renderToolbarSignal37(){
     if(!ensureToolbarSignalUi37()) return;
+    if(state.directionChip){
+      state.directionChip.textContent = `DIR: ${state.direction}`;
+      state.directionChip.classList.add("is-active");
+      state.directionChip.setAttribute("aria-label",`Direction mode ${state.direction}. Click to change.`);
+      state.directionChip.title = "Direction mode: AUTO → LONG → SHORT";
+    }
     HORIZONS.forEach(item => {
       const chip = state.chips.get(item.id);
       if(chip) chip.classList.toggle("is-active",state.horizon === item.id);
     });
     const signal = evaluateToolbarPressureSignal37(state.horizon);
+    const thesis = state.direction === "AUTO" ? null : evaluateDirectionThesis37(signal,state.direction,state.horizon);
     if(state.entry){
-      state.entry.dataset.tone = pillTone37(signal.entry);
-      state.entry.textContent = `${entryDisplayText37(signal.entry)} ${signal.confidence}% · ${signal.action}`;
+      const displayValue = thesis ? `THESIS ${thesis.status}` : signal.entry;
+      state.entry.dataset.tone = pillTone37(displayValue);
+      state.entry.textContent = thesis
+        ? `${thesis.status} ${thesis.confidence}% · ${thesis.action}`
+        : `${entryDisplayText37(signal.entry)} ${signal.confidence}% · ${signal.action}`;
       state.entry.removeAttribute("title");
     }
     if(state.exit){
@@ -5212,8 +5448,8 @@ const marketDataHub = (() => {
       state.exit.removeAttribute("title");
     }
     if(state.detailsBody){
-      state.detailsBody.textContent = tooltipText37(signal);
-      if(state.detailsTitle) state.detailsTitle.textContent = `${horizonLabel37(state.horizon)} details`;
+      state.detailsBody.textContent = tooltipText37(signal,thesis);
+      if(state.detailsTitle) state.detailsTitle.textContent = `${state.direction} · ${horizonLabel37(state.horizon)} details`;
       positionToolbarSignalDetails37();
     }
     state.lastRenderAt = Date.now();
