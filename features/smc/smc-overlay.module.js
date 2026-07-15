@@ -356,15 +356,63 @@
     return alpha(color, 0.10);
   }
 
+  function structureScopeSnapshot(rows, scope, length) {
+    const pivots = detectPivots(rows, scope, length, length);
+    const points = classifySwingPoints(pivots);
+    const classificationByPivot = new Map(points.map((point) => [`${point.index}:${point.side}`, point.text]));
+    const classifiedPivots = pivots.map((pivot) => ({
+      ...pivot,
+      classification: classificationByPivot.get(`${pivot.index}:${pivot.side}`) || null,
+      confirmed: pivot.confirmIndex < rows.length - 1,
+      tentative: pivot.confirmIndex >= rows.length - 1
+    }));
+    const breaks = detectBreaks(rows, classifiedPivots, scope);
+    const latestHigh = [...classifiedPivots].reverse().find((pivot) => pivot.side === "high" && pivot.confirmed) || null;
+    const latestLow = [...classifiedPivots].reverse().find((pivot) => pivot.side === "low" && pivot.confirmed) || null;
+    const latestEvent = breaks.events.length ? breaks.events[breaks.events.length - 1] : null;
+    return {
+      scope,
+      pivots: classifiedPivots,
+      points,
+      events: breaks.events,
+      latestEvent,
+      latestHigh,
+      latestLow,
+      trend: breaks.trend || 0,
+      levelLabels: breaks.levelLabels,
+      levels: breaks.levelLabels.map((level) => ({
+        ...level,
+        classification: classificationByPivot.get(`${level.index}:${level.side}`) || null,
+        confirmed: true,
+        tentative: false
+      }))
+    };
+  }
+
+  function calculateStructureSnapshot(inputRows, options = {}) {
+    const rows = normalizeRows(inputRows);
+    const swingLength = clamp(Math.round(num(options.swingLength) || state.settings.swingLength), 2, 10);
+    const internalLength = clamp(Math.round(swingLength / 2), 1, Math.max(1, swingLength - 1));
+    const swing = structureScopeSnapshot(rows, "swing", swingLength);
+    const internal = structureScopeSnapshot(rows, "internal", internalLength);
+    return {
+      rows: rows.length,
+      swingLength,
+      internalLength,
+      swing,
+      internal,
+      swingBias: swing.trend || 0,
+      calculatedAt: Date.now()
+    };
+  }
+
   function buildDrawings(rows) {
     const settings = state.settings;
-    const internalLength = clamp(Math.round(settings.swingLength / 2), 1, Math.max(1, settings.swingLength - 1));
-    const swingPivots = detectPivots(rows, "swing", settings.swingLength, settings.swingLength);
-    const internalPivots = detectPivots(rows, "internal", internalLength, internalLength);
-    const swingPoints = classifySwingPoints(swingPivots);
-    const swingBreaks = detectBreaks(rows, swingPivots, "swing");
-    const internalBreaks = detectBreaks(rows, internalPivots, "internal");
-    const swingBias = swingBreaks.trend || 0;
+    const structure = calculateStructureSnapshot(rows, { swingLength: settings.swingLength });
+    const swingPoints = structure.swing.points;
+    const swingBreaks = structure.swing;
+    const internalBreaks = structure.internal;
+    const swingBias = structure.swingBias;
 
     let swingEvents = swingBreaks.events.filter((event) => eventMatchesFilter(event, settings.swingBullishStructure, settings.swingBearishStructure));
     let internalEvents = internalBreaks.events.filter((event) => eventMatchesFilter(event, settings.internalBullishStructure, settings.internalBearishStructure));
@@ -1057,6 +1105,9 @@
     setEnabled,
     updateSettings,
     activateSettingsTab,
+    getStructureSnapshot(rows, options) {
+      return calculateStructureSnapshot(rows, options);
+    },
     redraw() {
       invalidate();
       safeDraw();

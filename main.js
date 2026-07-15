@@ -2961,7 +2961,10 @@ const marketDataHub = (() => {
     lastGapRepairMsByTf:{},
     bufferSymbol:null,
     ssscSeedPromise:null,
-    maStackSeedPromise:null
+    maStackSeedPromise:null,
+    consumerTimeframes:{},
+    consumerDepths:{},
+    timeframeEnsureInFlight:{}
   };
 
   function now(){ return Date.now(); }
@@ -2974,6 +2977,7 @@ const marketDataHub = (() => {
       diag.lastChartActivityByTf = {};
       diag.lastChartActivitySourceByTf = {};
       diag.lastActiveChartCandles = [];
+      state.timeframeEnsureInFlight = {};
     }
     state.bufferSymbol = symbol;
     return symbol;
@@ -3154,13 +3158,15 @@ const marketDataHub = (() => {
     const hit = sharedTfConfig(tf);
     const ssscCap = state.ssscVisible && SHARED_SSSC_TFS.some(x => x.interval === tf) && hit ? hit.cap : 0;
     const maStackCap = state.maStackVisible && SHARED_MA_STACK_TFS.some(x => x.interval === tf) && hit ? hit.cap : 0;
+    const consumerKeep = Math.max(0,...Object.values(state.consumerDepths || {}).map(depths => Number(depths && depths[tf]) || 0));
     if(tf === iv()) return Math.max(
       ssscCap,
       maStackCap,
+      consumerKeep,
       chartDesiredClosedDepth(visibleCount || DEF_VISIBLE),
       Math.min(CHART_HISTORY_RETENTION_CAP, Array.isArray(candles) ? candles.length : 0)
     );
-    return hit ? ((state.ssscVisible || state.maStackVisible) ? hit.cap : hit.keep) : 420;
+    return Math.max(consumerKeep,hit ? ((state.ssscVisible || state.maStackVisible) ? hit.cap : hit.keep) : 420);
   }
   function requiredKlineTimeframes(){
     const required = new Set([iv()]);
@@ -3170,7 +3176,34 @@ const marketDataHub = (() => {
     if(state.maStackVisible){
       SHARED_MA_STACK_TFS.forEach(tf => required.add(tf.interval));
     }
+    Object.values(state.consumerTimeframes || {}).forEach(timeframes => {
+      (Array.isArray(timeframes) ? timeframes : []).forEach(tf => {
+        const interval = canonicalTfKey(tf);
+        if(interval) required.add(interval);
+      });
+    });
     return required;
+  }
+  function setTimeframeRequirements(consumerId,timeframes){
+    ensureBufferSymbol();
+    const id = String(consumerId || "").trim();
+    if(!id) return;
+    const depths = {};
+    const next = [...new Set((Array.isArray(timeframes) ? timeframes : []).map(item => {
+      const tf = canonicalTfKey(item && typeof item === "object" ? item.tf : item);
+      const count = Math.max(0,Math.round(Number(item && typeof item === "object" ? item.count : 0) || 0));
+      if(tf && count) depths[tf] = Math.max(depths[tf] || 0,count);
+      return tf;
+    }).filter(Boolean))].sort();
+    const previous = Array.isArray(state.consumerTimeframes[id]) ? state.consumerTimeframes[id] : [];
+    const previousDepths = state.consumerDepths[id] || {};
+    const depthKey = value => Object.keys(value).sort().map(tf => `${tf}:${value[tf]}`).join("|");
+    if(previous.join("|") === next.join("|") && depthKey(previousDepths) === depthKey(depths)) return;
+    if(next.length) state.consumerTimeframes[id] = next;
+    else delete state.consumerTimeframes[id];
+    if(next.length) state.consumerDepths[id] = depths;
+    else delete state.consumerDepths[id];
+    rebuildRequirements(true);
   }
   function currentStreams(){
     const base = cfg().symbol.toLowerCase();
@@ -3887,6 +3920,41 @@ const marketDataHub = (() => {
       continuous:!gaps.length
     };
   }
+  async function ensureTimeframeBuffer(tf,count){
+    ensureBufferSymbol();
+    const interval = canonicalTfKey(tf);
+    const targetClosed = Math.max(1,Math.round(Number(count) || 0));
+    if(!interval) throw new Error("Invalid timeframe requirement: " + tf);
+    const cachedGaps = validateClosedBuffer(interval,getClosedBuffer(interval),{repair:false,reason:"consumer-health-check"});
+    if(getClosedBuffer(interval).length >= targetClosed && !cachedGaps.length){
+      return {closed:getClosedBuffer(interval),chart:getChartBuffer(interval),continuous:true,cached:true};
+    }
+    const active = state.timeframeEnsureInFlight[interval];
+    if(active){
+      await active.promise;
+      const remainingGaps = validateClosedBuffer(interval,getClosedBuffer(interval),{repair:false,reason:"consumer-health-check"});
+      if(getClosedBuffer(interval).length >= targetClosed && !remainingGaps.length){
+        return {closed:getClosedBuffer(interval),chart:getChartBuffer(interval),continuous:true,cached:true};
+      }
+    }
+    const symbol = ensureBufferSymbol();
+    const guard = () => String((cfg() && cfg().symbol) || "").toUpperCase() === symbol;
+    const promise = prepareTimeframeBuffer(interval,targetClosed,{guard})
+      .then(result => {
+        const gaps = validateClosedBuffer(interval,getClosedBuffer(interval),{repair:false,reason:"consumer-load-verify"});
+        if(!result || getClosedBuffer(interval).length < targetClosed || gaps.length){
+          throw new Error(`${interval} history load incomplete`);
+        }
+        return result;
+      })
+      .finally(() => {
+        if(state.timeframeEnsureInFlight[interval] && state.timeframeEnsureInFlight[interval].promise === promise){
+          delete state.timeframeEnsureInFlight[interval];
+        }
+      });
+    state.timeframeEnsureInFlight[interval] = {target:targetClosed,promise};
+    return promise;
+  }
   async function seedSsscBuffers(force=false){
     ensureBufferSymbol();
     for(const tf of SHARED_SSSC_TFS){
@@ -4220,8 +4288,10 @@ const marketDataHub = (() => {
     rebuildRequirements,
     setSsscVisible,
     setMaStackVisible,
+    setTimeframeRequirements,
     seedBuffer,
     prepareTimeframeBuffer,
+    ensureTimeframeBuffer,
     ensureOlderClosedCandles,
     seedSsscBuffers,
     ensureSsscBuffers,
@@ -4250,6 +4320,46 @@ const marketDataHub = (() => {
     {id:"2_3h",label:"2–3H"},
     {id:"6_8h",label:"6–8H"}
   ];
+  const HORIZON_ENGINE = {
+    quick:{
+      pressure:[
+        {tf:"1m",lookback:20,maSlot:1,weight:0.40,role:"micro-trigger"},
+        {tf:"3m",lookback:20,maSlot:1,weight:1.05,role:"active trigger"},
+        {tf:"5m",lookback:20,maSlot:1,weight:1.30,role:"primary direction"},
+        {tf:"15m",lookback:5,maSlot:1,weight:0.75,role:"permission filter"}
+      ],
+      eventTfs:["1m","3m","5m"],
+      structureTfs:["15m","1h"],
+      boundaryTfs:["4h","1d"],
+      structureRoles:{internal:["1m","3m"],swing:["5m","15m","1h"],major:["4h","1d"]},
+      formingWeight:0.55,
+      participationWeight:0.16
+    },
+    "2_3h":{
+      pressure:[
+        {tf:"5m",lookback:20,maSlot:1,weight:1.00,role:"active trigger"},
+        {tf:"15m",lookback:10,maSlot:2,weight:1.10,role:"primary direction"}
+      ],
+      eventTfs:["5m","15m"],
+      structureTfs:["1h"],
+      boundaryTfs:["4h","1d"],
+      structureRoles:{internal:["5m"],swing:["15m","1h"],major:["4h"],regime:["1d"]},
+      formingWeight:0.38,
+      participationWeight:0.18
+    },
+    "6_8h":{
+      pressure:[
+        {tf:"15m",lookback:20,maSlot:2,weight:1.00,role:"active development"},
+        {tf:"1h",lookback:12,maSlot:2,weight:0.85,role:"structural pressure"}
+      ],
+      eventTfs:["15m","1h"],
+      structureTfs:["4h"],
+      boundaryTfs:["1d"],
+      structureRoles:{internal:["15m"],swing:["1h","4h"],regime:["1d"]},
+      formingWeight:0.25,
+      participationWeight:0.20
+    }
+  };
   const state = {
     horizon:readStoredHorizon(),
     direction:readStoredDirection(),
@@ -4257,12 +4367,21 @@ const marketDataHub = (() => {
     directionChip:null,
     entry:null,
     exit:null,
+    managementTip:null,
+    managementTipPinned:false,
     details:null,
     detailsBody:null,
     detailsTitle:null,
     detailsPositioned:false,
     lastRenderAt:0,
     refreshTimer:null,
+    dataKey:"",
+    dataLoadPromise:null,
+    dataLoadGeneration:0,
+    dataStatus:null,
+    activeSnapshot:null,
+    marketSnapshot:null,
+    snapshotVersion:0,
     chips:new Map()
   };
 
@@ -4280,6 +4399,9 @@ const marketDataHub = (() => {
   }
   function setStoredHorizon(next){
     state.horizon = HORIZONS.some(item => item.id === next) ? next : "quick";
+    state.dataKey = "";
+    state.dataStatus = null;
+    state.marketSnapshot = null;
     try{ localStorage.setItem(STORAGE_KEY,state.horizon); }catch(_e){}
     scheduleToolbarSignalRefresh37(true);
   }
@@ -4457,14 +4579,243 @@ const marketDataHub = (() => {
         observer.observe(topbar);
       }
     }
+    let managementTip = document.getElementById("pressureSignalManagementTip");
+    if(!managementTip){
+      managementTip = document.createElement("div");
+      managementTip.id = "pressureSignalManagementTip";
+      managementTip.className = "pressure-signal-management-tip";
+      managementTip.setAttribute("role","tooltip");
+      managementTip.setAttribute("aria-hidden","true");
+      document.body.appendChild(managementTip);
+    }
+    state.managementTip = managementTip;
+    if(state.exit){
+      state.exit.setAttribute("role","button");
+      state.exit.setAttribute("tabindex","0");
+      state.exit.setAttribute("aria-describedby",managementTip.id);
+      state.exit.setAttribute("aria-expanded",managementTip.classList.contains("is-open") ? "true" : "false");
+    }
+    if(state.exit && state.exit.dataset.managementTipBound !== "true"){
+      state.exit.dataset.managementTipBound = "true";
+      state.exit.addEventListener("pointerenter",() => showManagementTooltip37(false),false);
+      state.exit.addEventListener("pointerleave",() => {
+        if(!state.managementTipPinned) hideManagementTooltip37();
+      },false);
+      state.exit.addEventListener("focus",() => showManagementTooltip37(false),false);
+      state.exit.addEventListener("blur",() => {
+        if(!state.managementTipPinned) hideManagementTooltip37();
+      },false);
+      state.exit.addEventListener("click",event => {
+        event.preventDefault();
+        event.stopPropagation();
+        state.managementTipPinned = !state.managementTipPinned;
+        if(state.managementTipPinned) showManagementTooltip37(true);
+        else hideManagementTooltip37();
+      },false);
+      state.exit.addEventListener("keydown",event => {
+        if(event.key === "Enter" || event.key === " "){
+          event.preventDefault();
+          state.managementTipPinned = !state.managementTipPinned;
+          if(state.managementTipPinned) showManagementTooltip37(true);
+          else hideManagementTooltip37();
+        }else if(event.key === "Escape"){
+          state.managementTipPinned = false;
+          hideManagementTooltip37();
+        }
+      },false);
+      document.addEventListener("pointerdown",event => {
+        if(!state.managementTipPinned || event.target === state.exit || managementTip.contains(event.target)) return;
+        state.managementTipPinned = false;
+        hideManagementTooltip37();
+      },false);
+      window.addEventListener("resize",positionManagementTooltip37,false);
+      window.addEventListener("scroll",positionManagementTooltip37,{passive:true});
+    }
     return root;
+  }
+  function horizonEngine37(horizonId=state.horizon){
+    return HORIZON_ENGINE[horizonId] || HORIZON_ENGINE.quick;
+  }
+  function signalCanonicalSlots37(){
+    try{
+      const provider = window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function"
+        ? window.MA_FEATURE.getCanonicalMASlots
+        : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+      const slots = provider ? provider() : null;
+      if(Array.isArray(slots) && slots.length === 5){
+        return slots.map((slot,index) => ({slotId:`MA${index + 1}`,period:Math.max(1,Math.round(Number(slot && slot.period) || [9,21,55,100,200][index]))}));
+      }
+    }catch(_e){}
+    return [9,21,55,100,200].map((period,index) => ({slotId:`MA${index + 1}`,period}));
+  }
+  function signalDataPlan37(horizonId=state.horizon){
+    const engine = horizonEngine37(horizonId);
+    const slots = signalCanonicalSlots37();
+    const maxPeriod = Math.max(...slots.map(slot => Number(slot.period) || 0),200);
+    const pressureByTf = new Map(engine.pressure.map(item => [item.tf,item]));
+    const roles = new Map();
+    engine.pressure.forEach(item => roles.set(item.tf,[`${item.tf} pressure history`]));
+    engine.eventTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} MA-event history`]));
+    engine.structureTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} canonical SMC structure`]));
+    engine.boundaryTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} canonical MA boundaries`]));
+    const timeframes = [...new Set([...engine.pressure.map(item => item.tf),...engine.eventTfs,...engine.structureTfs,...engine.boundaryTfs])];
+    const items = timeframes.map(tf => {
+      const pressure = pressureByTf.get(tf);
+      const lookbackDepth = pressure ? pressure.lookback * 3 : 0;
+      const fullSessionDepth = typeof ivSec === "function" ? Math.ceil(172800 / Math.max(1,ivSec(tf))) + 20 : 0;
+      const historyTarget = Math.max(320,maxPeriod + 80,lookbackDepth,fullSessionDepth,120);
+      return {tf,historyTarget,roles:roles.get(tf) || [`${tf} market history`]};
+    });
+    return {horizonId,engine,slots,items,timeframes};
+  }
+  function signalDataAge37(tf,rows){
+    const list = Array.isArray(rows) ? rows : [];
+    const latest = list.length ? list[list.length - 1] : null;
+    if(!latest) return Infinity;
+    const activityMs = latest.final === false
+      ? Number(latest.openTime || Number(latest.time) * 1000)
+      : Number(latest.closeTime || (Number(latest.time) + (typeof ivSec === "function" ? ivSec(tf) : 0)) * 1000);
+    return Number.isFinite(activityMs) ? Math.max(0,(typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now()) - activityMs) : Infinity;
+  }
+  function inspectSignalData37(plan,hub){
+    if(!hub) return {status:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"shared market-data hub unavailable"}))};
+    const items = plan.items.map(item => {
+      const closed = typeof hub.getClosedBuffer === "function" ? hub.getClosedBuffer(item.tf) || [] : [];
+      const chart = typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : closed;
+      const count = Array.isArray(closed) ? closed.length : 0;
+      const ageMs = signalDataAge37(item.tf,chart);
+      const staleAfterMs = Math.max(90000,(typeof ivSec === "function" ? ivSec(item.tf) : 60) * 3000);
+      const tail = (Array.isArray(closed) ? closed : []).slice(-Math.min(count,item.historyTarget));
+      const step = typeof ivSec === "function" ? ivSec(item.tf) : 0;
+      const continuous = tail.length > 1 && tail.every((row,index) => index === 0 || Number(row.time)-Number(tail[index-1].time) === step);
+      const status = count < item.historyTarget || !continuous
+        ? (state.dataLoadPromise ? "loading" : "insufficient")
+        : (ageMs > staleAfterMs ? "stale" : "sufficient");
+      const reason = count < item.historyTarget ? `needs ${item.historyTarget} closed candles` : (!continuous ? "candle history is not continuous" : "");
+      return {...item,status,count,ageMs,continuous,reason};
+    });
+    const failed = state.dataStatus && Array.isArray(state.dataStatus.failures) ? state.dataStatus.failures : [];
+    failed.forEach(failure => {
+      const item = items.find(entry => entry.tf === failure.tf);
+      if(item && item.status !== "sufficient") Object.assign(item,{status:"failed",reason:failure.reason});
+    });
+    const statuses = new Set(items.map(item => item.status));
+    const status = statuses.has("failed") ? "failed"
+      : statuses.has("loading") ? "loading"
+        : statuses.has("insufficient") ? "insufficient"
+          : statuses.has("stale") ? "stale"
+            : "sufficient";
+    return {status,items,checkedAt:Date.now()};
+  }
+  function ensureSignalData37(horizonId=state.horizon){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const plan = signalDataPlan37(horizonId);
+    const symbol = String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase();
+    const key = `${symbol}|${horizonId}|${plan.slots.map(slot => slot.period).join("-")}`;
+    if(hub && typeof hub.setTimeframeRequirements === "function") hub.setTimeframeRequirements(MODULE,plan.items.map(item => ({tf:item.tf,count:item.historyTarget})));
+    if(state.dataKey !== key){
+      state.dataKey = key;
+      state.dataStatus = null;
+      state.dataLoadGeneration += 1;
+      state.marketSnapshot = null;
+    }
+    let health = inspectSignalData37(plan,hub);
+    const retryFailed = state.dataStatus && state.dataStatus.failedAt && Date.now()-state.dataStatus.failedAt >= 30000;
+    const needsLoad = health.items.filter(item => item.status === "insufficient" || item.status === "unavailable" || (item.status === "failed" && retryFailed));
+    if(hub && needsLoad.length && !state.dataLoadPromise && typeof hub.ensureTimeframeBuffer === "function"){
+      const generation = state.dataLoadGeneration;
+      state.dataLoadPromise = Promise.all(needsLoad.map(item =>
+        hub.ensureTimeframeBuffer(item.tf,item.historyTarget)
+          .then(() => ({tf:item.tf,ok:true}))
+          .catch(error => ({tf:item.tf,ok:false,reason:error && error.message ? error.message : String(error)}))
+      )).then(results => {
+        if(generation !== state.dataLoadGeneration) return;
+        state.dataStatus = {failures:results.filter(result => !result.ok),failedAt:Date.now()};
+      }).finally(() => {
+        state.dataLoadPromise = null;
+        scheduleToolbarSignalRefresh37(true);
+      });
+      health = inspectSignalData37(plan,hub);
+    }
+    return {plan,health};
+  }
+  function buildSignalSnapshot37(plan,health,frozen={}){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const rowsByTf = {};
+    const closedByTf = {};
+    const maByTf = {};
+    const structureByTf = {};
+    if(!hub) return {symbol:"",horizonId:plan.horizonId,createdAt:Date.now(),rowsByTf,closedByTf,maByTf,structureByTf,health};
+    plan.items.forEach(item => {
+      rowsByTf[item.tf] = (hub.getChartBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      closedByTf[item.tf] = (hub.getClosedBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      maByTf[item.tf] = {
+        live:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots}),
+        closed:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots})
+      };
+      try{
+        structureByTf[item.tf] = window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot === "function"
+          ? window.SMC_FEATURE.getStructureSnapshot(closedByTf[item.tf])
+          : null;
+      }catch(_e){
+        structureByTf[item.tf] = null;
+      }
+    });
+    return {
+      symbol:String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),
+      horizonId:plan.horizonId,
+      createdAt:Date.now(),
+      version:++state.snapshotVersion,
+      currentPrice:Object.prototype.hasOwnProperty.call(frozen,"currentPrice") ? frozen.currentPrice : (typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null),
+      position:Object.prototype.hasOwnProperty.call(frozen,"position") ? frozen.position : openPositionSignal37(),
+      rowsByTf,
+      closedByTf,
+      maByTf,
+      structureByTf,
+      health
+    };
+  }
+  function signalSnapshotSignature37(plan){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const currentPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null;
+    const position = openPositionSignal37();
+    let smcIdentity = "smc:waiting";
+    try{
+      if(window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot === "function"){
+        const settings = typeof window.SMC_FEATURE.getSettings === "function" ? window.SMC_FEATURE.getSettings() : null;
+        smcIdentity = `smc:ready:${settings && settings.swingLength || "default"}`;
+      }
+    }catch(_e){}
+    const parts = [
+      String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),
+      plan.horizonId,
+      smcIdentity,
+      currentPrice
+    ];
+    plan.items.forEach(item => {
+      const rows = hub && typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : [];
+      const last = rows.length ? rows[rows.length - 1] : null;
+      parts.push(item.tf,rows.length,last && last.openTime,last && last.close,last && last.volume,last && last.takerBuyBase,last && last.final);
+    });
+    parts.push(position && position.side,position && position.qty,position && position.price);
+    return {signature:parts.join("|"),currentPrice,position};
+  }
+  function coherentSignalSnapshot37(plan,health){
+    const frozen = signalSnapshotSignature37(plan);
+    if(state.marketSnapshot && state.marketSnapshot.signature === frozen.signature) return state.marketSnapshot;
+    const snapshot = buildSignalSnapshot37(plan,health,frozen);
+    snapshot.signature = frozen.signature;
+    state.marketSnapshot = snapshot;
+    return snapshot;
   }
   function signalRows37(tf){
     try{
+      if(state.activeSnapshot && Array.isArray(state.activeSnapshot.rowsByTf && state.activeSnapshot.rowsByTf[tf])){
+        return state.activeSnapshot.rowsByTf[tf].map(row => ({...row}));
+      }
       const hub = window.PUBLIC_MARKET_DATA_HUB || null;
       let rows = [];
       if(hub && typeof hub.getChartBuffer === "function") rows = hub.getChartBuffer(tf) || [];
-      if((!Array.isArray(rows) || !rows.length) && typeof iv === "function" && String(iv() || "").toLowerCase() === String(tf).toLowerCase() && Array.isArray(candles)) rows = candles;
       if((!Array.isArray(rows) || !rows.length) && hub && typeof hub.getClosedBuffer === "function") rows = hub.getClosedBuffer(tf) || [];
       const deduped = new Map();
       (Array.isArray(rows) ? rows : []).forEach(row => {
@@ -4527,6 +4878,9 @@ const marketDataHub = (() => {
     return num37(last && last.value);
   }
   function openPositionSignal37(){
+    if(state.activeSnapshot && Object.prototype.hasOwnProperty.call(state.activeSnapshot,"position")){
+      return state.activeSnapshot.position ? {...state.activeSnapshot.position} : null;
+    }
     try{
       const box = Array.isArray(openPositionBoxes)
         ? openPositionBoxes.find(item => item && Math.abs(Number(item.qty) || 0) > 1e-12)
@@ -4541,11 +4895,115 @@ const marketDataHub = (() => {
       return null;
     }
   }
-  function samplePressureSignal37(tf,lookback,emaPeriod){
+  function signalCurrentPrice37(fallback=null){
+    const frozen = state.activeSnapshot ? num37(state.activeSnapshot.currentPrice) : null;
+    if(frozen != null) return frozen;
+    return typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : num37(fallback);
+  }
+  function signalStructure37(tf,scope="swing"){
+    const snapshot = state.activeSnapshot && state.activeSnapshot.structureByTf && state.activeSnapshot.structureByTf[tf];
+    return snapshot && snapshot[scope] ? snapshot[scope] : null;
+  }
+  function signalMaSnapshot37(tf,closed=false){
+    const pair = state.activeSnapshot && state.activeSnapshot.maByTf && state.activeSnapshot.maByTf[tf];
+    return pair ? (closed ? pair.closed : pair.live) : null;
+  }
+  function signalMaSlot37(tf,slotId,closed=false){
+    const snapshot = signalMaSnapshot37(tf,closed);
+    const slot = snapshot && Array.isArray(snapshot.slots) ? snapshot.slots.find(item => item.slotId === slotId) : null;
+    const value = snapshot && snapshot.valuesBySlot ? num37(snapshot.valuesBySlot[slotId]) : null;
+    const series = snapshot && snapshot.seriesBySlot && Array.isArray(snapshot.seriesBySlot[slotId]) ? snapshot.seriesBySlot[slotId] : [];
+    const latestRow = snapshot && Array.isArray(snapshot.rows) && snapshot.rows.length ? snapshot.rows[snapshot.rows.length-1] : null;
+    return {slotId,period:slot ? Number(slot.period) : null,label:slot ? `EMA${slot.period}` : slotId,value,series,reliable:!!(snapshot && snapshot.reliable),evidenceState:latestRow && latestRow.final === false ? "forming/live" : "closed-confirmed"};
+  }
+  function weightedPressureAggregate37(rows,tf,formingWeight){
+    const source = Array.isArray(rows) ? rows : [];
+    if(!source.length || source.some(row => !validSignalRow37(row))) return null;
+    const first = source[0];
+    const last = source[source.length - 1];
+    let volume = 0;
+    let takerBuyBase = 0;
+    source.forEach(row => {
+      const weight = row.final === false ? formingWeight : 1;
+      volume += Number(row.volume) * weight;
+      takerBuyBase += Number(row.takerBuyBase) * weight;
+    });
+    return {
+      tf,
+      open:first.open,
+      high:Math.max(...source.map(row => Number(row.high))),
+      low:Math.min(...source.map(row => Number(row.low))),
+      close:last.close,
+      volume,
+      takerBuyBase,
+      final:source.every(row => row.final === true),
+      formingCount:source.filter(row => row.final === false).length
+    };
+  }
+  function sessionVwapContext37(rows,tf){
+    const source = Array.isArray(rows) ? rows : [];
+    const series = typeof VWAP === "function" ? VWAP(source) : [];
+    const value = latestSeriesValue37(series);
+    if(value == null || !source.length) return {value:null,maturity:"unavailable",eligible:false,contextOnly:false,completedCandles:0};
+    const latest = source[source.length - 1];
+    const latestDate = new Date(Number(latest.time) * 1000);
+    const sessionStart = Date.UTC(latestDate.getUTCFullYear(),latestDate.getUTCMonth(),latestDate.getUTCDate()) / 1000;
+    const sessionRows = source.filter(row => Number(row.time) >= sessionStart);
+    const closedRows = sessionRows.filter(row => row.final !== false);
+    const cumulativeVolume = sessionRows.reduce((sum,row) => sum + Math.max(0,Number(row.volume) || 0),0);
+    const priorRows = source.filter(row => Number(row.time) < sessionStart).slice(-Math.max(24,closedRows.length * 3));
+    const baselinePerCandle = priorRows.length ? priorRows.reduce((sum,row) => sum + Math.max(0,Number(row.volume) || 0),0) / priorRows.length : null;
+    const expectedVolume = baselinePerCandle == null ? null : baselinePerCandle * Math.max(1,sessionRows.length);
+    const participationRatio = expectedVolume > 0 ? cumulativeVolume / expectedVolume : null;
+    const recentVwap = series.slice(-Math.min(6,series.length)).map(point => num37(point.value)).filter(valueNow => valueNow != null);
+    const stable = recentVwap.length >= 3 && (Math.max(...recentVwap) - Math.min(...recentVwap)) / Math.max(Math.abs(value),1) <= 0.0025;
+    const elapsedMs = Math.max(0,(typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now()) - sessionStart * 1000);
+    const stepMinutes = Math.max(1,(typeof ivSec === "function" ? ivSec(tf) : 60) / 60);
+    const minimumClosed = Math.max(3,Math.ceil(90 / stepMinutes));
+    const matureClosed = Math.max(6,Math.ceil(180 / stepMinutes));
+    const immature = closedRows.length < minimumClosed || elapsedMs < 60 * 60 * 1000 || cumulativeVolume <= 0;
+    const mature = !immature && closedRows.length >= matureClosed && stable && (participationRatio == null || participationRatio >= 0.55);
+    return {
+      value,
+      maturity:immature ? "immature" : (mature ? "mature" : "developing"),
+      eligible:mature,
+      contextOnly:!immature && !mature,
+      completedCandles:closedRows.length,
+      cumulativeVolume,
+      participationRatio,
+      stable,
+      elapsedMs
+    };
+  }
+  function canonicalPivots37(tf,scope="swing"){
+    const structure = signalStructure37(tf,scope);
+    const pivots = structure && Array.isArray(structure.pivots) ? structure.pivots.filter(pivot => pivot.confirmed) : [];
+    const highs = pivots.filter(pivot => pivot.side === "high");
+    const lows = pivots.filter(pivot => pivot.side === "low");
+    return {
+      high:structure && structure.latestHigh || null,
+      low:structure && structure.latestLow || null,
+      previousHigh:highs.length > 1 ? highs[highs.length - 2] : null,
+      previousLow:lows.length > 1 ? lows[lows.length - 2] : null,
+      confirmedHighs:highs,
+      confirmedLows:lows,
+      events:structure && structure.events || [],
+      latestEvent:structure && structure.latestEvent || null,
+      trend:structure && structure.trend || 0,
+      sufficient:highs.length >= 2 && lows.length >= 2,
+      available:!!structure
+    };
+  }
+  function samplePressureSignal37(tf,lookback,maSlot=1){
     const rows = signalRows37(tf);
     const validRows = rows.filter(validSignalRow37);
-    if(validRows.length < Math.max(lookback,emaPeriod,2)) return {available:false,tf,lookback};
-    const current = aggregateSignalRows37(validRows.slice(-lookback),tf);
+    const engine = horizonEngine37();
+    const slot = signalMaSlot37(tf,`MA${maSlot}`);
+    const requiredRows = Math.max(lookback * 2,Number(slot.period) || 0,2);
+    if(validRows.length < requiredRows || !slot.reliable) return {available:false,tf,lookback,reason:!slot.reliable ? "canonical MA warmup insufficient" : "pressure history insufficient"};
+    const formingWeight = engine.formingWeight;
+    const currentRows = validRows.slice(-lookback);
+    const current = weightedPressureAggregate37(currentRows,tf,formingWeight);
     if(!current) return {available:false,tf,lookback};
     const totalVolume = num37(current.volume);
     const takerBuy = num37(current.takerBuyBase);
@@ -4556,7 +5014,7 @@ const marketDataHub = (() => {
     const dominantPct = Math.max(buyPct,sellPct);
     const sideSign = buyPct >= sellPct ? 1 : -1;
     const previousRows = validRows.slice(-lookback * 2,-lookback);
-    const previous = previousRows.length >= lookback ? aggregateSignalRows37(previousRows.slice(-lookback),tf) : null;
+    const previous = previousRows.length >= lookback ? weightedPressureAggregate37(previousRows.slice(-lookback),tf,1) : null;
     const previousVolume = num37(previous && previous.volume);
     const previousBuy = num37(previous && previous.takerBuyBase);
     const previousSell = previousVolume != null && previousBuy != null ? Math.max(0,previousVolume - previousBuy) : null;
@@ -4574,17 +5032,26 @@ const marketDataHub = (() => {
     const bodyRatio = range > 0 ? Math.abs(body) / range : 0;
     const priceFollows = sideSign > 0 ? body > 0 : body < 0;
     const priceRefuses = sideSign !== 0 && (!priceFollows || bodyRatio <= 0.18);
-    const lastPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : close;
-    const vwapValue = latestSeriesValue37(typeof VWAP === "function" ? VWAP(rows) : []);
-    const ema9Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,9) : []);
-    const ema21Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,21) : []);
-    const ema55Value = latestSeriesValue37(typeof EMA === "function" ? EMA(rows,55) : []);
-    const emaValue = emaPeriod === 9 ? ema9Value : emaPeriod === 21 ? ema21Value : latestSeriesValue37(typeof EMA === "function" ? EMA(rows,emaPeriod) : []);
-    const structureRows = validRows.slice(-Math.max(3,lookback + 1),-1);
-    const recentHigh = structureRows.length ? Math.max(...structureRows.map(row => Number(row.high)).filter(Number.isFinite)) : null;
-    const recentLow = structureRows.length ? Math.min(...structureRows.map(row => Number(row.low)).filter(Number.isFinite)) : null;
+    const lastPrice = signalCurrentPrice37(close);
+    const maSlots = [1,2,3,4,5].map(index => signalMaSlot37(tf,`MA${index}`));
+    const vwap = sessionVwapContext37(rows,tf);
+    const vwapValue = vwap.value;
+    const emaValue = slot.value;
+    const pivots = canonicalPivots37(tf,"swing");
+    const recentHigh = pivots.high && pivots.high.price;
+    const recentLow = pivots.low && pivots.low.price;
+    const completedCurrent = currentRows.filter(row => row.final !== false).length;
+    const currentAverageVolume = current.volume / Math.max(1,currentRows.length - current.formingCount + current.formingCount * formingWeight);
+    const priorParticipationRows = validRows.slice(-lookback * 4,-lookback);
+    const recentAverageVolume = priorParticipationRows.length
+      ? priorParticipationRows.reduce((sum,row) => sum + Number(row.volume),0) / priorParticipationRows.length
+      : null;
+    const participationRatio = recentAverageVolume > 0 ? currentAverageVolume / recentAverageVolume : null;
+    const participationDelta = previousVolume > 0 ? totalVolume / previousVolume - 1 : null;
+    const participationFactor = participationRatio == null ? 0.85 : Math.max(0.65,Math.min(1.15,0.72 + participationRatio * 0.28));
+    const formingShare = currentRows.length ? currentRows.filter(row => row.final === false).length / currentRows.length : 0;
     let contextSide = 0;
-    if(lastPrice != null && vwapValue != null){
+    if(vwap.eligible && lastPrice != null && vwapValue != null){
       if(lastPrice > vwapValue) contextSide += 1;
       else if(lastPrice < vwapValue) contextSide -= 1;
     }
@@ -4597,7 +5064,9 @@ const marketDataHub = (() => {
       available:true,
       tf,
       lookback,
-      emaPeriod,
+      maSlot,
+      emaPeriod:slot.period,
+      emaLabel:slot.label,
       sideSign,
       bullPct:buyPct,
       bearPct:sellPct,
@@ -4605,193 +5074,323 @@ const marketDataHub = (() => {
       bearDelta:previousSellPct == null ? null : sellPct - previousSellPct,
       dominantPct,
       pressureMomentum,
+      participationRatio,
+      participationDelta,
+      participationFactor,
+      currentAverageVolume,
+      recentAverageVolume,
+      evidenceState:formingShare > 0 ? "forming/live" : "closed-confirmed",
+      formingShare,
+      completedCurrent,
       contextSide,
       bodyRatio,
       priceRefuses,
       currentPrice:lastPrice,
       vwapValue,
+      vwap,
       emaValue,
-      ema9Value,
-      ema21Value,
-      ema55Value,
+      maSlots,
+      ema9Value:maSlots[0].value,
+      ema21Value:maSlots[1].value,
+      ema55Value:maSlots[2].value,
+      ema100Value:maSlots[3].value,
+      ema200Value:maSlots[4].value,
+      ema9Label:maSlots[0].label,
+      ema21Label:maSlots[1].label,
+      ema55Label:maSlots[2].label,
+      ema100Label:maSlots[3].label,
+      ema200Label:maSlots[4].label,
+      pivots,
       recentHigh:Number.isFinite(recentHigh) ? recentHigh : null,
       recentLow:Number.isFinite(recentLow) ? recentLow : null,
-      stuckNearVwap:lastPrice != null && vwapValue != null ? Math.abs(lastPrice - vwapValue) / Math.max(Math.abs(lastPrice),1) <= 0.0015 : false
+      stuckNearVwap:vwap.eligible && lastPrice != null && vwapValue != null ? Math.abs(lastPrice - vwapValue) / Math.max(Math.abs(lastPrice),1) <= 0.0015 : false
     };
   }
   function maFreshness37(horizonId){
     if(horizonId === "2_3h") return {primaryTfs:["5m","15m"],freshMax:5,validMax:8};
     if(horizonId === "6_8h") return {primaryTfs:["15m","1h"],freshMax:5,validMax:10};
-    return {primaryTfs:["3m","5m"],freshMax:3,validMax:5};
+    return {primaryTfs:["1m","3m","5m"],freshMax:3,validMax:5};
   }
   function maSeriesMap37(series){
     return new Map((Array.isArray(series) ? series : []).map(point => [Number(point.time),num37(point.value)]));
   }
   function maEventBaseImpact37(type,fresh){
-    if(type === "rejection" || type === "bounce") return fresh ? 8 : 3;
+    if(type === "rejection" || type === "bounce" || type === "failed reclaim / rejection" || type === "failed breakdown / bounce") return fresh ? 8 : 3;
     if(type === "failed reclaim" || type === "failed breakdown") return fresh ? 7 : 2;
     if(type === "loss" || type === "reclaim") return fresh ? 6 : 2;
-    return fresh ? 4 : 1;
+    if(type === "compression release") return fresh ? 5 : 2;
+    if(type === "compression") return fresh ? 3 : 1;
+    if(type.includes("MA1/MA2 crossover")) return fresh ? 4 : 1;
+    return fresh ? 2 : 1;
   }
   function detectMaEvent37(tf,freshness){
-    const rows = signalRows37(tf);
-    if(!Array.isArray(rows) || rows.length < 3){
-      return {tf,state:"unknown",impact:0,reason:`${tf} MA event data unavailable`};
-    }
-    const anchors = [
-      {label:"EMA21",kind:"ma",values:maSeriesMap37(typeof EMA === "function" ? EMA(rows,21) : [])},
-      {label:"EMA55",kind:"ma",values:maSeriesMap37(typeof EMA === "function" ? EMA(rows,55) : [])},
-      {label:"VWAP",kind:"vwap",values:maSeriesMap37(typeof VWAP === "function" ? VWAP(rows) : [])}
-    ];
-    const lastIndex = rows.length - 1;
-    const candidates = [];
-    const add = (row,index,anchor,type,direction,rank) => {
-      const age = lastIndex - index;
-      const fresh = age <= freshness.freshMax;
-      const validAge = age <= freshness.validMax;
-      const potential = validAge ? maEventBaseImpact37(type,fresh) : 0;
-      candidates.push({
-        tf,
-        type,
-        direction,
-        anchor:anchor.label,
-        anchorKind:anchor.kind,
-        age,
-        rank,
-        potential,
-        eventClose:num37(row.close),
-        eventHigh:num37(row.high),
-        eventLow:num37(row.low),
-        eventTime:Number(row.time),
-        anchorNow:anchor.values.get(Number(rows[lastIndex].time)),
-        eventAnchor:anchor.values.get(Number(row.time))
-      });
-    };
-    const start = Math.max(1,lastIndex - Math.max(16,freshness.validMax + 8));
-    anchors.forEach(anchor => {
-      for(let index=start;index<=lastIndex;index++){
-        const row = rows[index];
-        const previous = rows[index - 1];
-        const level = anchor.values.get(Number(row.time));
-        const previousLevel = anchor.values.get(Number(previous.time));
-        if(level == null || previousLevel == null) continue;
-        const tolerance = Math.max(Math.abs(level) * 0.0004,1e-8);
-        const touched = Number(row.low) <= level + tolerance && Number(row.high) >= level - tolerance;
-        const failedReclaim = Number(previous.close) < previousLevel && Number(row.high) >= level - tolerance && Number(row.close) < level;
-        const failedBreakdown = Number(previous.close) > previousLevel && Number(row.low) <= level + tolerance && Number(row.close) > level;
-        if(failedReclaim) add(row,index,anchor,"failed reclaim",-1,5);
-        else if(failedBreakdown) add(row,index,anchor,"failed breakdown",1,5);
-        else if(touched && Number(row.close) < level && Number(row.close) <= Number(row.open)) add(row,index,anchor,"rejection",-1,5);
-        else if(touched && Number(row.close) > level && Number(row.close) >= Number(row.open)) add(row,index,anchor,"bounce",1,5);
-        else if(Number(previous.close) >= previousLevel && Number(row.close) < level) add(row,index,anchor,"loss",-1,4);
-        else if(Number(previous.close) <= previousLevel && Number(row.close) > level) add(row,index,anchor,"reclaim",1,4);
+    try{
+      const rows = signalRows37(tf);
+      if(!Array.isArray(rows) || rows.length < 3){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"data_unavailable",impact:0,reason:`${tf} MA data unavailable`} ]};
       }
-    });
-    const ema21 = anchors[0];
-    const ema55 = anchors[1];
-    for(let index=start;index<=lastIndex;index++){
-      const row = rows[index];
-      const previous = rows[index - 1];
-      const fast = ema21.values.get(Number(row.time));
-      const slow = ema55.values.get(Number(row.time));
-      const previousFast = ema21.values.get(Number(previous.time));
-      const previousSlow = ema55.values.get(Number(previous.time));
-      if(fast == null || slow == null || previousFast == null || previousSlow == null) continue;
-      if(previousFast <= previousSlow && fast > slow) add(row,index,{label:"EMA21/EMA55",kind:"cross",values:ema21.values},"bullish crossover",1,2);
-      else if(previousFast >= previousSlow && fast < slow) add(row,index,{label:"EMA21/EMA55",kind:"cross",values:ema21.values},"bearish crossover",-1,2);
+      const maSnapshot = signalMaSnapshot37(tf,false);
+      if(!maSnapshot || !maSnapshot.reliable){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"data_unavailable",impact:0,reason:`${tf} canonical MA data unavailable`} ]};
+      }
+      const anchors = maSnapshot.slots.map(slot => ({
+        label:`EMA${slot.period}`,
+        slotId:slot.slotId,
+        period:Number(slot.period),
+        kind:"ma",
+        values:maSeriesMap37(maSnapshot.seriesBySlot[slot.slotId] || [])
+      }));
+      const vwap = sessionVwapContext37(rows,tf);
+      if(vwap.eligible){
+        anchors.push({label:"VWAP",kind:"vwap",values:maSeriesMap37(typeof VWAP === "function" ? VWAP(rows) : []),maturity:vwap.maturity});
+      }
+      const hasMaValues = anchors.some(anchor => [...anchor.values.values()].filter(value => value != null).length >= 2);
+      if(!hasMaValues){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"data_unavailable",impact:0,reason:`${tf} MA data unavailable`} ]};
+      }
+      const lastIndex = rows.length - 1;
+      const candidates = [];
+      const add = (row,index,anchor,type,direction,rank) => {
+        const age = lastIndex - index;
+        const fresh = age <= freshness.freshMax;
+        const validAge = age <= freshness.validMax;
+        const potential = validAge ? maEventBaseImpact37(type,fresh) : 0;
+        candidates.push({
+          tf,
+          type,
+          direction,
+          anchor:anchor.label,
+          anchorKind:anchor.kind,
+          slotId:anchor.slotId || null,
+          period:anchor.period || null,
+          age,
+          rank,
+          potential,
+          confirmation:row.final === false ? "forming/tentative" : "closed-confirmed",
+          eventClose:num37(row.close),
+          eventHigh:num37(row.high),
+          eventLow:num37(row.low),
+          eventTime:Number(row.time),
+          anchorNow:anchor.values.get(Number(rows[lastIndex].time)),
+          eventAnchor:anchor.values.get(Number(row.time)),
+          interactionKey:`${state.activeSnapshot && state.activeSnapshot.symbol || ""}|${tf}|${anchor.label}|${Number(row.time)}`
+        });
+      };
+      const start = Math.max(1,lastIndex - Math.max(16,freshness.validMax + 8));
+      anchors.forEach(anchor => {
+        for(let index=start;index<=lastIndex;index++){
+          const row = rows[index];
+          const previous = rows[index - 1];
+          const level = anchor.values.get(Number(row.time));
+          const previousLevel = anchor.values.get(Number(previous.time));
+          if(level == null || previousLevel == null) continue;
+          const tolerance = Math.max(Math.abs(level) * 0.0004,1e-8);
+          const touched = Number(row.low) <= level + tolerance && Number(row.high) >= level - tolerance;
+          const failedReclaim = Number(previous.close) < previousLevel && Number(row.high) >= level - tolerance && Number(row.close) < level;
+          const failedBreakdown = Number(previous.close) > previousLevel && Number(row.low) <= level + tolerance && Number(row.close) > level;
+          if(failedReclaim) add(row,index,anchor,"failed reclaim / rejection",-1,5);
+          else if(failedBreakdown) add(row,index,anchor,"failed breakdown / bounce",1,5);
+          else if(touched && Number(row.close) < level && Number(row.close) <= Number(row.open)) add(row,index,anchor,"rejection",-1,5);
+          else if(touched && Number(row.close) > level && Number(row.close) >= Number(row.open)) add(row,index,anchor,"bounce",1,5);
+          else if(Number(previous.close) >= previousLevel && Number(row.close) < level) add(row,index,anchor,"loss",-1,4);
+          else if(Number(previous.close) <= previousLevel && Number(row.close) > level) add(row,index,anchor,"reclaim",1,4);
+        }
+      });
+      const crossPairs = [[anchors[0],anchors[1],"MA1/MA2 crossover",3],[anchors[1],anchors[2],"MA2/MA3 crossover",2],[anchors[2],anchors[3],"slow-MA stack change",1],[anchors[3],anchors[4],"slow-MA stack change",1]].filter(pair => pair[0] && pair[1]);
+      crossPairs.forEach(([fastAnchor,slowAnchor,type,rank]) => {
+        for(let index=start;index<=lastIndex;index++){
+          const row = rows[index];
+          const previous = rows[index - 1];
+          const fast = fastAnchor.values.get(Number(row.time));
+          const slow = slowAnchor.values.get(Number(row.time));
+          const previousFast = fastAnchor.values.get(Number(previous.time));
+          const previousSlow = slowAnchor.values.get(Number(previous.time));
+          if(fast == null || slow == null || previousFast == null || previousSlow == null) continue;
+          const crossAnchor = {label:`${fastAnchor.label}/${slowAnchor.label}`,kind:"cross",values:fastAnchor.values,fastAnchor,slowAnchor};
+          if(previousFast <= previousSlow && fast > slow) add(row,index,crossAnchor,`${type} bullish`,1,rank);
+          else if(previousFast >= previousSlow && fast < slow) add(row,index,crossAnchor,`${type} bearish`,-1,rank);
+        }
+      });
+      const fastAnchor = anchors[0];
+      const mediumAnchor = anchors[1];
+      if(fastAnchor && mediumAnchor){
+        for(let index=start;index<=lastIndex;index++){
+          const row = rows[index];
+          const previous = rows[index - 1];
+          const fast = fastAnchor.values.get(Number(row.time));
+          const medium = mediumAnchor.values.get(Number(row.time));
+          const previousFast = fastAnchor.values.get(Number(previous.time));
+          const previousMedium = mediumAnchor.values.get(Number(previous.time));
+          if([fast,medium,previousFast,previousMedium].some(value => value == null)) continue;
+          const gap = Math.abs(fast-medium) / Math.max(Math.abs(Number(row.close)),1);
+          const previousGap = Math.abs(previousFast-previousMedium) / Math.max(Math.abs(Number(previous.close)),1);
+          const compressionAnchor = {label:`${fastAnchor.label}/${mediumAnchor.label}`,kind:"compression",values:fastAnchor.values};
+          if(gap <= 0.0008 && previousGap > 0.0008) add(row,index,compressionAnchor,"compression",0,3);
+          else if(gap >= 0.0015 && previousGap <= 0.0008) add(row,index,compressionAnchor,"compression release",fast > medium ? 1 : -1,4);
+        }
+      }
+      if(!candidates.length){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"no_event",impact:0,reason:`No fresh ${tf} MA event detected`} ]};
+      }
+      candidates.sort((a,b) => (b.potential - a.potential) || (b.rank - a.rank) || (a.age - b.age));
+      const latest = rows[lastIndex];
+      const currentPrice = signalCurrentPrice37(latest.close);
+      const selected = [];
+      const seen = new Set();
+      for(const event of candidates){
+        const key = event.interactionKey;
+        if(seen.has(key)) continue;
+        seen.add(key);
+        const anchor = anchors.find(item => item.label === event.anchor) || null;
+        const priceOnValidSide = event.direction === 0 ? true : (currentPrice != null && event.anchorNow != null
+          ? (event.direction > 0 ? currentPrice >= event.anchorNow : currentPrice <= event.anchorNow)
+          : null);
+        const closedRows = rows.filter(row => row.final !== false).slice(-2);
+        const confirmedAgainst = event.direction !== 0 && anchor && closedRows.length >= 2 && closedRows.every(row => {
+          const level = anchor.values.get(Number(row.time));
+          return level != null && (event.direction > 0 ? Number(row.close) < level : Number(row.close) > level);
+        });
+        const afterEvent = rows.slice(Math.max(0,lastIndex - event.age + 1));
+        const structureIntact = event.direction > 0
+          ? (event.eventLow == null || !afterEvent.length || Math.min(...afterEvent.map(row => Number(row.low))) >= event.eventLow * 0.9985)
+          : event.direction < 0
+            ? (event.eventHigh == null || !afterEvent.length || Math.max(...afterEvent.map(row => Number(row.high))) <= event.eventHigh * 1.0015)
+            : true;
+        const priceRefuses = event.direction !== 0 && event.age >= 2 && currentPrice != null && event.eventClose != null
+          ? (event.direction > 0 ? currentPrice <= event.eventClose : currentPrice >= event.eventClose)
+          : false;
+        let crossOrderValid = null;
+        if(event.anchorKind === "cross"){
+          const pair = crossPairs.find(([fast,slow]) => `${fast.label}/${slow.label}` === event.anchor);
+          if(pair){
+            const fastNow = pair[0].values.get(Number(latest.time));
+            const slowNow = pair[1].values.get(Number(latest.time));
+            crossOrderValid = fastNow != null && slowNow != null ? (event.direction > 0 ? fastNow > slowNow : fastNow < slowNow) : null;
+            event.fastNow = fastNow;
+            event.slowNow = slowNow;
+            event.fastLabel = pair[0].label;
+            event.slowLabel = pair[1].label;
+          }
+        }else if(event.anchorKind === "compression" && fastAnchor && mediumAnchor){
+          event.fastNow = fastAnchor.values.get(Number(latest.time));
+          event.slowNow = mediumAnchor.values.get(Number(latest.time));
+          event.fastLabel = fastAnchor.label;
+          event.slowLabel = mediumAnchor.label;
+        }
+        selected.push({...event,currentPrice,priceOnValidSide,confirmedAgainst,heldBeyondAnchor:confirmedAgainst,structureIntact,priceRefuses,crossOrderValid});
+        if(selected.length >= 3) break;
+      }
+      selected.forEach(event => {
+        event.rawCandidateCount = candidates.length;
+        event.deduplicatedCount = Math.max(0,candidates.filter(candidate => candidate.interactionKey === event.interactionKey).length - 1);
+      });
+      return {tf,events:selected,rawCandidateCount:candidates.length,canonicalEventCount:selected.length};
+    }catch(_e){
+      return {tf,events:[{tf,state:"unknown",diagnostic:"scan_failed",impact:0,reason:`${tf} MA event scan failed`} ]};
     }
-    if(!candidates.length){
-      return {tf,state:"unknown",impact:0,reason:`${tf} MA event unavailable in recent data`};
-    }
-    candidates.sort((a,b) => (b.potential - a.potential) || (b.rank - a.rank) || (a.age - b.age));
-    const event = candidates[0];
-    const latest = rows[lastIndex];
-    const previousLatest = rows[Math.max(0,lastIndex - 1)];
-    const currentPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : num37(latest.close);
-    const priceOnValidSide = currentPrice != null && event.anchorNow != null
-      ? (event.direction > 0 ? currentPrice >= event.anchorNow : currentPrice <= event.anchorNow)
-      : null;
-    const previousAnchor = anchors.find(anchor => anchor.label === event.anchor)?.values.get(Number(previousLatest.time));
-    const heldBeyondAnchor = currentPrice != null && event.anchorNow != null && previousAnchor != null
-      ? (event.direction > 0
-        ? currentPrice < event.anchorNow && Number(previousLatest.close) < previousAnchor
-        : currentPrice > event.anchorNow && Number(previousLatest.close) > previousAnchor)
-      : false;
-    const afterEvent = rows.slice(Math.max(0,lastIndex - event.age + 1));
-    const structureIntact = event.direction > 0
-      ? (event.eventLow == null || !afterEvent.length || Math.min(...afterEvent.map(row => Number(row.low))) >= event.eventLow * 0.9985)
-      : (event.eventHigh == null || !afterEvent.length || Math.max(...afterEvent.map(row => Number(row.high))) <= event.eventHigh * 1.0015);
-    const priceRefuses = event.age >= 2 && currentPrice != null && event.eventClose != null
-      ? (event.direction > 0 ? currentPrice <= event.eventClose : currentPrice >= event.eventClose)
-      : false;
-    const latestEma21 = ema21.values.get(Number(latest.time));
-    const latestEma55 = ema55.values.get(Number(latest.time));
-    const crossOrderValid = event.anchorKind === "cross" && latestEma21 != null && latestEma55 != null
-      ? (event.direction > 0 ? latestEma21 > latestEma55 : latestEma21 < latestEma55)
-      : null;
-    return {
-      ...event,
-      currentPrice,
-      priceOnValidSide,
-      heldBeyondAnchor,
-      structureIntact,
-      priceRefuses,
-      crossOrderValid,
-      ema21Now:latestEma21,
-      ema55Now:latestEma55
-    };
   }
   function evaluateMaEvents37(horizonId,pressureSamples,signalDirection){
     const freshness = maFreshness37(horizonId);
     const samples = Array.isArray(pressureSamples) ? pressureSamples : [];
     const availablePressure = samples.filter(sample => sample.available);
-    const pressureDirection = availablePressure.length
-      ? Math.sign(availablePressure.reduce((sum,sample) => sum + sample.sideSign * sample.weight,0))
-      : 0;
-    const events = freshness.primaryTfs.map(tf => {
-      const event = detectMaEvent37(tf,freshness);
+    const scans = freshness.primaryTfs.map(tf => detectMaEvent37(tf,freshness));
+    const rawCandidateCount = scans.reduce((sum,scan) => sum + Number(scan && scan.rawCandidateCount || 0),0);
+    const events = scans.flatMap(scan => Array.isArray(scan && scan.events) ? scan.events : []).map(event => {
+      const tf = event.tf;
       if(event.state === "unknown") return event;
       if(event.priceOnValidSide == null){
-        return {...event,state:"unknown",impact:0,appliedImpact:0,reason:`${tf} ${event.anchor} current behavior unavailable`};
+        return {...event,state:"unknown",diagnostic:"data_unavailable",impact:0,appliedImpact:0,reason:`${tf} ${event.anchor} live value unavailable`};
       }
       const matchingPressure = availablePressure.filter(sample => sample.tf === tf || (tf === "1h" && sample.tf === "15m"));
       const sharplyFading = matchingPressure.some(sample => {
         const delta = event.direction > 0 ? sample.bullDelta : sample.bearDelta;
         return delta != null && delta < -0.03;
       });
-      const pressureOpposes = pressureDirection !== 0 && pressureDirection !== event.direction;
-      const invalidated = event.priceOnValidSide === false || event.heldBeyondAnchor || !event.structureIntact || event.crossOrderValid === false || pressureOpposes || event.priceRefuses;
+      const opposingPressureReversal = event.direction !== 0 && event.priceOnValidSide === false && matchingPressure.some(sample =>
+        sample.sideSign === -event.direction && sample.dominantPct >= 0.62 && sample.pressureMomentum >= 0.03
+      );
+      const oppositeStructure = ["internal","swing"].map(scope => signalStructure37(tf,scope)).filter(Boolean).flatMap(structure => structure.events || []).filter(structureEvent =>
+        (structureEvent.direction === "bullish" ? 1 : -1) === -event.direction && Number(structureEvent.breakTime) >= Number(event.eventTime)
+      ).sort((a,b) => Number(b.breakTime)-Number(a.breakTime))[0] || null;
+      let invalidationReason = "";
+      if(event.confirmedAgainst) invalidationReason = event.direction > 0 ? "Level lost and held below" : "Level reclaimed and held";
+      else if(event.crossOrderValid === false) invalidationReason = "Canonical MA ordering reversed";
+      else if(oppositeStructure) invalidationReason = `Confirmed opposite ${String(oppositeStructure.text || oppositeStructure.structureType).toUpperCase()} on ${tf}`;
+      else if(!event.structureIntact) invalidationReason = "Defined failure to follow through; post-event structure broke";
+      else if(opposingPressureReversal) invalidationReason = "Defined opposing-pressure reversal confirmed beyond the level";
+      const invalidated = !!invalidationReason;
       let stateName = "stale";
-      if(event.age > freshness.validMax) stateName = "stale";
+      let stateReason = "";
+      if(event.age > freshness.validMax){ stateName = "stale"; stateReason = `Freshness window expired after ${freshness.validMax} candles`; }
       else if(invalidated) stateName = "invalidated";
       else if(event.age <= freshness.freshMax && !sharplyFading) stateName = "fresh";
       else if(event.age <= freshness.validMax) stateName = "aging";
-      let rawImpact = 0;
-      if(stateName === "fresh") rawImpact = maEventBaseImpact37(event.type,true);
-      else if(stateName === "aging") rawImpact = maEventBaseImpact37(event.type,false);
-      else if(stateName === "invalidated") rawImpact = event.rank <= 2 ? -5 : -8;
+      if(stateName === "aging") stateReason = sharplyFading ? "Supporting pressure is fading" : "Event is aging within its validity window";
+      if(stateName === "invalidated") stateReason = invalidationReason;
+      let baseImpact = 0;
+      if(stateName === "fresh") baseImpact = maEventBaseImpact37(event.type,true);
+      else if(stateName === "aging") baseImpact = maEventBaseImpact37(event.type,false);
+      else if(stateName === "invalidated") baseImpact = event.rank <= 2 ? -5 : -8;
+      const timeframeFactor = horizonId === "quick" && tf === "1m" ? 0.55 : 1;
+      const confirmationFactor = event.confirmation === "forming/tentative" ? 0.45 : 1;
+      const timeframeAdjustedImpact = Math.round(baseImpact * timeframeFactor);
+      const rawImpact = Math.round(timeframeAdjustedImpact * confirmationFactor);
       let appliedImpact = 0;
-      if(signalDirection){
+      if(signalDirection && event.direction !== 0){
         if(stateName === "invalidated") appliedImpact = event.direction === signalDirection ? rawImpact : 0;
         else if(stateName === "fresh" || stateName === "aging") appliedImpact = event.direction === signalDirection ? rawImpact : -Math.min(rawImpact,6);
       }
-      return {...event,state:stateName,sharplyFading,pressureOpposes,impact:rawImpact,appliedImpact};
+      const rawDirectionalContribution = !signalDirection || event.direction === 0 ? 0
+        : stateName === "invalidated" ? (event.direction === signalDirection ? baseImpact : 0)
+          : event.direction === signalDirection ? baseImpact : -Math.min(baseImpact,6);
+      return {...event,state:stateName,stateReason,invalidationReason,sharplyFading,opposingPressureReversal,oppositeStructure,baseImpact,impact:rawImpact,appliedImpact,rawDirectionalContribution,timeframeAdjustedImpact,timeframeFactor,confirmationFactor};
     });
-    const impact = Math.max(-12,Math.min(10,events.reduce((sum,event) => sum + Number(event.appliedImpact || 0),0)));
+    const confluence = [-1,1].map(direction => {
+      const aligned = events.filter(event => event.direction === direction && event.state === "fresh");
+      const distinctTfs = [...new Set(aligned.map(event => event.tf))];
+      if(distinctTfs.length < 2) return null;
+      const adjustment = signalDirection ? (signalDirection === direction ? 2 : -2) : 0;
+      return {direction,timeframes:distinctTfs,eventKeys:aligned.map(event => event.interactionKey),adjustment};
+    }).filter(Boolean);
+    const rawContribution = events.reduce((sum,event) => sum + Number(event.rawDirectionalContribution || 0),0);
+    const discountedContribution = events.reduce((sum,event) => sum + Number(event.appliedImpact || 0),0);
+    const confluenceAdjustment = confluence.reduce((sum,item) => sum + item.adjustment,0);
+    const preCap = discountedContribution + confluenceAdjustment;
+    const impact = Math.max(-12,Math.min(10,preCap));
+    const canonicalEventCount = events.filter(event => event.state !== "unknown").length;
+    const deduplicatedCount = events.reduce((sum,event) => sum + Number(event.deduplicatedCount || 0),0);
+    const omittedCandidateCount = Math.max(0,rawCandidateCount-canonicalEventCount-deduplicatedCount);
+    const audit = {
+      rawCandidateCount,
+      canonicalEventCount,
+      deduplicatedCount,
+      omittedCandidateCount,
+      deduplicationAdjustment:0,
+      rawContribution,
+      timeframeAndFormingAdjustment:discountedContribution-rawContribution,
+      confluenceAdjustment,
+      preCap,
+      capMinimum:-12,
+      capMaximum:10,
+      capAdjustment:impact-preCap,
+      appliedImpact:impact
+    };
     return {
       events,
       impact,
+      confluence,
+      audit,
       invalidatedSupport:!!signalDirection && events.some(event => event.direction === signalDirection && event.state === "invalidated"),
       priceRefusal:!!signalDirection && events.some(event => event.direction === signalDirection && event.priceRefuses),
       weakening:!!signalDirection && events.some(event => event.direction === signalDirection && (event.sharplyFading || event.state === "aging"))
     };
   }
-  function entryActionText37(entry){
+  function entryActionText37(entry,direction=null){
     switch(entry){
       case "ENTRY LONG": return "Buy pullbacks";
       case "ENTRY SHORT": return "Sell bounces";
       case "ENTRY ABSORPTION": return "Do not chase";
-      case "ENTRY FADE RISK": return "Caution";
+      case "ENTRY FADE RISK": return direction === "SHORT" ? "Bearish edge weakening" : direction === "LONG" ? "Bullish edge weakening" : "No edge";
       default: return "No edge";
     }
   }
@@ -4828,7 +5427,17 @@ const marketDataHub = (() => {
   }
   function tooltipDataHealth37(signal){
     const samples = Array.isArray(signal && signal.samples) ? signal.samples : [];
-    return samples.map(sample => `${sample.tf} LB${sample.lookback} ${sample.available ? "OK" : "missing"}`).join(" / ");
+    return samples.map(sample => `${sample.tf} LB${sample.lookback} ${sample.available ? `sufficient, ${signalRows37(sample.tf).length} candles` : (sample.reason || "unavailable")}`).join(" / ");
+  }
+  function tooltipMaDataHealth37(events){
+    const lines = (Array.isArray(events) ? events : []).map(event => {
+      if(!event) return null;
+      if(event.anchorKind === "confluence") return null;
+      if(event.diagnostic === "data_unavailable") return `${event.tf} MA data unavailable`;
+      if(event.diagnostic === "scan_failed") return null;
+      return `${event.tf} candles OK / ${event.tf} MA values OK`;
+    }).filter(Boolean);
+    return [...new Set(lines)].join(" / ");
   }
   function tooltipBasis37(sample){
     return sample ? `${sample.tf} LB${sample.lookback}` : "Pressure data";
@@ -4837,7 +5446,7 @@ const marketDataHub = (() => {
     const percent = num37(value) == null ? null : Number(value) * 100;
     if(percent == null) return null;
     const rounded = Math.round(percent * 10) / 10;
-    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}%`;
+    return `${rounded.toFixed(1)}%`;
   }
   function tooltipSignedPoints37(value){
     const points = num37(value) == null ? null : Number(value) * 100;
@@ -4860,7 +5469,13 @@ const marketDataHub = (() => {
     const movement = deltaText && Math.abs(Number(delta)) > 0.005
       ? `${bearish ? "Bear" : "Bull"} pressure ${Number(delta) > 0 ? "strengthening" : "weakening"} by ${deltaText}`
       : null;
-    return `${tooltipBasis37(sample)} ${dominantLabel} pressure: ${dominantValue} vs ${otherLabel} ${otherValue}${movement ? `; ${movement}` : ""}${qualifier ? `; ${qualifier}` : ""}`;
+    const participation = num37(sample.participationRatio) == null
+      ? "participation unavailable"
+      : `participation ${Math.abs(sample.participationRatio-1) < 0.005 ? "near" : sample.participationRatio > 1 ? `${Math.round((sample.participationRatio-1)*100)}% above` : `${Math.round((1-sample.participationRatio)*100)}% below`} recent average`;
+    const participationChange = num37(sample.participationDelta) == null
+      ? null
+      : `total participation ${sample.participationDelta >= 0 ? "increased" : "decreased"} ${Math.round(Math.abs(sample.participationDelta)*100)}% versus the prior window`;
+    return `${tooltipBasis37(sample)} ${dominantLabel} pressure: ${dominantValue} vs ${otherLabel} ${otherValue}; ${participation}${participationChange ? `; ${participationChange}` : ""}; ${sample.evidenceState || "unavailable"}${movement ? `; ${movement}` : ""}${qualifier ? `; ${qualifier}` : ""}`;
   }
   function tooltipPrice37(value){
     const price = num37(value);
@@ -4868,12 +5483,22 @@ const marketDataHub = (() => {
     const digits = Math.abs(price) >= 1000 ? 2 : Math.abs(price) >= 100 ? 3 : 5;
     return price.toLocaleString(undefined,{maximumFractionDigits:digits});
   }
+  function tooltipIndicator37(tf,label,value){
+    const name = label === "VWAP" || label === "Session VWAP" ? `${tf} Session VWAP` : `${tf} ${label}`;
+    const level = num37(value);
+    return `${name} ${level == null ? "unavailable" : tooltipPrice37(level)}`;
+  }
+  function tooltipDistance37(value){
+    const distance = Math.abs(Number(value));
+    if(!Number.isFinite(distance)) return null;
+    return distance.toLocaleString(undefined,{minimumFractionDigits:distance < 100 ? 1 : 0,maximumFractionDigits:distance < 100 ? 1 : 0});
+  }
   function tooltipPriceRelation37(label,price,anchor){
     const current = num37(price);
     const level = num37(anchor);
     if(current == null || level == null) return null;
     const relation = current >= level ? "above" : "below";
-    return `Price ${relation} ${label} ${tooltipPrice37(level)} by ${tooltipPrice37(Math.abs(current - level))}`;
+    return `Price ${relation} ${label} by ${tooltipDistance37(current-level)}`;
   }
   function tooltipMainSample37(signal){
     const samples = Array.isArray(signal && signal.samples) ? signal.samples.filter(sample => sample.available) : [];
@@ -4882,14 +5507,15 @@ const marketDataHub = (() => {
   function tooltipAnchor37(sample){
     if(!sample) return null;
     const anchors = [];
-    if(num37(sample.vwapValue) != null) anchors.push({label:"VWAP",value:Number(sample.vwapValue)});
-    if(num37(sample.emaValue) != null) anchors.push({label:`EMA${sample.emaPeriod}`,value:Number(sample.emaValue)});
+    if(num37(sample.vwapValue) != null) anchors.push({label:"Session VWAP",value:Number(sample.vwapValue)});
+    if(num37(sample.emaValue) != null) anchors.push({label:`${sample.tf} EMA${sample.emaPeriod}`,value:Number(sample.emaValue)});
     if(!anchors.length) return null;
     const low = Math.min(...anchors.map(anchor => anchor.value));
     const high = Math.max(...anchors.map(anchor => anchor.value));
-    const label = anchors.map(anchor => anchor.label).join("/");
+    const label = anchors.map(anchor => anchor.label).join(" / ");
     const range = Math.abs(high - low) > 1e-9 ? `${tooltipPrice37(low)}–${tooltipPrice37(high)}` : tooltipPrice37(low);
-    return {label,value:anchors[0].value,text:`${label}${anchors.length > 1 ? " zone" : ""} ${range}`};
+    const values = anchors.map(anchor => `${anchor.label} ${tooltipPrice37(anchor.value)}`).join(" / ");
+    return {label,value:anchors[0].value,text:`${values}${anchors.length > 1 ? ` zone ${range}` : ""}`};
   }
   function tooltipLevels37(signal){
     const bias = entryDisplayText37(signal && signal.entry);
@@ -4915,7 +5541,7 @@ const marketDataHub = (() => {
       else if(recentHigh != null) levels.push(`Sell bounce: recent resistance $${tooltipPrice37(recentHigh)}`);
       if(recentHigh != null) levels.push(`Invalid above: recent high $${tooltipPrice37(recentHigh)}`);
       if(recentLow != null) levels.push(`Trim: recent low $${tooltipPrice37(recentLow)}`);
-      if(anchor) levels.push(`Close if: ${anchor.label} reclaimed and bull pressure overtakes`);
+      if(anchor) levels.push(`Close if: ${anchor.text} reclaimed and bull pressure overtakes`);
       else if(recentHigh != null) levels.push("Close if: price breaks the recent high and bull pressure overtakes");
       return levels.length ? levels : ["No anchored short level is available"];
     }
@@ -4925,7 +5551,7 @@ const marketDataHub = (() => {
       else if(recentLow != null) levels.push(`Buy pullback: recent support $${tooltipPrice37(recentLow)}`);
       if(recentLow != null) levels.push(`Invalid below: recent low $${tooltipPrice37(recentLow)}`);
       if(recentHigh != null) levels.push(`Trim: recent high $${tooltipPrice37(recentHigh)}`);
-      if(anchor) levels.push(`Close if: ${anchor.label} lost and bear pressure overtakes`);
+      if(anchor) levels.push(`Close if: ${anchor.text} lost and bear pressure overtakes`);
       else if(recentLow != null) levels.push("Close if: price breaks the recent low and bear pressure overtakes");
       return levels.length ? levels : ["No anchored long level is available"];
     }
@@ -4949,19 +5575,22 @@ const marketDataHub = (() => {
             ? "stale/context only"
             : "invalidated";
       const anchorLevel = num37(event.anchorNow);
-      lines.push(`${event.tf} ${event.anchor}${anchorLevel != null ? ` ${tooltipPrice37(anchorLevel)}` : " level unavailable"} ${event.type}, ${event.age} candle${event.age === 1 ? "" : "s"} ago, ${stateLabel}`);
+      const eventAnchor = maEventLabel37(event);
+      lines.push(`${eventAnchor} ${event.type}, ${event.age} candle${event.age === 1 ? "" : "s"} ago, ${stateLabel}, ${event.confirmation || "confirmation unavailable"}`);
       const current = num37(event.currentPrice);
       const anchor = num37(event.anchorNow);
       if(current != null && anchor != null){
-        const distance = `$${tooltipPrice37(Math.abs(current - anchor))}`;
+        const distance = `$${tooltipDistance37(current-anchor)}`;
         if(event.direction < 0){
-          lines.push(current <= anchor ? `Price remains ${distance} below ${event.anchor} ${tooltipPrice37(anchor)}` : `Price reclaimed ${event.anchor} ${tooltipPrice37(anchor)} by ${distance}`);
+          lines.push(current <= anchor ? `Price remains ${distance} below ${eventAnchor}` : `Price reclaimed ${eventAnchor} by ${distance}`);
         }else{
-          lines.push(current >= anchor ? `Price remains ${distance} above ${event.anchor} ${tooltipPrice37(anchor)}` : `Price lost ${event.anchor} ${tooltipPrice37(anchor)} by ${distance}`);
+          lines.push(current >= anchor ? `Price remains ${distance} above ${eventAnchor}` : `Price lost ${eventAnchor} by ${distance}`);
         }
       }
-      if(event.structureIntact === true) lines.push(event.direction < 0 ? "Lower-high structure intact" : "Higher-low structure intact");
-      else if(event.structureIntact === false) lines.push(event.direction < 0 ? "Lower-high structure broken" : "Higher-low structure broken");
+      if(event.structureIntact === true) lines.push(event.direction < 0 ? "Post-event bearish structure remains intact" : "Post-event bullish structure remains intact");
+      else if(event.structureIntact === false) lines.push(event.direction < 0 ? "Post-event bearish structure is broken" : "Post-event bullish structure is broken");
+      if(event.state === "invalidated" && event.invalidationReason) lines.push(`Invalidation reason: ${event.invalidationReason}`);
+      else if((event.state === "stale" || event.state === "aging") && event.stateReason) lines.push(event.stateReason);
       if(event.priceRefuses) lines.push(event.direction < 0 ? "Price refuses to fall after the event" : "Price refuses to rise after the event");
       if(event.sharplyFading) lines.push(event.direction < 0 ? "Bear pressure is sharply fading" : "Bull pressure is sharply fading");
       const impact = Number(event.appliedImpact || 0);
@@ -4985,8 +5614,8 @@ const marketDataHub = (() => {
       const reasons = [];
       if(main) reasons.push(tooltipPressureLine37(main));
       reasons.push("Price is not following the dominant pressure");
-      const vwapRelation = main && tooltipPriceRelation37("VWAP",main.currentPrice,main.vwapValue);
-      const emaRelation = main && tooltipPriceRelation37(`EMA${main.emaPeriod}`,main.currentPrice,main.emaValue);
+      const vwapRelation = main && tooltipPriceRelation37(tooltipIndicator37(main.tf,"VWAP",main.vwapValue),main.currentPrice,main.vwapValue);
+      const emaRelation = main && tooltipPriceRelation37(tooltipIndicator37(main.tf,`EMA${main.emaPeriod}`,main.emaValue),main.currentPrice,main.emaValue);
       if(vwapRelation) reasons.push(vwapRelation);
       if(emaRelation) reasons.push(emaRelation);
       reasons.push("Wait for price confirmation; do not chase");
@@ -4994,7 +5623,7 @@ const marketDataHub = (() => {
     }
     if(bias === "FADE RISK"){
       const reasons = available.map(sample => tooltipPressureLine37(sample,sample === main ? "pressure is weakening" : null));
-      const relation = main && tooltipPriceRelation37("VWAP",main.currentPrice,main.vwapValue);
+      const relation = main && tooltipPriceRelation37(tooltipIndicator37(main.tf,"VWAP",main.vwapValue),main.currentPrice,main.vwapValue);
       if(relation) reasons.push(relation);
       reasons.push("Continuation needs renewed pressure");
       return reasons.slice(0,5);
@@ -5005,14 +5634,14 @@ const marketDataHub = (() => {
       if(sides.size > 1) reasons.push("Relevant timeframes show conflicting pressure");
       else reasons.push("Pressure is balanced or lacks a clean directional edge");
       const nearVwap = available.find(sample => sample.stuckNearVwap && num37(sample.vwapValue) != null);
-      if(nearVwap) reasons.push(`Price remains close to VWAP ${tooltipPrice37(nearVwap.vwapValue)}`);
+      if(nearVwap) reasons.push(`Price remains close to ${tooltipIndicator37(nearVwap.tf,"VWAP",nearVwap.vwapValue)}`);
       reasons.push("Waiting for pressure and price context to align");
       return reasons.slice(0,5);
     }
     const sideSign = bias === "LONG" ? 1 : -1;
     const reasons = available.map(sample => tooltipPressureLine37(sample,sample !== main && sample.sideSign === sideSign ? "confirming" : sample.sideSign !== sideSign ? "opposing" : null));
-    const vwapRelation = main && tooltipPriceRelation37("VWAP",main.currentPrice,main.vwapValue);
-    const emaRelation = main && tooltipPriceRelation37(`EMA${main.emaPeriod}`,main.currentPrice,main.emaValue);
+    const vwapRelation = main && tooltipPriceRelation37(tooltipIndicator37(main.tf,"VWAP",main.vwapValue),main.currentPrice,main.vwapValue);
+    const emaRelation = main && tooltipPriceRelation37(tooltipIndicator37(main.tf,`EMA${main.emaPeriod}`,main.emaValue),main.currentPrice,main.emaValue);
     if(vwapRelation) reasons.push(vwapRelation);
     if(emaRelation) reasons.push(emaRelation);
     const filter = available.find(sample => sample.tf === "15m" && sample.sideSign === sideSign);
@@ -5025,7 +5654,9 @@ const marketDataHub = (() => {
     const hasMissing = samples.some(sample => !sample.available);
     const basis = samples.map(tooltipBasis37);
     const main = tooltipMainSample37(signal);
-    const contextLabel = main ? `VWAP / EMA${main.emaPeriod}` : "VWAP / EMA context";
+    const contextLabel = main
+      ? `${tooltipIndicator37(main.tf,"VWAP",main.vwapValue)} / ${tooltipIndicator37(main.tf,`EMA${main.emaPeriod}`,main.emaValue)}`
+      : "price/indicator context unavailable";
     const filter = samples.filter(sample => sample.tf === "15m").slice(-1)[0];
     const filterLabel = filter ? tooltipBasis37(filter) : "15m context";
     if(bias === "LONG") return [
@@ -5045,7 +5676,7 @@ const marketDataHub = (() => {
     if(bias === "ABSORPTION") return [
       "Price begins following the dominant pressure",
       "Opposing pressure overtakes",
-      "VWAP/EMA21 context resolves with price confirmation"
+      `${contextLabel} resolves with price confirmation`
     ];
     if(bias === "FADE RISK") return [
       "Pressure momentum strengthens again",
@@ -5082,108 +5713,292 @@ const marketDataHub = (() => {
     const items = Array.isArray(lines) && lines.length ? lines : ["None identified from available data"];
     return items.map(line => `• ${line}`).join("\n");
   }
+  function maEventLabel37(event){
+    if(!event) return "MA event unavailable";
+    if(event.anchorKind === "confluence") return event.displayLabel || `${event.tf} MA-event confluence`;
+    if(event.anchorKind === "cross" || event.anchorKind === "compression"){
+      return `${tooltipIndicator37(event.tf,event.fastLabel || String(event.anchor || "").split("/")[0],event.fastNow)} / ${tooltipIndicator37(event.tf,event.slowLabel || String(event.anchor || "").split("/")[1],event.slowNow)}`;
+    }
+    return tooltipIndicator37(event.tf,event.anchorKind === "vwap" ? "VWAP" : event.anchor,event.anchorNow);
+  }
   function directionEvidence37(signal,direction){
     const desired = direction === "SHORT" ? -1 : 1;
     const samples = Array.isArray(signal && signal.samples) ? signal.samples : [];
     const supportive = [];
+    const limiting = [];
     const adverse = [];
     const missing = [];
+    const diagnostics = [];
     samples.slice().sort((a,b) => Number(b.weight || 0) - Number(a.weight || 0)).forEach(sample => {
       if(!sample.available){
         missing.push(`${tooltipBasis37(sample)} pressure unavailable`);
         return;
       }
-      (sample.sideSign === desired ? supportive : adverse).push(tooltipPressureLine37(sample));
+      if(sample.sideSign !== desired){
+        adverse.push(`${tooltipPressureLine37(sample)}${sample.tf === "1m" ? "; early opposing pressure" : ""}`);
+        return;
+      }
+      const sideLabel = desired > 0 ? "bull" : "bear";
+      const pressure = desired > 0 ? sample.bullPct : sample.bearPct;
+      const delta = desired > 0 ? sample.bullDelta : sample.bearDelta;
+      if(num37(sample.participationRatio) != null && sample.participationRatio < 0.85){
+        limiting.push(`${tooltipBasis37(sample)} directional share has weak participation at ${Math.round((1-sample.participationRatio)*100)}% below recent average`);
+      }else if(num37(pressure) != null && pressure < 0.55){
+        limiting.push(`${tooltipBasis37(sample)} ${sideLabel} pressure is marginal at ${tooltipPercent37(pressure)}`);
+      }else if(num37(delta) != null && delta < 0){
+        limiting.push(`${tooltipBasis37(sample)} ${sideLabel} pressure is weakening by ${tooltipSignedPoints37(delta)}`);
+      }else{
+        supportive.push(tooltipPressureLine37(sample));
+      }
     });
     const main = tooltipMainSample37(signal);
     if(main){
-      [
-        {label:"EMA9",value:main.ema9Value},
-        {label:"EMA21",value:main.ema21Value},
-        {label:"VWAP",value:main.vwapValue}
-      ].forEach(anchor => {
+      const anchors = (Array.isArray(main.maSlots) ? main.maSlots.slice(0,3).map(slot => ({label:slot.label,value:slot.value})) : []);
+      if(main.vwap && main.vwap.eligible) anchors.push({label:"VWAP",value:main.vwapValue,maturity:"mature"});
+      else if(main.vwap && main.vwap.maturity !== "unavailable") limiting.push(`${tooltipIndicator37(main.tf,"VWAP",main.vwapValue)} — ${main.vwap.maturity}, ${main.vwap.maturity === "immature" ? "excluded" : "context only"}`);
+      anchors.forEach(anchor => {
         const price = num37(main.currentPrice);
         const level = num37(anchor.value);
+        const indicator = tooltipIndicator37(main.tf,anchor.label,anchor.value);
         if(price == null || level == null){
-          missing.push(`${anchor.label} live level unavailable`);
+          missing.push(indicator);
           return;
         }
         const supports = desired > 0 ? price >= level : price <= level;
         const relation = price >= level ? "above" : "below";
-        (supports ? supportive : adverse).push(`Price ${relation} ${anchor.label} ${tooltipPrice37(level)}`);
+        (supports ? supportive : adverse).push(`Price remains ${relation} ${indicator}${anchor.maturity ? `; ${anchor.maturity}` : ""}`);
       });
-      const structureLevel = num37(desired > 0 ? main.recentLow : main.recentHigh);
+      const pivot = main.pivots && (desired > 0 ? main.pivots.low : main.pivots.high);
+      const structureLevel = num37(pivot && pivot.price);
       const price = num37(main.currentPrice);
       if(structureLevel != null && price != null){
         const intact = desired > 0 ? price >= structureLevel : price <= structureLevel;
-        const label = desired > 0 ? "Higher low" : "Lower high";
-        (intact ? supportive : adverse).push(`${label} ${tooltipPrice37(structureLevel)} ${intact ? "remains intact" : "has broken"}`);
+        const label = structureClassName37(pivot.classification,pivot.side);
+        (intact ? supportive : adverse).push(intact
+          ? `Latest confirmed ${main.tf} ${label} ${tooltipPrice37(structureLevel)} remains intact`
+          : `Price broke ${desired > 0 ? "below" : "above"} the latest confirmed ${main.tf} ${label} ${tooltipPrice37(structureLevel)}`);
       }else{
-        missing.push(`${desired > 0 ? "Higher-low" : "Lower-high"} structure level unavailable`);
+        missing.push(`${main.tf} confirmed pivot structure unavailable`);
       }
+    }
+    if(signal.structuralContext && Array.isArray(signal.structuralContext.evidence)){
+      signal.structuralContext.evidence.forEach(line => {
+        const bullish = /Bullish|higher high|higher low/i.test(line);
+        const bearish = /Bearish|lower high|lower low/i.test(line);
+        if(line.includes(`supports ${direction}`) || (desired > 0 && bullish && !bearish) || (desired < 0 && bearish && !bullish)) supportive.push(line);
+        else if(line.includes(`opposes ${direction}`) || (desired > 0 && bearish && !bullish) || (desired < 0 && bullish && !bearish)) adverse.push(line);
+        else limiting.push(line);
+      });
     }
     const events = Array.isArray(signal && signal.maEvents) ? signal.maEvents : [];
     events.forEach(event => {
       if(!event || event.state === "unknown"){
-        missing.push(event && event.reason ? event.reason : "MA event data unavailable");
+        const reason = event && event.reason ? event.reason : "MA event scan failed";
+        if(event && event.diagnostic === "no_event"){
+          limiting.push(reason);
+          limiting.push("No MA-event confidence boost applied");
+        }else if(event && event.diagnostic === "scan_failed"){
+          diagnostics.push(reason);
+        }else{
+          missing.push(reason);
+        }
         return;
       }
-      const level = num37(event.anchorNow);
-      const ema21 = num37(event.ema21Now);
-      const ema55 = num37(event.ema55Now);
-      const anchorText = event.anchorKind === "cross"
-        ? `EMA21${ema21 != null ? ` ${tooltipPrice37(ema21)}` : " live level unavailable"} / EMA55${ema55 != null ? ` ${tooltipPrice37(ema55)}` : " live level unavailable"}`
-        : `${event.anchor}${level != null ? ` ${tooltipPrice37(level)}` : " live level unavailable"}`;
-      const line = `${event.tf} ${anchorText} ${event.type} is ${event.state}`;
-      const eventSupports = event.direction === desired && event.state !== "invalidated";
+      const anchorText = maEventLabel37(event);
+      const line = `${anchorText} ${event.type} is ${event.state}; ${event.confirmation || "confirmation unavailable"}${event.invalidationReason ? `; ${event.invalidationReason}` : ""}`;
+      if(event.state === "stale"){
+        limiting.push(line);
+        limiting.push("Event retained as context only");
+        limiting.push("No confidence boost applied");
+        return;
+      }
+      if(event.state === "aging" && event.direction === desired){
+        supportive.push(line);
+        return;
+      }
+      const eventSupports = event.direction === desired && event.state === "fresh" && Number(event.appliedImpact || 0) !== 0;
       const eventAdverse = event.direction === -desired && event.state !== "invalidated";
       if(eventSupports) supportive.push(line);
       else if(eventAdverse || (event.direction === desired && event.state === "invalidated")) adverse.push(line);
+      else limiting.push(`${line}; no confidence boost applied`);
     });
-    return {supportive,adverse,missing};
+    return {supportive,limiting,adverse,missing,diagnostics};
+  }
+  function neutralEvidence37(signal){
+    const limiting = [];
+    const missing = [];
+    const diagnostics = [];
+    (Array.isArray(signal && signal.samples) ? signal.samples : []).forEach(sample => {
+      if(sample.available) limiting.push(tooltipPressureLine37(sample));
+      else missing.push(`${tooltipBasis37(sample)} pressure unavailable`);
+    });
+    (Array.isArray(signal && signal.maEvents) ? signal.maEvents : []).forEach(event => {
+      if(!event || event.state === "unknown"){
+        const reason = event && event.reason ? event.reason : "MA event scan failed";
+        if(event && event.diagnostic === "no_event") limiting.push(reason);
+        else if(event && event.diagnostic === "scan_failed") diagnostics.push(reason);
+        else missing.push(reason);
+        return;
+      }
+      if(event.state === "stale"){
+        limiting.push(`${maEventLabel37(event)} ${event.type} is stale; context only, no confidence boost applied`);
+      }else{
+        limiting.push(`${maEventLabel37(event)} ${event.type} is ${event.state}; no directional score applied while market bias is WAIT`);
+      }
+    });
+    return {limiting,missing,diagnostics};
+  }
+  function classifiedLevelState37(tf,level,currentPrice,direction){
+    const rows = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[tf];
+    const closed = Array.isArray(rows) ? rows.slice(-3) : [];
+    const above = currentPrice > level;
+    const latest = closed.length ? closed[closed.length-1] : null;
+    const latestAbove = latest ? Number(latest.close) > level : above;
+    const liveCross = !!latest && latestAbove !== above;
+    const held = closed.length >= 2 && closed.slice(-2).every(row => above ? Number(row.close) > level : Number(row.close) < level);
+    const priorOpposite = closed.slice(0,-2).some(row => above ? Number(row.close) < level : Number(row.close) > level);
+    const failedCross = !!latest && (above
+      ? Number(latest.low) <= level && Number(latest.close) > level
+      : Number(latest.high) >= level && Number(latest.close) < level);
+    let stateText;
+    if(liveCross) stateText = above ? "live/tentative reclaim" : "live/tentative breach";
+    else if(failedCross) stateText = above ? "failed breach; support remains" : "failed reclaim; resistance remains";
+    else if(held && priorOpposite) stateText = above ? "confirmed held reclaim; converted support" : "confirmed held breach; converted resistance";
+    else if(held) stateText = above ? "confirmed support" : "confirmed resistance";
+    else stateText = above ? "support" : "resistance";
+    if(direction === "SHORT" && above) return `${stateText}; already reclaimed, adverse for SHORT`;
+    if(direction === "LONG" && !above) return `${stateText}; already breached, adverse for LONG`;
+    return stateText;
+  }
+  function rankedSignalLevels37(signal,direction,horizonId=state.horizon){
+    const currentPrice = signalCurrentPrice37();
+    if(currentPrice == null || (direction !== "LONG" && direction !== "SHORT")) return [];
+    const engine = horizonEngine37(horizonId);
+    const allTfs = [...new Set([...engine.eventTfs,...engine.structureTfs,...engine.boundaryTfs])];
+    const tfImportance = new Map();
+    engine.eventTfs.forEach((tf,index) => tfImportance.set(tf,4-index*0.35));
+    engine.structureTfs.forEach((tf,index) => tfImportance.set(tf,5-index*0.25));
+    engine.boundaryTfs.forEach((tf,index) => tfImportance.set(tf,4.5-index*0.25));
+    const candidates = [];
+    allTfs.forEach(tf => {
+      [1,2,3,4,5].forEach(slotIndex => {
+        const ma = signalMaSlot37(tf,`MA${slotIndex}`);
+        if(!ma.reliable || ma.value == null) return;
+        const distance = Math.abs(ma.value-currentPrice) / Math.max(Math.abs(currentPrice),1);
+        const boundary = engine.boundaryTfs.includes(tf);
+        const maximumDistance = horizonId === "quick" ? (boundary ? 0.012 : 0.008) : horizonId === "2_3h" ? 0.02 : 0.035;
+        if(distance > maximumDistance) return;
+        const periodImportance = slotIndex >= 4 ? 3.2 : slotIndex === 3 ? 2.4 : 1.6;
+        const stateText = classifiedLevelState37(tf,ma.value,currentPrice,direction);
+        candidates.push({
+          kind:"ma",tf,label:ma.label,price:ma.value,state:stateText,distance,boundary,
+          score:(tfImportance.get(tf)||1)+periodImportance+Math.max(0,6-distance*500),
+          text:`${tooltipIndicator37(tf,ma.label,ma.value)} — ${stateText}; ${ma.evidenceState}`
+        });
+      });
+      const structure = signalStructure37(tf,"swing");
+      const pivots = canonicalPivots37(tf,"swing");
+      const canonicalLevels = structure && Array.isArray(structure.levels) && structure.levels.length
+        ? structure.levels
+        : [pivots.high,pivots.low].filter(Boolean);
+      canonicalLevels.forEach(level => {
+        const distance = Math.abs(level.price-currentPrice) / Math.max(Math.abs(currentPrice),1);
+        const maximumDistance = horizonId === "quick" ? 0.012 : horizonId === "2_3h" ? 0.025 : 0.04;
+        if(distance > maximumDistance) return;
+        const stateText = classifiedLevelState37(tf,level.price,currentPrice,direction);
+        const classification = level.classification ? structureClassName37(level.classification,level.side) : null;
+        const strengthLabel = level.text || (level.side === "high" ? "Swing High" : "Swing Low");
+        const label = `${strengthLabel}${classification ? ` / ${classification}` : ""}`;
+        candidates.push({
+          kind:"structure",tf,label,price:level.price,state:stateText,distance,
+          strength:level.strength || null,classification:level.classification || null,
+          confirmed:level.confirmed === true,tentative:level.tentative === true,
+          boundary:engine.boundaryTfs.includes(tf),
+          score:(tfImportance.get(tf)||1)+4+(level.strength === "strong" ? 1 : 0)+Math.max(0,6-distance*500),
+          text:`${tf} ${label} ${tooltipPrice37(level.price)} — ${level.confirmed === true ? "confirmed" : "tentative"}; ${stateText}`
+        });
+      });
+    });
+    const main = tooltipMainSample37(signal);
+    if(main && main.vwap && main.vwap.eligible && main.vwapValue != null){
+      const distance = Math.abs(main.vwapValue-currentPrice) / Math.max(Math.abs(currentPrice),1);
+      if(distance <= (horizonId === "quick" ? 0.008 : 0.018)){
+        const stateText = classifiedLevelState37(main.tf,main.vwapValue,currentPrice,direction);
+        candidates.push({kind:"vwap",tf:main.tf,label:"Session VWAP",price:main.vwapValue,state:stateText,distance,boundary:false,score:8+Math.max(0,5-distance*500),text:`${tooltipIndicator37(main.tf,"VWAP",main.vwapValue)} — mature, ${stateText}`});
+      }
+    }
+    candidates.forEach(candidate => {
+      const confluence = candidates.some(other => other !== candidate && Math.abs(other.price-candidate.price)/Math.max(Math.abs(currentPrice),1) <= (horizonId === "quick" ? 0.0015 : 0.0025));
+      if(confluence) candidate.score += 2;
+      const event = (signal.maEvents || []).find(item => item.tf === candidate.tf && item.anchor === candidate.label && item.state === "fresh");
+      if(event) candidate.score += 2;
+    });
+    return candidates.sort((a,b) => (b.score-a.score) || (a.distance-b.distance));
   }
   function advisoryLevels37(signal,direction){
-    const main = tooltipMainSample37(signal);
-    if(!main || (direction !== "LONG" && direction !== "SHORT")){
-      return {direction:null,lines:["No direction-specific level is available while the market read has no direction"]};
+    if(direction !== "LONG" && direction !== "SHORT"){
+      return {direction:null,lines:["No direction-specific level is available while the market read has no direction"],candidates:[]};
     }
-    const ema9 = num37(main.ema9Value);
-    const ema21 = num37(main.ema21Value);
-    const ema55 = num37(main.ema55Value);
-    const vwap = num37(main.vwapValue);
-    const currentPrice = num37(main.currentPrice);
-    const recentHigh = num37(main.recentHigh);
-    const recentLow = num37(main.recentLow);
-    const confluenceLimit = state.horizon === "6_8h" ? 0.004 : state.horizon === "2_3h" ? 0.0025 : 0.0015;
-    const closeConfluence = ema9 != null && ema21 != null && currentPrice != null
-      && Math.abs(ema9 - ema21) / Math.max(Math.abs(currentPrice),1) <= confluenceLimit;
-    const confluenceText = closeConfluence
-      ? (ema9 <= ema21
-        ? `EMA9 ${tooltipPrice37(ema9)}–EMA21 ${tooltipPrice37(ema21)}`
-        : `EMA21 ${tooltipPrice37(ema21)}–EMA9 ${tooltipPrice37(ema9)}`)
-      : null;
+    const currentPrice = signalCurrentPrice37();
+    const candidates = rankedSignalLevels37(signal,direction,state.horizon);
+    const validEntries = candidates.filter(level => (direction === "SHORT" ? level.price > currentPrice : level.price < currentPrice)
+      && !/already |live\/tentative|adverse for/i.test(level.state));
+    const crossed = candidates.filter(level => direction === "SHORT" ? level.price <= currentPrice : level.price >= currentPrice);
     const lines = [];
-    if(direction === "LONG"){
-      if(closeConfluence) lines.push(`Buy-pullback zone: ${confluenceText}`);
-      else{
-        if(ema9 != null) lines.push(`Tighten below: EMA9 ${tooltipPrice37(ema9)}`);
-        if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} ${currentPrice != null && currentPrice >= ema21 ? "is lost" : "rejects again"}`);
-      }
-      if(recentLow != null) lines.push(`Local structure: latest higher low ${tooltipPrice37(recentLow)}`);
-      if(ema55 != null) lines.push(`Stronger warning: EMA55 ${tooltipPrice37(ema55)} lost`);
-      if(vwap != null) lines.push(`Major invalidation: VWAP ${tooltipPrice37(vwap)} lost and held below`);
+    if(validEntries.length){
+      lines.push(`${direction === "SHORT" ? "Nearest sell-bounce level" : "Nearest buy-pullback level"}: ${validEntries.slice().sort((a,b) => a.distance-b.distance)[0].text}`);
+      validEntries.filter(level => level !== validEntries.slice().sort((a,b) => a.distance-b.distance)[0]).slice(0,2).forEach(level => {
+        lines.push(`${level.boundary ? "Major higher-TF boundary" : "Additional ranked level"}: ${level.text}`);
+      });
     }else{
-      if(closeConfluence) lines.push(`Sell-bounce zone: ${confluenceText}`);
-      else{
-        if(ema9 != null) lines.push(`Tighten above: EMA9 ${tooltipPrice37(ema9)}`);
-        if(ema21 != null) lines.push(`Trim if: EMA21 ${tooltipPrice37(ema21)} reclaimed`);
-      }
-      if(recentHigh != null) lines.push(`Local structure: latest lower high ${tooltipPrice37(recentHigh)}`);
-      if(ema55 != null) lines.push(`Stronger warning: EMA55 ${tooltipPrice37(ema55)} reclaimed`);
-      if(vwap != null) lines.push(`Major invalidation: VWAP ${tooltipPrice37(vwap)} reclaimed and held`);
+      lines.push(direction === "SHORT" ? "No valid sell-bounce zone currently above price" : "No valid buy-pullback zone currently below price");
     }
-    if(!lines.length) lines.push("Direction-specific advisory levels unavailable");
-    return {direction,lines};
+    crossed.slice(0,2).forEach(level => lines.push(`Crossed/current level: ${level.text}`));
+    return {direction,lines,candidates,entryCandidates:validEntries,crossed};
+  }
+  function evaluateEntryQuality37(signal,thesis,direction){
+    if(direction !== "LONG" && direction !== "SHORT"){
+      return {state:"WAIT",text:"WAIT — no directional edge",instruction:"Wait for alignment",levels:advisoryLevels37(signal,null),exclusions:[]};
+    }
+    const levels = advisoryLevels37(signal,direction);
+    const exclusions = entryLevelExclusions37(signal,direction,levels);
+    const eligibleEntries = (levels.entryCandidates || []).filter(level => !(level.kind === "vwap" && exclusions.some(line => /VWAP.*excluded/i.test(line))));
+    const qualityLevels = {...levels,entryCandidates:eligibleEntries};
+    const status = thesis ? thesis.status : (signal.marketDirection === direction && String(signal.entry).includes(direction) ? "SUPPORTIVE" : "MIXED");
+    if(status === "MISSING" || signal.loading || signal.dataIncomplete){
+      return {state:"MISSING",text:"Data incomplete",instruction:"Wait for required data",levels:qualityLevels,exclusions};
+    }
+    if(status === "ADVERSE" || status === "INVALID"){
+      return {state:"NO_ENTRY",text:`No ${direction.toLowerCase()} entry`,instruction:"Stand aside",levels:qualityLevels,exclusions};
+    }
+    const signaled = String(signal.entry || "") === `ENTRY ${direction}`;
+    if(status === "SUPPORTIVE" && signaled && eligibleEntries.length){
+      return {state:"READY",text:`READY — valid ${direction === "SHORT" ? "sell-bounce" : "buy-pullback"} setup`,instruction:"Use the ranked level; do not chase beyond it",levels:qualityLevels,exclusions};
+    }
+    if(status === "SUPPORTIVE" && eligibleEntries.length){
+      return {state:"WAIT",text:`WAIT — wait for ${direction === "SHORT" ? "a sell-bounce" : "a buy-pullback"} at the nearest valid level`,instruction:"Do not chase",levels:qualityLevels,exclusions};
+    }
+    const zone = direction === "SHORT" ? "sell-bounce/add zone currently above price" : "buy-pullback/add zone currently below price";
+    return {
+      state:"WAIT",
+      text:`WAIT — no valid ${zone}`,
+      instruction:"Do not chase",
+      levels:qualityLevels,
+      exclusions
+    };
+  }
+  function entryLevelExclusions37(signal,direction,levels){
+    const exclusions = [];
+    const main = tooltipMainSample37(signal);
+    const desired = direction === "SHORT" ? -1 : 1;
+    const strengtheningOpposition = (signal.samples || []).filter(sample => sample.available && sample.sideSign === -desired && sample.pressureMomentum > 0.01);
+    if(main && main.vwap && main.vwap.eligible && strengtheningOpposition.length){
+      exclusions.push(`${tooltipIndicator37(main.tf,"Session VWAP",main.vwapValue)} excluded as a ${direction.toLowerCase()}-entry level because ${strengtheningOpposition.slice(0,2).map(sample => sample.tf).join(" and ")} opposing pressure is strengthening`);
+    }
+    if(!exclusions.length && levels.crossed && levels.crossed.length){
+      exclusions.push(`${levels.crossed[0].text} is already crossed and is not a future entry zone`);
+    }
+    return exclusions;
   }
   function positionDetails37(signal){
     const position = signal && signal.position;
@@ -5201,20 +6016,149 @@ const marketDataHub = (() => {
     if(normalized === "long" || normalized === "short") return `${normalized}-bias conditions`;
     return `${normalized} conditions`;
   }
+  function scoredStateText37(label,confidence){
+    const stateLabel = String(label || "WAIT");
+    if(stateLabel === "WAIT" || stateLabel === "MIXED") return stateLabel;
+    const score = num37(confidence);
+    return score == null ? stateLabel : `${stateLabel} ${Math.round(score)}%`;
+  }
+  function compactStateText37(label,confidence,action){
+    return `${scoredStateText37(label,confidence)} · ${action}`;
+  }
+  function autoAlignmentBreakdown37(signal){
+    const bias = entryDisplayText37(signal && signal.entry);
+    if(bias !== "LONG" && bias !== "SHORT") return [];
+    const breakdown = signal.breakdown || {};
+    const total = Math.round(Number(signal.confidence));
+    const components = {
+      base:Number(breakdown.base || 0),
+      pressure:Number(breakdown.pressure || 0),
+      context:Number(breakdown.context || 0),
+      participation:Number(breakdown.participation || 0),
+      forming:Number(breakdown.forming || 0),
+      micro:Number(breakdown.micro || 0),
+      structure:Number(breakdown.structure || 0),
+      ma:Number(breakdown.ma || 0)
+    };
+    const subtotal = Object.values(components).reduce((sum,value) => sum + value,0);
+    const adjustment = total - subtotal;
+    const weights = horizonEngine37(state.horizon).pressure.map(item => `${item.tf} ${item.weight.toFixed(2)}`).join(" / ");
+    const lines = [
+      `Pressure weights: ${weights}`,
+      `Base directional score: ${components.base}/100`,
+      `Pressure strength: ${components.pressure >= 0 ? "+" : ""}${components.pressure}`,
+      `Price/MA context: ${components.context >= 0 ? "+" : ""}${components.context}`,
+      `Participation adjustment: ${components.participation >= 0 ? "+" : ""}${components.participation}`,
+      `Forming-candle adjustment: ${components.forming >= 0 ? "+" : ""}${components.forming}`,
+      `Micro-trigger adjustment: ${components.micro >= 0 ? "+" : ""}${components.micro}`,
+      `Higher-TF structure: ${components.structure >= 0 ? "+" : ""}${components.structure}`,
+      `MA-event impact: ${components.ma >= 0 ? "+" : ""}${components.ma}`
+    ];
+    if(signal.staleConfidenceCap) lines.push(`Stale-data confidence cap: ${signal.staleConfidenceCap}/100`);
+    if(adjustment) lines.push(`Score-bound adjustment: ${adjustment > 0 ? "+" : ""}${adjustment}`);
+    lines.push(`Total: ${total}/100`);
+    return lines;
+  }
+  function thesisAlignmentBreakdown37(signal,thesis){
+    if(!thesis || thesis.status === "MIXED") return [];
+    const breakdown = thesis.breakdown || {};
+    const total = Math.round(Number(thesis.confidence));
+    const components = {
+      base:Number(breakdown.base || 0),pressure:Number(breakdown.pressure || 0),context:Number(breakdown.context || 0),
+      ma:Number(breakdown.ma || 0),structure:Number(breakdown.structure || 0),participation:Number(breakdown.participation || 0),forming:Number(breakdown.forming || 0)
+    };
+    const subtotal = Object.values(components).reduce((sum,value) => sum + value,0);
+    const adjustment = total - subtotal;
+    const lines = [
+      `Base ${thesis.status.toLowerCase()} score: ${components.base}/100`,
+      `Directional pressure magnitude: +${components.pressure}`,
+      `Price/MA context: +${components.context}`,
+      `MA-event magnitude: +${components.ma}`,
+      `Higher-TF structure: +${components.structure}`,
+      `Participation adjustment: ${components.participation >= 0 ? "+" : ""}${components.participation}`,
+      `Forming-candle adjustment: ${components.forming >= 0 ? "+" : ""}${components.forming}`
+    ];
+    if(thesis.staleConfidenceCap) lines.push(`Stale-data confidence cap: ${thesis.staleConfidenceCap}/100`);
+    if(adjustment) lines.push(`Score-bound adjustment: ${adjustment > 0 ? "+" : ""}${adjustment}`);
+    lines.push(`Total: ${total}/100`);
+    return lines;
+  }
+  function thesisQualityLimits37(signal,thesis,evidence){
+    if(!thesis || thesis.status === "MIXED") return [];
+    const bias = entryDisplayText37(signal && signal.entry);
+    if(bias === "WAIT" || Math.abs(Number(signal.confidence) - Number(thesis.confidence)) < 3) return [];
+    return [...new Set([...(evidence && evidence.limiting || []),...(evidence && evidence.adverse || [])])].slice(0,6);
+  }
+  function signalDataHealthLines37(health){
+    return (health && Array.isArray(health.items) ? health.items : []).map(item => {
+      const age = Number.isFinite(Number(item.ageMs)) ? `, age ${item.ageMs < 1000 ? "<1s" : `${Math.round(item.ageMs/1000)}s`}` : "";
+      const statusLabel = item.status === "insufficient" ? "loaded but insufficient history" : item.status;
+      const pair = state.activeSnapshot && state.activeSnapshot.maByTf && state.activeSnapshot.maByTf[item.tf];
+      const ma = pair && pair.closed;
+      const maState = ma ? `; canonical MA ${ma.reliable ? `sufficient (${ma.warmupCount}/${ma.requiredRows})` : `insufficient (${ma.warmupCount}/${ma.requiredRows})`}` : "";
+      const needsPivots = (item.roles || []).some(role => role.includes("SMC structure"));
+      const pivots = needsPivots ? canonicalPivots37(item.tf,"swing") : null;
+      const pivotState = pivots ? `; canonical SMC ${pivots.sufficient ? "sufficient" : "insufficient confirmed swings"}` : "";
+      return `${item.tf}: ${statusLabel}, ${item.count}/${item.historyTarget} closed candles${age}${maState}${pivotState}${item.reason ? ` — ${item.reason}` : ""}`;
+    });
+  }
+  function loadingSignal37(bundle){
+    const position = openPositionSignal37();
+    const status = bundle.health.status;
+    const action = status === "loading" || status === "insufficient" ? "Loading data" : "Data unavailable";
+    return {
+      entry:"ENTRY WAIT",confidence:null,action,exit:"EXIT WAIT",normalized:0,dominantSide:0,marketDirection:null,
+      position,samples:[],maEvents:[],maImpact:0,loading:true,dataHealth:bundle.health,
+      management:{
+        exit:"EXIT WAIT",state:"WAIT",
+        reasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+        tooltipReasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+        watchCondition:"Management resumes when the required snapshot is complete",
+        events:[],sufficient:false
+      }
+    };
+  }
+  function loadingThesis37(direction){
+    return {status:"MISSING",confidence:null,action:"Data incomplete",direction,maEvents:[],maImpact:0,missing:true};
+  }
   function tooltipText37(signal,thesis){
     const bias = entryDisplayText37(signal.entry);
     const position = positionDetails37(signal);
     const dataAge = tooltipDataAge37();
+    if(signal.loading){
+      const loadingItems = (signal.dataHealth && signal.dataHealth.items || [])
+        .filter(item => item.status !== "sufficient")
+        .flatMap(item => item.roles || [`${item.tf} market history`]);
+      const header = [
+        `Direction mode: ${state.direction}`,
+        `Selected horizon: ${horizonLabel37(state.horizon)}`,
+        ...(state.direction === "AUTO"
+          ? ["Independent market bias: WAIT","Independent market alignment: Data incomplete"]
+          : [`${state.direction === "LONG" ? "Long" : "Short"}-thesis status: MIXED`,`${state.direction === "LONG" ? "Long" : "Short"}-thesis alignment: Data incomplete`,`Independent market bias: WAIT`,`Independent market alignment: Data incomplete`]),
+        position.position,
+        position.management
+      ];
+      const sections = [];
+      if(loadingItems.length) sections.push(`Data loading:\n${detailBulletList37([...new Set(loadingItems)])}`);
+      sections.push(`Data health:\n${detailBulletList37(signalDataHealthLines37(signal.dataHealth))}`);
+      return `${header.join("\n")}\n\n${sections.join("\n\n")}`;
+    }
+    const independentAlignment = bias === "WAIT"
+      ? "No clear directional edge"
+      : `${signal.confidence}% with ${alignmentCondition37(bias)}`;
     const header = [
       `Direction mode: ${state.direction}`,
       `Selected horizon: ${horizonLabel37(state.horizon)}`,
       ...(state.direction === "AUTO"
-        ? [`Independent market bias: ${bias} ${signal.confidence}%`,`Alignment: ${signal.confidence}% with ${alignmentCondition37(bias)}`]
+        ? [
+          `Independent market bias: ${scoredStateText37(bias,signal.confidence)}`,
+          `Independent market alignment: ${independentAlignment}`
+        ]
         : [
-          `${state.direction === "LONG" ? "Long" : "Short"}-thesis status: ${thesis.status} ${thesis.confidence}%`,
-          `Alignment: ${thesis.confidence}% with ${alignmentCondition37(thesis.status,state.direction)}`,
-          `Independent market bias: ${bias} ${signal.confidence}%`,
-          `Independent market alignment: ${signal.confidence}% with ${alignmentCondition37(bias)}`
+          `${state.direction === "LONG" ? "Long" : "Short"}-thesis status: ${scoredStateText37(thesis.status,thesis.confidence)}`,
+          `${state.direction === "LONG" ? "Long" : "Short"}-thesis alignment: ${thesis.status === "MIXED" ? "Wait for confirmation" : `${thesis.confidence}% with ${alignmentCondition37(thesis.status,state.direction)}`}`,
+          `Independent market bias: ${scoredStateText37(bias,signal.confidence)}`,
+          `Independent market alignment: ${independentAlignment}`
         ]),
       position.position,
       position.management
@@ -5224,15 +6168,33 @@ const marketDataHub = (() => {
     const levelDirection = targetDirection || openDirection || null;
     const levels = advisoryLevels37(signal,levelDirection);
     const sections = [];
+    let evidence = null;
     if(targetDirection){
-      const evidenceSignal = state.direction === "AUTO" ? signal : {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact};
-      const evidence = directionEvidence37(evidenceSignal,targetDirection);
+      const evidenceSignal = state.direction === "AUTO" ? signal : {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact,structuralContext:thesis.structuralContext};
+      evidence = directionEvidence37(evidenceSignal,targetDirection);
       const prefix = state.direction === "AUTO" ? `independent ${targetDirection}` : targetDirection;
-      sections.push(`Supportive for ${prefix}:\n${detailBulletList37(evidence.supportive)}`);
-      sections.push(`Adverse for ${prefix}:\n${detailBulletList37(evidence.adverse)}`);
+      if(evidence.supportive.length) sections.push(`Supportive for ${prefix}:\n${detailBulletList37(evidence.supportive)}`);
+      if(evidence.limiting.length) sections.push(`Limiting / neutral:\n${detailBulletList37(evidence.limiting)}`);
+      if(evidence.adverse.length) sections.push(`Adverse for ${prefix}:\n${detailBulletList37(evidence.adverse)}`);
       if(evidence.missing.length) sections.push(`Missing data:\n${detailBulletList37(evidence.missing)}`);
+      if(evidence.diagnostics.length) sections.push(`Diagnostics:\n${detailBulletList37(evidence.diagnostics)}`);
     }else{
-      sections.push(`Evidence:\n${detailBulletList37(tooltipReasons37(signal))}`);
+      const neutral = neutralEvidence37(signal);
+      if(neutral.limiting.length) sections.push(`Limiting / neutral:\n${detailBulletList37(neutral.limiting)}`);
+      if(neutral.missing.length) sections.push(`Missing data:\n${detailBulletList37(neutral.missing)}`);
+      if(neutral.diagnostics.length) sections.push(`Diagnostics:\n${detailBulletList37(neutral.diagnostics)}`);
+    }
+    const autoBreakdown = autoAlignmentBreakdown37(signal);
+    if(autoBreakdown.length) sections.push(`Independent alignment breakdown:\n${detailBulletList37(autoBreakdown)}`);
+    const thesisBreakdown = thesisAlignmentBreakdown37(signal,thesis);
+    if(thesisBreakdown.length) sections.push(`${state.direction === "LONG" ? "Long" : "Short"}-thesis alignment breakdown:\n${detailBulletList37(thesisBreakdown)}`);
+    const qualityLimits = thesisQualityLimits37(signal,thesis,evidence);
+    if(qualityLimits.length) sections.push(`Thesis-quality limits:\n${detailBulletList37(qualityLimits)}`);
+    if(signal.position && signal.management && Array.isArray(signal.management.reasons)){
+      sections.push(`Position management evidence for ${signal.position.side}:\n${detailBulletList37(signal.management.reasons)}`);
+    }
+    if((thesis ? thesis.maEvents : signal.maEvents).length){
+      sections.push(`MA events:\n${detailBulletList37(tooltipMaEvents37(thesis ? {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact} : signal))}`);
     }
     const levelsHeading = targetDirection
       ? `Levels for ${levels.direction}`
@@ -5244,9 +6206,198 @@ const marketDataHub = (() => {
       const managementLevels = advisoryLevels37(signal,openDirection);
       sections.push(`Management anchors for open ${openDirection}:\n${detailBulletList37(managementLevels.lines)}`);
     }
-    sections.push("All levels are advisory only.");
-    sections.push(`Signal recalculated: ${tooltipTime37()}${dataAge ? `\nData age: ${dataAge}` : ""}\nData: ${tooltipDataHealth37(signal)}`);
+    const detailEvents = thesis ? thesis.maEvents : signal.maEvents;
+    const maDataHealth = tooltipMaDataHealth37(detailEvents);
+    const healthLines = signalDataHealthLines37(signal.dataHealth);
+    sections.push(`Signal recalculated: ${tooltipTime37()}${dataAge ? `\nData age: ${dataAge}` : ""}${healthLines.length ? `\nData health:\n${detailBulletList37(healthLines)}` : `\nData: ${tooltipDataHealth37(signal)}`}${maDataHealth ? `\nMA data: ${maDataHealth}` : ""}`);
     return `${header.join("\n")}\n\n${sections.join("\n\n")}`;
+  }
+  function formatSignalTime37(value){
+    const date = new Date(Number(value) || Date.now());
+    try{
+      return new Intl.DateTimeFormat([],{hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).format(date);
+    }catch(_e){
+      return date.toLocaleTimeString();
+    }
+  }
+  function rankedEvidence37(lines,limit){
+    const score = line => {
+      const text = String(line || "");
+      if(/BOS|CHoCH|broke (above|below)|lower high|higher low/i.test(text)) return 10;
+      if(/EMA9|EMA21|EMA55/i.test(text)) return 9;
+      if(/MA-event impact/i.test(text)) return 8;
+      if(/pressure.*strengthening|pressure.*accelerating/i.test(text)) return 8;
+      if(/fresh|closed-confirmed/i.test(text)) return 7;
+      if(/VWAP/i.test(text)) return 6;
+      if(/participation/i.test(text)) return 5;
+      return 3;
+    };
+    const unique = [...new Set((lines || []).filter(Boolean))];
+    let maReferences = 0;
+    return unique.sort((a,b) => score(b)-score(a)).filter(line => {
+      if(!/EMA|VWAP.*(rejection|bounce|reclaim|loss)/i.test(line)) return true;
+      maReferences += 1;
+      return maReferences <= 2;
+    }).slice(0,limit);
+  }
+  function conciseLevelText37(level){
+    if(!level) return "Level unavailable";
+    if(level.kind === "vwap") return `${level.tf} mature Session VWAP ${tooltipPrice37(level.price)}`;
+    return `${level.tf} ${level.label} ${tooltipPrice37(level.price)}`;
+  }
+  function compactDataStatus37(health){
+    const status = health && health.status || "unavailable";
+    if(status === "sufficient") return "Current and sufficient";
+    if(status === "stale") return "Stale — confidence capped";
+    if(status === "loading") return "Loading required history";
+    if(status === "insufficient") return "Insufficient history";
+    if(status === "failed") return "Loading failed";
+    return "Unavailable";
+  }
+  function maAuditLines37(audit){
+    if(!audit) return ["MA-event scoring audit unavailable"];
+    const signed = value => `${Number(value) > 0 ? "+" : ""}${Number(value) || 0}`;
+    return [
+      `Raw candidates: ${audit.rawCandidateCount}; scored canonical events: ${audit.canonicalEventCount}; duplicates removed: ${audit.deduplicatedCount}; lower-ranked interactions omitted: ${audit.omittedCandidateCount}`,
+      `Raw MA-event contribution: ${signed(audit.rawContribution)}`,
+      `Deduplication adjustment: ${signed(audit.deduplicationAdjustment)} — duplicates are removed before scoring`,
+      `Timeframe/forming adjustment: ${signed(audit.timeframeAndFormingAdjustment)}`,
+      `Confluence adjustment: ${signed(audit.confluenceAdjustment)}`,
+      `Score before cap: ${signed(audit.preCap)}`,
+      `MA-event cap: ${audit.capMinimum} to +${audit.capMaximum}; cap adjustment ${signed(audit.capAdjustment)}`,
+      `Applied MA-event impact: ${signed(audit.appliedImpact)}`
+    ];
+  }
+  function signalDetailsReport37(signal,thesis,entryQuality){
+    const mode = state.direction;
+    const horizon = horizonLabel37(state.horizon);
+    const position = signal.position;
+    const management = signal.management || {state:"WAIT",reasons:["Position-management data incomplete"],risks:[]};
+    const autoBias = entryDisplayText37(signal.entry);
+    const targetDirection = mode === "AUTO"
+      ? (signal.fadeDirection || ((autoBias === "LONG" || autoBias === "SHORT") ? signal.marketDirection : null))
+      : mode;
+    const evidenceSignal = thesis ? {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact,maAudit:thesis.maAudit,structuralContext:thesis.structuralContext} : signal;
+    const evidence = targetDirection ? directionEvidence37(evidenceSignal,targetDirection) : null;
+    const summary = [`${mode} · ${horizon}`];
+    if(signal.loading){
+      summary.push("",`Market bias: WAIT`,`Entry: Data incomplete`,`Position: ${position ? `${position.side} ${Math.abs(position.qty).toLocaleString(undefined,{maximumFractionDigits:8})}` : "None"}`,"Management: WAIT","",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(Date.now())}`);
+    }else{
+      if(mode === "AUTO"){
+        const marketLabel = signal.entry === "ENTRY FADE RISK"
+          ? (signal.fadeDirection ? `${signal.fadeDirection} FADE RISK` : "WAIT")
+          : entryDisplayText37(signal.entry);
+        summary.push("",`Market bias: ${scoredStateText37(marketLabel,signal.confidence)}`);
+      }
+      else summary.push("",`${mode === "LONG" ? "Long" : "Short"} thesis: ${thesis ? thesis.status : "MIXED"}`);
+      summary.push(`Entry: ${entryQuality.text}`);
+      if(entryQuality.instruction) summary.push(`Instruction: ${entryQuality.instruction}`);
+      summary.push("",`Position: ${position ? `${position.side} ${Math.abs(position.qty).toLocaleString(undefined,{maximumFractionDigits:8})}` : "None"}`,`Management: ${management.state || "WAIT"}`);
+      if(position && targetDirection){
+        const thesisState = thesis ? thesis.status : (signal.independentThesis && signal.independentThesis.status || autoBias);
+        const relationship = targetDirection === position.side ? "supports" : "opposes";
+        summary.push(`${mode === "AUTO" ? "Thesis" : "Selected thesis"} vs position: ${targetDirection} ${thesisState} ${relationship} open ${position.side}`);
+        if(management.relationshipText) summary.push(`Management basis: ${management.relationshipText}`);
+        if(management.relationship === "supports" && (management.state === "TRIM" || management.state === "TIGHTEN SL") && management.positionRiskReasons && management.positionRiskReasons.length){
+          summary.push(`Position risk: ${management.positionRiskReasons[0]}`);
+        }
+      }
+      if(mode === "AUTO" && !targetDirection){
+        const bullish = directionEvidence37(signal,"LONG");
+        const bearish = directionEvidence37(signal,"SHORT");
+        const bullLines = rankedEvidence37(bullish.supportive,2);
+        const bearLines = rankedEvidence37(bearish.supportive,2);
+        const limiting = rankedEvidence37([...(bullish.limiting || []),...(bearish.limiting || [])].filter(line => !/\b(invalidated|stale)\b/i.test(String(line))),2);
+        summary.push("","Bullish factors:",...bullLines.map(line => `\u2022 ${line}`),"Bearish factors:",...bearLines.map(line => `\u2022 ${line}`));
+        if(limiting.length) summary.push("Limiting / neutral:",...limiting.map(line => `\u2022 ${line}`));
+        summary.push("Conclusion:","\u2022 Evidence is conflicting; no directional edge");
+        if(position && management.reasons && management.reasons.length){
+          summary.push("Position why:",...rankedEvidence37(management.reasons,2).map(line => `\u2022 ${line}`));
+        }
+      }else if(evidence){
+        const status = thesis && thesis.status || (targetDirection === signal.marketDirection ? "SUPPORTIVE" : "MIXED");
+        const directionalReasons = (status === "ADVERSE" || status === "INVALID" ? evidence.adverse : status === "SUPPORTIVE" ? evidence.supportive : [...evidence.supportive,...evidence.adverse])
+          .filter(line => !/\b(invalidated|stale)\b/i.test(String(line)));
+        const audit = thesis ? thesis.maAudit : signal.maAudit;
+        if(audit && Number(audit.appliedImpact)){
+          directionalReasons.push(`MA-event impact: ${Number(audit.appliedImpact) > 0 ? "+" : ""}${Number(audit.appliedImpact)}${Number(audit.capAdjustment) ? " — score cap reached" : ""}`);
+        }
+        const reasonSource = position && position.side === targetDirection ? [...(management.reasons || []),...directionalReasons] : directionalReasons;
+        const reasons = rankedEvidence37(reasonSource,4);
+        const risks = rankedEvidence37([...(management.risks || []),...(status === "SUPPORTIVE" ? evidence.adverse : evidence.limiting || [])].filter(line => !/\b(invalidated|stale)\b/i.test(String(line))),2);
+        summary.push("",`${status === "ADVERSE" || status === "INVALID" ? `Why ${targetDirection} is ${status.toLowerCase()}` : "Why"}:`,...reasons.map(line => `\u2022 ${line}`));
+        if(risks.length) summary.push("","Risks:",...risks.map(line => `\u2022 ${line}`));
+      }
+      const levelPool = entryQuality.levels.entryCandidates && entryQuality.levels.entryCandidates.length
+        ? entryQuality.levels.entryCandidates
+        : (entryQuality.levels.candidates || []);
+      const principalLevels = levelPool.slice().sort((a,b) => a.distance-b.distance).slice(0,3);
+      if(principalLevels.length){
+        const heading = targetDirection === "SHORT" ? "Nearest resistance:" : targetDirection === "LONG" ? "Potential long support:" : "Nearest levels:";
+        summary.push("",heading,...principalLevels.map(level => `\u2022 ${conciseLevelText37(level)}`));
+      }else if(entryQuality.exclusions.length){
+        summary.push("","Level constraint:",...entryQuality.exclusions.slice(0,1).map(line => `\u2022 ${line}`));
+      }
+      summary.push("",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(state.activeSnapshot && state.activeSnapshot.createdAt)}`);
+    }
+
+    const analysis = [];
+    const samples = signal.samples || [];
+    if(samples.length) analysis.push(`Pressure and participation:\n${detailBulletList37(samples.map(sample => sample.available ? tooltipPressureLine37(sample) : `${sample.tf} unavailable`))}`);
+    const structure = thesis && thesis.structuralContext || signal.structuralContext;
+    if(structure && structure.smc){
+      analysis.push(`Canonical SMC structure:\n${detailBulletList37([...structure.smc.evidence,...structure.smc.diagnostics])}`);
+    }
+    const validEvents = (thesis ? thesis.maEvents : signal.maEvents || []).filter(event => event && (event.state === "fresh" || event.state === "aging"));
+    if(validEvents.length){
+      analysis.push(`Selected valid MA/VWAP events:\n${detailBulletList37(validEvents.map(event => `${maEventLabel37(event)} — ${event.type}; ${event.state}; ${event.confirmation}; applied impact ${Number(event.appliedImpact || 0) >= 0 ? "+" : ""}${Number(event.appliedImpact || 0)}`))}`);
+    }
+    if(position){
+      analysis.push(`Actual-position management evidence:\n${detailBulletList37([management.consistencyRule,...(management.reasons || []),...(management.risks || []).map(line => `Risk: ${line}`)].filter(Boolean))}`);
+    }
+    const main = tooltipMainSample37(signal);
+    if(main && main.vwap) analysis.push(`VWAP maturity:\n${detailBulletList37([`${tooltipIndicator37(main.tf,"VWAP",main.vwapValue)} — ${main.vwap.maturity}; ${main.vwap.completedCandles} completed session candles`])}`);
+    analysis.push(`Entry quality:\n${detailBulletList37([entryQuality.text,entryQuality.instruction,...entryQuality.exclusions])}`);
+    if(entryQuality.levels.lines && entryQuality.levels.lines.length) analysis.push(`Level ranking:\n${detailBulletList37(entryQuality.levels.lines)}`);
+    const breakdown = thesis ? thesisAlignmentBreakdown37(signal,thesis) : autoAlignmentBreakdown37(signal);
+    if(breakdown.length) analysis.push(`Score breakdown:\n${detailBulletList37(breakdown)}`);
+
+    const detailEvents = thesis ? thesis.maEvents : signal.maEvents || [];
+    const invalidEvents = detailEvents.filter(event => event && (event.state === "invalidated" || event.state === "stale" || event.state === "unknown"));
+    const diagnostics = [
+      `Snapshot: version ${state.activeSnapshot && state.activeSnapshot.version || "unavailable"}; ${new Date(state.activeSnapshot && state.activeSnapshot.createdAt || Date.now()).toISOString()}`,
+      `Snapshot signature: ${String(state.activeSnapshot && state.activeSnapshot.signature || "unavailable").slice(0,180)}`,
+      `DIR management invariant: ${state.activeSnapshot && state.activeSnapshot.managementValidation && state.activeSnapshot.managementValidation.valid ? "PASS" : "not validated"}`,
+      `Data health:\n${detailBulletList37(signalDataHealthLines37(signal.dataHealth))}`,
+      `Event scoring:\n${detailBulletList37(maAuditLines37(thesis ? thesis.maAudit : signal.maAudit))}`
+    ];
+    if(invalidEvents.length){
+      diagnostics.push(`Stale / invalidated events:\n${detailBulletList37(invalidEvents.map(event => event.state === "unknown" ? event.reason : `${maEventLabel37(event)} — ${event.state}: ${event.invalidationReason || event.stateReason || "reason unavailable"}`))}`);
+    }
+    return {summary:summary.join("\n"),analysis:analysis.join("\n\n"),diagnostics:diagnostics.join("\n\n")};
+  }
+  function renderSignalDetailsReport37(report){
+    if(!state.detailsBody) return;
+    const openAnalysis = !!state.detailsBody.querySelector("details[data-section='analysis'][open]");
+    const openDiagnostics = !!state.detailsBody.querySelector("details[data-section='diagnostics'][open]");
+    state.detailsBody.replaceChildren();
+    const summary = document.createElement("pre");
+    summary.className = "pressure-signal-details-summary";
+    summary.textContent = report.summary;
+    state.detailsBody.appendChild(summary);
+    [["analysis","Analysis",report.analysis,openAnalysis],["diagnostics","Diagnostics",report.diagnostics,openDiagnostics]].forEach(([key,label,content,wasOpen]) => {
+      const section = document.createElement("details");
+      section.className = "pressure-signal-details-section";
+      section.dataset.section = key;
+      section.open = !!wasOpen;
+      const heading = document.createElement("summary");
+      heading.textContent = label;
+      const body = document.createElement("pre");
+      body.textContent = content || "No additional detail available";
+      section.appendChild(heading);
+      section.appendChild(body);
+      state.detailsBody.appendChild(section);
+    });
   }
   function signalDetailsBounds37(){
     const chart = document.getElementById("chart");
@@ -5317,30 +6468,381 @@ const marketDataHub = (() => {
     if(state.details && state.details.classList.contains("is-open")) hideToolbarSignalDetails37();
     else showToolbarSignalDetails37();
   }
-  function evaluateToolbarPressureSignal37(horizonId){
-    const configs = {
-      quick:[
-        {tf:"3m",lookback:20,ema:9,weight:1.05},
-        {tf:"5m",lookback:20,ema:9,weight:1.30},
-        {tf:"15m",lookback:5,ema:9,weight:0.75}
-      ],
-      "2_3h":[
-        {tf:"5m",lookback:20,ema:9,weight:1.0},
-        {tf:"15m",lookback:10,ema:21,weight:1.1}
-      ],
-      "6_8h":[
-        {tf:"15m",lookback:20,ema:21,weight:1.0},
-        {tf:"15m",lookback:30,ema:21,weight:1.15}
-      ]
+  function managementTooltipText37(management){
+    const action = String(management && management.state || "WAIT");
+    const reasons = Array.isArray(management && management.tooltipReasons)
+      ? management.tooltipReasons.slice(0,4)
+      : (Array.isArray(management && management.reasons) ? management.reasons.slice(0,4) : ["Management evidence is unavailable"]);
+    const lines = [`Why ${action}:`,...reasons.map(reason => `• ${reason}`)];
+    if(management && management.watchCondition) lines.push("",`Watch: ${management.watchCondition}`);
+    return lines.join("\n");
+  }
+  function updateManagementTooltip37(signal){
+    if(!state.managementTip) return;
+    const management = signal && signal.management || {state:"WAIT",reasons:["Position-management data incomplete"]};
+    const content = managementTooltipText37(management);
+    state.managementTip.textContent = content;
+    state.managementTip.dataset.snapshotVersion = String(state.activeSnapshot && state.activeSnapshot.version || "loading");
+    if(state.exit){
+      state.exit.setAttribute("aria-label",`${exitDisplayText37(signal && signal.exit)} management. ${content.replace(/\n+/g," ")}`);
+    }
+    if(state.managementTip.classList.contains("is-open")) positionManagementTooltip37();
+  }
+  function positionManagementTooltip37(){
+    if(!state.exit || !state.managementTip || !state.managementTip.classList.contains("is-open")) return;
+    const anchor = state.exit.getBoundingClientRect();
+    const tip = state.managementTip;
+    const margin = 6;
+    tip.style.maxWidth = `${Math.max(220,Math.min(360,window.innerWidth-16))}px`;
+    const rect = tip.getBoundingClientRect();
+    let left = Math.max(8,Math.min(anchor.left,window.innerWidth-rect.width-8));
+    let top = anchor.bottom + margin;
+    if(top + rect.height > window.innerHeight - 8) top = Math.max(8,anchor.top-rect.height-margin);
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+  }
+  function showManagementTooltip37(pinned){
+    if(!state.managementTip || !state.exit || !state.managementTip.textContent) return;
+    if(pinned) state.managementTipPinned = true;
+    state.managementTip.classList.add("is-open");
+    state.managementTip.setAttribute("aria-hidden","false");
+    state.exit.setAttribute("aria-expanded","true");
+    positionManagementTooltip37();
+  }
+  function hideManagementTooltip37(){
+    if(state.managementTip){
+      state.managementTip.classList.remove("is-open");
+      state.managementTip.setAttribute("aria-hidden","true");
+    }
+    if(state.exit) state.exit.setAttribute("aria-expanded","false");
+  }
+  function structureClassName37(classification,side){
+    const names = {HH:"higher high",HL:"higher low",LH:"lower high",LL:"lower low"};
+    return names[classification] || (side === "high" ? "swing high" : "swing low");
+  }
+  function canonicalStructureEvidence37(direction,horizonId){
+    const desired = direction === "SHORT" || direction === -1 ? -1 : 1;
+    const engine = horizonEngine37(horizonId);
+    const roles = engine.structureRoles || {internal:[],swing:engine.structureTfs || [],major:engine.boundaryTfs || []};
+    const currentPrice = signalCurrentPrice37();
+    const evidence = [];
+    const diagnostics = [];
+    let raw = 0;
+    let weight = 0;
+    const applyScope = (tf,scope,roleWeight,roleLabel) => {
+      const structure = signalStructure37(tf,scope);
+      if(!structure){ diagnostics.push(`${tf} ${scope} canonical SMC structure unavailable`); return; }
+      const pivots = canonicalPivots37(tf,scope);
+      if(roleLabel === "major boundary" && currentPrice != null){
+        const nearby = [pivots.high,pivots.low].filter(Boolean).some(pivot => Math.abs(pivot.price-currentPrice)/Math.max(Math.abs(currentPrice),1) <= (horizonId === "quick" ? 0.025 : 0.04));
+        if(!nearby){ diagnostics.push(`${tf} ${scope} major SMC boundaries are outside the active proximity window`); return; }
+      }
+      const latestEvent = structure.latestEvent;
+      if(latestEvent){
+        const eventSide = latestEvent.direction === "bullish" ? 1 : -1;
+        raw += eventSide * desired * roleWeight;
+        weight += roleWeight;
+        evidence.push(`${latestEvent.direction === "bullish" ? "Bullish" : "Bearish"} ${tf} ${String(latestEvent.text || latestEvent.structureType || "structure break").toUpperCase()} confirmed at ${tooltipPrice37(latestEvent.price)}`);
+      }
+      [pivots.high,pivots.low].filter(Boolean).forEach(pivot => {
+        const classificationSide = pivot.classification === "HH" || pivot.classification === "HL" ? 1
+          : pivot.classification === "LH" || pivot.classification === "LL" ? -1 : 0;
+        if(classificationSide){
+          const classificationWeight = roleWeight * 0.45;
+          raw += classificationSide * desired * classificationWeight;
+          weight += classificationWeight;
+        }
+      });
+      const invalidation = desired > 0 ? pivots.low : pivots.high;
+      if(invalidation && currentPrice != null){
+        const broken = confirmedCloseBeyond37(tf,invalidation.price,desired > 0 ? -1 : 1);
+        const name = structureClassName37(invalidation.classification,invalidation.side);
+        evidence.push(broken
+          ? `Price broke ${desired > 0 ? "below" : "above"} the latest confirmed ${tf} ${name} ${tooltipPrice37(invalidation.price)}`
+          : `Latest confirmed ${tf} ${name} ${tooltipPrice37(invalidation.price)} remains intact`);
+      }
+      const strongWeak = (structure.levels || []).map(level => `${level.text || `${level.strength || "unclassified"} ${level.side}`} ${tooltipPrice37(level.price)}${level.classification ? ` (${level.classification})` : ""}; ${level.confirmed ? "confirmed" : "tentative"}`);
+      diagnostics.push(`${tf} ${scope} (${roleLabel}): trend ${structure.trend > 0 ? "bullish" : structure.trend < 0 ? "bearish" : "unconfirmed"}; ${structure.pivots.filter(pivot => pivot.confirmed).length} confirmed pivots${strongWeak.length ? `; ${strongWeak.join(" / ")}` : ""}`);
     };
-    const configsForHorizon = configs[horizonId] || configs.quick;
-    const samples = configsForHorizon.map(item => ({...samplePressureSignal37(item.tf,item.lookback,item.ema),weight:item.weight}));
+    (roles.internal || []).forEach(tf => applyScope(tf,"internal",horizonId === "quick" ? 0.30 : 0.65,"early warning"));
+    (roles.swing || []).forEach((tf,index) => applyScope(tf,"swing",index === 0 ? 1.35 : 1.0,"swing structure"));
+    (roles.major || []).forEach(tf => applyScope(tf,"swing",0.55,"major boundary"));
+    (roles.regime || []).forEach(tf => applyScope(tf,"swing",0.65,"regime"));
+    const normalized = weight ? raw / weight : 0;
+    return {points:Math.max(-7,Math.min(7,Math.round(normalized * 7))),normalized,evidence,diagnostics};
+  }
+  function structuralMarketContext37(direction,horizonId){
+    const desired = direction === "SHORT" || direction === -1 ? -1 : 1;
+    const engine = horizonEngine37(horizonId);
+    const currentPrice = signalCurrentPrice37();
+    const proximity = horizonId === "quick" ? 0.008 : horizonId === "2_3h" ? 0.015 : 0.025;
+    let raw = 0;
+    let weight = 0;
+    const evidence = [];
+    [...engine.structureTfs,...engine.boundaryTfs].forEach(tf => {
+      const boundary = engine.boundaryTfs.includes(tf);
+      [2,3,4,5].forEach(slotIndex => {
+        const ma = signalMaSlot37(tf,`MA${slotIndex}`);
+        if(!ma.reliable || currentPrice == null || ma.value == null) return;
+        const distance = Math.abs(ma.value-currentPrice) / Math.max(Math.abs(currentPrice),1);
+        if(boundary && distance > proximity) return;
+        const importance = boundary ? (slotIndex >= 4 ? 1.25 : 0.65) : (slotIndex >= 3 ? 1.0 : 0.8);
+        const side = currentPrice >= ma.value ? 1 : -1;
+        raw += side * desired * importance;
+        weight += importance;
+        if(distance <= proximity){
+          evidence.push(`${tooltipIndicator37(tf,ma.label,ma.value)} — ${side === desired ? "supports" : "opposes"} ${desired > 0 ? "LONG" : "SHORT"}; ${ma.evidenceState}`);
+        }
+      });
+    });
+    const maNormalized = weight ? raw / weight : 0;
+    const smc = canonicalStructureEvidence37(direction,horizonId);
+    const normalized = weight ? maNormalized * 0.42 + smc.normalized * 0.58 : smc.normalized;
+    return {
+      points:Math.max(-8,Math.min(8,Math.round(maNormalized * 3 + smc.points))),
+      normalized,
+      evidence:[...smc.evidence,...evidence],
+      smc,
+      maNormalized
+    };
+  }
+  function confirmedCloseBeyond37(tf,level,side){
+    const rows = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[tf];
+    const latest = Array.isArray(rows) ? rows.slice(-2) : [];
+    return latest.length >= 2 && latest.every(row => side > 0 ? Number(row.close) > level : Number(row.close) < level);
+  }
+  function evaluatePositionManagement37(signal,horizonId){
+    const position = signal && signal.position;
+    if(!position) return {
+      exit:"EXIT WAIT",state:"WAIT",
+      reasons:["No open position is available to manage","Entry bias remains separate from position management"],
+      tooltipReasons:["No open position is available to manage","Entry bias remains separate from position management"],
+      watchCondition:"Management begins when an open position is detected",
+      risks:[],events:[],sufficient:true
+    };
+    const samples = Array.isArray(signal.samples) ? signal.samples : [];
+    if(!samples.length || samples.some(sample => !sample.available)){
+      return {
+        exit:"EXIT WAIT",state:"WAIT",
+        reasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+        tooltipReasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+        watchCondition:"Management resumes when the required snapshot is complete",
+        risks:[],events:[],sufficient:false
+      };
+    }
+    const desired = position.side === "SHORT" ? -1 : 1;
+    const maEvaluation = evaluateMaEvents37(horizonId,samples,desired);
+    const engine = horizonEngine37(horizonId);
+    const currentPrice = signalCurrentPrice37();
+    const pressure = samples.reduce((sum,sample) => sum + sample.sideSign * Math.max(0,(sample.dominantPct-0.5)/0.2) * sample.weight * sample.participationFactor,0)
+      / Math.max(1,samples.reduce((sum,sample) => sum + sample.weight,0));
+    const orientedPressure = pressure * desired;
+    const reasons = [];
+    const risks = [];
+    const positionRiskReasons = [];
+    const independentThesis = signal && signal.independentThesis || null;
+    const independentDirection = independentThesis && independentThesis.status === "SUPPORTIVE" ? independentThesis.direction : null;
+    const thesisRelation = !independentDirection ? "neutral" : independentDirection === position.side ? "supports" : "opposes";
+    const thesisConfidence = num37(independentThesis && independentThesis.confidence);
+    let severity = 0;
+    if(thesisRelation === "supports" && independentThesis.fadeRisk){
+      const reason = `${independentDirection} thesis remains supportive, but the ${independentDirection === "LONG" ? "bullish" : "bearish"} edge is weakening`;
+      risks.push(reason);
+      positionRiskReasons.push(reason);
+      severity += 2;
+    }
+    const opposingPressureSamples = samples.filter(sample => sample.sideSign === -desired).sort((a,b) => b.weight-a.weight);
+    const opposingPressureText = opposingPressureSamples.slice(0,2).map(sample => `${sample.tf} ${(sample.dominantPct*100).toFixed(1)}%`).join(" / ");
+    if(orientedPressure < -0.22){ severity += 4; reasons.push(`Opposing ${desired > 0 ? "bear" : "bull"} pressure is strong${opposingPressureText ? `: ${opposingPressureText}` : ""}`); }
+    else if(orientedPressure < -0.10){ severity += 2; reasons.push(`Opposing ${desired > 0 ? "bear" : "bull"} pressure is strengthening${opposingPressureText ? `: ${opposingPressureText}` : ""}`); }
+    else{
+      const strongest = samples.slice().sort((a,b) => (b.weight*Math.abs(b.dominantPct-0.5))-(a.weight*Math.abs(a.dominantPct-0.5)))[0];
+      if(strongest && strongest.sideSign === desired){
+        reasons.push(`${strongest.tf} ${desired > 0 ? "bull" : "bear"} pressure ${(strongest.dominantPct*100).toFixed(1)}%${strongest.pressureMomentum > 0.01 ? ", strengthening" : ""}`);
+      }
+    }
+    (engine.structureRoles && engine.structureRoles.internal || []).forEach(tf => {
+      const structure = signalStructure37(tf,"internal");
+      const event = structure && structure.latestEvent;
+      const rows = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[tf];
+      const freshnessFloor = Array.isArray(rows) && rows.length >= 4 ? Number(rows[rows.length-4].time) : -Infinity;
+      const eventSide = event && event.direction === "bullish" ? 1 : event ? -1 : 0;
+      if(event && eventSide === -desired && Number(event.breakTime) >= freshnessFloor){
+        severity += tf === "1m" ? 1 : 2;
+        const reason = `${event.direction === "bullish" ? "Bullish" : "Bearish"} ${tf} internal ${String(event.text || event.structureType).toUpperCase()} confirmed against the position`;
+        risks.push(reason);
+        positionRiskReasons.push(reason);
+      }
+    });
+    const opposingEvents = maEvaluation.events.filter(event => event.direction === -desired && (event.state === "fresh" || event.state === "aging"));
+    const invalidatedEvents = maEvaluation.events.filter(event => event.direction === desired && event.state === "invalidated");
+    if(opposingEvents.length){
+      severity += Math.min(3,opposingEvents.length);
+      opposingEvents.slice(0,2).forEach(event => reasons.push(`${maEventLabel37(event)} ${event.type} remains ${event.state}`));
+    }
+    if(invalidatedEvents.length){
+      severity += 3;
+      invalidatedEvents.slice(0,2).forEach(event => {
+        const reason = `${maEventLabel37(event)} invalidated: ${event.invalidationReason || event.stateReason}`;
+        reasons.push(reason);
+        positionRiskReasons.push(reason);
+      });
+    }
+    let structureInvalid = false;
+    let oppositeSwingBreak = false;
+    (engine.structureRoles && engine.structureRoles.swing || engine.structureTfs).forEach(tf => {
+      const pivots = canonicalPivots37(tf,"swing");
+      const structure = signalStructure37(tf,"swing");
+      const latestEvent = structure && structure.latestEvent;
+      const eventSide = latestEvent && latestEvent.direction === "bullish" ? 1 : latestEvent ? -1 : 0;
+      const tfRows = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[tf];
+      const recentFloor = Array.isArray(tfRows) && tfRows.length >= 8 ? Number(tfRows[tfRows.length-8].time) : -Infinity;
+      if(latestEvent && eventSide === -desired && Number(latestEvent.breakTime) >= recentFloor){
+        oppositeSwingBreak = true;
+        severity += 4;
+        reasons.push(`Confirmed opposite ${tf} ${String(latestEvent.text || latestEvent.structureType).toUpperCase()} at ${tooltipPrice37(latestEvent.price)}`);
+      }
+      const invalidation = desired > 0 ? pivots.low : pivots.high;
+      if(!invalidation || currentPrice == null) return;
+      const beyondSide = desired > 0 ? -1 : 1;
+      const structureName = structureClassName37(invalidation.classification,invalidation.side);
+      if(confirmedCloseBeyond37(tf,invalidation.price,beyondSide)){
+        structureInvalid = true;
+        reasons.push(`Price broke ${desired > 0 ? "below" : "above"} the latest confirmed ${tf} ${structureName} ${tooltipPrice37(invalidation.price)} and held`);
+      }else if(currentPrice != null && Math.abs(currentPrice-invalidation.price)/Math.max(Math.abs(currentPrice),1) <= (horizonId === "quick" ? 0.004 : 0.008)){
+        severity += 2;
+        const reason = `Price is testing the latest confirmed ${tf} ${structureName} ${tooltipPrice37(invalidation.price)}`;
+        risks.push(reason);
+        positionRiskReasons.push(reason);
+      }else if(reasons.length < 4){
+        reasons.push(`Latest confirmed ${tf} ${structureName} ${tooltipPrice37(invalidation.price)} remains intact`);
+      }
+    });
+    if(structureInvalid) severity += 6;
+    const main = tooltipMainSample37(signal);
+    if(main && main.vwap && main.vwap.eligible && main.vwapValue != null && currentPrice != null){
+      const adverseSide = desired > 0 ? -1 : 1;
+      if(confirmedCloseBeyond37(main.tf,main.vwapValue,adverseSide)){
+        severity += 2;
+        reasons.push(`${tooltipIndicator37(main.tf,"VWAP",main.vwapValue)} breached and held against ${position.side}`);
+      }else if((desired < 0 && currentPrice > main.vwapValue) || (desired > 0 && currentPrice < main.vwapValue)){
+        risks.push(`Price remains ${currentPrice > main.vwapValue ? "above" : "below"} mature ${tooltipIndicator37(main.tf,"Session VWAP",main.vwapValue)}`);
+      }
+    }
+    const weakParticipation = samples.slice().sort((a,b) => Number(a.participationRatio || 1)-Number(b.participationRatio || 1))[0];
+    if(weakParticipation && weakParticipation.participationRatio != null && weakParticipation.participationRatio < 0.85){
+      const reason = `${weakParticipation.tf} participation is ${Math.round(weakParticipation.participationRatio*100)}% of recent average`;
+      risks.push(reason);
+      positionRiskReasons.push(reason);
+    }
+    if(main && currentPrice != null){
+      const fastMas = (main.maSlots || []).slice(0,2).filter(ma => num37(ma && ma.value) != null);
+      const alignedFastMas = fastMas.filter(ma => desired > 0 ? currentPrice > ma.value : currentPrice < ma.value);
+      const extension = alignedFastMas.reduce((maxDistance,ma) => Math.max(maxDistance,Math.abs(currentPrice-ma.value)/Math.max(Math.abs(currentPrice),1)),0);
+      if(alignedFastMas.length >= 2 && extension >= (horizonId === "quick" ? 0.006 : 0.012)){
+        const reason = `Position is extended ${desired > 0 ? "above" : "below"} ${main.tf} ${alignedFastMas.map(ma => ma.label).join("/")}`;
+        risks.push(reason);
+        positionRiskReasons.push(reason);
+        severity += 2;
+      }
+    }
+    const rankedLevels = rankedSignalLevels37(signal,position.side,horizonId);
+    const nearbyBoundary = rankedLevels.find(level => level.boundary && (desired > 0 ? level.price > currentPrice : level.price < currentPrice) && level.distance <= (horizonId === "quick" ? 0.006 : 0.012));
+    if(nearbyBoundary){
+      severity += 2;
+      const reason = `Major opposing boundary nearby: ${nearbyBoundary.text}`;
+      risks.push(reason);
+      positionRiskReasons.push(reason);
+    }
+    const activeBreaches = rankedLevels.filter(level => level.state.includes(`adverse for ${position.side}`));
+    if(activeBreaches.length){
+      severity += Math.min(3,activeBreaches.length);
+      const reason = `Active crossed level: ${activeBreaches[0].text}`;
+      reasons.push(reason);
+      positionRiskReasons.push(reason);
+    }
+    let stateName;
+    let consistencyRule;
+    if(structureInvalid){
+      stateName = "CLOSE";
+      consistencyRule = "Confirmed position invalidation requires a full close";
+    }else if(thesisRelation === "opposes"){
+      const multiTimeframePressure = new Set(opposingPressureSamples
+        .filter(sample => sample.dominantPct >= 0.55)
+        .map(sample => sample.tf)).size >= 2;
+      const oppositionConfirmations = [
+        oppositeSwingBreak,
+        orientedPressure < -0.22,
+        opposingEvents.length >= 2,
+        multiTimeframePressure
+      ].filter(Boolean).length;
+      const strongOpposition = thesisConfidence != null && thesisConfidence >= 70
+        && oppositionConfirmations >= 2;
+      const meaningfulOpposition = thesisConfidence != null && thesisConfidence >= 60
+        && (oppositionConfirmations >= 1 || orientedPressure < -0.10 || opposingEvents.length > 0);
+      if(strongOpposition){
+        stateName = "TRIM";
+        consistencyRule = `Strong multi-timeframe ${independentDirection} thesis opposes the open ${position.side}`;
+      }else if(meaningfulOpposition || severity >= 4){
+        stateName = "TIGHTEN SL";
+        consistencyRule = `${independentDirection} thesis meaningfully opposes the open ${position.side}`;
+      }else{
+        stateName = "HOLD";
+        consistencyRule = `${independentDirection} opposition is tactical; confirmed position structure remains valid`;
+      }
+    }else if(thesisRelation === "supports"){
+      const explicitRisks = [...new Set(positionRiskReasons)];
+      if(explicitRisks.length >= 2 && severity >= 7){
+        stateName = "TRIM";
+        consistencyRule = `The ${independentDirection} thesis supports the position, but explicit position-specific risks justify trimming`;
+      }else if(explicitRisks.length && (severity >= 2 || independentThesis.fadeRisk)){
+        stateName = "TIGHTEN SL";
+        consistencyRule = `The ${independentDirection} thesis supports the position, but weakening or nearby risk justifies tighter protection`;
+      }else{
+        stateName = "HOLD";
+        consistencyRule = `The ${independentDirection} thesis supports the open ${position.side}; no confirmed invalidation is active`;
+      }
+    }else{
+      stateName = severity >= 7 ? "TRIM" : severity >= 4 ? "TIGHTEN SL" : "HOLD";
+      consistencyRule = stateName === "HOLD"
+        ? "No confirmed opposing thesis or position invalidation is active"
+        : "Management escalated from confirmed pressure, structure, or position-specific risk";
+    }
+    const exit = stateName === "CLOSE" ? "EXIT EXIT" : `EXIT ${stateName}`;
+    if(!reasons.length) reasons.push("Pressure and confirmed structure remain aligned with the open position");
+    const relationshipText = thesisRelation === "supports"
+      ? `${independentDirection} thesis supports the open ${position.side}`
+      : thesisRelation === "opposes"
+        ? `${independentDirection} thesis opposes the open ${position.side}`
+        : "No independent directional thesis is confirmed against the position";
+    const reasonPool = thesisRelation === "supports"
+      ? [relationshipText,consistencyRule,...positionRiskReasons,...reasons]
+      : [relationshipText,consistencyRule,...reasons,...positionRiskReasons];
+    const tooltipReasons = [...new Set(reasonPool.filter(Boolean))].slice(0,4);
+    const watchCondition = stateName === "CLOSE"
+      ? `Recovery requires confirmed structure to be reclaimed for ${position.side}`
+      : stateName === "TRIM"
+        ? "Escalate to CLOSE only after confirmed position invalidation"
+        : stateName === "TIGHTEN SL"
+          ? "Escalate if the confirmed swing invalidation is breached and held"
+          : (positionRiskReasons[0] || "Escalate only if opposing evidence becomes confirmed");
+    return {
+      exit,state:stateName,reasons:[...new Set(reasons)].slice(0,6),risks:[...new Set(risks)].slice(0,4),
+      positionRiskReasons:[...new Set(positionRiskReasons)].slice(0,5),relationship:thesisRelation,relationshipText,
+      consistencyRule,tooltipReasons,watchCondition,independentThesisDirection:independentDirection,
+      events:maEvaluation.events,maAudit:maEvaluation.audit,sufficient:true,severity,orientedPressure,structureInvalid
+    };
+  }
+  function evaluateToolbarPressureSignal37(horizonId){
+    const engine = horizonEngine37(horizonId);
+    const configsForHorizon = engine.pressure;
+    const samples = configsForHorizon.map(item => ({...samplePressureSignal37(item.tf,item.lookback,item.maSlot),weight:item.weight,role:item.role}));
     if(samples.some(sample => !sample.available)){
       const maEvaluation = evaluateMaEvents37(horizonId,samples,0);
       return {
         entry:"ENTRY WAIT",
-        confidence:51,
-        action:"No edge",
+        confidence:null,
+        action:"Data incomplete",
         exit:"EXIT WAIT",
         normalized:0,
         dominantSide:0,
@@ -5348,35 +6850,56 @@ const marketDataHub = (() => {
         position:openPositionSignal37(),
         samples,
         maEvents:maEvaluation.events,
-        maImpact:0
+        maImpact:0,
+        maAudit:maEvaluation.audit,
+        dataIncomplete:true,
+        management:{
+          exit:"EXIT WAIT",state:"WAIT",
+          reasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+          tooltipReasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+          watchCondition:"Management resumes when the required snapshot is complete",
+          events:[],sufficient:false
+        }
       };
     }
     const score = samples.reduce((sum,sample) => {
       const strength = Math.max(0,(sample.dominantPct - 0.5) / 0.2);
-      return sum + sample.sideSign * strength * sample.weight;
+      const formingFactor = 1 - sample.formingShare * (1-engine.formingWeight);
+      return sum + sample.sideSign * strength * sample.weight * sample.participationFactor * formingFactor;
     },0);
     const totalWeight = samples.reduce((sum,sample) => sum + sample.weight,0) || 1;
-    const normalized = score / totalWeight;
-    const dominantSide = normalized > 0 ? 1 : normalized < 0 ? -1 : 0;
+    const rawNormalized = score / totalWeight;
+    const coreSamples = horizonId === "quick" ? samples.filter(sample => sample.tf === "3m" || sample.tf === "5m") : samples;
+    const coreScore = coreSamples.reduce((sum,sample) => sum + sample.sideSign * Math.max(0,(sample.dominantPct-0.5)/0.2) * sample.weight * sample.participationFactor,0);
+    const coreWeight = coreSamples.reduce((sum,sample) => sum + sample.weight,0) || 1;
+    const coreNormalized = coreScore / coreWeight;
+    const coreSide = coreNormalized > 0 ? 1 : coreNormalized < 0 ? -1 : 0;
+    const normalized = horizonId === "quick" && coreSide && Math.sign(rawNormalized) !== coreSide ? coreNormalized * 0.75 : rawNormalized;
+    const dominantSide = horizonId === "quick" && coreSide ? coreSide : (normalized > 0 ? 1 : normalized < 0 ? -1 : 0);
     const balanced = Math.abs(normalized) < (horizonId === "6_8h" ? 0.13 : horizonId === "2_3h" ? 0.12 : 0.11);
-    const conflict = samples.some(sample => sample.sideSign > 0) && samples.some(sample => sample.sideSign < 0);
+    const conflict = coreSamples.some(sample => sample.sideSign > 0) && coreSamples.some(sample => sample.sideSign < 0);
     const main = samples.reduce((best,sample) => !best || sample.weight > best.weight ? sample : best,null);
     const supportiveContext = dominantSide > 0
       ? samples.filter(sample => sample.contextSide >= 0).length >= Math.max(1,samples.length - 1)
       : dominantSide < 0
         ? samples.filter(sample => sample.contextSide <= 0).length >= Math.max(1,samples.length - 1)
         : false;
+    const micro = horizonId === "quick" ? samples.find(sample => sample.tf === "1m") : null;
+    const microImpact = micro && coreSide ? (micro.sideSign === coreSide ? 2 : -3) : 0;
+    const participationPoint = Math.max(-4,Math.min(3,Math.round((samples.reduce((sum,sample) => sum + sample.participationFactor * sample.weight,0) / totalWeight - 1) * 10)));
+    const formingPenalty = -Math.min(4,Math.round(samples.reduce((sum,sample) => sum + sample.formingShare * sample.weight,0) / totalWeight * 5));
+    const structural = structuralMarketContext37(dominantSide,horizonId);
     const absorption = !!(main && main.dominantPct >= 0.65 && (main.priceRefuses || (main.contextSide && main.contextSide === -main.sideSign)));
-    const fadeRisk = !!(main && dominantSide !== 0 && main.sideSign === dominantSide && main.pressureMomentum < -0.03 && main.contextSide === dominantSide);
+    const fadeRisk = !!(main && !balanced && !conflict && dominantSide !== 0 && ((main.sideSign === dominantSide && main.pressureMomentum < -0.03 && main.contextSide === dominantSide) || microImpact < 0));
     let entry = "ENTRY WAIT";
     if(absorption) entry = "ENTRY ABSORPTION";
     else if(fadeRisk) entry = "ENTRY FADE RISK";
     else if(!conflict && !balanced && !main.stuckNearVwap && dominantSide > 0 && supportiveContext) entry = "ENTRY LONG";
     else if(!conflict && !balanced && !main.stuckNearVwap && dominantSide < 0 && supportiveContext) entry = "ENTRY SHORT";
     let confidence = (() => {
-      if(entry === "ENTRY WAIT") return 51;
+      if(entry === "ENTRY WAIT") return null;
       if(entry === "ENTRY ABSORPTION" || entry === "ENTRY FADE RISK") return 58;
-      return Math.max(54,Math.min(72,Math.round(54 + Math.min(1,Math.abs(normalized) / 0.26) * 14 + (supportiveContext ? 3 : 0))));
+      return Math.max(51,Math.min(78,Math.round(54 + Math.min(1,Math.abs(normalized) / 0.26) * 14 + (supportiveContext ? 3 : 0) + participationPoint + formingPenalty + microImpact + structural.points)));
     })();
     const signalDirection = entry === "ENTRY LONG" ? 1 : entry === "ENTRY SHORT" ? -1 : 0;
     const maEvaluation = evaluateMaEvents37(horizonId,samples,signalDirection);
@@ -5389,50 +6912,46 @@ const marketDataHub = (() => {
         confidence = 58;
       }else{
         entry = "ENTRY WAIT";
-        confidence = 54;
+        confidence = null;
       }
     }else if(signalDirection && maEvaluation.impact){
       confidence = Math.max(51,Math.min(80,confidence + maEvaluation.impact));
     }
     const position = openPositionSignal37();
-    let exit = "EXIT WAIT";
-    if(position){
-      const side = position.side === "SHORT" ? -1 : 1;
-      const currentPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null;
-      const entryPrice = num37(position.price);
-      const profitable = currentPrice != null && entryPrice != null ? (side > 0 ? currentPrice > entryPrice : currentPrice < entryPrice) : false;
-      if((entry === "ENTRY LONG" && side > 0) || (entry === "ENTRY SHORT" && side < 0)){
-        exit = confidence >= 60 && !fadeRisk && !absorption ? "EXIT HOLD" : (profitable ? "EXIT TRIM" : "EXIT TIGHTEN SL");
-      }else if((entry === "ENTRY LONG" && side < 0) || (entry === "ENTRY SHORT" && side > 0)){
-        exit = confidence >= 62 ? "EXIT EXIT" : (profitable ? "EXIT TRIM" : "EXIT TIGHTEN SL");
-      }else if(entry === "ENTRY ABSORPTION" || entry === "ENTRY FADE RISK"){
-        exit = profitable ? "EXIT TRIM" : "EXIT TIGHTEN SL";
-      }else{
-        exit = "EXIT WAIT";
-      }
-    }
-    return {
+    const result = {
       entry,
       confidence,
-      action:entryActionText37(entry),
-      exit,
+      action:entryActionText37(entry,dominantSide > 0 ? "LONG" : dominantSide < 0 ? "SHORT" : null),
+      exit:"EXIT WAIT",
       normalized,
+      rawNormalized,
+      coreNormalized,
       dominantSide,
       marketDirection:dominantSide > 0 ? "LONG" : dominantSide < 0 ? "SHORT" : null,
+      fadeDirection:entry === "ENTRY FADE RISK" ? (dominantSide > 0 ? "LONG" : dominantSide < 0 ? "SHORT" : null) : null,
       position,
       samples,
       maEvents:maEvaluation.events,
-      maImpact:maEvaluation.impact
+      maImpact:maEvaluation.impact,
+      maAudit:maEvaluation.audit,
+      breakdown:{base:54,pressure:Math.round(Math.min(1,Math.abs(normalized)/0.26)*14),context:supportiveContext?3:0,participation:participationPoint,forming:formingPenalty,micro:microImpact,structure:structural.points,ma:maEvaluation.impact},
+      structuralContext:structural
     };
+    result.independentThesis = result.marketDirection
+      ? evaluateDirectionThesis37(result,result.marketDirection,horizonId)
+      : null;
+    result.management = evaluatePositionManagement37(result,horizonId);
+    result.exit = result.management.exit;
+    return result;
   }
   function evaluateDirectionThesis37(market,direction,horizonId){
     const desired = direction === "SHORT" ? -1 : 1;
     const samples = Array.isArray(market && market.samples) ? market.samples : [];
     if(!samples.length || samples.some(sample => !sample.available)){
       return {
-        status:"MIXED",
-        confidence:51,
-        action:"Wait for confirmation",
+        status:"MISSING",
+        confidence:null,
+        action:"Data incomplete",
         direction,
         maEvents:[],
         maImpact:0,
@@ -5442,23 +6961,55 @@ const marketDataHub = (() => {
     const main = tooltipMainSample37(market);
     const oriented = Number(market.normalized || 0) * desired;
     const maEvaluation = evaluateMaEvents37(horizonId,samples,desired);
-    const currentPrice = main && num37(main.currentPrice);
-    const structureLevel = main && num37(desired > 0 ? main.recentLow : main.recentHigh);
-    const structureBroken = currentPrice != null && structureLevel != null
-      ? (desired > 0 ? currentPrice < structureLevel : currentPrice > structureLevel)
-      : false;
+    const structural = structuralMarketContext37(direction,horizonId);
+    const engine = horizonEngine37(horizonId);
+    const structureBroken = (engine.structureRoles && engine.structureRoles.swing || engine.structureTfs).some(tf => {
+      const pivots = canonicalPivots37(tf,"swing");
+      const pivot = desired > 0 ? pivots.low : pivots.high;
+      return !!(pivot && confirmedCloseBeyond37(tf,pivot.price,desired > 0 ? -1 : 1));
+    });
     const contextOpposes = !!(main && main.contextSide === -desired);
     const contextSupports = !!(main && main.contextSide === desired);
+    const primaryTf = horizonId === "quick" ? "5m" : horizonId === "2_3h" ? "15m" : "1h";
+    const currentPrice = signalCurrentPrice37();
+    const primaryMas = [1,2,3].map(slotIndex => signalMaSlot37(primaryTf,`MA${slotIndex}`)).filter(ma => ma.reliable && ma.value != null);
+    const maPriceAlignment = currentPrice == null ? 0 : primaryMas.reduce((sum,ma) => sum + ((currentPrice >= ma.value ? 1 : -1) * desired),0);
+    const pressureMomentumAlignment = samples.reduce((sum,sample) => {
+      if(sample.sideSign !== desired || sample.pressureMomentum <= 0.01) return sum;
+      return sum + (sample.tf === "1m" ? 0.35 : sample.weight);
+    },0);
+    const materialScore = oriented * 30
+      + maEvaluation.impact * 0.75
+      + structural.points * 1.25
+      + maPriceAlignment * 2
+      + pressureMomentumAlignment
+      + (contextSupports ? 1.5 : 0)
+      - (contextOpposes ? 1.5 : 0);
     let status = "MIXED";
-    if(structureBroken && (oriented < -0.08 || contextOpposes)) status = "INVALID";
-    else if(oriented <= -0.10 || contextOpposes || maEvaluation.impact <= -5) status = "ADVERSE";
-    else if(oriented >= 0.11 && !contextOpposes && maEvaluation.impact > -5) status = "SUPPORTIVE";
-    const confidence = (() => {
-      if(status === "MIXED") return Math.max(51,Math.min(59,Math.round(52 + Math.abs(oriented) * 12)));
-      if(status === "INVALID") return Math.max(68,Math.min(80,Math.round(70 + Math.abs(oriented) * 8 + (contextOpposes ? 3 : 0))));
-      return Math.max(56,Math.min(76,Math.round(57 + Math.abs(oriented) * 14 + (contextSupports || contextOpposes ? 3 : 0) + Math.min(4,Math.abs(maEvaluation.impact)))));
-    })();
-    const action = status === "SUPPORTIVE"
+    if(structureBroken && materialScore <= -5) status = "INVALID";
+    else if(materialScore <= -3) status = "ADVERSE";
+    else if(materialScore >= 3) status = "SUPPORTIVE";
+    const invalid = status === "INVALID";
+    const base = invalid ? 70 : 57;
+    const pressurePoints = Math.round(Math.abs(oriented) * (invalid ? 8 : 14));
+    const contextPoints = invalid ? (contextOpposes ? 3 : 0) : (contextSupports || contextOpposes ? 3 : 0);
+    const maPoints = invalid ? 0 : Math.min(4,Math.abs(maEvaluation.impact));
+    const structurePoints = invalid || status === "ADVERSE" ? Math.max(0,-structural.points) : Math.max(0,structural.points);
+    const participationPoints = Number(market.breakdown && market.breakdown.participation || 0);
+    const formingPoints = Number(market.breakdown && market.breakdown.forming || 0);
+    const rawConfidence = base + Math.min(12,Math.round(Math.abs(materialScore))) + pressurePoints + contextPoints + maPoints + structurePoints + participationPoints + formingPoints;
+    const confidence = status === "MIXED" ? null
+      : invalid
+        ? Math.max(68,Math.min(82,Math.round(rawConfidence)))
+        : Math.max(54,Math.min(78,Math.round(rawConfidence)));
+    const microSample = horizonId === "quick" ? samples.find(sample => sample.tf === "1m") : null;
+    const thesisFadeRisk = status === "SUPPORTIVE" && (
+      samples.some(sample => sample.sideSign === desired && sample.pressureMomentum < -0.03)
+      || !!(microSample && microSample.sideSign === -desired && microSample.dominantPct >= 0.55)
+    );
+    const action = thesisFadeRisk
+      ? (direction === "LONG" ? "Bullish edge weakening" : "Bearish edge weakening")
+      : status === "SUPPORTIVE"
       ? (direction === "LONG" ? "Buy pullbacks" : "Sell bounces")
       : status === "MIXED"
         ? "Wait for confirmation"
@@ -5470,12 +7021,47 @@ const marketDataHub = (() => {
       confidence,
       action,
       direction,
+      fadeRisk:thesisFadeRisk,
       oriented,
+      materialScore,
+      maPriceAlignment,
+      primaryTf,
       structureBroken,
       maEvents:maEvaluation.events,
       maImpact:maEvaluation.impact,
+      maAudit:maEvaluation.audit,
+      structuralContext:structural,
+      breakdown:{base,pressure:pressurePoints,context:contextPoints,ma:maPoints,structure:structurePoints,participation:participationPoints,forming:formingPoints},
       missing:false
     };
+  }
+  function managementFingerprint37(management){
+    if(!management) return "missing";
+    return JSON.stringify({
+      state:management.state,
+      exit:management.exit,
+      reasons:management.reasons || [],
+      risks:management.risks || [],
+      positionRiskReasons:management.positionRiskReasons || [],
+      relationship:management.relationship || null,
+      relationshipText:management.relationshipText || null,
+      consistencyRule:management.consistencyRule || null,
+      tooltipReasons:management.tooltipReasons || [],
+      watchCondition:management.watchCondition || null,
+      structureInvalid:!!management.structureInvalid,
+      severity:management.severity,
+      orientedPressure:management.orientedPressure
+    });
+  }
+  function validateFrozenManagement37(signal,horizonId){
+    const before = managementFingerprint37(signal && signal.management);
+    const interpretations = {AUTO:before};
+    ["LONG","SHORT"].forEach(direction => {
+      evaluateDirectionThesis37(signal,direction,horizonId);
+      interpretations[direction] = managementFingerprint37(signal && signal.management);
+    });
+    const after = managementFingerprint37(signal && signal.management);
+    return {valid:before === after && DIRECTIONS.every(direction => interpretations[direction] === before),before,after,interpretations};
   }
   function renderToolbarSignal37(){
     if(!ensureToolbarSignalUi37()) return;
@@ -5489,27 +7075,64 @@ const marketDataHub = (() => {
       const chip = state.chips.get(item.id);
       if(chip) chip.classList.toggle("is-active",state.horizon === item.id);
     });
-    const signal = evaluateToolbarPressureSignal37(state.horizon);
-    const thesis = state.direction === "AUTO" ? null : evaluateDirectionThesis37(signal,state.direction,state.horizon);
-    if(state.entry){
-      const displayValue = thesis ? `THESIS ${thesis.status}` : signal.entry;
-      state.entry.dataset.tone = pillTone37(displayValue);
-      state.entry.textContent = thesis
-        ? `${thesis.status} ${thesis.confidence}% · ${thesis.action}`
-        : `${entryDisplayText37(signal.entry)} ${signal.confidence}% · ${signal.action}`;
-      state.entry.removeAttribute("title");
+    const bundle = ensureSignalData37(state.horizon);
+    const ready = bundle.health.status === "sufficient" || bundle.health.status === "stale";
+    state.activeSnapshot = ready ? coherentSignalSnapshot37(bundle.plan,bundle.health) : null;
+    try{
+      let signal;
+      if(ready){
+        if(!state.activeSnapshot.signal){
+          state.activeSnapshot.signal = evaluateToolbarPressureSignal37(state.horizon);
+          state.activeSnapshot.managementValidation = validateFrozenManagement37(state.activeSnapshot.signal,state.horizon);
+        }
+        signal = state.activeSnapshot.signal;
+      }else{
+        signal = loadingSignal37(bundle);
+      }
+      signal.dataHealth = bundle.health;
+      if(ready && bundle.health.status === "stale" && num37(signal.confidence) != null){
+        signal.confidence = Math.min(62,signal.confidence);
+        signal.staleConfidenceCap = 62;
+      }
+      const thesis = state.direction === "AUTO"
+        ? null
+        : (ready ? evaluateDirectionThesis37(signal,state.direction,state.horizon) : loadingThesis37(state.direction));
+      if(thesis && ready && bundle.health.status === "stale" && num37(thesis.confidence) != null){
+        thesis.confidence = Math.min(62,thesis.confidence);
+        thesis.staleConfidenceCap = 62;
+      }
+      const autoBias = entryDisplayText37(signal.entry);
+      const entryDirection = state.direction === "AUTO"
+        ? (signal.fadeDirection || ((autoBias === "LONG" || autoBias === "SHORT") ? signal.marketDirection : null))
+        : state.direction;
+      const entryQuality = evaluateEntryQuality37(signal,thesis,entryDirection);
+      if(state.entry){
+        const displayValue = thesis && thesis.fadeRisk ? "ENTRY FADE RISK" : thesis ? `THESIS ${thesis.status}` : signal.entry;
+        state.entry.dataset.tone = pillTone37(displayValue);
+        const displayLabel = thesis && thesis.fadeRisk
+          ? `${state.direction} FADE RISK`
+          : !thesis && signal.entry === "ENTRY FADE RISK"
+            ? (signal.fadeDirection ? `${signal.fadeDirection} FADE RISK` : "WAIT")
+            : thesis ? thesis.status : entryDisplayText37(signal.entry);
+        const displayAction = thesis ? thesis.action : (signal.entry === "ENTRY FADE RISK" && !signal.fadeDirection ? "No edge" : signal.action);
+        state.entry.textContent = compactStateText37(displayLabel,thesis ? thesis.confidence : signal.confidence,displayAction);
+        state.entry.removeAttribute("title");
+      }
+      if(state.exit){
+        state.exit.dataset.tone = pillTone37(signal.exit);
+        state.exit.textContent = exitDisplayText37(signal.exit);
+        state.exit.removeAttribute("title");
+      }
+      updateManagementTooltip37(signal);
+      if(state.detailsBody){
+        renderSignalDetailsReport37(signalDetailsReport37(signal,thesis,entryQuality));
+        if(state.detailsTitle) state.detailsTitle.textContent = `${state.direction} · ${horizonLabel37(state.horizon)} details`;
+        positionToolbarSignalDetails37();
+      }
+      state.lastRenderAt = Date.now();
+    }finally{
+      state.activeSnapshot = null;
     }
-    if(state.exit){
-      state.exit.dataset.tone = pillTone37(signal.exit);
-      state.exit.textContent = exitDisplayText37(signal.exit);
-      state.exit.removeAttribute("title");
-    }
-    if(state.detailsBody){
-      state.detailsBody.textContent = tooltipText37(signal,thesis);
-      if(state.detailsTitle) state.detailsTitle.textContent = `${state.direction} · ${horizonLabel37(state.horizon)} details`;
-      positionToolbarSignalDetails37();
-    }
-    state.lastRenderAt = Date.now();
   }
   function scheduleToolbarSignalRefresh37(immediate){
     const run = () => {
@@ -5542,6 +7165,18 @@ const marketDataHub = (() => {
       return result;
     };
   }
+  window.PRESSURE_SIGNAL_DIAGNOSTICS = () => ({
+    module:MODULE,
+    horizon:state.horizon,
+    direction:state.direction,
+    snapshot:state.marketSnapshot ? {
+      version:state.marketSnapshot.version,
+      createdAt:state.marketSnapshot.createdAt,
+      symbol:state.marketSnapshot.symbol,
+      managementInvariant:state.marketSnapshot.managementValidation && state.marketSnapshot.managementValidation.valid,
+      managementFingerprint:managementFingerprint37(state.marketSnapshot.signal && state.marketSnapshot.signal.management)
+    } : null
+  });
 })();
 
 (() => {
@@ -23616,8 +25251,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   const fmtBigResult = value => {
     const n = num(value);
     if(n == null) return "-";
-    const abs = "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-    return n < 0 ? "(" + abs + ")" : "+" + abs;
+    const rounded = Math.round(n);
+    const sign = rounded > 0 ? "+" : rounded < 0 ? "-" : "";
+    return sign + "$" + Math.abs(rounded).toLocaleString("en-US",{maximumFractionDigits:0});
   };
   const dayText = ms => {
     const dt = new Date(ms);
@@ -23637,6 +25273,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     .replace(/&/g,"&amp;")
     .replace(/</g,"&lt;")
     .replace(/>/g,"&gt;");
+  const wfAttr = value => wfEscape(value)
+    .replace(/"/g,"&quot;")
+    .replace(/'/g,"&#39;");
 
   let visible = false;
   let hoverTradeIndex = null;
@@ -24007,21 +25646,139 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       if(visible) render();
     });
   }
+  const WF_DIRECTION_FONT_MAX_PX = 10;
+  const WF_DIRECTION_FONT_MIN_PX = 6;
+  const WF_RESULT_FONT_MAX_PX = 24;
+  const WF_RESULT_FONT_MIN_PX = 11;
+  let wfMeasureCanvas = null;
+  function wfRenderedTextWidth(node){
+    if(!node) return 0;
+    try{
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const width = range.getBoundingClientRect().width;
+      if(typeof range.detach === "function") range.detach();
+      if(Number.isFinite(width) && width > 0) return width;
+    }catch(_e){}
+    try{
+      wfMeasureCanvas = wfMeasureCanvas || document.createElement("canvas");
+      const context = wfMeasureCanvas.getContext("2d");
+      const style = window.getComputedStyle(node);
+      context.font = `${style.fontStyle} ${style.fontVariant} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const text = String(node.textContent || "");
+      const letterSpacing = Number.parseFloat(style.letterSpacing) || 0;
+      return context.measureText(text).width + Math.max(0,text.length-1) * letterSpacing;
+    }catch(_e){
+      return node.scrollWidth || 0;
+    }
+  }
+  function wfUsableInnerWidth(node){
+    if(!node) return 0;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return Math.max(0,rect.width
+      - (Number.parseFloat(style.borderLeftWidth) || 0)
+      - (Number.parseFloat(style.borderRightWidth) || 0)
+      - (Number.parseFloat(style.paddingLeft) || 0)
+      - (Number.parseFloat(style.paddingRight) || 0));
+  }
+  function fitWfDirectionLabels(chart){
+    if(!chart) return;
+    chart.querySelectorAll(".wf-bar-col").forEach(column => {
+      const bar = column.querySelector(".wf-bar");
+      const label = column.querySelector(".wf-bar-dir");
+      if(!bar || !label) return;
+      label.hidden = false;
+      label.removeAttribute("aria-hidden");
+      label.style.fontSize = `${WF_DIRECTION_FONT_MAX_PX}px`;
+      const usableWidth = wfUsableInnerWidth(bar);
+      const targetWidth = usableWidth * 0.86;
+      let renderedWidth = wfRenderedTextWidth(label);
+      if(!(targetWidth > 0)){
+        label.hidden = true;
+        label.setAttribute("aria-hidden","true");
+        return;
+      }
+      if(!(renderedWidth > 0)) return;
+      if(renderedWidth > targetWidth){
+        let fontSize = Math.min(WF_DIRECTION_FONT_MAX_PX,WF_DIRECTION_FONT_MAX_PX * targetWidth / renderedWidth);
+        if(fontSize < WF_DIRECTION_FONT_MIN_PX){
+          label.hidden = true;
+          label.setAttribute("aria-hidden","true");
+          return;
+        }
+        fontSize = Math.floor(fontSize * 4) / 4;
+        label.style.fontSize = `${fontSize}px`;
+        renderedWidth = wfRenderedTextWidth(label);
+        while(fontSize > WF_DIRECTION_FONT_MIN_PX && renderedWidth > targetWidth){
+          fontSize = Math.max(WF_DIRECTION_FONT_MIN_PX,fontSize-0.25);
+          label.style.fontSize = `${fontSize}px`;
+          renderedWidth = wfRenderedTextWidth(label);
+        }
+        if(renderedWidth > targetWidth + 0.25){
+          label.hidden = true;
+          label.setAttribute("aria-hidden","true");
+        }
+      }
+    });
+  }
+  function wfCompactMoney(value){
+    const n = num(value);
+    if(n == null) return "-";
+    const magnitude = Math.abs(n);
+    if(magnitude < 1000) return money(n);
+    const units = [[1e12,"T"],[1e9,"B"],[1e6,"M"],[1e3,"K"]];
+    const unit = units.find(item => magnitude >= item[0]) || units[units.length-1];
+    const scaled = magnitude / unit[0];
+    const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+    const text = scaled.toFixed(decimals).replace(/\.0+$/g,"").replace(/(\.\d*?)0+$/g,"$1");
+    return `${n > 0 ? "+" : n < 0 ? "-" : ""}$${text}${unit[1]}`;
+  }
+  function fitWfResultValues(result){
+    if(!result) return;
+    result.querySelectorAll(".wf-result-value").forEach(valueNode => {
+      const exactText = String(valueNode.dataset.exactText || valueNode.textContent || "");
+      const compactText = String(valueNode.dataset.compactText || exactText);
+      const metric = valueNode.closest(".wf-result-metric") || result;
+      const targetWidth = wfUsableInnerWidth(metric) - 2;
+      valueNode.textContent = exactText;
+      valueNode.style.fontSize = `${WF_RESULT_FONT_MAX_PX}px`;
+      valueNode.classList.remove("is-compact");
+      if(!(targetWidth > 0)) return;
+      let renderedWidth = wfRenderedTextWidth(valueNode);
+      if(renderedWidth <= targetWidth) return;
+      let fontSize = Math.max(WF_RESULT_FONT_MIN_PX,Math.min(WF_RESULT_FONT_MAX_PX,WF_RESULT_FONT_MAX_PX * targetWidth / renderedWidth));
+      fontSize = Math.floor(fontSize * 2) / 2;
+      valueNode.style.fontSize = `${fontSize}px`;
+      renderedWidth = wfRenderedTextWidth(valueNode);
+      while(fontSize > WF_RESULT_FONT_MIN_PX && renderedWidth > targetWidth){
+        fontSize = Math.max(WF_RESULT_FONT_MIN_PX,fontSize-0.5);
+        valueNode.style.fontSize = `${fontSize}px`;
+        renderedWidth = wfRenderedTextWidth(valueNode);
+      }
+      if(renderedWidth <= targetWidth) return;
+      valueNode.textContent = compactText;
+      valueNode.classList.add("is-compact");
+      valueNode.style.fontSize = `${WF_RESULT_FONT_MAX_PX}px`;
+      renderedWidth = wfRenderedTextWidth(valueNode);
+      fontSize = renderedWidth > targetWidth
+        ? Math.max(WF_RESULT_FONT_MIN_PX,Math.floor((WF_RESULT_FONT_MAX_PX * targetWidth / renderedWidth) * 2) / 2)
+        : WF_RESULT_FONT_MAX_PX;
+      valueNode.style.fontSize = `${fontSize}px`;
+    });
+  }
   function updateWfSideWidth(win,result){
     if(!win || !result) return;
-    const labelNode = result.querySelector(".wf-result-label");
-    const valueNode = result.querySelector(".wf-result-value");
-    if(!valueNode) return;
-    const valueText = String(valueNode.textContent || "");
-    const labelText = String(labelNode && labelNode.textContent || "");
-    const nextKey = valueText + "|" + labelText;
+    const labelNodes = Array.from(result.querySelectorAll(".wf-result-label"));
+    const valueNodes = Array.from(result.querySelectorAll(".wf-result-value"));
+    if(!valueNodes.length) return;
+    const nextKey = valueNodes.map(node => node.dataset.exactText || node.textContent || "").join("|")
+      + "|" + labelNodes.map(node => node.textContent || "").join("|")
+      + "|" + Math.round(win.clientWidth || 0);
     if(nextKey === wfSyncState.sideWidthKey && wfSyncState.sideWidthPx > 0) return;
-    const measured = Math.max(
-      116,
-      Math.ceil((labelNode ? labelNode.scrollWidth : 0) + 16),
-      Math.ceil(valueNode.scrollWidth + 20)
-    );
-    const nextWidth = Math.max(116,measured);
+    const labelWidth = labelNodes.reduce((width,node) => Math.max(width,node.scrollWidth || 0),0);
+    const maximum = Math.max(96,Math.floor((win.clientWidth || 520) * 0.30));
+    const nextWidth = Math.min(maximum,Math.max(116,Math.ceil(labelWidth + 16)));
     const changed = Math.abs(nextWidth - wfSyncState.sideWidthPx) >= 2;
     wfSyncState.sideWidthKey = nextKey;
     wfSyncState.sideWidthPx = nextWidth;
@@ -24089,12 +25846,19 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function wfWatermarks(trades){
     const rows = Array.isArray(trades) ? trades : [];
-    let high = null;
+    let high = {index:null,value:0};
     rows.forEach((trade,index) => {
       const top = Math.max(num(trade && trade.start) || 0,num(trade && trade.end) || 0);
-      if(!high || top > high.value) high = {index,value:top};
+      if(top > high.value) high = {index,value:top};
     });
     return {high};
+  }
+  function wfHwmMetrics(watermarks,currentDisplayedNet){
+    const peak = Math.max(0,num(watermarks && watermarks.high && watermarks.high.value) || 0);
+    const current = num(currentDisplayedNet) || 0;
+    let delta = current-peak;
+    if(Math.abs(delta) < 1e-9) delta = 0;
+    return {peak,current,delta};
   }
   function wfLineText(line){
     return Array.isArray(line) ? line.map(part => String(part && part.text || "")).join("") : String(line || "");
@@ -24486,6 +26250,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       ? (num(fastSummary && fastSummary.netTotal) || 0)
       : trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
     const selectedNet = selectedNetBase;
+    const watermarks = wfWatermarks(trades);
     const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
     const liveNet = num(liveTrade && liveTrade.net) || 0;
     const returnMetrics = wfReturnMetrics(selectedNet);
@@ -24500,6 +26265,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const grossLosses = losses.reduce((sum,trade) => sum + Math.abs(Math.min(0,num(trade.net) || 0)),0);
     const profitRatio = grossLosses > 0 ? grossWins / grossLosses : null;
     const headlineNet = selectedNet + liveNet;
+    const hwm = wfHwmMetrics(watermarks,headlineNet);
     const headlineGrossWins = grossWins + Math.max(0,liveNet);
     const headlineGrossLosses = grossLosses + Math.abs(Math.min(0,liveNet));
     const headlineProfitRatio = headlineGrossLosses > 0 ? headlineGrossWins / headlineGrossLosses : null;
@@ -24522,6 +26288,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     return {
       trades,
       chartTrades,
+      watermarks,
       liveTrade,
       livePreviewBars,
       wins:wins.length,
@@ -24536,6 +26303,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       profitRatio:headlineProfitRatio,
       selectedNet:headlineNet,
       closedSelectedNet:selectedNet,
+      floatingNet:liveNet,
+      hwm,
       startBalance:returnPct.startBalance || returnPct.derivedStartBalance || null,
       endBalance,
       returnPct,
@@ -24602,16 +26371,48 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(false && title && model.period){
       title.textContent = "Waterfall — From " + dayText(model.period.start) + " to " + dayText(model.period.end);
     }
-    const watermarks = wfWatermarks(model.trades);
-    const highWatermarkValue = num(watermarks && watermarks.high && watermarks.high.value);
+    const watermarks = model.watermarks;
     const netValue = num(model.selectedNet) || 0;
     const resultClass = netValue < 0
       ? "is-loss"
       : Math.abs(netValue) < 1e-12
         ? "is-neutral"
-        : (highWatermarkValue != null && netValue > 0 && netValue < highWatermarkValue ? "is-neutral" : "is-gain");
+        : "is-gain";
     if(result){
-      result.innerHTML = `<div class="wf-result-label">Net P/L</div><div class="wf-result-value ${resultClass}">${fmtBigResult(model.selectedNet)}</div>`;
+      const hwm = model.hwm;
+      const hwmClass = hwm.delta < 0 ? "is-loss" : hwm.delta > 0 ? "is-gain" : "is-neutral";
+      const netExact = fmtBigResult(model.selectedNet);
+      const netTitle = [
+        `Closed Net P/L: ${money(model.closedSelectedNet)}`,
+        `Floating P/L: ${money(model.floatingNet)}`,
+        `Current Net P/L: ${money(model.selectedNet)}`
+      ].join("\n");
+      const hwmExact = fmtBigResult(hwm.delta);
+      const hwmTitle = [
+        `Closed-trade HWM: ${money(hwm.peak)}`,
+        `Current Net P/L: ${money(hwm.current)}`,
+        `Distance from closed HWM: ${money(hwm.delta)}`
+      ].join("\n");
+      result.innerHTML = `<div class="wf-result-metric">
+          <div class="wf-result-label">Net P/L</div>
+          <div class="wf-result-value ${resultClass}" data-result-kind="net" title="${wfAttr(netTitle)}">${wfEscape(netExact)}</div>
+        </div>
+        <div class="wf-result-separator" aria-hidden="true"></div>
+        <div class="wf-result-metric">
+          <div class="wf-result-label">HWM Δ</div>
+          <div class="wf-result-value ${hwmClass}" data-result-kind="hwm" title="${wfAttr(hwmTitle)}">${wfEscape(hwmExact)}</div>
+        </div>`;
+      const netNode = result.querySelector('[data-result-kind="net"]');
+      const hwmNode = result.querySelector('[data-result-kind="hwm"]');
+      if(netNode){
+        netNode.dataset.exactText = netExact;
+        netNode.dataset.compactText = wfCompactMoney(model.selectedNet);
+      }
+      if(hwmNode){
+        hwmNode.dataset.exactText = hwmExact;
+        hwmNode.dataset.compactText = wfCompactMoney(hwm.delta);
+      }
+      fitWfResultValues(result);
     }
     if(!model.trades.length && !model.liveTrade){
       chart.innerHTML = `<div class="wf-empty">${model.mode === "fast" ? "No closed positions in the selected period." : "No closed trades in the selected period."}</div>`;
@@ -24709,6 +26510,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
         <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}</div>
       </div>`;
+    fitWfDirectionLabels(chart);
   }
 
   function wfTooltipLines(trade){
