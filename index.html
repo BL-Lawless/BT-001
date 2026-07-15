@@ -12,6 +12,7 @@ Exact duplicate inline script/style blocks removed; final behavior patches prese
 Rollback baseline: V13_UI_V2_PATCH_20.
 -->
   <link rel="stylesheet" href="style.css"/>
+  <link rel="stylesheet" href="features/pressure-signal/pressure-signal.css"/>
   <link rel="stylesheet" href="features/grad-calculator/grad-calculator.css"/>
 </head>
 <body>
@@ -160,6 +161,11 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/shared/binanceConditionalOrderClassifier.js" defer></script>
   <script src="main.js" defer></script>
   <script src="features/smc/smc-overlay.module.js" defer></script>
+  <script src="features/pressure-signal/core/config.js" defer></script>
+  <script src="features/pressure-signal/diagnostics/reporting.js" defer></script>
+  <script src="features/pressure-signal/management/position-engine.js" defer></script>
+  <script src="features/pressure-signal/ui/windows.js" defer></script>
+  <script src="features/pressure-signal/index.js" defer></script>
   <script src="features/calculator/index.js" defer></script>
   <script src="features/grad-calculator/index.js" defer></script>
 

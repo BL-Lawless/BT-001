@@ -1,0 +1,3154 @@
+(() => {
+  "use strict";
+
+  try{
+    if(window.PRESSURE_SIGNAL && typeof window.PRESSURE_SIGNAL.destroy === "function") window.PRESSURE_SIGNAL.destroy();
+  }catch(_e){}
+  const build = window.__PRESSURE_SIGNAL_FEATURE_BUILD__ || {};
+  if(!build.config || !build.reporting || !build.createPositionEngine || !build.createWindowSystem){
+    throw new Error("Pressure Signal dependencies are not loaded");
+  }
+  const featureConfig = build.config;
+  const featureFormat = build.reporting;
+  const positionEngine = build.createPositionEngine(featureConfig,featureFormat);
+  const windowSystem = build.createWindowSystem(featureConfig,featureFormat);
+  const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
+  const STORAGE_KEY = "bt001_topbar_pressure_signal_horizon";
+  const DIRECTION_STORAGE_KEY = "bt001_topbar_pressure_signal_direction";
+  const DIRECTIONS = ["AUTO","LONG","SHORT"];
+  const ENTRY_STATES37 = [
+    "BIAS CONFIRMED","SETUP ARMED","ZONE ENGAGED","TRIGGER DEVELOPING",
+    "READY","EXPIRED","INVALIDATED"
+  ];
+  // Pressure bands are deliberately wider than a 50/50 knife edge. These are
+  // policy constants so live testing can tune them without changing the engine.
+  const PRESSURE_POLICY37 = {
+    neutralImbalance:0.025,
+    mildShare:0.58,
+    strongShare:0.62,
+    materialPrimaryShare:0.60,
+    materialTriggerShare:0.60,
+    acceleratingMomentum:0.02,
+    persistentBars:2,
+    participationWeak:0.85,
+    participationExpanding:1.05
+  };
+  const ENTRY_POLICY37 = {
+    quick:{triggerTf:"3m",primaryTf:"5m",setupTfs:["3m","5m"],triggerCandles:5,chaseAtr:1.35,zoneAtr:0.16,toleranceAtr:0.12},
+    "2_3h":{triggerTf:"5m",primaryTf:"15m",setupTfs:["5m","15m"],triggerCandles:6,chaseAtr:1.55,zoneAtr:0.18,toleranceAtr:0.14},
+    "6_8h":{triggerTf:"15m",primaryTf:"1h",setupTfs:["15m","1h"],triggerCandles:7,chaseAtr:1.75,zoneAtr:0.20,toleranceAtr:0.16}
+  };
+  const HORIZONS = [
+    {id:"quick",label:"Quick"},
+    {id:"2_3h",label:"2–3H"},
+    {id:"6_8h",label:"6–8H"}
+  ];
+  const HORIZON_ENGINE = {
+    quick:{
+      pressure:[
+        {tf:"1m",lookback:20,maSlot:1,weight:0.40,role:"micro-trigger"},
+        {tf:"3m",lookback:20,maSlot:1,weight:1.05,role:"active trigger"},
+        {tf:"5m",lookback:20,maSlot:1,weight:1.30,role:"primary direction"},
+        {tf:"15m",lookback:5,maSlot:1,weight:0.75,role:"permission filter"}
+      ],
+      eventTfs:["1m","3m","5m"],
+      structureTfs:["15m","1h"],
+      boundaryTfs:["4h","1d"],
+      structureRoles:{internal:["1m","3m"],swing:["5m","15m","1h"],major:["4h","1d"]},
+      formingWeight:0.55,
+      participationWeight:0.16
+    },
+    "2_3h":{
+      pressure:[
+        {tf:"5m",lookback:20,maSlot:1,weight:1.00,role:"active trigger"},
+        {tf:"15m",lookback:10,maSlot:2,weight:1.10,role:"primary direction"}
+      ],
+      eventTfs:["5m","15m"],
+      structureTfs:["1h"],
+      boundaryTfs:["4h","1d"],
+      structureRoles:{internal:["5m"],swing:["15m","1h"],major:["4h"],regime:["1d"]},
+      formingWeight:0.38,
+      participationWeight:0.18
+    },
+    "6_8h":{
+      pressure:[
+        {tf:"15m",lookback:20,maSlot:2,weight:1.00,role:"active development"},
+        {tf:"1h",lookback:12,maSlot:2,weight:0.85,role:"structural pressure"}
+      ],
+      eventTfs:["15m","1h"],
+      structureTfs:["4h"],
+      boundaryTfs:["1d"],
+      structureRoles:{internal:["15m"],swing:["1h","4h"],regime:["1d"]},
+      formingWeight:0.25,
+      participationWeight:0.20
+    }
+  };
+  const state = {
+    horizon:readStoredHorizon(),
+    direction:readStoredDirection(),
+    root:null,
+    directionChip:null,
+    entry:null,
+    exit:null,
+    details:null,
+    detailsBody:null,
+    detailsTitle:null,
+    lastRenderAt:0,
+    refreshTimer:null,
+    dataKey:"",
+    dataLoadPromise:null,
+    dataLoadGeneration:0,
+    dataStatus:null,
+    activeSnapshot:null,
+    marketSnapshot:null,
+    snapshotVersion:0,
+    entryTrackers:new Map(),
+    chips:new Map(),
+    initialized:false,
+    lifecycleTimer:null,
+    previousDraw:null,
+    drawWrapper:null,
+    resizeObservers:[],
+    signalSummaryVariants:null,
+    summaryFrame:null,
+    uiAbort:null,
+    lastError:null
+  };
+
+  function num37(value){
+    if(value == null || value === "") return null;
+    const out = Number(value);
+    return Number.isFinite(out) ? out : null;
+  }
+  function readStoredHorizon(){
+    try{
+      const saved = String(localStorage.getItem(STORAGE_KEY) || "").toLowerCase();
+      return HORIZONS.some(item => item.id === saved) ? saved : "quick";
+    }catch(_e){
+      return "quick";
+    }
+  }
+  function setStoredHorizon(next){
+    state.horizon = HORIZONS.some(item => item.id === next) ? next : "quick";
+    state.dataKey = "";
+    state.dataStatus = null;
+    state.marketSnapshot = null;
+    try{ localStorage.setItem(STORAGE_KEY,state.horizon); }catch(_e){}
+    scheduleToolbarSignalRefresh37(true);
+  }
+  function readStoredDirection(){
+    try{
+      const saved = String(localStorage.getItem(DIRECTION_STORAGE_KEY) || "").toUpperCase();
+      return DIRECTIONS.includes(saved) ? saved : "AUTO";
+    }catch(_e){
+      return "AUTO";
+    }
+  }
+  function setStoredDirection(next){
+    state.direction = DIRECTIONS.includes(next) ? next : "AUTO";
+    try{ localStorage.setItem(DIRECTION_STORAGE_KEY,state.direction); }catch(_e){}
+    scheduleToolbarSignalRefresh37(true);
+  }
+  function cycleStoredDirection37(){
+    const index = DIRECTIONS.indexOf(state.direction);
+    setStoredDirection(DIRECTIONS[(index + 1) % DIRECTIONS.length]);
+  }
+  function ensureToolbarSignalUi37(){
+    if(!state.uiAbort) state.uiAbort = new AbortController();
+    const lifecycleSignal = state.uiAbort.signal;
+    const topbar = document.querySelector(".topbar");
+    const toggles = topbar && topbar.querySelector(".toggles");
+    if(!topbar || !toggles) return null;
+    let root = document.getElementById("pressureSignalToolbar");
+    if(!root){
+      root = document.createElement("div");
+      root.id = "pressureSignalToolbar";
+      root.className = "pressure-signal-toolbar";
+      const fixedControls = document.createElement("div");
+      fixedControls.className = "pressure-signal-fixed-controls";
+      const flexibleCenter = document.createElement("div");
+      flexibleCenter.className = "pressure-signal-flex-center";
+      const directionChip = document.createElement("button");
+      directionChip.type = "button";
+      directionChip.id = "pressureSignalDirection";
+      directionChip.className = "pressure-signal-chip pressure-signal-direction";
+      directionChip.addEventListener("click",cycleStoredDirection37,false);
+      fixedControls.appendChild(directionChip);
+      state.directionChip = directionChip;
+      HORIZONS.forEach(item => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "pressure-signal-chip";
+        chip.textContent = item.label;
+        chip.dataset.horizon = item.id;
+        chip.addEventListener("click",() => setStoredHorizon(item.id),false);
+        state.chips.set(item.id,chip);
+        fixedControls.appendChild(chip);
+      });
+      const entry = document.createElement("span");
+      entry.id = "pressureSignalEntry";
+      entry.className = "pressure-signal-pill";
+      flexibleCenter.appendChild(entry);
+      const exit = document.createElement("span");
+      exit.id = "pressureSignalExit";
+      exit.className = "pressure-signal-pill";
+      flexibleCenter.appendChild(exit);
+      root.append(fixedControls,flexibleCenter);
+      topbar.insertBefore(root,toggles);
+      state.entry = entry;
+      state.exit = exit;
+    }
+    state.root = root;
+    const label = root.querySelector(".pressure-signal-label");
+    if(label) label.remove();
+    if(!state.entry) state.entry = document.getElementById("pressureSignalEntry");
+    if(!state.exit) state.exit = document.getElementById("pressureSignalExit");
+    if(!state.directionChip) state.directionChip = document.getElementById("pressureSignalDirection");
+    HORIZONS.forEach(item => {
+      if(!state.chips.has(item.id)){
+        const chip = root.querySelector(`[data-horizon="${item.id}"]`);
+        if(chip) state.chips.set(item.id,chip);
+      }
+    });
+    if(root.dataset.summaryResizeBound !== "true" && typeof ResizeObserver === "function"){
+      root.dataset.summaryResizeBound = "true";
+      const observer = new ResizeObserver(scheduleResponsiveSignalSummary37);
+      observer.observe(root);
+      observer.observe(toggles);
+      observer.observe(topbar);
+      state.resizeObservers.push(observer);
+    }
+    const legacyTooltip = document.getElementById("pressureSignalTooltip");
+    if(legacyTooltip) legacyTooltip.remove();
+    let details = document.getElementById("pressureSignalDetails");
+    if(!details){
+      details = document.createElement("div");
+      details.id = "pressureSignalDetails";
+      details.className = "pressure-signal-details";
+      details.setAttribute("role","dialog");
+      details.setAttribute("aria-label","Pressure signal details");
+      details.setAttribute("aria-hidden","true");
+      const header = document.createElement("div");
+      header.className = "pressure-signal-details-header";
+      const title = document.createElement("span");
+      title.className = "pressure-signal-details-title";
+      title.textContent = "Pressure details";
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "pressure-signal-details-close";
+      close.textContent = "×";
+      close.setAttribute("aria-label","Close pressure signal details");
+      const body = document.createElement("div");
+      body.className = "pressure-signal-details-body";
+      header.appendChild(title);
+      header.appendChild(close);
+      details.appendChild(header);
+      details.appendChild(body);
+      document.body.appendChild(details);
+    }
+    state.details = details;
+    state.detailsBody = details.querySelector(".pressure-signal-details-body");
+    state.detailsTitle = details.querySelector(".pressure-signal-details-title");
+    root.removeAttribute("aria-describedby");
+    if(state.entry){
+      state.entry.setAttribute("role","button");
+      state.entry.setAttribute("tabindex","0");
+      state.entry.setAttribute("aria-haspopup","dialog");
+      state.entry.setAttribute("aria-controls",details.id);
+      state.entry.setAttribute("aria-expanded",details.classList.contains("is-open") ? "true" : "false");
+    }
+    if(state.entry && state.entry.dataset.detailsBound !== "true"){
+      state.entry.dataset.detailsBound = "true";
+      state.entry.addEventListener("click",toggleToolbarSignalDetails37,false);
+      state.entry.addEventListener("keydown",event => {
+        if(event.key === "Enter" || event.key === " ") toggleToolbarSignalDetails37(event);
+      },false);
+      const close = details.querySelector(".pressure-signal-details-close");
+      if(close) close.addEventListener("click",event => {
+        event.stopPropagation();
+        hideToolbarSignalDetails37();
+        state.entry.focus();
+      },false);
+      details.addEventListener("click",event => event.stopPropagation(),false);
+      document.addEventListener("keydown",event => {
+        if(event.key === "Escape" && state.details && state.details.classList.contains("is-open")){
+          hideToolbarSignalDetails37();
+          state.entry.focus();
+        }
+      },{signal:lifecycleSignal});
+    }
+    if(state.exit){
+      state.exit.setAttribute("role","button");
+      state.exit.setAttribute("tabindex","0");
+      state.exit.setAttribute("aria-expanded","false");
+    }
+    const oldTip = document.getElementById("pressureSignalManagementTip");
+    if(oldTip) oldTip.remove();
+    windowSystem.bindToolbar();
+    return root;
+  }
+  function horizonEngine37(horizonId=state.horizon){
+    return HORIZON_ENGINE[horizonId] || HORIZON_ENGINE.quick;
+  }
+  function signalCanonicalSlots37(){
+    try{
+      const provider = window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function"
+        ? window.MA_FEATURE.getCanonicalMASlots
+        : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+      const slots = provider ? provider() : null;
+      if(Array.isArray(slots) && slots.length === 5){
+        return slots.map((slot,index) => ({slotId:`MA${index + 1}`,period:Math.max(1,Math.round(Number(slot && slot.period) || [9,21,55,100,200][index]))}));
+      }
+    }catch(_e){}
+    return [9,21,55,100,200].map((period,index) => ({slotId:`MA${index + 1}`,period}));
+  }
+  function signalDataPlan37(horizonId=state.horizon){
+    const engine = horizonEngine37(horizonId);
+    const slots = signalCanonicalSlots37();
+    const maxPeriod = Math.max(...slots.map(slot => Number(slot.period) || 0),200);
+    const pressureByTf = new Map(engine.pressure.map(item => [item.tf,item]));
+    const roles = new Map();
+    engine.pressure.forEach(item => roles.set(item.tf,[`${item.tf} pressure history`]));
+    engine.eventTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} MA-event history`]));
+    engine.structureTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} canonical SMC structure`]));
+    engine.boundaryTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} canonical MA boundaries`]));
+    const timeframes = [...new Set([...engine.pressure.map(item => item.tf),...engine.eventTfs,...engine.structureTfs,...engine.boundaryTfs])];
+    const items = timeframes.map(tf => {
+      const pressure = pressureByTf.get(tf);
+      const lookbackDepth = pressure ? pressure.lookback * 3 : 0;
+      const fullSessionDepth = typeof ivSec === "function" ? Math.ceil(172800 / Math.max(1,ivSec(tf))) + 20 : 0;
+      const historyTarget = Math.max(320,maxPeriod + 80,lookbackDepth,fullSessionDepth,120);
+      return {tf,historyTarget,roles:roles.get(tf) || [`${tf} market history`]};
+    });
+    return {horizonId,engine,slots,items,timeframes};
+  }
+  function signalDataAge37(tf,rows){
+    const list = Array.isArray(rows) ? rows : [];
+    const latest = list.length ? list[list.length - 1] : null;
+    if(!latest) return Infinity;
+    const activityMs = latest.final === false
+      ? Number(latest.openTime || Number(latest.time) * 1000)
+      : Number(latest.closeTime || (Number(latest.time) + (typeof ivSec === "function" ? ivSec(tf) : 0)) * 1000);
+    return Number.isFinite(activityMs) ? Math.max(0,(typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now()) - activityMs) : Infinity;
+  }
+  function inspectSignalData37(plan,hub){
+    if(!hub) return {status:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"shared market-data hub unavailable"}))};
+    const items = plan.items.map(item => {
+      const closed = typeof hub.getClosedBuffer === "function" ? hub.getClosedBuffer(item.tf) || [] : [];
+      const chart = typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : closed;
+      const count = Array.isArray(closed) ? closed.length : 0;
+      const ageMs = signalDataAge37(item.tf,chart);
+      const staleAfterMs = Math.max(90000,(typeof ivSec === "function" ? ivSec(item.tf) : 60) * 3000);
+      const tail = (Array.isArray(closed) ? closed : []).slice(-Math.min(count,item.historyTarget));
+      const step = typeof ivSec === "function" ? ivSec(item.tf) : 0;
+      const continuous = tail.length > 1 && tail.every((row,index) => index === 0 || Number(row.time)-Number(tail[index-1].time) === step);
+      const status = count < item.historyTarget || !continuous
+        ? (state.dataLoadPromise ? "loading" : "insufficient")
+        : (ageMs > staleAfterMs ? "stale" : "sufficient");
+      const reason = count < item.historyTarget ? `needs ${item.historyTarget} closed candles` : (!continuous ? "candle history is not continuous" : "");
+      return {...item,status,count,ageMs,continuous,reason};
+    });
+    const failed = state.dataStatus && Array.isArray(state.dataStatus.failures) ? state.dataStatus.failures : [];
+    failed.forEach(failure => {
+      const item = items.find(entry => entry.tf === failure.tf);
+      if(item && item.status !== "sufficient") Object.assign(item,{status:"failed",reason:failure.reason});
+    });
+    const statuses = new Set(items.map(item => item.status));
+    const status = statuses.has("failed") ? "failed"
+      : statuses.has("loading") ? "loading"
+        : statuses.has("insufficient") ? "insufficient"
+          : statuses.has("stale") ? "stale"
+            : "sufficient";
+    return {status,items,checkedAt:Date.now()};
+  }
+  function ensureSignalData37(horizonId=state.horizon){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const plan = signalDataPlan37(horizonId);
+    const symbol = String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase();
+    const key = `${symbol}|${horizonId}|${plan.slots.map(slot => slot.period).join("-")}`;
+    if(hub && typeof hub.setTimeframeRequirements === "function") hub.setTimeframeRequirements(MODULE,plan.items.map(item => ({tf:item.tf,count:item.historyTarget})));
+    if(state.dataKey !== key){
+      state.dataKey = key;
+      state.dataStatus = null;
+      state.dataLoadGeneration += 1;
+      state.marketSnapshot = null;
+      state.entryTrackers.clear();
+    }
+    let health = inspectSignalData37(plan,hub);
+    const retryFailed = state.dataStatus && state.dataStatus.failedAt && Date.now()-state.dataStatus.failedAt >= 30000;
+    const needsLoad = health.items.filter(item => item.status === "insufficient" || item.status === "unavailable" || (item.status === "failed" && retryFailed));
+    if(hub && needsLoad.length && !state.dataLoadPromise && typeof hub.ensureTimeframeBuffer === "function"){
+      const generation = state.dataLoadGeneration;
+      state.dataLoadPromise = Promise.all(needsLoad.map(item =>
+        hub.ensureTimeframeBuffer(item.tf,item.historyTarget)
+          .then(() => ({tf:item.tf,ok:true}))
+          .catch(error => ({tf:item.tf,ok:false,reason:error && error.message ? error.message : String(error)}))
+      )).then(results => {
+        if(generation !== state.dataLoadGeneration) return;
+        state.dataStatus = {failures:results.filter(result => !result.ok),failedAt:Date.now()};
+      }).finally(() => {
+        if(generation !== state.dataLoadGeneration) return;
+        state.dataLoadPromise = null;
+        scheduleToolbarSignalRefresh37(true);
+      });
+      health = inspectSignalData37(plan,hub);
+    }
+    return {plan,health};
+  }
+  function buildSignalSnapshot37(plan,health,frozen={}){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const rowsByTf = {};
+    const closedByTf = {};
+    const maByTf = {};
+    const structureByTf = {};
+    if(!hub) return {symbol:"",horizonId:plan.horizonId,createdAt:Date.now(),rowsByTf,closedByTf,maByTf,structureByTf,health};
+    plan.items.forEach(item => {
+      rowsByTf[item.tf] = (hub.getChartBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      closedByTf[item.tf] = (hub.getClosedBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      maByTf[item.tf] = {
+        live:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots}),
+        closed:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots})
+      };
+      try{
+        structureByTf[item.tf] = window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot === "function"
+          ? window.SMC_FEATURE.getStructureSnapshot(closedByTf[item.tf])
+          : null;
+      }catch(_e){
+        structureByTf[item.tf] = null;
+      }
+    });
+    return {
+      symbol:String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),
+      horizonId:plan.horizonId,
+      createdAt:Date.now(),
+      version:++state.snapshotVersion,
+      currentPrice:Object.prototype.hasOwnProperty.call(frozen,"currentPrice") ? frozen.currentPrice : (typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null),
+      position:Object.prototype.hasOwnProperty.call(frozen,"position") ? frozen.position : openPositionSignal37(),
+      rowsByTf,
+      closedByTf,
+      maByTf,
+      structureByTf,
+      health
+    };
+  }
+  function signalSnapshotSignature37(plan){
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const currentPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null;
+    const position = openPositionSignal37();
+    let smcIdentity = "smc:waiting";
+    try{
+      if(window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot === "function"){
+        const settings = typeof window.SMC_FEATURE.getSettings === "function" ? window.SMC_FEATURE.getSettings() : null;
+        smcIdentity = `smc:ready:${settings && settings.swingLength || "default"}`;
+      }
+    }catch(_e){}
+    const parts = [
+      String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),
+      plan.horizonId,
+      smcIdentity,
+      currentPrice
+    ];
+    plan.items.forEach(item => {
+      const rows = hub && typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : [];
+      const last = rows.length ? rows[rows.length - 1] : null;
+      parts.push(item.tf,rows.length,last && last.openTime,last && last.close,last && last.volume,last && last.takerBuyBase,last && last.final);
+    });
+    parts.push(
+      position && position.side,
+      position && position.qty,
+      position && position.price,
+      position && position.margin,
+      position && position.leverage,
+      position && position.realizedPnl,
+      position && position.unrealizedPnl,
+      position && position.chainId
+    );
+    return {signature:parts.join("|"),currentPrice,position};
+  }
+  function coherentSignalSnapshot37(plan,health){
+    const frozen = signalSnapshotSignature37(plan);
+    if(state.marketSnapshot && state.marketSnapshot.signature === frozen.signature) return state.marketSnapshot;
+    const snapshot = buildSignalSnapshot37(plan,health,frozen);
+    snapshot.signature = frozen.signature;
+    state.marketSnapshot = snapshot;
+    return snapshot;
+  }
+  function signalRows37(tf){
+    try{
+      if(state.activeSnapshot && Array.isArray(state.activeSnapshot.rowsByTf && state.activeSnapshot.rowsByTf[tf])){
+        return state.activeSnapshot.rowsByTf[tf].map(row => ({...row}));
+      }
+      const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+      let rows = [];
+      if(hub && typeof hub.getChartBuffer === "function") rows = hub.getChartBuffer(tf) || [];
+      if((!Array.isArray(rows) || !rows.length) && hub && typeof hub.getClosedBuffer === "function") rows = hub.getClosedBuffer(tf) || [];
+      const deduped = new Map();
+      (Array.isArray(rows) ? rows : []).forEach(row => {
+        const normalized = normalizeSignalRow37(row,tf);
+        if(normalized) deduped.set(normalized.time,normalized);
+      });
+      return Array.from(deduped.values()).sort((a,b) => a.time - b.time);
+    }catch(_e){
+      return [];
+    }
+  }
+  function normalizeSignalRow37(row,tf){
+    if(!row) return null;
+    const openTimeMs = Number.isFinite(Number(row.openTime))
+      ? Number(row.openTime)
+      : (Number.isFinite(Number(row.time)) ? Number(row.time) * 1000 : NaN);
+    const closeTimeMs = Number.isFinite(Number(row.closeTime))
+      ? Number(row.closeTime)
+      : (Number.isFinite(openTimeMs) && typeof ivSec === "function" ? openTimeMs + ivSec(tf) * 1000 - 1 : NaN);
+    const out = {
+      time:Number.isFinite(Number(row.time)) ? Number(row.time) : (Number.isFinite(openTimeMs) ? Math.floor(openTimeMs / 1000) : NaN),
+      openTime:openTimeMs,
+      closeTime:closeTimeMs,
+      open:num37(row.open),
+      high:num37(row.high),
+      low:num37(row.low),
+      close:num37(row.close),
+      volume:num37(row.volume ?? row.baseVolume),
+      takerBuyBase:num37(row.takerBuyBase),
+      final:row.final === true
+    };
+    return Number.isFinite(out.time) && out.open != null && out.high != null && out.low != null && out.close != null ? out : null;
+  }
+  function validSignalRow37(row){
+    if(!row) return false;
+    const volume = num37(row.volume);
+    const takerBuy = num37(row.takerBuyBase);
+    if(!(volume > 0) || takerBuy == null) return false;
+    return takerBuy >= 0 && takerBuy <= volume;
+  }
+  function aggregateSignalRows37(rows,tf){
+    const source = Array.isArray(rows) ? rows : [];
+    if(!source.length || source.some(row => !validSignalRow37(row))) return null;
+    const first = source[0];
+    const last = source[source.length - 1];
+    return {
+      tf,
+      open:first.open,
+      high:Math.max(...source.map(row => Number(row.high))),
+      low:Math.min(...source.map(row => Number(row.low))),
+      close:last.close,
+      volume:source.reduce((sum,row) => sum + Number(row.volume),0),
+      takerBuyBase:source.reduce((sum,row) => sum + Number(row.takerBuyBase),0),
+      final:source.every(row => row.final === true)
+    };
+  }
+  function latestSeriesValue37(series){
+    const rows = Array.isArray(series) ? series : [];
+    const last = rows.length ? rows[rows.length - 1] : null;
+    return num37(last && last.value);
+  }
+  function openPositionSignal37(){
+    if(state.activeSnapshot && Object.prototype.hasOwnProperty.call(state.activeSnapshot,"position")){
+      return state.activeSnapshot.position ? {...state.activeSnapshot.position} : null;
+    }
+    try{
+      const box = Array.isArray(openPositionBoxes)
+        ? openPositionBoxes.find(item => item && Math.abs(Number(item.qty) || 0) > 1e-12)
+        : null;
+      if(!box) return null;
+      const chainId = box.chainId || null;
+      const realizedPnl = typeof openLotLinks !== "undefined" && Array.isArray(openLotLinks)
+        ? openLotLinks.filter(link => {
+          const linkChain = typeof cid21 === "function" ? cid21(link) : link && (link.chainId || link.parentTradeId);
+          return chainId && linkChain === chainId;
+        }).reduce((sum,link) => sum + (num37(link && (link.netPnl ?? link.realizedPnl ?? link.binanceRealizedPnl)) || 0),0)
+        : 0;
+      return {
+        symbol:String(box.symbol || (typeof activeSymbol === "function" ? activeSymbol() : "") || "BTCUSDT"),
+        side:String(box.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG",
+        qty:num37(box.qty),
+        price:num37(box.price),
+        markPrice:num37(box.markPrice),
+        unrealizedPnl:num37(box.unrealizedPnl),
+        realizedPnl,
+        leverage:num37(box.leverage),
+        margin:typeof openBoxMargin === "function" ? num37(openBoxMargin(box)) : num37(box.positionInitialMargin ?? box.isolatedMargin ?? box.margin),
+        positionInitialMargin:num37(box.positionInitialMargin),
+        isolatedMargin:num37(box.isolatedMargin),
+        chainId,
+        time:num37(box.time)
+      };
+    }catch(_e){
+      return null;
+    }
+  }
+  function signalCurrentPrice37(fallback=null){
+    const frozen = state.activeSnapshot ? num37(state.activeSnapshot.currentPrice) : null;
+    if(frozen != null) return frozen;
+    const live = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null;
+    if(live != null) return live;
+    if(state.activeSnapshot && state.activeSnapshot.rowsByTf){
+      const latest = Object.values(state.activeSnapshot.rowsByTf).map(rows => Array.isArray(rows) && rows.length ? rows[rows.length-1] : null).filter(Boolean).sort((a,b) => Number(b.openTime || b.time)-Number(a.openTime || a.time))[0];
+      const close = num37(latest && latest.close);
+      if(close != null) return close;
+    }
+    return num37(fallback);
+  }
+  function signalStructure37(tf,scope="swing"){
+    const snapshot = state.activeSnapshot && state.activeSnapshot.structureByTf && state.activeSnapshot.structureByTf[tf];
+    return snapshot && snapshot[scope] ? snapshot[scope] : null;
+  }
+  function signalMaSnapshot37(tf,closed=false){
+    const pair = state.activeSnapshot && state.activeSnapshot.maByTf && state.activeSnapshot.maByTf[tf];
+    return pair ? (closed ? pair.closed : pair.live) : null;
+  }
+  function signalMaSlot37(tf,slotId,closed=false){
+    const snapshot = signalMaSnapshot37(tf,closed);
+    const slot = snapshot && Array.isArray(snapshot.slots) ? snapshot.slots.find(item => item.slotId === slotId) : null;
+    const value = snapshot && snapshot.valuesBySlot ? num37(snapshot.valuesBySlot[slotId]) : null;
+    const series = snapshot && snapshot.seriesBySlot && Array.isArray(snapshot.seriesBySlot[slotId]) ? snapshot.seriesBySlot[slotId] : [];
+    const latestRow = snapshot && Array.isArray(snapshot.rows) && snapshot.rows.length ? snapshot.rows[snapshot.rows.length-1] : null;
+    return {slotId,period:slot ? Number(slot.period) : null,label:slot ? `EMA${slot.period}` : slotId,value,series,reliable:!!(snapshot && snapshot.reliable),evidenceState:latestRow && latestRow.final === false ? "forming/live" : "closed-confirmed"};
+  }
+  function weightedPressureAggregate37(rows,tf,formingWeight){
+    const source = Array.isArray(rows) ? rows : [];
+    if(!source.length || source.some(row => !validSignalRow37(row))) return null;
+    const first = source[0];
+    const last = source[source.length - 1];
+    let volume = 0;
+    let takerBuyBase = 0;
+    source.forEach(row => {
+      const weight = row.final === false ? formingWeight : 1;
+      volume += Number(row.volume) * weight;
+      takerBuyBase += Number(row.takerBuyBase) * weight;
+    });
+    return {
+      tf,
+      open:first.open,
+      high:Math.max(...source.map(row => Number(row.high))),
+      low:Math.min(...source.map(row => Number(row.low))),
+      close:last.close,
+      volume,
+      takerBuyBase,
+      final:source.every(row => row.final === true),
+      formingCount:source.filter(row => row.final === false).length
+    };
+  }
+  function canonicalPivots37(tf,scope="swing"){
+    const structure = signalStructure37(tf,scope);
+    const pivots = structure && Array.isArray(structure.pivots) ? structure.pivots.filter(pivot => pivot.confirmed) : [];
+    const highs = pivots.filter(pivot => pivot.side === "high");
+    const lows = pivots.filter(pivot => pivot.side === "low");
+    return {
+      high:structure && structure.latestHigh || null,
+      low:structure && structure.latestLow || null,
+      previousHigh:highs.length > 1 ? highs[highs.length - 2] : null,
+      previousLow:lows.length > 1 ? lows[lows.length - 2] : null,
+      confirmedHighs:highs,
+      confirmedLows:lows,
+      events:structure && structure.events || [],
+      latestEvent:structure && structure.latestEvent || null,
+      trend:structure && structure.trend || 0,
+      sufficient:highs.length >= 2 && lows.length >= 2,
+      available:!!structure
+    };
+  }
+  function samplePressureSignal37(tf,lookback,maSlot=1){
+    const rows = signalRows37(tf);
+    const validRows = rows.filter(validSignalRow37);
+    const engine = horizonEngine37();
+    const slot = signalMaSlot37(tf,`MA${maSlot}`);
+    const requiredRows = Math.max(lookback * 2,Number(slot.period) || 0,2);
+    if(validRows.length < requiredRows || !slot.reliable) return {available:false,tf,lookback,reason:!slot.reliable ? "canonical MA warmup insufficient" : "pressure history insufficient"};
+    const formingWeight = engine.formingWeight;
+    const currentRows = validRows.slice(-lookback);
+    const current = weightedPressureAggregate37(currentRows,tf,formingWeight);
+    if(!current) return {available:false,tf,lookback};
+    const totalVolume = num37(current.volume);
+    const takerBuy = num37(current.takerBuyBase);
+    if(!(totalVolume > 0) || takerBuy == null || takerBuy > totalVolume) return {available:false,tf,lookback};
+    const takerSell = Math.max(0,totalVolume - takerBuy);
+    const buyPct = takerBuy / totalVolume;
+    const sellPct = takerSell / totalVolume;
+    const dominantPct = Math.max(buyPct,sellPct);
+    const rawSideSign = buyPct >= sellPct ? 1 : -1;
+    const pressureImbalance = Math.abs(buyPct-sellPct) / 2;
+    const sideSign = pressureImbalance <= PRESSURE_POLICY37.neutralImbalance ? 0 : rawSideSign;
+    const previousRows = validRows.slice(-lookback * 2,-lookback);
+    const previous = previousRows.length >= lookback ? weightedPressureAggregate37(previousRows.slice(-lookback),tf,1) : null;
+    const previousVolume = num37(previous && previous.volume);
+    const previousBuy = num37(previous && previous.takerBuyBase);
+    const previousSell = previousVolume != null && previousBuy != null ? Math.max(0,previousVolume - previousBuy) : null;
+    const previousBuyPct = previousVolume > 0 && previousBuy != null ? previousBuy / previousVolume : null;
+    const previousSellPct = previousVolume > 0 && previousSell != null ? previousSell / previousVolume : null;
+    const previousDominantPct = previousVolume > 0 && previousSell != null ? Math.max(previousBuy / previousVolume,previousSell / previousVolume) : null;
+    const previousSide = previousVolume > 0 && previousSell != null ? ((previousBuy / previousVolume) >= (previousSell / previousVolume) ? 1 : -1) : 0;
+    const pressureMomentum = previousDominantPct == null ? 0 : (rawSideSign === previousSide ? dominantPct - previousDominantPct : dominantPct - 0.5);
+    const close = num37(current.close);
+    const open = num37(current.open);
+    const high = num37(current.high);
+    const low = num37(current.low);
+    const range = high != null && low != null ? Math.max(0,high - low) : 0;
+    const body = close != null && open != null ? close - open : 0;
+    const bodyRatio = range > 0 ? Math.abs(body) / range : 0;
+    const priceFollows = sideSign > 0 ? body > 0 : body < 0;
+    const priceRefuses = sideSign !== 0 && (!priceFollows || bodyRatio <= 0.18);
+    const lastPrice = signalCurrentPrice37(close);
+    const maSlots = [1,2,3,4,5].map(index => signalMaSlot37(tf,`MA${index}`));
+    const emaValue = slot.value;
+    const pivots = canonicalPivots37(tf,"swing");
+    const recentHigh = pivots.high && pivots.high.price;
+    const recentLow = pivots.low && pivots.low.price;
+    const completedCurrent = currentRows.filter(row => row.final !== false).length;
+    const currentAverageVolume = current.volume / Math.max(1,currentRows.length - current.formingCount + current.formingCount * formingWeight);
+    const priorParticipationRows = validRows.slice(-lookback * 4,-lookback);
+    const recentAverageVolume = priorParticipationRows.length
+      ? priorParticipationRows.reduce((sum,row) => sum + Number(row.volume),0) / priorParticipationRows.length
+      : null;
+    const participationRatio = recentAverageVolume > 0 ? currentAverageVolume / recentAverageVolume : null;
+    const participationDelta = previousVolume > 0 ? totalVolume / previousVolume - 1 : null;
+    const participationFactor = participationRatio == null ? 0.85 : Math.max(0.65,Math.min(1.15,0.72 + participationRatio * 0.28));
+    const formingShare = currentRows.length ? currentRows.filter(row => row.final === false).length / currentRows.length : 0;
+    let contextSide = 0;
+    if(lastPrice != null && emaValue != null){
+      if(lastPrice > emaValue) contextSide += 1;
+      else if(lastPrice < emaValue) contextSide -= 1;
+    }
+    contextSide = contextSide > 0 ? 1 : contextSide < 0 ? -1 : 0;
+    return {
+      available:true,
+      tf,
+      lookback,
+      maSlot,
+      emaPeriod:slot.period,
+      emaLabel:slot.label,
+      sideSign,
+      rawSideSign,
+      pressureImbalance,
+      bullPct:buyPct,
+      bearPct:sellPct,
+      bullDelta:previousBuyPct == null ? null : buyPct - previousBuyPct,
+      bearDelta:previousSellPct == null ? null : sellPct - previousSellPct,
+      dominantPct,
+      pressureMomentum,
+      participationRatio,
+      participationDelta,
+      participationFactor,
+      currentAverageVolume,
+      recentAverageVolume,
+      evidenceState:formingShare > 0 ? "forming/live" : "closed-confirmed",
+      formingShare,
+      completedCurrent,
+      contextSide,
+      bodyRatio,
+      priceRefuses,
+      currentPrice:lastPrice,
+      emaValue,
+      maSlots,
+      ema9Value:maSlots[0].value,
+      ema21Value:maSlots[1].value,
+      ema55Value:maSlots[2].value,
+      ema100Value:maSlots[3].value,
+      ema200Value:maSlots[4].value,
+      ema9Label:maSlots[0].label,
+      ema21Label:maSlots[1].label,
+      ema55Label:maSlots[2].label,
+      ema100Label:maSlots[3].label,
+      ema200Label:maSlots[4].label,
+      pivots,
+      recentHigh:Number.isFinite(recentHigh) ? recentHigh : null,
+      recentLow:Number.isFinite(recentLow) ? recentLow : null
+    };
+  }
+  function maFreshness37(horizonId){
+    if(horizonId === "2_3h") return {primaryTfs:["5m","15m"],freshMax:5,validMax:8};
+    if(horizonId === "6_8h") return {primaryTfs:["15m","1h"],freshMax:5,validMax:10};
+    return {primaryTfs:["1m","3m","5m"],freshMax:3,validMax:5};
+  }
+  function maSeriesMap37(series){
+    return new Map((Array.isArray(series) ? series : []).map(point => [Number(point.time),num37(point.value)]));
+  }
+  function maEventBaseImpact37(type,fresh){
+    if(type === "rejection" || type === "bounce" || type === "failed reclaim / rejection" || type === "failed breakdown / bounce") return fresh ? 8 : 3;
+    if(type === "failed reclaim" || type === "failed breakdown") return fresh ? 7 : 2;
+    if(type === "loss" || type === "reclaim") return fresh ? 6 : 2;
+    if(type === "compression release") return fresh ? 5 : 2;
+    if(type === "compression") return fresh ? 3 : 1;
+    if(type.includes("MA1/MA2 crossover")) return fresh ? 4 : 1;
+    return fresh ? 2 : 1;
+  }
+  function detectMaEvent37(tf,freshness){
+    try{
+      const rows = signalRows37(tf);
+      if(!Array.isArray(rows) || rows.length < 3){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"data_unavailable",impact:0,reason:`${tf} MA data unavailable`} ]};
+      }
+      const maSnapshot = signalMaSnapshot37(tf,false);
+      if(!maSnapshot || !maSnapshot.reliable){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"data_unavailable",impact:0,reason:`${tf} canonical MA data unavailable`} ]};
+      }
+      const anchors = maSnapshot.slots.map(slot => ({
+        label:`EMA${slot.period}`,
+        slotId:slot.slotId,
+        period:Number(slot.period),
+        kind:"ma",
+        values:maSeriesMap37(maSnapshot.seriesBySlot[slot.slotId] || [])
+      }));
+      const hasMaValues = anchors.some(anchor => [...anchor.values.values()].filter(value => value != null).length >= 2);
+      if(!hasMaValues){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"data_unavailable",impact:0,reason:`${tf} MA data unavailable`} ]};
+      }
+      const lastIndex = rows.length - 1;
+      const candidates = [];
+      const add = (row,index,anchor,type,direction,rank) => {
+        const age = lastIndex - index;
+        const fresh = age <= freshness.freshMax;
+        const validAge = age <= freshness.validMax;
+        const potential = validAge ? maEventBaseImpact37(type,fresh) : 0;
+        candidates.push({
+          tf,
+          type,
+          direction,
+          anchor:anchor.label,
+          anchorKind:anchor.kind,
+          slotId:anchor.slotId || null,
+          period:anchor.period || null,
+          age,
+          rank,
+          potential,
+          confirmation:row.final === false ? "forming/tentative" : "closed-confirmed",
+          eventClose:num37(row.close),
+          eventHigh:num37(row.high),
+          eventLow:num37(row.low),
+          eventTime:Number(row.time),
+          anchorNow:anchor.values.get(Number(rows[lastIndex].time)),
+          eventAnchor:anchor.values.get(Number(row.time)),
+          interactionKey:`${state.activeSnapshot && state.activeSnapshot.symbol || ""}|${tf}|${anchor.label}|${Number(row.time)}`
+        });
+      };
+      const start = Math.max(1,lastIndex - Math.max(16,freshness.validMax + 8));
+      anchors.forEach(anchor => {
+        for(let index=start;index<=lastIndex;index++){
+          const row = rows[index];
+          const previous = rows[index - 1];
+          const level = anchor.values.get(Number(row.time));
+          const previousLevel = anchor.values.get(Number(previous.time));
+          if(level == null || previousLevel == null) continue;
+          const tolerance = Math.max(Math.abs(level) * 0.0004,1e-8);
+          const touched = Number(row.low) <= level + tolerance && Number(row.high) >= level - tolerance;
+          const failedReclaim = Number(previous.close) < previousLevel && Number(row.high) >= level - tolerance && Number(row.close) < level;
+          const failedBreakdown = Number(previous.close) > previousLevel && Number(row.low) <= level + tolerance && Number(row.close) > level;
+          if(failedReclaim) add(row,index,anchor,"failed reclaim / rejection",-1,5);
+          else if(failedBreakdown) add(row,index,anchor,"failed breakdown / bounce",1,5);
+          else if(touched && Number(row.close) < level && Number(row.close) <= Number(row.open)) add(row,index,anchor,"rejection",-1,5);
+          else if(touched && Number(row.close) > level && Number(row.close) >= Number(row.open)) add(row,index,anchor,"bounce",1,5);
+          else if(Number(previous.close) >= previousLevel && Number(row.close) < level) add(row,index,anchor,"loss",-1,4);
+          else if(Number(previous.close) <= previousLevel && Number(row.close) > level) add(row,index,anchor,"reclaim",1,4);
+        }
+      });
+      const crossPairs = [[anchors[0],anchors[1],"MA1/MA2 crossover",3],[anchors[1],anchors[2],"MA2/MA3 crossover",2],[anchors[2],anchors[3],"slow-MA stack change",1],[anchors[3],anchors[4],"slow-MA stack change",1]].filter(pair => pair[0] && pair[1]);
+      crossPairs.forEach(([fastAnchor,slowAnchor,type,rank]) => {
+        for(let index=start;index<=lastIndex;index++){
+          const row = rows[index];
+          const previous = rows[index - 1];
+          const fast = fastAnchor.values.get(Number(row.time));
+          const slow = slowAnchor.values.get(Number(row.time));
+          const previousFast = fastAnchor.values.get(Number(previous.time));
+          const previousSlow = slowAnchor.values.get(Number(previous.time));
+          if(fast == null || slow == null || previousFast == null || previousSlow == null) continue;
+          const crossAnchor = {label:`${fastAnchor.label}/${slowAnchor.label}`,kind:"cross",values:fastAnchor.values,fastAnchor,slowAnchor};
+          if(previousFast <= previousSlow && fast > slow) add(row,index,crossAnchor,`${type} bullish`,1,rank);
+          else if(previousFast >= previousSlow && fast < slow) add(row,index,crossAnchor,`${type} bearish`,-1,rank);
+        }
+      });
+      const fastAnchor = anchors[0];
+      const mediumAnchor = anchors[1];
+      if(fastAnchor && mediumAnchor){
+        for(let index=start;index<=lastIndex;index++){
+          const row = rows[index];
+          const previous = rows[index - 1];
+          const fast = fastAnchor.values.get(Number(row.time));
+          const medium = mediumAnchor.values.get(Number(row.time));
+          const previousFast = fastAnchor.values.get(Number(previous.time));
+          const previousMedium = mediumAnchor.values.get(Number(previous.time));
+          if([fast,medium,previousFast,previousMedium].some(value => value == null)) continue;
+          const gap = Math.abs(fast-medium) / Math.max(Math.abs(Number(row.close)),1);
+          const previousGap = Math.abs(previousFast-previousMedium) / Math.max(Math.abs(Number(previous.close)),1);
+          const compressionAnchor = {label:`${fastAnchor.label}/${mediumAnchor.label}`,kind:"compression",values:fastAnchor.values};
+          if(gap <= 0.0008 && previousGap > 0.0008) add(row,index,compressionAnchor,"compression",0,3);
+          else if(gap >= 0.0015 && previousGap <= 0.0008) add(row,index,compressionAnchor,"compression release",fast > medium ? 1 : -1,4);
+        }
+      }
+      if(!candidates.length){
+        return {tf,events:[{tf,state:"unknown",diagnostic:"no_event",impact:0,reason:`No fresh ${tf} MA event detected`} ]};
+      }
+      candidates.sort((a,b) => (b.potential - a.potential) || (b.rank - a.rank) || (a.age - b.age));
+      const latest = rows[lastIndex];
+      const currentPrice = signalCurrentPrice37(latest.close);
+      const selected = [];
+      const seen = new Set();
+      for(const event of candidates){
+        const key = event.interactionKey;
+        if(seen.has(key)) continue;
+        seen.add(key);
+        const anchor = anchors.find(item => item.label === event.anchor) || null;
+        const priceOnValidSide = event.direction === 0 ? true : (currentPrice != null && event.anchorNow != null
+          ? (event.direction > 0 ? currentPrice >= event.anchorNow : currentPrice <= event.anchorNow)
+          : null);
+        const closedRows = rows.filter(row => row.final !== false).slice(-2);
+        const confirmedAgainst = event.direction !== 0 && anchor && closedRows.length >= 2 && closedRows.every(row => {
+          const level = anchor.values.get(Number(row.time));
+          return level != null && (event.direction > 0 ? Number(row.close) < level : Number(row.close) > level);
+        });
+        const afterEvent = rows.slice(Math.max(0,lastIndex - event.age + 1));
+        const structureIntact = event.direction > 0
+          ? (event.eventLow == null || !afterEvent.length || Math.min(...afterEvent.map(row => Number(row.low))) >= event.eventLow * 0.9985)
+          : event.direction < 0
+            ? (event.eventHigh == null || !afterEvent.length || Math.max(...afterEvent.map(row => Number(row.high))) <= event.eventHigh * 1.0015)
+            : true;
+        const priceRefuses = event.direction !== 0 && event.age >= 2 && currentPrice != null && event.eventClose != null
+          ? (event.direction > 0 ? currentPrice <= event.eventClose : currentPrice >= event.eventClose)
+          : false;
+        let crossOrderValid = null;
+        if(event.anchorKind === "cross"){
+          const pair = crossPairs.find(([fast,slow]) => `${fast.label}/${slow.label}` === event.anchor);
+          if(pair){
+            const fastNow = pair[0].values.get(Number(latest.time));
+            const slowNow = pair[1].values.get(Number(latest.time));
+            crossOrderValid = fastNow != null && slowNow != null ? (event.direction > 0 ? fastNow > slowNow : fastNow < slowNow) : null;
+            event.fastNow = fastNow;
+            event.slowNow = slowNow;
+            event.fastLabel = pair[0].label;
+            event.slowLabel = pair[1].label;
+          }
+        }else if(event.anchorKind === "compression" && fastAnchor && mediumAnchor){
+          event.fastNow = fastAnchor.values.get(Number(latest.time));
+          event.slowNow = mediumAnchor.values.get(Number(latest.time));
+          event.fastLabel = fastAnchor.label;
+          event.slowLabel = mediumAnchor.label;
+        }
+        selected.push({...event,currentPrice,priceOnValidSide,confirmedAgainst,heldBeyondAnchor:confirmedAgainst,structureIntact,priceRefuses,crossOrderValid});
+        if(selected.length >= 3) break;
+      }
+      selected.forEach(event => {
+        event.rawCandidateCount = candidates.length;
+        event.deduplicatedCount = Math.max(0,candidates.filter(candidate => candidate.interactionKey === event.interactionKey).length - 1);
+      });
+      return {tf,events:selected,rawCandidateCount:candidates.length,canonicalEventCount:selected.length};
+    }catch(_e){
+      return {tf,events:[{tf,state:"unknown",diagnostic:"scan_failed",impact:0,reason:`${tf} MA event scan failed`} ]};
+    }
+  }
+  function evaluateMaEvents37(horizonId,pressureSamples,signalDirection){
+    const freshness = maFreshness37(horizonId);
+    const samples = Array.isArray(pressureSamples) ? pressureSamples : [];
+    const availablePressure = samples.filter(sample => sample.available);
+    const scans = freshness.primaryTfs.map(tf => detectMaEvent37(tf,freshness));
+    const rawCandidateCount = scans.reduce((sum,scan) => sum + Number(scan && scan.rawCandidateCount || 0),0);
+    const events = scans.flatMap(scan => Array.isArray(scan && scan.events) ? scan.events : []).map(event => {
+      const tf = event.tf;
+      if(event.state === "unknown") return event;
+      if(event.priceOnValidSide == null){
+        return {...event,state:"unknown",diagnostic:"data_unavailable",impact:0,appliedImpact:0,reason:`${tf} ${event.anchor} live value unavailable`};
+      }
+      const matchingPressure = availablePressure.filter(sample => sample.tf === tf || (tf === "1h" && sample.tf === "15m"));
+      const sharplyFading = matchingPressure.some(sample => {
+        const delta = event.direction > 0 ? sample.bullDelta : sample.bearDelta;
+        return delta != null && delta < -0.03;
+      });
+      const opposingPressureReversal = event.direction !== 0 && event.priceOnValidSide === false && matchingPressure.some(sample =>
+        sample.sideSign === -event.direction && sample.dominantPct >= 0.62 && sample.pressureMomentum >= 0.03
+      );
+      const oppositeStructure = ["internal","swing"].map(scope => signalStructure37(tf,scope)).filter(Boolean).flatMap(structure => structure.events || []).filter(structureEvent =>
+        (structureEvent.direction === "bullish" ? 1 : -1) === -event.direction && Number(structureEvent.breakTime) >= Number(event.eventTime)
+      ).sort((a,b) => Number(b.breakTime)-Number(a.breakTime))[0] || null;
+      let invalidationReason = "";
+      if(event.confirmedAgainst) invalidationReason = event.direction > 0 ? "Level lost and held below" : "Level reclaimed and held";
+      else if(event.crossOrderValid === false) invalidationReason = "Canonical MA ordering reversed";
+      else if(oppositeStructure) invalidationReason = `Confirmed opposite ${String(oppositeStructure.text || oppositeStructure.structureType).toUpperCase()} on ${tf}`;
+      else if(!event.structureIntact) invalidationReason = "Defined failure to follow through; post-event structure broke";
+      else if(opposingPressureReversal) invalidationReason = "Defined opposing-pressure reversal confirmed beyond the level";
+      const invalidated = !!invalidationReason;
+      let stateName = "stale";
+      let stateReason = "";
+      if(event.age > freshness.validMax){ stateName = "stale"; stateReason = `Freshness window expired after ${freshness.validMax} candles`; }
+      else if(invalidated) stateName = "invalidated";
+      else if(event.age <= freshness.freshMax && !sharplyFading) stateName = "fresh";
+      else if(event.age <= freshness.validMax) stateName = "aging";
+      if(stateName === "aging") stateReason = sharplyFading ? "Supporting pressure is fading" : "Event is aging within its validity window";
+      if(stateName === "invalidated") stateReason = invalidationReason;
+      let baseImpact = 0;
+      if(stateName === "fresh") baseImpact = maEventBaseImpact37(event.type,true);
+      else if(stateName === "aging") baseImpact = maEventBaseImpact37(event.type,false);
+      else if(stateName === "invalidated") baseImpact = event.rank <= 2 ? -5 : -8;
+      const timeframeFactor = horizonId === "quick" && tf === "1m" ? 0.55 : 1;
+      const confirmationFactor = event.confirmation === "forming/tentative" ? 0.45 : 1;
+      const timeframeAdjustedImpact = Math.round(baseImpact * timeframeFactor);
+      const rawImpact = Math.round(timeframeAdjustedImpact * confirmationFactor);
+      let appliedImpact = 0;
+      if(signalDirection && event.direction !== 0){
+        if(stateName === "invalidated") appliedImpact = event.direction === signalDirection ? rawImpact : 0;
+        else if(stateName === "fresh" || stateName === "aging") appliedImpact = event.direction === signalDirection ? rawImpact : -Math.min(rawImpact,6);
+      }
+      const rawDirectionalContribution = !signalDirection || event.direction === 0 ? 0
+        : stateName === "invalidated" ? (event.direction === signalDirection ? baseImpact : 0)
+          : event.direction === signalDirection ? baseImpact : -Math.min(baseImpact,6);
+      return {...event,state:stateName,stateReason,invalidationReason,sharplyFading,opposingPressureReversal,oppositeStructure,baseImpact,impact:rawImpact,appliedImpact,rawDirectionalContribution,timeframeAdjustedImpact,timeframeFactor,confirmationFactor};
+    });
+    const confluence = [-1,1].map(direction => {
+      const aligned = events.filter(event => event.direction === direction && event.state === "fresh");
+      const distinctTfs = [...new Set(aligned.map(event => event.tf))];
+      if(distinctTfs.length < 2) return null;
+      const adjustment = signalDirection ? (signalDirection === direction ? 2 : -2) : 0;
+      return {direction,timeframes:distinctTfs,eventKeys:aligned.map(event => event.interactionKey),adjustment};
+    }).filter(Boolean);
+    const rawContribution = events.reduce((sum,event) => sum + Number(event.rawDirectionalContribution || 0),0);
+    const discountedContribution = events.reduce((sum,event) => sum + Number(event.appliedImpact || 0),0);
+    const confluenceAdjustment = confluence.reduce((sum,item) => sum + item.adjustment,0);
+    const preCap = discountedContribution + confluenceAdjustment;
+    const impact = Math.max(-12,Math.min(10,preCap));
+    const canonicalEventCount = events.filter(event => event.state !== "unknown").length;
+    const deduplicatedCount = events.reduce((sum,event) => sum + Number(event.deduplicatedCount || 0),0);
+    const omittedCandidateCount = Math.max(0,rawCandidateCount-canonicalEventCount-deduplicatedCount);
+    const audit = {
+      rawCandidateCount,
+      canonicalEventCount,
+      deduplicatedCount,
+      omittedCandidateCount,
+      deduplicationAdjustment:0,
+      rawContribution,
+      timeframeAndFormingAdjustment:discountedContribution-rawContribution,
+      confluenceAdjustment,
+      preCap,
+      capMinimum:-12,
+      capMaximum:10,
+      capAdjustment:impact-preCap,
+      appliedImpact:impact
+    };
+    return {
+      events,
+      impact,
+      confluence,
+      audit,
+      invalidatedSupport:!!signalDirection && events.some(event => event.direction === signalDirection && event.state === "invalidated"),
+      priceRefusal:!!signalDirection && events.some(event => event.direction === signalDirection && event.priceRefuses),
+      weakening:!!signalDirection && events.some(event => event.direction === signalDirection && (event.sharplyFading || event.state === "aging"))
+    };
+  }
+  function entryActionText37(entry,direction=null){
+    switch(entry){
+      case "ENTRY LONG": return "Buy pullbacks";
+      case "ENTRY SHORT": return "Sell bounces";
+      case "ENTRY ABSORPTION": return "Do not chase";
+      case "ENTRY FADE RISK": return direction === "SHORT" ? "Bearish edge weakening" : direction === "LONG" ? "Bullish edge weakening" : "No edge";
+      default: return "No edge";
+    }
+  }
+  function pillTone37(value){
+    switch(String(value || "")){
+      case "ENTRY LONG":
+      case "THESIS SUPPORTIVE":
+      case "EXIT HOLD":
+        return "green";
+      case "ENTRY SHORT":
+      case "THESIS INVALID":
+      case "EXIT EXIT":
+        return "red";
+      case "ENTRY ABSORPTION":
+      case "ENTRY FADE RISK":
+      case "THESIS ADVERSE":
+      case "EXIT TRIM":
+      case "EXIT TIGHTEN SL":
+        return "orange";
+      default:
+        return "gray";
+    }
+  }
+  function entryDisplayText37(value){
+    return String(value || "").replace(/^ENTRY\s+/,"");
+  }
+  function exitDisplayText37(value){
+    const action = String(value || "").replace(/^EXIT\s+/,"");
+    return action === "EXIT" || action === "CLOSE" ? "CLOSE" : action;
+  }
+  function horizonLabel37(horizonId){
+    const horizon = HORIZONS.find(item => item.id === horizonId);
+    return horizon ? horizon.label : HORIZONS[0].label;
+  }
+  function tooltipBasis37(sample){
+    return sample ? `${sample.tf} LB${sample.lookback}` : "Pressure data";
+  }
+  function tooltipPercent37(value){
+    const percent = num37(value) == null ? null : Number(value) * 100;
+    if(percent == null) return null;
+    const rounded = Math.round(percent * 10) / 10;
+    return `${rounded.toFixed(1)}%`;
+  }
+  function tooltipSignedPoints37(value){
+    const points = num37(value) == null ? null : Number(value) * 100;
+    if(points == null) return null;
+    const rounded = Math.round(Math.abs(points) * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)} points`;
+  }
+  function tooltipPressureLine37(sample,qualifier){
+    if(!sample || !sample.available) return `${tooltipBasis37(sample)} pressure unavailable`;
+    const bull = tooltipPercent37(sample.bullPct);
+    const bear = tooltipPercent37(sample.bearPct);
+    if(!bull || !bear) return `${tooltipBasis37(sample)} pressure values unavailable`;
+    const neutral = sample.sideSign === 0;
+    const bearish = sample.sideSign < 0;
+    const dominantLabel = bearish ? "bear" : "bull";
+    const otherLabel = bearish ? "bull" : "bear";
+    const dominantValue = bearish ? bear : bull;
+    const otherValue = bearish ? bull : bear;
+    const delta = bearish ? sample.bearDelta : sample.bullDelta;
+    const deltaText = tooltipSignedPoints37(delta);
+    const movement = deltaText && Math.abs(Number(delta)) > 0.005
+      ? `${bearish ? "Bear" : "Bull"} pressure ${Number(delta) > 0 ? "strengthening" : "weakening"} by ${deltaText}`
+      : null;
+    const participation = num37(sample.participationRatio) == null
+      ? "participation unavailable"
+      : `participation ${Math.abs(sample.participationRatio-1) < 0.005 ? "near" : sample.participationRatio > 1 ? `${Math.round((sample.participationRatio-1)*100)}% above` : `${Math.round((1-sample.participationRatio)*100)}% below`} recent average`;
+    const participationChange = num37(sample.participationDelta) == null
+      ? null
+      : `total participation ${sample.participationDelta >= 0 ? "increased" : "decreased"} ${Math.round(Math.abs(sample.participationDelta)*100)}% versus the prior window`;
+    const pressureText = neutral
+      ? `neutral pressure: bull ${bull} vs bear ${bear}`
+      : `${dominantLabel} pressure: ${dominantValue} vs ${otherLabel} ${otherValue}`;
+    return `${tooltipBasis37(sample)} ${pressureText}; ${participation}${participationChange ? `; ${participationChange}` : ""}; ${sample.evidenceState || "unavailable"}${movement ? `; ${movement}` : ""}${qualifier ? `; ${qualifier}` : ""}`;
+  }
+  function tooltipPrice37(value){
+    const price = num37(value);
+    if(price == null) return null;
+    return featureFormat.price(price);
+  }
+  function tooltipIndicator37(tf,label,value){
+    const name = `${tf} ${label}`;
+    const level = num37(value);
+    return `${name} ${level == null ? "unavailable" : tooltipPrice37(level)}`;
+  }
+  function tooltipDistance37(value){
+    const distance = Math.abs(Number(value));
+    if(!Number.isFinite(distance)) return null;
+    return distance.toLocaleString(undefined,{minimumFractionDigits:distance < 100 ? 1 : 0,maximumFractionDigits:distance < 100 ? 1 : 0});
+  }
+  function tooltipPriceRelation37(label,price,anchor){
+    const current = num37(price);
+    const level = num37(anchor);
+    if(current == null || level == null) return null;
+    const relation = current >= level ? "above" : "below";
+    return `Price ${relation} ${label} by ${tooltipDistance37(current-level)}`;
+  }
+  function tooltipMainSample37(signal){
+    const samples = Array.isArray(signal && signal.samples) ? signal.samples.filter(sample => sample.available) : [];
+    return samples.reduce((best,sample) => !best || sample.weight > best.weight ? sample : best,null);
+  }
+  function tooltipAnchor37(sample){
+    if(!sample) return null;
+    const anchors = [];
+    if(num37(sample.emaValue) != null) anchors.push({label:`${sample.tf} EMA${sample.emaPeriod}`,value:Number(sample.emaValue)});
+    if(!anchors.length) return null;
+    const low = Math.min(...anchors.map(anchor => anchor.value));
+    const high = Math.max(...anchors.map(anchor => anchor.value));
+    const label = anchors.map(anchor => anchor.label).join(" / ");
+    const range = Math.abs(high - low) > 1e-9 ? `${tooltipPrice37(low)}–${tooltipPrice37(high)}` : tooltipPrice37(low);
+    const values = anchors.map(anchor => `${anchor.label} ${tooltipPrice37(anchor.value)}`).join(" / ");
+    return {label,value:anchors[0].value,text:`${values}${anchors.length > 1 ? ` zone ${range}` : ""}`};
+  }
+  function tooltipLevels37(signal){
+    const bias = entryDisplayText37(signal && signal.entry);
+    if(bias === "WAIT") return ["No clean level suggestion while signal is WAIT"];
+    const main = tooltipMainSample37(signal);
+    const anchor = tooltipAnchor37(main);
+    const recentHigh = main && num37(main.recentHigh);
+    const recentLow = main && num37(main.recentLow);
+    if(bias === "ABSORPTION"){
+      const levels = ["Do not chase: pressure/price divergence"];
+      if(anchor) levels.push(`Watch reclaim/reject zone: ${anchor.text}`);
+      return levels;
+    }
+    if(bias === "FADE RISK"){
+      const levels = [];
+      if(anchor) levels.push(`Tighten/trim toward: ${anchor.text}`);
+      levels.push("Invalid if: pressure re-accelerates with price continuation");
+      return levels;
+    }
+    if(bias === "SHORT"){
+      const levels = [];
+      if(anchor) levels.push(`Sell bounce: ${anchor.text}`);
+      else if(recentHigh != null) levels.push(`Sell bounce: recent resistance $${tooltipPrice37(recentHigh)}`);
+      if(recentHigh != null) levels.push(`Invalid above: recent high $${tooltipPrice37(recentHigh)}`);
+      if(recentLow != null) levels.push(`Trim: recent low $${tooltipPrice37(recentLow)}`);
+      if(anchor) levels.push(`Close if: ${anchor.text} reclaimed and bull pressure overtakes`);
+      else if(recentHigh != null) levels.push("Close if: price breaks the recent high and bull pressure overtakes");
+      return levels.length ? levels : ["No anchored short level is available"];
+    }
+    if(bias === "LONG"){
+      const levels = [];
+      if(anchor) levels.push(`Buy pullback: ${anchor.text}`);
+      else if(recentLow != null) levels.push(`Buy pullback: recent support $${tooltipPrice37(recentLow)}`);
+      if(recentLow != null) levels.push(`Invalid below: recent low $${tooltipPrice37(recentLow)}`);
+      if(recentHigh != null) levels.push(`Trim: recent high $${tooltipPrice37(recentHigh)}`);
+      if(anchor) levels.push(`Close if: ${anchor.text} lost and bear pressure overtakes`);
+      else if(recentLow != null) levels.push("Close if: price breaks the recent low and bear pressure overtakes");
+      return levels.length ? levels : ["No anchored long level is available"];
+    }
+    return ["No anchored level suggestion is available"];
+  }
+  function tooltipMaEvents37(signal){
+    const events = Array.isArray(signal && signal.maEvents) ? signal.maEvents : [];
+    if(!events.length) return ["MA event state unavailable","No MA-event confidence boost applied"];
+    const lines = [];
+    events.forEach(event => {
+      if(!event || event.state === "unknown"){
+        lines.push(event && event.reason ? event.reason : "MA event age/current state unavailable");
+        lines.push("No MA-event confidence boost applied");
+        return;
+      }
+      const stateLabel = event.state === "fresh"
+        ? "fresh and still valid"
+        : event.state === "aging"
+          ? "aging but still valid"
+          : event.state === "stale"
+            ? "stale/context only"
+            : "invalidated";
+      const anchorLevel = num37(event.anchorNow);
+      const eventAnchor = maEventLabel37(event);
+      lines.push(`${eventAnchor} ${event.type}, ${event.age} candle${event.age === 1 ? "" : "s"} ago, ${stateLabel}, ${event.confirmation || "confirmation unavailable"}`);
+      const current = num37(event.currentPrice);
+      const anchor = num37(event.anchorNow);
+      if(current != null && anchor != null){
+        const distance = `$${tooltipDistance37(current-anchor)}`;
+        if(event.direction < 0){
+          lines.push(current <= anchor ? `Price remains ${distance} below ${eventAnchor}` : `Price reclaimed ${eventAnchor} by ${distance}`);
+        }else{
+          lines.push(current >= anchor ? `Price remains ${distance} above ${eventAnchor}` : `Price lost ${eventAnchor} by ${distance}`);
+        }
+      }
+      if(event.structureIntact === true) lines.push(event.direction < 0 ? "Post-event bearish structure remains intact" : "Post-event bullish structure remains intact");
+      else if(event.structureIntact === false) lines.push(event.direction < 0 ? "Post-event bearish structure is broken" : "Post-event bullish structure is broken");
+      if(event.state === "invalidated" && event.invalidationReason) lines.push(`Invalidation reason: ${event.invalidationReason}`);
+      else if((event.state === "stale" || event.state === "aging") && event.stateReason) lines.push(event.stateReason);
+      if(event.priceRefuses) lines.push(event.direction < 0 ? "Price refuses to fall after the event" : "Price refuses to rise after the event");
+      if(event.sharplyFading) lines.push(event.direction < 0 ? "Bear pressure is sharply fading" : "Bull pressure is sharply fading");
+      const impact = Number(event.appliedImpact || 0);
+      if(impact) lines.push(`Confidence impact: ${impact > 0 ? "+" : ""}${impact}%`);
+      else lines.push("No MA-event confidence boost applied");
+    });
+    const netImpact = Number(signal && signal.maImpact || 0);
+    if(netImpact) lines.push(`Net MA confidence impact: ${netImpact > 0 ? "+" : ""}${netImpact}%`);
+    return lines;
+  }
+  function tooltipReasons37(signal){
+    const bias = entryDisplayText37(signal && signal.entry);
+    const samples = Array.isArray(signal && signal.samples) ? signal.samples : [];
+    const missing = samples.filter(sample => !sample.available);
+    if(missing.length){
+      return missing.map(sample => `${tooltipBasis37(sample)} pressure unavailable`).concat(`Cannot validate ${horizonLabel37(state.horizon)} context`);
+    }
+    const available = samples.filter(sample => sample.available).slice().sort((a,b) => b.weight - a.weight);
+    const main = tooltipMainSample37(signal);
+    if(bias === "ABSORPTION"){
+      const reasons = [];
+      if(main) reasons.push(tooltipPressureLine37(main));
+      reasons.push("Price is not following the dominant pressure");
+      const emaRelation = main && tooltipPriceRelation37(tooltipIndicator37(main.tf,`EMA${main.emaPeriod}`,main.emaValue),main.currentPrice,main.emaValue);
+      if(emaRelation) reasons.push(emaRelation);
+      reasons.push("Wait for price confirmation; do not chase");
+      return reasons.slice(0,5);
+    }
+    if(bias === "FADE RISK"){
+      const reasons = available.map(sample => tooltipPressureLine37(sample,sample === main ? "pressure is weakening" : null));
+      reasons.push("Continuation needs renewed pressure");
+      return reasons.slice(0,5);
+    }
+    if(bias === "WAIT"){
+      const sides = new Set(available.map(sample => sample.sideSign).filter(Boolean));
+      const reasons = available.map(sample => tooltipPressureLine37(sample));
+      if(sides.size > 1) reasons.push("Relevant timeframes show conflicting pressure");
+      else reasons.push("Pressure is balanced or lacks a clean directional edge");
+      reasons.push("Waiting for pressure and price context to align");
+      return reasons.slice(0,5);
+    }
+    const sideSign = bias === "LONG" ? 1 : -1;
+    const reasons = available.map(sample => tooltipPressureLine37(sample,sample !== main && sample.sideSign === sideSign ? "confirming" : sample.sideSign !== sideSign ? "opposing" : null));
+    const emaRelation = main && tooltipPriceRelation37(tooltipIndicator37(main.tf,`EMA${main.emaPeriod}`,main.emaValue),main.currentPrice,main.emaValue);
+    if(emaRelation) reasons.push(emaRelation);
+    const filter = available.find(sample => sample.tf === "15m" && sample.sideSign === sideSign);
+    if(filter && reasons.length < 5) reasons.push(`${tooltipBasis37(filter)} not blocking ${bias.toLowerCase()}`);
+    return reasons.slice(0,5);
+  }
+  function tooltipInvalidations37(signal){
+    const bias = entryDisplayText37(signal && signal.entry);
+    const samples = Array.isArray(signal && signal.samples) ? signal.samples : [];
+    const hasMissing = samples.some(sample => !sample.available);
+    const basis = samples.map(tooltipBasis37);
+    const main = tooltipMainSample37(signal);
+    const contextLabel = main
+      ? tooltipIndicator37(main.tf,`EMA${main.emaPeriod}`,main.emaValue)
+      : "price/indicator context unavailable";
+    const filter = samples.filter(sample => sample.tf === "15m").slice(-1)[0];
+    const filterLabel = filter ? tooltipBasis37(filter) : "15m context";
+    if(bias === "LONG") return [
+      `Price loses ${contextLabel} and holds below`,
+      "Bullish pressure fades",
+      `Bear pressure overtakes on ${basis.join(" or ")}`,
+      `${filterLabel} turns clearly bearish`,
+      "Price refuses to rise despite bull pressure"
+    ];
+    if(bias === "SHORT") return [
+      `Price reclaims ${contextLabel} and holds`,
+      "Bearish pressure fades",
+      `Bull pressure overtakes on ${basis.join(" or ")}`,
+      `${filterLabel} turns clearly bullish`,
+      "Price refuses to fall despite bear pressure"
+    ];
+    if(bias === "ABSORPTION") return [
+      "Price begins following the dominant pressure",
+      "Opposing pressure overtakes",
+      `${contextLabel} resolves with price confirmation`
+    ];
+    if(bias === "FADE RISK") return [
+      "Pressure momentum strengthens again",
+      "Price resets without reversal",
+      "Higher-timeframe context confirms continuation"
+    ];
+    return [hasMissing ? "Data recovers and pressure/price align" : "Pressure and price align into a clean directional edge"];
+  }
+  function detailBulletList37(lines){
+    const items = Array.isArray(lines) && lines.length ? lines : ["None identified from available data"];
+    return items.map(line => `• ${line}`).join("\n");
+  }
+  function maEventLabel37(event){
+    if(!event) return "MA event unavailable";
+    if(event.anchorKind === "confluence") return event.displayLabel || `${event.tf} MA-event confluence`;
+    if(event.anchorKind === "cross" || event.anchorKind === "compression"){
+      return `${tooltipIndicator37(event.tf,event.fastLabel || String(event.anchor || "").split("/")[0],event.fastNow)} / ${tooltipIndicator37(event.tf,event.slowLabel || String(event.anchor || "").split("/")[1],event.slowNow)}`;
+    }
+    return tooltipIndicator37(event.tf,event.anchor,event.anchorNow);
+  }
+  function directionEvidence37(signal,direction){
+    const desired = direction === "SHORT" ? -1 : 1;
+    const samples = Array.isArray(signal && signal.samples) ? signal.samples : [];
+    const supportive = [];
+    const limiting = [];
+    const adverse = [];
+    const missing = [];
+    const diagnostics = [];
+    samples.slice().sort((a,b) => Number(b.weight || 0) - Number(a.weight || 0)).forEach(sample => {
+      if(!sample.available){
+        missing.push(`${tooltipBasis37(sample)} pressure unavailable`);
+        return;
+      }
+      if(sample.sideSign === 0){
+        limiting.push(`${tooltipPressureLine37(sample)}; inside the neutral band`);
+        return;
+      }
+      if(sample.sideSign !== desired){
+        const classification = pressureClassification37(sample,desired);
+        const line = `${tooltipPressureLine37(sample)}${sample.tf === "1m" ? "; micro-timing caution only" : ""}`;
+        (classification.state === "strongly conflicting" ? adverse : limiting).push(line);
+        return;
+      }
+      const sideLabel = desired > 0 ? "bull" : "bear";
+      const pressure = desired > 0 ? sample.bullPct : sample.bearPct;
+      const delta = desired > 0 ? sample.bullDelta : sample.bearDelta;
+      if(num37(sample.participationRatio) != null && sample.participationRatio < 0.85){
+        limiting.push(`${tooltipBasis37(sample)} directional share has weak participation at ${Math.round((1-sample.participationRatio)*100)}% below recent average`);
+      }else if(num37(pressure) != null && pressure < 0.55){
+        limiting.push(`${tooltipBasis37(sample)} ${sideLabel} pressure is marginal at ${tooltipPercent37(pressure)}`);
+      }else if(num37(delta) != null && delta < 0){
+        limiting.push(`${tooltipBasis37(sample)} ${sideLabel} pressure is weakening by ${tooltipSignedPoints37(delta)}`);
+      }else{
+        supportive.push(tooltipPressureLine37(sample));
+      }
+    });
+    const main = tooltipMainSample37(signal);
+    if(main){
+      const anchors = (Array.isArray(main.maSlots) ? main.maSlots.slice(0,3).map(slot => ({label:slot.label,value:slot.value})) : []);
+      anchors.forEach(anchor => {
+        const price = num37(main.currentPrice);
+        const level = num37(anchor.value);
+        const indicator = tooltipIndicator37(main.tf,anchor.label,anchor.value);
+        if(price == null || level == null){
+          missing.push(indicator);
+          return;
+        }
+        const supports = desired > 0 ? price >= level : price <= level;
+        const relation = price >= level ? "above" : "below";
+        (supports ? supportive : adverse).push(`Price remains ${relation} ${indicator}${anchor.maturity ? `; ${anchor.maturity}` : ""}`);
+      });
+      const pivot = main.pivots && (desired > 0 ? main.pivots.low : main.pivots.high);
+      const structureLevel = num37(pivot && pivot.price);
+      const price = num37(main.currentPrice);
+      if(structureLevel != null && price != null){
+        const intact = desired > 0 ? price >= structureLevel : price <= structureLevel;
+        const label = structureClassName37(pivot.classification,pivot.side);
+        (intact ? supportive : adverse).push(intact
+          ? `Latest confirmed ${main.tf} ${label} ${tooltipPrice37(structureLevel)} remains intact`
+          : `Price broke ${desired > 0 ? "below" : "above"} the latest confirmed ${main.tf} ${label} ${tooltipPrice37(structureLevel)}`);
+      }else{
+        missing.push(`${main.tf} confirmed pivot structure unavailable`);
+      }
+    }
+    if(signal.structuralContext && Array.isArray(signal.structuralContext.evidence)){
+      signal.structuralContext.evidence.forEach(line => {
+        const bullish = /Bullish|higher high|higher low/i.test(line);
+        const bearish = /Bearish|lower high|lower low/i.test(line);
+        if(line.includes(`supports ${direction}`) || (desired > 0 && bullish && !bearish) || (desired < 0 && bearish && !bullish)) supportive.push(line);
+        else if(line.includes(`opposes ${direction}`) || (desired > 0 && bearish && !bullish) || (desired < 0 && bullish && !bearish)) adverse.push(line);
+        else limiting.push(line);
+      });
+    }
+    const events = Array.isArray(signal && signal.maEvents) ? signal.maEvents : [];
+    events.forEach(event => {
+      if(!event || event.state === "unknown"){
+        const reason = event && event.reason ? event.reason : "MA event scan failed";
+        if(event && event.diagnostic === "no_event"){
+          limiting.push(reason);
+          limiting.push("No MA-event confidence boost applied");
+        }else if(event && event.diagnostic === "scan_failed"){
+          diagnostics.push(reason);
+        }else{
+          missing.push(reason);
+        }
+        return;
+      }
+      const anchorText = maEventLabel37(event);
+      const line = `${anchorText} ${event.type} is ${event.state}; ${event.confirmation || "confirmation unavailable"}${event.invalidationReason ? `; ${event.invalidationReason}` : ""}`;
+      if(event.state === "stale"){
+        limiting.push(line);
+        limiting.push("Event retained as context only");
+        limiting.push("No confidence boost applied");
+        return;
+      }
+      if(event.state === "aging" && event.direction === desired){
+        supportive.push(line);
+        return;
+      }
+      const eventSupports = event.direction === desired && event.state === "fresh" && Number(event.appliedImpact || 0) !== 0;
+      const eventAdverse = event.direction === -desired && event.state !== "invalidated";
+      if(eventSupports) supportive.push(line);
+      else if(eventAdverse || (event.direction === desired && event.state === "invalidated")) adverse.push(line);
+      else limiting.push(`${line}; no confidence boost applied`);
+    });
+    return {supportive,limiting,adverse,missing,diagnostics};
+  }
+  function classifiedLevelState37(tf,level,currentPrice,direction){
+    const rows = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[tf];
+    const closed = Array.isArray(rows) ? rows.slice(-3) : [];
+    const above = currentPrice > level;
+    const latest = closed.length ? closed[closed.length-1] : null;
+    const latestAbove = latest ? Number(latest.close) > level : above;
+    const liveCross = !!latest && latestAbove !== above;
+    const held = closed.length >= 2 && closed.slice(-2).every(row => above ? Number(row.close) > level : Number(row.close) < level);
+    const priorOpposite = closed.slice(0,-2).some(row => above ? Number(row.close) < level : Number(row.close) > level);
+    const failedCross = !!latest && (above
+      ? Number(latest.low) <= level && Number(latest.close) > level
+      : Number(latest.high) >= level && Number(latest.close) < level);
+    let stateText;
+    if(liveCross) stateText = above ? "live/tentative reclaim" : "live/tentative breach";
+    else if(failedCross) stateText = above ? "failed breach; support remains" : "failed reclaim; resistance remains";
+    else if(held && priorOpposite) stateText = above ? "confirmed held reclaim; converted support" : "confirmed held breach; converted resistance";
+    else if(held) stateText = above ? "confirmed support" : "confirmed resistance";
+    else stateText = above ? "support" : "resistance";
+    if(direction === "SHORT" && above) return `${stateText}; already reclaimed, adverse for SHORT`;
+    if(direction === "LONG" && !above) return `${stateText}; already breached, adverse for LONG`;
+    return stateText;
+  }
+  function rankedSignalLevels37(signal,direction,horizonId=state.horizon){
+    const currentPrice = signalCurrentPrice37();
+    if(currentPrice == null || (direction !== "LONG" && direction !== "SHORT")) return [];
+    const engine = horizonEngine37(horizonId);
+    const allTfs = [...new Set([...engine.eventTfs,...engine.structureTfs,...engine.boundaryTfs])];
+    const tfImportance = new Map();
+    engine.eventTfs.forEach((tf,index) => tfImportance.set(tf,4-index*0.35));
+    engine.structureTfs.forEach((tf,index) => tfImportance.set(tf,5-index*0.25));
+    engine.boundaryTfs.forEach((tf,index) => tfImportance.set(tf,4.5-index*0.25));
+    const candidates = [];
+    allTfs.forEach(tf => {
+      [1,2,3,4,5].forEach(slotIndex => {
+        const ma = signalMaSlot37(tf,`MA${slotIndex}`);
+        if(!ma.reliable || ma.value == null) return;
+        const distance = Math.abs(ma.value-currentPrice) / Math.max(Math.abs(currentPrice),1);
+        const boundary = engine.boundaryTfs.includes(tf);
+        const maximumDistance = horizonId === "quick" ? (boundary ? 0.012 : 0.008) : horizonId === "2_3h" ? 0.02 : 0.035;
+        if(distance > maximumDistance) return;
+        const periodImportance = slotIndex >= 4 ? 3.2 : slotIndex === 3 ? 2.4 : 1.6;
+        const stateText = classifiedLevelState37(tf,ma.value,currentPrice,direction);
+        candidates.push({
+          kind:"ma",tf,label:ma.label,price:ma.value,state:stateText,distance,boundary,
+          score:(tfImportance.get(tf)||1)+periodImportance+Math.max(0,6-distance*500),
+          text:`${tooltipIndicator37(tf,ma.label,ma.value)} — ${stateText}; ${ma.evidenceState}`
+        });
+      });
+      const structure = signalStructure37(tf,"swing");
+      const pivots = canonicalPivots37(tf,"swing");
+      const canonicalLevels = structure && Array.isArray(structure.levels) && structure.levels.length
+        ? structure.levels
+        : [pivots.high,pivots.low].filter(Boolean);
+      canonicalLevels.forEach(level => {
+        const distance = Math.abs(level.price-currentPrice) / Math.max(Math.abs(currentPrice),1);
+        const maximumDistance = horizonId === "quick" ? 0.012 : horizonId === "2_3h" ? 0.025 : 0.04;
+        if(distance > maximumDistance) return;
+        const stateText = classifiedLevelState37(tf,level.price,currentPrice,direction);
+        const classification = level.classification ? structureClassName37(level.classification,level.side) : null;
+        const strengthLabel = level.text || (level.side === "high" ? "Swing High" : "Swing Low");
+        const label = `${strengthLabel}${classification ? ` / ${classification}` : ""}`;
+        candidates.push({
+          kind:"structure",tf,label,price:level.price,state:stateText,distance,
+          strength:level.strength || null,classification:level.classification || null,
+          confirmed:level.confirmed === true,tentative:level.tentative === true,
+          boundary:engine.boundaryTfs.includes(tf),
+          score:(tfImportance.get(tf)||1)+4+(level.strength === "strong" ? 1 : 0)+Math.max(0,6-distance*500),
+          text:`${tf} ${label} ${tooltipPrice37(level.price)} — ${level.confirmed === true ? "confirmed" : "tentative"}; ${stateText}`
+        });
+      });
+    });
+    candidates.forEach(candidate => {
+      const confluence = candidates.some(other => other !== candidate && Math.abs(other.price-candidate.price)/Math.max(Math.abs(currentPrice),1) <= (horizonId === "quick" ? 0.0015 : 0.0025));
+      if(confluence) candidate.score += 2;
+      const event = (signal.maEvents || []).find(item => item.tf === candidate.tf && item.anchor === candidate.label && item.state === "fresh");
+      if(event) candidate.score += 2;
+    });
+    return candidates.sort((a,b) => (b.score-a.score) || (a.distance-b.distance));
+  }
+  function evaluateEntryQuality37(signal,thesis,direction){
+    const decision = signal && signal.entryDecision;
+    const candidates = decision && Array.isArray(decision.candidates) ? decision.candidates : [];
+    const candidateLevels = candidates.map(candidate => ({
+      kind:candidate.family.includes("Structure") ? "structure" : "ma",
+      tf:candidate.tf,label:candidate.source,price:(candidate.zone.low+candidate.zone.high)/2,
+      distance:candidate.distance,state:candidate.state,boundary:false,score:candidate.rankScore,
+      text:`${zoneText37(candidate)} - ${candidate.state}`
+    }));
+    const candidateSet = {direction,lines:candidateLevels.map(level => level.text),candidates:candidateLevels,entryCandidates:candidateLevels,crossed:[]};
+    if(signal.loading || signal.dataIncomplete) return {state:"MISSING",score:null,text:"Data incomplete",instruction:"Wait for required data",levels:candidateSet,exclusions:[]};
+    if(direction !== "LONG" && direction !== "SHORT") return {state:"BIAS CONFIRMED",score:20,text:"BIAS CONFIRMED - no directional permission",instruction:signal.bias && signal.bias.reason || "Wait for alignment",levels:candidateSet,exclusions:[]};
+    if(signal.marketDirection !== direction) return {state:"BIAS CONFIRMED",score:15,text:`BIAS CONFIRMED ${signal.marketDirection || "NEUTRAL"} - no ${direction} setup permission`,instruction:"Selected direction does not match the authoritative bias",levels:candidateSet,exclusions:[]};
+    if(!decision || !decision.family) return {state:"BIAS CONFIRMED",score:25,text:`BIAS CONFIRMED ${direction}`,instruction:decision && decision.reason || "Waiting for a valid setup location",levels:candidateSet,exclusions:[]};
+    const distance = decision.distance == null ? null : `${(decision.distance*100).toFixed(2)}%`;
+    return {
+      state:decision.state,
+      score:decision.entryQuality,
+      biasConfidence:signal.confidence,
+      entryAction:decision.entryAction,
+      text:[`${decision.state} ${direction}`,decision.family,zoneText37(decision),decision.state === "SETUP ARMED" && distance ? `distance ${distance}` : null].filter(Boolean).join(" - "),
+      instruction:decision.reason,
+      levels:candidateSet,
+      exclusions:[],
+      decision
+    };
+  }
+  function alignmentCondition37(label,direction){
+    const normalized = String(label || "wait").toLowerCase().replace(/\s+/g,"-");
+    if(direction === "LONG" || direction === "SHORT") return `${normalized}-${direction.toLowerCase()} conditions`;
+    if(normalized === "long" || normalized === "short") return `${normalized}-bias conditions`;
+    return `${normalized} conditions`;
+  }
+  function scoredStateText37(label,confidence){
+    const stateLabel = String(label || "WAIT");
+    if(stateLabel === "WAIT" || stateLabel === "MIXED") return stateLabel;
+    const score = num37(confidence);
+    return score == null ? stateLabel : `${stateLabel} ${Math.round(score)}%`;
+  }
+  function compactStateText37(label,confidence,action){
+    return `${scoredStateText37(label,confidence)} · ${action}`;
+  }
+  function compactEntryReason37(decision){
+    if(!decision) return "No directional edge";
+    if(decision.state === "NO BIAS") return "No directional edge";
+    if(decision.state === "BIAS CONFIRMED") return "Waiting for setup";
+    if(decision.state === "SETUP ARMED") return `${decision.source || decision.family} interaction`;
+    if(decision.state === "ZONE ENGAGED") return "Waiting for reaction";
+    if(decision.state === "READY") return "Trigger confirmed";
+    if(decision.state === "EXPIRED") return decision.chaseExceeded ? "Chase distance exceeded" : "Trigger expired";
+    if(decision.state === "INVALIDATED") return "Setup invalidated";
+    if(/participation/i.test(decision.reason || "")) return "Weak participation";
+    if(/opposition/i.test(decision.reason || "")) return `${decision.pressure && decision.pressure.primaryTf || "Primary"} opposition`;
+    if(/pressure/i.test(decision.reason || "")) return `${decision.pressure && decision.pressure.triggerTf || "Trigger"} pressure pending`;
+    if(/absorption/i.test(decision.reason || "")) return "Possible absorption";
+    return "Confirmation pending";
+  }
+  function autoAlignmentBreakdown37(signal){
+    const bias = entryDisplayText37(signal && signal.entry);
+    if(bias !== "LONG" && bias !== "SHORT") return [];
+    const breakdown = signal.breakdown || {};
+    const total = Math.round(Number(signal.confidence));
+    const components = {
+      base:Number(breakdown.base || 0),
+      stack:Number(breakdown.stack || 0),
+      pressure:Number(breakdown.pressure || 0),
+      context:Number(breakdown.context || 0),
+      participation:Number(breakdown.participation || 0),
+      forming:Number(breakdown.forming || 0),
+      micro:Number(breakdown.micro || 0),
+      structure:Number(breakdown.structure || 0),
+      ma:Number(breakdown.ma || 0),
+      setup:Number(breakdown.setup || 0)
+    };
+    const subtotal = Object.values(components).reduce((sum,value) => sum + value,0);
+    const adjustment = total - subtotal;
+    const weights = horizonEngine37(state.horizon).pressure.map(item => `${item.tf} ${item.weight.toFixed(2)}`).join(" / ");
+    const lines = [
+      `Pressure weights: ${weights}`,
+      `Base directional score: ${components.base}/100`,
+      `MA-stack quality: ${components.stack >= 0 ? "+" : ""}${components.stack}`,
+      `Pressure strength: ${components.pressure >= 0 ? "+" : ""}${components.pressure}`,
+      `Price/MA context: ${components.context >= 0 ? "+" : ""}${components.context}`,
+      `Participation adjustment: ${components.participation >= 0 ? "+" : ""}${components.participation}`,
+      `Forming-candle adjustment: ${components.forming >= 0 ? "+" : ""}${components.forming}`,
+      `Micro-trigger adjustment: ${components.micro >= 0 ? "+" : ""}${components.micro}`,
+      `Higher-TF structure: ${components.structure >= 0 ? "+" : ""}${components.structure}`,
+      `MA-event impact: ${components.ma >= 0 ? "+" : ""}${components.ma}`,
+      `Setup/trigger quality: ${components.setup >= 0 ? "+" : ""}${components.setup}`
+    ];
+    if(signal.staleConfidenceCap) lines.push(`Stale-data confidence cap: ${signal.staleConfidenceCap}/100`);
+    if(adjustment) lines.push(`Score-bound adjustment: ${adjustment > 0 ? "+" : ""}${adjustment}`);
+    lines.push(`Total: ${total}/100`);
+    return lines;
+  }
+  function thesisAlignmentBreakdown37(signal,thesis){
+    if(!thesis || thesis.status === "MIXED") return [];
+    const breakdown = thesis.breakdown || {};
+    const total = Math.round(Number(thesis.confidence));
+    const components = {
+      base:Number(breakdown.base || 0),pressure:Number(breakdown.pressure || 0),context:Number(breakdown.context || 0),
+      ma:Number(breakdown.ma || 0),structure:Number(breakdown.structure || 0),participation:Number(breakdown.participation || 0),forming:Number(breakdown.forming || 0)
+    };
+    const subtotal = Object.values(components).reduce((sum,value) => sum + value,0);
+    const adjustment = total - subtotal;
+    const lines = [
+      `Base ${thesis.status.toLowerCase()} score: ${components.base}/100`,
+      `Directional pressure magnitude: +${components.pressure}`,
+      `Price/MA context: +${components.context}`,
+      `MA-event magnitude: +${components.ma}`,
+      `Higher-TF structure: +${components.structure}`,
+      `Participation adjustment: ${components.participation >= 0 ? "+" : ""}${components.participation}`,
+      `Forming-candle adjustment: ${components.forming >= 0 ? "+" : ""}${components.forming}`
+    ];
+    if(thesis.staleConfidenceCap) lines.push(`Stale-data confidence cap: ${thesis.staleConfidenceCap}/100`);
+    if(adjustment) lines.push(`Score-bound adjustment: ${adjustment > 0 ? "+" : ""}${adjustment}`);
+    lines.push(`Total: ${total}/100`);
+    return lines;
+  }
+  function thesisQualityLimits37(signal,thesis,evidence){
+    if(!thesis || thesis.status === "MIXED") return [];
+    const bias = entryDisplayText37(signal && signal.entry);
+    if(bias === "WAIT" || Math.abs(Number(signal.confidence) - Number(thesis.confidence)) < 3) return [];
+    return [...new Set([...(evidence && evidence.limiting || []),...(evidence && evidence.adverse || [])])].slice(0,6);
+  }
+  function signalDataHealthLines37(health){
+    return (health && Array.isArray(health.items) ? health.items : []).map(item => {
+      const age = Number.isFinite(Number(item.ageMs)) ? `, age ${item.ageMs < 1000 ? "<1s" : `${Math.round(item.ageMs/1000)}s`}` : "";
+      const statusLabel = item.status === "insufficient" ? "loaded but insufficient history" : item.status;
+      const pair = state.activeSnapshot && state.activeSnapshot.maByTf && state.activeSnapshot.maByTf[item.tf];
+      const ma = pair && pair.closed;
+      const maState = ma ? `; canonical MA ${ma.reliable ? `sufficient (${ma.warmupCount}/${ma.requiredRows})` : `insufficient (${ma.warmupCount}/${ma.requiredRows})`}` : "";
+      const needsPivots = (item.roles || []).some(role => role.includes("SMC structure"));
+      const pivots = needsPivots ? canonicalPivots37(item.tf,"swing") : null;
+      const pivotState = pivots ? `; canonical SMC ${pivots.sufficient ? "sufficient" : "insufficient confirmed swings"}` : "";
+      return `${item.tf}: ${statusLabel}, ${item.count}/${item.historyTarget} closed candles${age}${maState}${pivotState}${item.reason ? ` — ${item.reason}` : ""}`;
+    });
+  }
+  function loadingSignal37(bundle){
+    const position = openPositionSignal37();
+    const status = bundle.health.status;
+    const action = status === "loading" || status === "insufficient" ? "Loading data" : "Data unavailable";
+    return {
+      entry:"ENTRY WAIT",confidence:null,action,exit:"EXIT WAIT",normalized:0,dominantSide:0,marketDirection:null,
+      position,samples:[],maEvents:[],maImpact:0,loading:true,dataHealth:bundle.health,
+      management:{
+        exit:"EXIT WAIT",state:"WAIT",
+        reasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+        tooltipReasons:["Required pressure and structure history is incomplete","No management escalation is issued without a coherent snapshot"],
+        watchCondition:"Management resumes when the required snapshot is complete",
+        events:[],sufficient:false
+      }
+    };
+  }
+  function loadingThesis37(direction){
+    return {status:"MISSING",confidence:null,action:"Data incomplete",direction,maEvents:[],maImpact:0,missing:true};
+  }
+  function formatSignalTime37(value){
+    const date = new Date(Number(value) || Date.now());
+    try{
+      return new Intl.DateTimeFormat([],{hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).format(date);
+    }catch(_e){
+      return date.toLocaleTimeString();
+    }
+  }
+  function rankedEvidence37(lines,limit){
+    const score = line => {
+      const text = String(line || "");
+      if(/BOS|CHoCH|broke (above|below)|lower high|higher low/i.test(text)) return 10;
+      if(/EMA9|EMA21|EMA55/i.test(text)) return 9;
+      if(/MA-event impact/i.test(text)) return 8;
+      if(/pressure.*strengthening|pressure.*accelerating/i.test(text)) return 8;
+      if(/fresh|closed-confirmed/i.test(text)) return 7;
+      if(/participation/i.test(text)) return 5;
+      return 3;
+    };
+    const unique = [...new Set((lines || []).filter(Boolean))];
+    let maReferences = 0;
+    return unique.sort((a,b) => score(b)-score(a)).filter(line => {
+      if(!/EMA.*(rejection|bounce|reclaim|loss)/i.test(line)) return true;
+      maReferences += 1;
+      return maReferences <= 2;
+    }).slice(0,limit);
+  }
+  function conciseLevelText37(level){
+    if(!level) return "Level unavailable";
+    return `${level.tf} ${level.label} ${tooltipPrice37(level.price)}`;
+  }
+  function compactDataStatus37(health){
+    const status = health && health.status || "unavailable";
+    if(status === "sufficient") return "Current and sufficient";
+    if(status === "stale") return "Stale — confidence capped";
+    if(status === "loading") return "Loading required history";
+    if(status === "insufficient") return "Insufficient history";
+    if(status === "failed") return "Loading failed";
+    return "Unavailable";
+  }
+  function maAuditLines37(audit){
+    if(!audit) return ["MA-event scoring audit unavailable"];
+    const signed = value => `${Number(value) > 0 ? "+" : ""}${Number(value) || 0}`;
+    return [
+      `Raw candidates: ${audit.rawCandidateCount}; scored canonical events: ${audit.canonicalEventCount}; duplicates removed: ${audit.deduplicatedCount}; lower-ranked interactions omitted: ${audit.omittedCandidateCount}`,
+      `Raw MA-event contribution: ${signed(audit.rawContribution)}`,
+      `Deduplication adjustment: ${signed(audit.deduplicationAdjustment)} — duplicates are removed before scoring`,
+      `Timeframe/forming adjustment: ${signed(audit.timeframeAndFormingAdjustment)}`,
+      `Confluence adjustment: ${signed(audit.confluenceAdjustment)}`,
+      `Score before cap: ${signed(audit.preCap)}`,
+      `MA-event cap: ${audit.capMinimum} to +${audit.capMaximum}; cap adjustment ${signed(audit.capAdjustment)}`,
+      `Applied MA-event impact: ${signed(audit.appliedImpact)}`
+    ];
+  }
+  function signalDetailsReport37(signal,thesis,entryQuality){
+    const mode = state.direction;
+    const horizon = horizonLabel37(state.horizon);
+    const autoBias = entryDisplayText37(signal.entry);
+    const targetDirection = mode === "AUTO"
+      ? (signal.fadeDirection || ((autoBias === "LONG" || autoBias === "SHORT") ? signal.marketDirection : null))
+      : mode;
+    const evidenceSignal = thesis
+      ? {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact,maAudit:thesis.maAudit,structuralContext:thesis.structuralContext}
+      : signal;
+    const evidence = targetDirection ? directionEvidence37(evidenceSignal,targetDirection) : null;
+    const summary = [`${mode} - ${horizon}`];
+
+    if(signal.loading){
+      summary.push("","Market bias: WAIT","Entry: Data incomplete","",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(Date.now())}`);
+    }else{
+      summary.push(
+        "",
+        `Bias: ${signal.marketDirection || "NEUTRAL"}`,
+        `Bias confidence: ${signal.confidence == null ? "Unavailable" : `${Math.round(signal.confidence)}%`}`,
+        `Entry quality: ${entryQuality.score == null ? "Unavailable" : `${Math.round(entryQuality.score)}%`}`
+      );
+      if(mode !== "AUTO") summary.push(`${mode === "LONG" ? "Long" : "Short"} thesis: ${thesis ? thesis.status : "MIXED"}`);
+      const decision = entryQuality.decision;
+      if(decision){
+        summary.push(
+          `Setup: ${setupDisplayName37(decision)}`,
+          `Family: ${decision.family}`,
+          `Zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
+          `State: ${decision.state}`,
+          `Entry: ${decision.entryAction || (decision.state === "READY" ? `READY ${decision.direction}` : "WAIT")}`,
+          `Trigger: ${decision.triggerState || "absent"}`,
+          `Distance: ${decision.distance == null ? "unavailable" : `${(decision.distance*100).toFixed(2)}%`}`,
+          `Reaction: ${decision.interaction && decision.interaction.trigger || "absent"}; ${decision.interaction && decision.interaction.confirmationRole || "none"}`,
+          `Movement away: ${decision.interaction && decision.interaction.movement ? "present" : "absent"}`,
+          `Pressure improvement: ${decision.pressure && decision.pressure.improved ? "present" : "absent"}`,
+          `Trigger participation: ${decision.pressure && decision.pressure.triggerParticipation && decision.pressure.triggerParticipation.text || "Unavailable"}`,
+          `Broader participation: ${decision.pressure && decision.pressure.broaderParticipation && decision.pressure.broaderParticipation.text || "Unavailable"}`,
+          `Adverse-evidence gate: ${decision.adverseGate && decision.adverseGate.blocksDevelopment ? "BLOCKED" : decision.adverseGate && decision.adverseGate.blocksReady ? "LIMITED" : "CLEAR"}`,
+          `Absorption: ${decision.absorption && decision.absorption.state || "cleared"}`,
+          `Invalidation: ${tooltipPrice37(decision.invalidation)}`,
+          `Valid for: ${decision.state === "SETUP ARMED" ? `after interaction, ${decision.triggerWindow} relevant candles` : `${decision.validFor} relevant candles`}`,
+          `Reason: ${decision.reason}`
+        );
+        if(decision.previousCandidate) summary.push(`Previous candidate: ${decision.previousCandidate.tf} ${decision.previousCandidate.source} - INVALIDATED; ${decision.previousCandidate.reason}`);
+      }else{
+        summary.push("Setup: None","State: BIAS CONFIRMED","Entry: WAIT",`Reason: ${entryQuality.instruction}`);
+      }
+
+      if(mode === "AUTO" && !targetDirection){
+        const bullish = directionEvidence37(signal,"LONG");
+        const bearish = directionEvidence37(signal,"SHORT");
+        summary.push(
+          "","Bullish factors:",...rankedEvidence37(bullish.supportive,2).map(line => `- ${line}`),
+          "Bearish factors:",...rankedEvidence37(bearish.supportive,2).map(line => `- ${line}`)
+        );
+        const limiting = rankedEvidence37([...(bullish.limiting || []),...(bearish.limiting || [])],2);
+        if(limiting.length) summary.push("Limiting / neutral:",...limiting.map(line => `- ${line}`));
+        summary.push("Conclusion:","- Evidence is conflicting; no directional edge");
+      }else if(evidence){
+        const status = thesis && thesis.status || (targetDirection === signal.marketDirection ? "SUPPORTIVE" : "MIXED");
+        const reasonSource = status === "ADVERSE" || status === "INVALID"
+          ? evidence.adverse
+          : status === "SUPPORTIVE" ? evidence.supportive : [...evidence.supportive,...evidence.adverse];
+        const reasons = rankedEvidence37(reasonSource.filter(line => !/\b(invalidated|stale)\b/i.test(String(line))),4);
+        const risks = rankedEvidence37((status === "SUPPORTIVE" ? evidence.adverse : evidence.limiting || []).filter(line => !/\b(invalidated|stale)\b/i.test(String(line))),2);
+        summary.push("",`${status === "ADVERSE" || status === "INVALID" ? `Why ${targetDirection} is ${status.toLowerCase()}` : "Why"}:`,...reasons.map(line => `- ${line}`));
+        if(risks.length) summary.push("","Risks:",...risks.map(line => `- ${line}`));
+      }
+
+      if(!decision){
+        const levels = entryQuality.levels.entryCandidates && entryQuality.levels.entryCandidates.length
+          ? entryQuality.levels.entryCandidates
+          : entryQuality.levels.candidates || [];
+        const principal = levels.slice().sort((a,b) => a.distance-b.distance).slice(0,3);
+        if(principal.length) summary.push("","Nearest relevant levels:",...principal.map(level => `- ${conciseLevelText37(level)}`));
+      }
+      summary.push("",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(state.activeSnapshot && state.activeSnapshot.createdAt)}`);
+    }
+
+    const analysis = [];
+    const samples = signal.samples || [];
+    if(samples.length) analysis.push(`Pressure and participation:\n${detailBulletList37(samples.map(sample => sample.available ? tooltipPressureLine37(sample) : `${sample.tf} unavailable`))}`);
+    if(signal.bias){
+      analysis.push(`Authoritative bias:\n${detailBulletList37([
+        `Selected bias: ${signal.bias.direction || "NEUTRAL"} ${signal.confidence == null ? "" : `${Math.round(signal.confidence)}%`}`.trim(),
+        `Bias source: ${signal.bias.source}; combined score ${signal.bias.score.toFixed(3)}`,
+        `MA stack score ${signal.bias.stackScore.toFixed(3)}; pressure score ${signal.bias.pressureScore.toFixed(3)}; structure score ${signal.bias.structureScore.toFixed(3)}`,
+        ...signal.bias.stacks.map(stack => `${stack.tf}: ${stack.state}, ${stack.phase}; order ${stack.orderCount}/4, slopes ${stack.slopeCount}/5, stability ${Math.round(stack.stability*100)}%`)
+      ])}`);
+    }
+    if(signal.entryDecision){
+      const decision = signal.entryDecision;
+      analysis.push(`Entry state audit:\n${detailBulletList37([
+        `State: ${decision.state}; exact reason: ${decision.reason}`,
+        `Bias confidence: ${signal.confidence == null ? "unavailable" : `${Math.round(signal.confidence)}%`}; entry quality: ${decision.entryQuality == null ? "unavailable" : `${decision.entryQuality}%`}`,
+        decision.family ? `Selected: ${decision.family} on ${decision.tf}; ${zoneText37(decision)}` : "No setup candidate selected",
+        decision.previousCandidate ? `Previous candidate: ${decision.previousCandidate.family} ${decision.previousCandidate.tf} - INVALIDATED; ${decision.previousCandidate.reason}` : null,
+        decision.family ? `Interaction: ${decision.interaction.interacted ? "yes" : "no"}; reaction: ${decision.interaction.trigger}; role: ${decision.interaction.confirmationRole}; movement: ${decision.interaction.movement ? "yes" : "no"}; sustained: ${decision.interaction.sustainedMovement ? "yes" : "no"}` : null,
+        decision.family ? `Pressure improvement: ${decision.pressure.improved ? "yes" : "no"}; ready confirmation: ${decision.pressure.confirmed ? "yes" : "no"}; ${decision.pressure.blocker || "no pressure blocker"}` : null,
+        decision.family ? `Trigger participation: ${decision.pressure.triggerParticipation.text}; broader participation: ${decision.pressure.broaderParticipation.text}` : null,
+        decision.family ? `Adverse gate: ${decision.adverseGate.blocksDevelopment ? "blocks development" : decision.adverseGate.blocksReady ? "blocks READY" : "clear"}; ${decision.adverseGate.reasons.join(" / ") || "no active adverse categories"}` : null,
+        decision.family ? `Invalidation ${tooltipPrice37(decision.invalidation)}; expiry ${decision.triggerWindow} candles or chase beyond ${tooltipPrice37(decision.chaseDistance)}` : null
+      ].filter(Boolean))}`);
+      if(decision.interaction && decision.interaction.evidence) analysis.push(`Reaction and movement evidence:\n${detailBulletList37(decision.interaction.evidence)}`);
+      if(decision.pressure && decision.pressure.evidence) analysis.push(`Pressure effectiveness:\n${detailBulletList37(decision.pressure.evidence)}`);
+      if(decision.candidateAudit && decision.candidateAudit.length){
+        analysis.push(`Candidate ranking:\n${detailBulletList37(decision.candidateAudit.map((candidate,index) => `${index+1}. ${candidate.family} ${candidate.tf}; ${candidate.state}; rank ${candidate.rankScore}; ${candidate.zone}; ${candidate.reason}`))}`);
+      }
+    }
+    const structure = thesis && thesis.structuralContext || signal.structuralContext;
+    if(structure && structure.smc) analysis.push(`Canonical SMC structure:\n${detailBulletList37([...structure.smc.evidence,...structure.smc.diagnostics])}`);
+    const validEvents = (thesis ? thesis.maEvents : signal.maEvents || []).filter(event => event && (event.state === "fresh" || event.state === "aging"));
+    if(validEvents.length) analysis.push(`Selected valid MA events:\n${detailBulletList37(validEvents.map(event => `${maEventLabel37(event)} - ${event.type}; ${event.state}; ${event.confirmation}; applied impact ${Number(event.appliedImpact || 0) >= 0 ? "+" : ""}${Number(event.appliedImpact || 0)}`))}`);
+    analysis.push(`Entry quality:\n${detailBulletList37([`Entry quality score: ${entryQuality.score == null ? "unavailable" : `${Math.round(entryQuality.score)}%`}`,entryQuality.text,entryQuality.instruction,...entryQuality.exclusions])}`);
+    if(entryQuality.levels.lines && entryQuality.levels.lines.length) analysis.push(`Level ranking:\n${detailBulletList37(entryQuality.levels.lines)}`);
+    const breakdown = thesis ? thesisAlignmentBreakdown37(signal,thesis) : autoAlignmentBreakdown37(signal);
+    if(breakdown.length) analysis.push(`Score breakdown:\n${detailBulletList37(breakdown)}`);
+
+    const detailEvents = thesis ? thesis.maEvents : signal.maEvents || [];
+    const invalidEvents = detailEvents.filter(event => event && (event.state === "invalidated" || event.state === "stale" || event.state === "unknown"));
+    const diagnostics = [
+      `Snapshot: version ${state.activeSnapshot && state.activeSnapshot.version || "unavailable"}; ${new Date(state.activeSnapshot && state.activeSnapshot.createdAt || Date.now()).toISOString()}`,
+      `Snapshot signature: ${String(state.activeSnapshot && state.activeSnapshot.signature || "unavailable").slice(0,180)}`,
+      `Data health:\n${detailBulletList37(signalDataHealthLines37(signal.dataHealth))}`,
+      `Event scoring:\n${detailBulletList37(maAuditLines37(thesis ? thesis.maAudit : signal.maAudit))}`,
+      `Entry states: ${ENTRY_STATES37.join(" -> ")}`,
+      `Pressure thresholds: neutral imbalance <= ${(PRESSURE_POLICY37.neutralImbalance*100).toFixed(1)} points; mild < ${(PRESSURE_POLICY37.mildShare*100).toFixed(0)}%; strong >= ${(PRESSURE_POLICY37.strongShare*100).toFixed(0)}%`,
+      `Entry decision snapshot: ${signal.entryDecision ? `${signal.entryDecision.state}; ${signal.entryDecision.reason}` : "unavailable"}`,
+      `Bias confidence: ${signal.confidence == null ? "unavailable" : `${Math.round(signal.confidence)}%`}; entry quality: ${entryQuality.score == null ? "unavailable" : `${Math.round(entryQuality.score)}%`}`,
+      `Selected setup: ${signal.entryDecision && signal.entryDecision.family ? setupDisplayName37(signal.entryDecision) : "none"}`,
+      `Zone interaction: ${signal.entryDecision && signal.entryDecision.interaction ? signal.entryDecision.interaction.interacted ? "engaged" : "not engaged" : "unavailable"}`,
+      `Reaction confirmation: ${signal.entryDecision && signal.entryDecision.interaction ? signal.entryDecision.interaction.confirmationRole : "unavailable"}`,
+      `Movement-away evidence: ${signal.entryDecision && signal.entryDecision.interaction ? signal.entryDecision.interaction.evidence.join(" | ") : "unavailable"}`,
+      `Pressure-improvement state: ${signal.entryDecision && signal.entryDecision.pressure ? signal.entryDecision.pressure.evidence.join(" | ") : "unavailable"}`,
+      `Adverse-evidence gate: ${signal.entryDecision && signal.entryDecision.adverseGate ? signal.entryDecision.adverseGate.reasons.join(" | ") || "clear" : "unavailable"}`,
+      `Trigger confirmation role: ${signal.entryDecision && signal.entryDecision.interaction ? signal.entryDecision.interaction.confirmationRole : "unavailable"}`
+    ];
+    if(invalidEvents.length) diagnostics.push(`Stale / invalidated events:\n${detailBulletList37(invalidEvents.map(event => event.state === "unknown" ? event.reason : `${maEventLabel37(event)} - ${event.state}: ${event.invalidationReason || event.stateReason || "reason unavailable"}`))}`);
+    return {summary:summary.join("\n"),analysis:analysis.join("\n\n"),diagnostics:diagnostics.join("\n\n")};
+  }
+  function renderSignalDetailsReport37(report){
+    if(!state.detailsBody) return;
+    const preservedScrollTop = state.detailsBody.scrollTop;
+    const openAnalysis = !!state.detailsBody.querySelector("details[data-section='analysis'][open]");
+    const openDiagnostics = !!state.detailsBody.querySelector("details[data-section='diagnostics'][open]");
+    state.detailsBody.replaceChildren();
+    const summary = document.createElement("pre");
+    summary.className = "pressure-signal-details-summary";
+    summary.textContent = report.summary;
+    state.detailsBody.appendChild(summary);
+    [["analysis","Analysis",report.analysis,openAnalysis],["diagnostics","Diagnostics",report.diagnostics,openDiagnostics]].forEach(([key,label,content,wasOpen]) => {
+      const section = document.createElement("details");
+      section.className = "pressure-signal-details-section";
+      section.dataset.section = key;
+      section.open = !!wasOpen;
+      const heading = document.createElement("summary");
+      heading.textContent = label;
+      const body = document.createElement("pre");
+      body.textContent = content || "No additional detail available";
+      section.appendChild(heading);
+      section.appendChild(body);
+      state.detailsBody.appendChild(section);
+    });
+    state.detailsBody.scrollTop = preservedScrollTop;
+  }
+  function positionToolbarSignalDetails37(){
+    if(!state.details || !state.details.classList.contains("is-open")) return;
+    windowSystem.recoverWindows();
+  }
+  function showToolbarSignalDetails37(){
+    if(!state.details || !state.entry) return;
+    state.details.classList.add("is-open");
+    state.details.setAttribute("aria-hidden","false");
+    state.entry.setAttribute("aria-expanded","true");
+    if(state.details.dataset.sizeInitialized !== "true"){
+      state.details.dataset.sizeInitialized = "true";
+      state.details.style.width = `${Math.min(400,Math.max(280,window.innerWidth-8))}px`;
+      state.details.style.height = `${Math.min(420,Math.max(180,window.innerHeight-8))}px`;
+    }
+    windowSystem.focusSignal();
+  }
+  function hideToolbarSignalDetails37(){
+    if(state.details){
+      state.details.classList.remove("is-open");
+      state.details.setAttribute("aria-hidden","true");
+    }
+    if(state.entry) state.entry.setAttribute("aria-expanded","false");
+  }
+  function toggleToolbarSignalDetails37(event){
+    if(event){
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if(state.details && state.details.classList.contains("is-open")) hideToolbarSignalDetails37();
+    else showToolbarSignalDetails37();
+  }
+  function structureClassName37(classification,side){
+    const names = {HH:"higher high",HL:"higher low",LH:"lower high",LL:"lower low"};
+    return names[classification] || (side === "high" ? "swing high" : "swing low");
+  }
+  function canonicalStructureEvidence37(direction,horizonId){
+    const desired = direction === "SHORT" || direction === -1 ? -1 : 1;
+    const engine = horizonEngine37(horizonId);
+    const roles = engine.structureRoles || {internal:[],swing:engine.structureTfs || [],major:engine.boundaryTfs || []};
+    const currentPrice = signalCurrentPrice37();
+    const evidence = [];
+    const diagnostics = [];
+    let raw = 0;
+    let weight = 0;
+    const applyScope = (tf,scope,roleWeight,roleLabel) => {
+      const structure = signalStructure37(tf,scope);
+      if(!structure){ diagnostics.push(`${tf} ${scope} canonical SMC structure unavailable`); return; }
+      const pivots = canonicalPivots37(tf,scope);
+      if(roleLabel === "major boundary" && currentPrice != null){
+        const nearby = [pivots.high,pivots.low].filter(Boolean).some(pivot => Math.abs(pivot.price-currentPrice)/Math.max(Math.abs(currentPrice),1) <= (horizonId === "quick" ? 0.025 : 0.04));
+        if(!nearby){ diagnostics.push(`${tf} ${scope} major SMC boundaries are outside the active proximity window`); return; }
+      }
+      const latestEvent = structure.latestEvent;
+      if(latestEvent){
+        const eventSide = latestEvent.direction === "bullish" ? 1 : -1;
+        raw += eventSide * desired * roleWeight;
+        weight += roleWeight;
+        evidence.push(`${latestEvent.direction === "bullish" ? "Bullish" : "Bearish"} ${tf} ${String(latestEvent.text || latestEvent.structureType || "structure break").toUpperCase()} confirmed at ${tooltipPrice37(latestEvent.price)}`);
+      }
+      [pivots.high,pivots.low].filter(Boolean).forEach(pivot => {
+        const classificationSide = pivot.classification === "HH" || pivot.classification === "HL" ? 1
+          : pivot.classification === "LH" || pivot.classification === "LL" ? -1 : 0;
+        if(classificationSide){
+          const classificationWeight = roleWeight * 0.45;
+          raw += classificationSide * desired * classificationWeight;
+          weight += classificationWeight;
+        }
+      });
+      const invalidation = desired > 0 ? pivots.low : pivots.high;
+      if(invalidation && currentPrice != null){
+        const broken = confirmedCloseBeyond37(tf,invalidation.price,desired > 0 ? -1 : 1);
+        const name = structureClassName37(invalidation.classification,invalidation.side);
+        evidence.push(broken
+          ? `Price broke ${desired > 0 ? "below" : "above"} the latest confirmed ${tf} ${name} ${tooltipPrice37(invalidation.price)}`
+          : `Latest confirmed ${tf} ${name} ${tooltipPrice37(invalidation.price)} remains intact`);
+      }
+      const strongWeak = (structure.levels || []).map(level => `${level.text || `${level.strength || "unclassified"} ${level.side}`} ${tooltipPrice37(level.price)}${level.classification ? ` (${level.classification})` : ""}; ${level.confirmed ? "confirmed" : "tentative"}`);
+      diagnostics.push(`${tf} ${scope} (${roleLabel}): trend ${structure.trend > 0 ? "bullish" : structure.trend < 0 ? "bearish" : "unconfirmed"}; ${structure.pivots.filter(pivot => pivot.confirmed).length} confirmed pivots${strongWeak.length ? `; ${strongWeak.join(" / ")}` : ""}`);
+    };
+    (roles.internal || []).forEach(tf => applyScope(tf,"internal",horizonId === "quick" ? 0.30 : 0.65,"early warning"));
+    (roles.swing || []).forEach((tf,index) => applyScope(tf,"swing",index === 0 ? 1.35 : 1.0,"swing structure"));
+    (roles.major || []).forEach(tf => applyScope(tf,"swing",0.55,"major boundary"));
+    (roles.regime || []).forEach(tf => applyScope(tf,"swing",0.65,"regime"));
+    const normalized = weight ? raw / weight : 0;
+    return {points:Math.max(-7,Math.min(7,Math.round(normalized * 7))),normalized,evidence,diagnostics};
+  }
+  function structuralMarketContext37(direction,horizonId){
+    const desired = direction === "SHORT" || direction === -1 ? -1 : 1;
+    const engine = horizonEngine37(horizonId);
+    const currentPrice = signalCurrentPrice37();
+    const proximity = horizonId === "quick" ? 0.008 : horizonId === "2_3h" ? 0.015 : 0.025;
+    let raw = 0;
+    let weight = 0;
+    const evidence = [];
+    [...engine.structureTfs,...engine.boundaryTfs].forEach(tf => {
+      const boundary = engine.boundaryTfs.includes(tf);
+      [2,3,4,5].forEach(slotIndex => {
+        const ma = signalMaSlot37(tf,`MA${slotIndex}`);
+        if(!ma.reliable || currentPrice == null || ma.value == null) return;
+        const distance = Math.abs(ma.value-currentPrice) / Math.max(Math.abs(currentPrice),1);
+        if(boundary && distance > proximity) return;
+        const importance = boundary ? (slotIndex >= 4 ? 1.25 : 0.65) : (slotIndex >= 3 ? 1.0 : 0.8);
+        const side = currentPrice >= ma.value ? 1 : -1;
+        raw += side * desired * importance;
+        weight += importance;
+        if(distance <= proximity){
+          evidence.push(`${tooltipIndicator37(tf,ma.label,ma.value)} — ${side === desired ? "supports" : "opposes"} ${desired > 0 ? "LONG" : "SHORT"}; ${ma.evidenceState}`);
+        }
+      });
+    });
+    const maNormalized = weight ? raw / weight : 0;
+    const smc = canonicalStructureEvidence37(direction,horizonId);
+    const normalized = weight ? maNormalized * 0.42 + smc.normalized * 0.58 : smc.normalized;
+    return {
+      points:Math.max(-8,Math.min(8,Math.round(maNormalized * 3 + smc.points))),
+      normalized,
+      evidence:[...smc.evidence,...evidence],
+      smc,
+      maNormalized
+    };
+  }
+  function confirmedCloseBeyond37(tf,level,side){
+    const rows = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[tf];
+    const latest = Array.isArray(rows) ? rows.slice(-2) : [];
+    return latest.length >= 2 && latest.every(row => side > 0 ? Number(row.close) > level : Number(row.close) < level);
+  }
+  function evaluatePositionManagement37(signal,horizonId){
+    const snapshot = state.activeSnapshot || state.marketSnapshot;
+    const position = signal && signal.position ? {...signal.position} : null;
+    return positionEngine.evaluate({
+      symbol:String(snapshot && snapshot.symbol || position && position.symbol || "BTCUSDT"),
+      horizon:horizonId,
+      createdAt:Number(snapshot && snapshot.createdAt || Date.now()),
+      version:snapshot && snapshot.version || "unavailable",
+      position,
+      currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position && position.markPrice),
+      samples:Array.isArray(signal && signal.samples) ? signal.samples.map(sample => ({...sample})) : [],
+      rowsByTf:snapshot && snapshot.rowsByTf || {},
+      closedByTf:snapshot && snapshot.closedByTf || {},
+      maByTf:snapshot && snapshot.maByTf || {},
+      structureByTf:snapshot && snapshot.structureByTf || {}
+    });
+  }
+  function entryPolicy37(horizonId=state.horizon){
+    return ENTRY_POLICY37[horizonId] || ENTRY_POLICY37.quick;
+  }
+  function clamp37(value,minimum,maximum){
+    return Math.max(minimum,Math.min(maximum,value));
+  }
+  function averageTrueRange37(tf,period=14){
+    const source = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[tf];
+    const rows = (Array.isArray(source) ? source : signalRows37(tf)).slice(-(period + 1));
+    if(rows.length < 3) return null;
+    const ranges = [];
+    for(let index=1;index<rows.length;index++){
+      const row = rows[index];
+      const previous = rows[index-1];
+      ranges.push(Math.max(
+        Number(row.high)-Number(row.low),
+        Math.abs(Number(row.high)-Number(previous.close)),
+        Math.abs(Number(row.low)-Number(previous.close))
+      ));
+    }
+    return ranges.length ? ranges.reduce((sum,value) => sum+value,0)/ranges.length : null;
+  }
+  function volatilityRules37(tf,horizonId=state.horizon){
+    const price = signalCurrentPrice37();
+    const policy = entryPolicy37(horizonId);
+    const measured = averageTrueRange37(tf,14);
+    const minimumAtr = price == null ? 1e-8 : Math.max(price*0.00035,1e-8);
+    const maximumAtr = price == null ? Infinity : price*(horizonId === "quick" ? 0.012 : horizonId === "2_3h" ? 0.025 : 0.045);
+    const atr = clamp37(measured == null ? minimumAtr : measured,minimumAtr,maximumAtr);
+    const zonePad = clamp37(atr*policy.zoneAtr,price == null ? 1e-8 : price*0.00012,price == null ? Infinity : price*0.0015);
+    const tolerance = clamp37(atr*policy.toleranceAtr,price == null ? 1e-8 : price*0.00010,price == null ? Infinity : price*0.0012);
+    return {atr,measuredAtr:measured,zonePad,tolerance,chaseDistance:atr*policy.chaseAtr};
+  }
+  function pressurePersistence37(tf,direction,count=PRESSURE_POLICY37.persistentBars){
+    const rows = signalRows37(tf).filter(validSignalRow37).filter(row => row.final !== false).slice(-count);
+    if(rows.length < count) return false;
+    return rows.every(row => {
+      const share = Number(row.takerBuyBase)/Math.max(Number(row.volume),1e-8);
+      const directionalShare = direction > 0 ? share : 1-share;
+      return directionalShare >= PRESSURE_POLICY37.strongShare;
+    });
+  }
+  function pressureClassification37(sample,direction){
+    if(!sample || !sample.available) return {state:"unavailable",strength:"unavailable",opposing:false,aligned:false,material:false};
+    const desired = direction === "SHORT" || direction === -1 ? -1 : 1;
+    if(sample.sideSign === 0 || Number(sample.pressureImbalance) <= PRESSURE_POLICY37.neutralImbalance){
+      return {state:"neutral",strength:"neutral",opposing:false,aligned:false,material:false};
+    }
+    const aligned = sample.sideSign === desired;
+    const share = Number(sample.dominantPct || 0.5);
+    const accelerating = Number(sample.pressureMomentum || 0) >= PRESSURE_POLICY37.acceleratingMomentum;
+    const material = share >= PRESSURE_POLICY37.strongShare || (share >= PRESSURE_POLICY37.mildShare && accelerating);
+    return {
+      state:aligned ? "aligned" : (material ? "strongly conflicting" : "mildly conflicting"),
+      strength:share >= PRESSURE_POLICY37.strongShare ? "strong" : share >= PRESSURE_POLICY37.mildShare ? "material" : "mild",
+      opposing:!aligned,
+      aligned,
+      material,
+      accelerating,
+      share
+    };
+  }
+  function pressureAudit37(samples,direction){
+    return (Array.isArray(samples) ? samples : []).map(sample => ({
+      tf:sample.tf,
+      role:sample.role,
+      ...pressureClassification37(sample,direction),
+      bullPct:sample.bullPct,
+      bearPct:sample.bearPct,
+      momentum:sample.pressureMomentum,
+      participation:sample.participationRatio
+    }));
+  }
+  function maStackState37(tf){
+    const snapshot = signalMaSnapshot37(tf,false);
+    if(!snapshot || !snapshot.reliable || !Array.isArray(snapshot.slots) || snapshot.slots.length < 5){
+      return {tf,available:false,side:0,alignment:0,state:"unavailable",phase:"unavailable",orderCount:0,slopeCount:0,stability:0};
+    }
+    const slots = snapshot.slots.slice(0,5);
+    const values = slots.map(slot => num37(snapshot.valuesBySlot && snapshot.valuesBySlot[slot.slotId]));
+    if(values.some(value => value == null)) return {tf,available:false,side:0,alignment:0,state:"unavailable",phase:"unavailable",orderCount:0,slopeCount:0,stability:0};
+    const orderFor = direction => values.slice(0,-1).filter((value,index) => direction > 0 ? value > values[index+1] : value < values[index+1]).length;
+    const bullOrder = orderFor(1);
+    const bearOrder = orderFor(-1);
+    const side = bullOrder === bearOrder ? 0 : bullOrder > bearOrder ? 1 : -1;
+    const orderCount = Math.max(bullOrder,bearOrder);
+    const slopeSigns = slots.map(slot => {
+      const series = snapshot.seriesBySlot && snapshot.seriesBySlot[slot.slotId] || [];
+      const recent = series.slice(-4).map(point => num37(point && point.value)).filter(value => value != null);
+      return recent.length >= 2 ? Math.sign(recent[recent.length-1]-recent[0]) : 0;
+    });
+    const slopeCount = side ? slopeSigns.filter(sign => sign === side).length : 0;
+    const currentSpread = Math.abs(values[0]-values[4])/Math.max(Math.abs(values[2]),1);
+    const priorValues = slots.map(slot => {
+      const series = snapshot.seriesBySlot && snapshot.seriesBySlot[slot.slotId] || [];
+      return series.length >= 4 ? num37(series[series.length-4].value) : null;
+    });
+    const priorSpread = priorValues.some(value => value == null) ? currentSpread : Math.abs(priorValues[0]-priorValues[4])/Math.max(Math.abs(priorValues[2]),1);
+    const spreadDelta = currentSpread-priorSpread;
+    let stableChecks = 0;
+    let stableMatches = 0;
+    for(let offset=1;offset<=3;offset++){
+      const historical = slots.map(slot => {
+        const series = snapshot.seriesBySlot && snapshot.seriesBySlot[slot.slotId] || [];
+        return series.length >= offset ? num37(series[series.length-offset].value) : null;
+      });
+      if(historical.some(value => value == null) || !side) continue;
+      stableChecks += 1;
+      const count = historical.slice(0,-1).filter((value,index) => side > 0 ? value > historical[index+1] : value < historical[index+1]).length;
+      if(count >= 3) stableMatches += 1;
+    }
+    const stability = stableChecks ? stableMatches/stableChecks : 0;
+    const alignment = side ? clamp37(orderCount/4*0.55+slopeCount/5*0.25+stability*0.20,0,1) : 0;
+    const stateName = orderCount === 4 && slopeCount >= 4 ? "aligned" : orderCount >= 3 ? "near-complete" : orderCount === 2 ? "transitioning" : "mixed";
+    const phase = stateName === "transitioning" || !side ? "transitioning"
+      : spreadDelta > 0.00018 ? "expanding"
+        : spreadDelta < -0.00018 ? "compressing" : "stable";
+    return {tf,available:true,side,alignment,state:stateName,phase,orderCount,slopeCount,stability,currentSpread,priorSpread,spreadDelta,values,labels:slots.map(slot => `EMA${slot.period}`)};
+  }
+  function evaluateBias37(samples,horizonId){
+    const engine = horizonEngine37(horizonId);
+    const policy = entryPolicy37(horizonId);
+    const stackTfs = [...new Set([...policy.setupTfs,policy.primaryTf,...engine.structureTfs])];
+    const stacks = stackTfs.map(maStackState37);
+    const stackWeights = new Map(stackTfs.map((tf,index) => [tf,tf === policy.primaryTf ? 1.45 : tf === policy.triggerTf ? 1.20 : Math.max(0.55,1-index*0.1)]));
+    let stackRaw = 0;
+    let stackWeight = 0;
+    stacks.filter(stack => stack.available).forEach(stack => {
+      const weight = stackWeights.get(stack.tf) || 0.7;
+      stackRaw += stack.side*stack.alignment*weight;
+      stackWeight += weight;
+    });
+    const stackScore = stackWeight ? stackRaw/stackWeight : 0;
+    let pressureRaw = 0;
+    let pressureWeight = 0;
+    (Array.isArray(samples) ? samples : []).filter(sample => sample.available).forEach(sample => {
+      const microFactor = horizonId === "quick" && sample.tf === "1m" ? 0.18 : 1;
+      const strength = sample.sideSign === 0 ? 0 : clamp37((sample.dominantPct-0.5)/0.12,0,1);
+      pressureRaw += sample.sideSign*strength*sample.weight*microFactor;
+      pressureWeight += sample.weight*microFactor;
+    });
+    const pressureScore = pressureWeight ? pressureRaw/pressureWeight : 0;
+    const provisionalSide = Math.abs(stackScore) >= 0.22 ? Math.sign(stackScore) : Math.sign(pressureScore);
+    const structureLong = structuralMarketContext37("LONG",horizonId);
+    const structureShort = structuralMarketContext37("SHORT",horizonId);
+    const structureScore = clamp37((structureLong.normalized-structureShort.normalized)/2,-1,1);
+    const combined = stackScore*0.62+pressureScore*0.23+structureScore*0.15;
+    const primaryStack = stacks.find(stack => stack.tf === policy.primaryTf);
+    const triggerStack = stacks.find(stack => stack.tf === policy.triggerTf);
+    const strongStackPermission = !!([primaryStack,triggerStack].find(stack => stack && stack.side && stack.alignment >= 0.68));
+    const pressurePermission = Math.abs(pressureScore) >= 0.46 && Math.abs(structureScore) >= 0.12;
+    let direction = strongStackPermission ? Math.sign(stackScore || (primaryStack && primaryStack.side) || (triggerStack && triggerStack.side)) : (pressurePermission ? Math.sign(combined) : 0);
+    if(direction && Math.sign(combined) && Math.sign(combined) !== direction && Math.abs(combined) >= 0.38) direction = 0;
+    const directionLabel = direction > 0 ? "LONG" : direction < 0 ? "SHORT" : null;
+    const audit = direction ? pressureAudit37(samples,direction) : [];
+    const strongPrimaryOpposition = direction && audit.some(item => item.tf === policy.primaryTf && item.opposing && item.share >= PRESSURE_POLICY37.materialPrimaryShare && item.accelerating);
+    if(strongPrimaryOpposition && !(primaryStack && primaryStack.side === direction && primaryStack.alignment >= 0.84)) direction = 0;
+    const finalDirection = direction > 0 ? "LONG" : direction < 0 ? "SHORT" : null;
+    const quality = Math.abs(combined);
+    const confidence = finalDirection ? clamp37(Math.round(54+quality*22+(strongStackPermission ? 4 : 0)),52,82) : null;
+    const source = strongStackPermission ? `${(primaryStack && primaryStack.side === direction ? primaryStack.tf : triggerStack && triggerStack.tf) || policy.primaryTf} MA stack` : pressurePermission ? "pressure plus structure" : "mixed evidence";
+    return {
+      direction:finalDirection,side:direction,confidence,score:combined,source,
+      stackScore,pressureScore,structureScore,stacks,
+      pressure:finalDirection ? pressureAudit37(samples,direction) : pressureAudit37(samples,provisionalSide || 1),
+      permission:!!finalDirection,
+      reason:finalDirection ? `${finalDirection} permission from ${source}` : (strongPrimaryOpposition ? `Material ${policy.primaryTf} opposition prevents directional permission` : "MA stacks, pressure, and structure do not provide a directional edge")
+    };
+  }
+  function zoneText37(candidate){
+    if(!candidate || !candidate.zone) return "Unavailable";
+    return `${candidate.tf} ${candidate.source} at ${tooltipPrice37(candidate.zone.low)}-${tooltipPrice37(candidate.zone.high)}`;
+  }
+  function setupDisplayName37(candidate){
+    if(!candidate || !candidate.family) return "No active setup";
+    const long = candidate.direction === "LONG" || candidate.side > 0 || candidate.direction > 0;
+    const role = long ? "support" : "resistance";
+    if(/^EMA\d+(?:\/EMA\d+)?$/.test(String(candidate.source || ""))){
+      const type = String(candidate.source).includes("/") ? "zone" : "test";
+      return `${candidate.tf} ${candidate.source} ${role} ${type}`;
+    }
+    if(candidate.family === "Structure breakout and retest") return `${candidate.tf} ${candidate.source} retest`;
+    if(candidate.family === "Structure rejection") return `${candidate.tf} ${candidate.source} rejection`;
+    return `${candidate.tf} ${candidate.source || candidate.family}`;
+  }
+  function signalSummaryVariants37(signal,decision){
+    const bias = signal && signal.marketDirection;
+    const confidence = num37(signal && signal.confidence);
+    const confidenceText = confidence == null ? "" : ` ${Math.round(confidence)}%`;
+    if(!bias) return {full:"WAIT \u00b7 NO BIAS",short:"WAIT",minimal:"WAIT"};
+    if(decision && decision.state === "READY") return {full:`READY ${bias}${confidenceText}`,short:`READY ${bias}`,minimal:`READY ${bias}`};
+    const fullState = decision && decision.state === "SETUP ARMED" ? "ARMED"
+      : decision && decision.state === "ZONE ENGAGED" ? "ENGAGED"
+        : decision && decision.state === "TRIGGER DEVELOPING" ? "DEVELOPING" : "WAIT";
+    const shortState = fullState === "DEVELOPING" ? "DEV" : fullState === "ENGAGED" ? "ENG" : fullState === "ARMED" ? "ARM" : "WAIT";
+    return {
+      full:`${bias}${confidenceText} \u00b7 ${fullState}`,
+      short:`${bias}${confidenceText} \u00b7 ${shortState}`,
+      minimal:`${bias}${confidenceText}`
+    };
+  }
+  function topSignalText37(signal,decision){
+    return signalSummaryVariants37(signal,decision).full;
+  }
+  function renderResponsiveSignalSummary37(){
+    if(state.summaryFrame != null) cancelAnimationFrame(state.summaryFrame);
+    state.summaryFrame = null;
+    if(!state.entry || !state.signalSummaryVariants) return;
+    const variants = state.signalSummaryVariants;
+    const choices = [["full",variants.full],["short",variants.short],["minimal",variants.minimal]];
+    let selected = choices[choices.length-1];
+    for(const choice of choices){
+      state.entry.textContent = choice[1];
+      if(state.entry.scrollWidth <= state.entry.clientWidth+1){
+        selected = choice;
+        break;
+      }
+    }
+    state.entry.textContent = selected[1];
+    state.entry.dataset.summaryVariant = selected[0];
+  }
+  function scheduleResponsiveSignalSummary37(){
+    if(state.summaryFrame != null) return;
+    state.summaryFrame = requestAnimationFrame(renderResponsiveSignalSummary37);
+  }
+  function signalToolbarTooltip37(signal,entryQuality,thesis){
+    if(!signal || signal.loading || signal.dataIncomplete){
+      return ["Bias: Unavailable","State: WAIT","Entry: Data incomplete",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`].join("\n");
+    }
+    const decision = entryQuality && entryQuality.decision || signal.entryDecision;
+    const bias = signal.marketDirection || "NEUTRAL";
+    const confidence = signal.confidence == null ? "" : ` ${Math.round(signal.confidence)}%`;
+    const lines = [`Bias: ${bias}${confidence}`,`Horizon: ${horizonLabel37(state.horizon)}`];
+    if(thesis) lines.push(`Selected thesis: ${state.direction} ${thesis.status}${thesis.confidence == null ? "" : ` ${Math.round(thesis.confidence)}%`}`);
+    if(!decision || !decision.family){
+      lines.push("State: BIAS CONFIRMED","Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`);
+      return lines.join("\n");
+    }
+    lines.push(
+      `State: ${decision.state}`,
+      `Setup family: ${decision.family}`,
+      `Setup timeframe: ${decision.tf}`,
+      `Setup: ${setupDisplayName37(decision)}`,
+      `Setup entry zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
+      `Trigger: ${decision.triggerState || "absent"}`,
+      `Entry: ${decision.entryAction || (decision.state === "READY" ? `READY ${decision.direction}` : "WAIT")}`,
+      `Reason: ${decision.reason}`,
+      `Participation: ${decision.pressure && decision.pressure.triggerParticipation && decision.pressure.triggerParticipation.text || "Unavailable"}`,
+      `Invalidation: ${tooltipPrice37(decision.invalidation)}`
+    );
+    return lines.join("\n");
+  }
+  function candidateDistance37(zone,price){
+    if(!zone || price == null) return null;
+    if(price >= zone.low && price <= zone.high) return 0;
+    return Math.min(Math.abs(price-zone.low),Math.abs(price-zone.high))/Math.max(Math.abs(price),1);
+  }
+  function makeEntryCandidate37(spec,horizonId){
+    const volatility = volatilityRules37(spec.tf,horizonId);
+    const price = signalCurrentPrice37();
+    const rawLow = Math.min(spec.levelLow,spec.levelHigh);
+    const rawHigh = Math.max(spec.levelLow,spec.levelHigh);
+    const zone = {low:rawLow-volatility.zonePad,high:rawHigh+volatility.zonePad};
+    const invalidation = spec.invalidation != null ? spec.invalidation : (spec.direction > 0
+      ? zone.low-Math.max(volatility.atr*0.35,(zone.high-zone.low)*0.45)
+      : zone.high+Math.max(volatility.atr*0.35,(zone.high-zone.low)*0.45));
+    return {
+      ...spec,horizonId,zone,invalidation,volatility,
+      distance:candidateDistance37(zone,price),currentPrice:price,
+      triggerWindow:entryPolicy37(horizonId).triggerCandles,
+      fingerprint:`${state.activeSnapshot && state.activeSnapshot.symbol || ""}|${horizonId}|${spec.direction}|${spec.family}|${spec.tf}|${Math.round((rawLow+rawHigh)/2/Math.max(volatility.atr*0.25,1e-8))}`
+    };
+  }
+  function interactionAndReaction37(candidate){
+    const rows = signalRows37(candidate.tf);
+    const policy = entryPolicy37(candidate.horizonId);
+    const start = Math.max(0,rows.length-policy.triggerCandles-3);
+    let interactionIndex = -1;
+    for(let index=start;index<rows.length;index++){
+      const row = rows[index];
+      if(candidate.breakTime && Number(row.time) < candidate.breakTime) continue;
+      if(Number(row.low) <= candidate.zone.high+candidate.volatility.tolerance && Number(row.high) >= candidate.zone.low-candidate.volatility.tolerance){
+        interactionIndex = index;
+        break;
+      }
+    }
+    if(interactionIndex < 0){
+      return {
+        interacted:false,reaction:false,confirmedReaction:false,provisionalReaction:false,
+        movement:false,sustainedMovement:false,age:null,interactionTime:null,
+        trigger:"No interaction",confirmationRole:"none",evidence:["Price has not reached the setup zone"]
+      };
+    }
+    const intended = candidate.direction;
+    const after = rows.slice(interactionIndex);
+    const reactionEvidence = row => {
+      const index = rows.indexOf(row);
+      const previous = index > 0 ? rows[index-1] : null;
+      const reclaimed = !!previous && (intended > 0
+        ? Number(previous.close) < candidate.zone.low && Number(row.close) > candidate.zone.high
+        : Number(previous.close) > candidate.zone.high && Number(row.close) < candidate.zone.low);
+      const held = intended > 0
+        ? Number(row.low) <= candidate.zone.high+candidate.volatility.tolerance && Number(row.close) >= candidate.zone.high && Number(row.close) > Number(row.open)
+        : Number(row.high) >= candidate.zone.low-candidate.volatility.tolerance && Number(row.close) <= candidate.zone.low && Number(row.close) < Number(row.open);
+      const rejected = intended > 0
+        ? Number(row.low) < candidate.zone.low && Number(row.close) > candidate.zone.high
+        : Number(row.high) > candidate.zone.high && Number(row.close) < candidate.zone.low;
+      return {reclaimed,held,rejected,qualifies:reclaimed || held || rejected};
+    };
+    const closedAfter = after.filter(row => row.final !== false);
+    const formingAfter = after.filter(row => row.final === false);
+    const closedReactionRow = closedAfter.find(row => reactionEvidence(row).qualifies) || null;
+    const formingReactionRow = formingAfter.find(row => reactionEvidence(row).qualifies) || null;
+    const favorableCloseMove = source => {
+      if(!source.length) return 0;
+      return intended > 0
+        ? Math.max(...source.map(row => Number(row.close)))-candidate.zone.high
+        : candidate.zone.low-Math.min(...source.map(row => Number(row.close)));
+    };
+    const closedMove = favorableCloseMove(closedAfter);
+    const liveMove = favorableCloseMove(after);
+    const initialThreshold = Math.max(candidate.volatility.atr*0.18,Math.abs(candidate.currentPrice || 0)*0.00020);
+    const sustainedThreshold = Math.max(candidate.volatility.atr*0.32,Math.abs(candidate.currentPrice || 0)*0.00032);
+    const movement = Math.max(closedMove,liveMove) >= initialThreshold;
+    const confirmedMovement = closedMove >= initialThreshold;
+    const sustainedMovement = Math.max(closedMove,liveMove) >= sustainedThreshold;
+    const reactionRow = closedReactionRow || formingReactionRow;
+    const evidence = reactionRow ? reactionEvidence(reactionRow) : {reclaimed:false,held:false,rejected:false};
+    const confirmedReaction = !!closedReactionRow;
+    const provisionalReaction = !closedReactionRow && !!formingReactionRow;
+    const reaction = (confirmedReaction || provisionalReaction) && movement;
+    const reactionType = !reactionRow ? "touch only" : intended > 0
+      ? evidence.reclaimed ? "bullish reclaim" : evidence.rejected ? "lower-price rejection" : "support hold"
+      : evidence.reclaimed ? "bearish reclaim" : evidence.rejected ? "higher-price rejection" : "resistance hold";
+    const latestIndex = rows.length-1;
+    const age = latestIndex-interactionIndex;
+    return {
+      interacted:true,reaction,confirmedReaction,provisionalReaction,movement,confirmedMovement,sustainedMovement,
+      move:Math.max(closedMove,liveMove),closedMove,liveMove,initialThreshold,sustainedThreshold,age,
+      interactionTime:Number(rows[interactionIndex].time),reactionTime:reactionRow ? Number(reactionRow.time) : null,
+      trigger:reactionType,confirmationRole:confirmedReaction ? "closed" : provisionalReaction ? "forming/provisional" : "none",
+      reclaim:evidence.reclaimed,rejection:evidence.rejected,hold:evidence.held,
+      evidence:[
+        `Zone interaction: ${rows[interactionIndex].final === false ? "forming" : "closed"} candle`,
+        `Reaction: ${reactionRow ? reactionType : "absent"} (${confirmedReaction ? "closed" : provisionalReaction ? "forming/provisional" : "none"})`,
+        `Movement away: ${movement ? "yes" : "no"}; ${Math.max(closedMove,liveMove).toFixed(2)} versus ${initialThreshold.toFixed(2)} required`,
+        `Sustained movement: ${sustainedMovement ? "yes" : "no"}; ${sustainedThreshold.toFixed(2)} required`
+      ]
+    };
+  }
+  function pressureEffectiveness37(sample,candidate){
+    if(!sample || !sample.available) return {state:"unavailable",adverseEffective:false,alignedEffective:false,losingEffectiveness:false,net:0,threshold:null};
+    const desired = candidate.direction;
+    const rows = signalRows37(sample.tf).filter(row => row.final !== false).slice(-4);
+    const atr = averageTrueRange37(sample.tf,14) || candidate.volatility.atr;
+    const net = rows.length >= 2 ? Number(rows[rows.length-1].close)-Number(rows[0].close) : 0;
+    const threshold = Math.max(atr*0.12,Math.abs(candidate.currentPrice || 0)*0.00012);
+    const oriented = net*desired;
+    const classification = pressureClassification37(sample,desired);
+    const adverseEffective = classification.opposing && (oriented < -threshold || (!sample.priceRefuses && sample.contextSide === -desired));
+    const alignedEffective = classification.aligned && (oriented > threshold || (!sample.priceRefuses && sample.contextSide === desired));
+    const losingEffectiveness = classification.opposing && !adverseEffective && (sample.priceRefuses || oriented >= -threshold);
+    return {
+      state:adverseEffective ? "opposing pressure remains effective" : alignedEffective ? "aligned pressure is producing progress" : losingEffectiveness ? "opposing pressure is losing effectiveness" : "pressure has not produced directional progress",
+      adverseEffective,alignedEffective,losingEffectiveness,net,oriented,threshold
+    };
+  }
+  function participationBasis37(sample){
+    const ratio = num37(sample && sample.participationRatio);
+    const stateName = ratio == null ? "Unknown" : ratio >= PRESSURE_POLICY37.participationExpanding ? "Expanding" : ratio < PRESSURE_POLICY37.participationWeak ? "Weak" : "Normal";
+    return {state:stateName,ratio,tf:sample && sample.tf || "unavailable",lookback:sample && sample.lookback || null,text:`${stateName}${ratio == null ? "" : ` ${ratio.toFixed(2)}x`} - ${sample && sample.tf || "unavailable"}${sample && sample.lookback ? ` LB${sample.lookback}` : ""}`};
+  }
+  function candidatePressureConfirmation37(candidate,samples){
+    const policy = entryPolicy37(candidate.horizonId);
+    const desired = candidate.direction;
+    const triggerSample = samples.find(sample => sample.tf === policy.triggerTf) || samples.find(sample => sample.tf === candidate.tf);
+    const primarySample = samples.find(sample => sample.tf === policy.primaryTf) || triggerSample;
+    const microSample = candidate.horizonId === "quick" ? samples.find(sample => sample.tf === "1m") : null;
+    const trigger = pressureClassification37(triggerSample,desired);
+    const primary = pressureClassification37(primarySample,desired);
+    const micro = microSample ? pressureClassification37(microSample,desired) : null;
+    const triggerEffectiveness = pressureEffectiveness37(triggerSample,candidate);
+    const primaryEffectiveness = pressureEffectiveness37(primarySample,candidate);
+    const microEffectiveness = microSample ? pressureEffectiveness37(microSample,candidate) : null;
+    const primaryBlocked = primary.opposing && primary.share >= 0.54 && primaryEffectiveness.adverseEffective;
+    const triggerBlocked = trigger.opposing && trigger.share >= 0.54 && triggerEffectiveness.adverseEffective;
+    const microBlocked = !!(micro && micro.opposing && micro.material && microEffectiveness && microEffectiveness.adverseEffective && trigger.opposing);
+    const triggerParticipation = participationBasis37(triggerSample);
+    const broaderParticipation = participationBasis37(primarySample);
+    const triggerImproved = trigger.aligned || trigger.state === "neutral" || triggerEffectiveness.losingEffectiveness;
+    const primaryNonDestructive = !primaryBlocked && (!primary.opposing || primaryEffectiveness.losingEffectiveness || primary.share < 0.54);
+    const improved = !primaryBlocked && !triggerBlocked && !microBlocked && triggerImproved && primaryNonDestructive;
+    const compressionParticipation = candidate.family !== "Compression release" || triggerParticipation.state === "Expanding";
+    const confirmed = improved && trigger.aligned && triggerParticipation.state !== "Weak" && compressionParticipation
+      && (triggerEffectiveness.alignedEffective || !triggerSample.priceRefuses);
+    const effectiveOpposition = primaryBlocked || triggerBlocked || microBlocked;
+    const sideWord = desired > 0 ? "selling" : "buying";
+    let blocker = "";
+    if(primaryBlocked) blocker = `${primarySample.tf} ${sideWord} pressure remains effective while price moves ${desired > 0 ? "lower" : "higher"}`;
+    else if(triggerBlocked) blocker = `${triggerSample.tf} ${sideWord} pressure remains effective on the trigger timeframe`;
+    else if(microBlocked) blocker = `1m ${sideWord} pressure persists while ${triggerSample.tf} has not improved`;
+    else if(!triggerImproved) blocker = `${triggerSample.tf} pressure has not improved`;
+    else if(!primaryNonDestructive) blocker = `${primarySample.tf} pressure remains destructive`;
+    else if(triggerParticipation.state === "Weak") blocker = `Trigger participation is weak - ${triggerParticipation.tf} LB${triggerParticipation.lookback}`;
+    else if(!compressionParticipation) blocker = `Compression participation has not expanded - ${triggerParticipation.tf} LB${triggerParticipation.lookback}`;
+    else if(!trigger.aligned) blocker = `${triggerSample.tf} aligned pressure resumption is not confirmed`;
+    return {
+      confirmed,improved,effectiveOpposition,trigger,primary,micro,triggerEffectiveness,primaryEffectiveness,microEffectiveness,
+      participation:triggerParticipation.state.toLowerCase(),participationRatio:triggerParticipation.ratio,
+      triggerParticipation,broaderParticipation,blocker,
+      triggerTf:triggerSample && triggerSample.tf,primaryTf:primarySample && primarySample.tf,
+      evidence:[
+        `Trigger pressure: ${trigger.state}; ${triggerEffectiveness.state} - ${triggerSample && triggerSample.tf} LB${triggerSample && triggerSample.lookback}`,
+        `Primary pressure: ${primary.state}; ${primaryEffectiveness.state} - ${primarySample && primarySample.tf} LB${primarySample && primarySample.lookback}`,
+        `Pressure improvement: ${improved ? "yes" : "no"}`,
+        `Trigger participation: ${triggerParticipation.text}`,
+        `Broader participation: ${broaderParticipation.text}`
+      ]
+    };
+  }
+  function adverseEvidenceGate37(candidate,interaction,pressure){
+    const desired = candidate.direction;
+    const rows = (state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[candidate.tf] || []).slice(-5);
+    const latest = rows.length ? rows[rows.length-1] : null;
+    const previous = rows.length > 1 ? rows[rows.length-2] : null;
+    const ema21 = signalMaSlot37(candidate.tf,"MA2",true).value;
+    const ema55 = signalMaSlot37(candidate.tf,"MA3",true).value;
+    const fastMaLost = !!(latest && ema21 != null && ema55 != null && (desired > 0
+      ? Number(latest.close) < ema21 && Number(latest.close) < ema55
+      : Number(latest.close) > ema21 && Number(latest.close) > ema55));
+    const adverseBody = !!(latest && (Number(latest.close)-Number(latest.open))*desired < 0
+      && Math.abs(Number(latest.close)-Number(latest.open)) >= candidate.volatility.atr*0.55);
+    const repeatedAdverseCloses = rows.length >= 2 && rows.slice(-2).every(row => (Number(row.close)-Number(row.open))*desired < 0);
+    const adverseSwing = !!(latest && previous && (desired > 0
+      ? Number(latest.high) < Number(previous.high) && Number(latest.close) < Number(previous.close)
+      : Number(latest.low) > Number(previous.low) && Number(latest.close) > Number(previous.close)));
+    const recoveryAbsent = interaction.interacted && (!interaction.reaction || !interaction.movement);
+    const categories = [
+      {family:"MA structure",active:fastMaLost,reason:`${candidate.tf} EMA9/21 and EMA55 are lost against the setup`},
+      {family:"Price action",active:adverseBody || repeatedAdverseCloses || adverseSwing,reason:adverseBody ? "Strong adverse candle displacement remains active" : repeatedAdverseCloses ? "Repeated adverse closes remain active" : "Adverse swing progression remains active"},
+      {family:"Pressure effectiveness",active:pressure.effectiveOpposition,reason:pressure.blocker || "Opposing pressure remains effective"},
+      {family:"Recovery",active:recoveryAbsent,reason:`No confirmed ${desired > 0 ? "hold or reclaim" : "rejection or fall back below"} and no movement away`}
+    ];
+    const active = categories.filter(item => item.active);
+    const blocksDevelopment = recoveryAbsent || pressure.effectiveOpposition || (fastMaLost && (adverseBody || repeatedAdverseCloses || adverseSwing));
+    const blocksReady = pressure.effectiveOpposition || recoveryAbsent || adverseBody || repeatedAdverseCloses || (active.length >= 2 && !interaction.sustainedMovement);
+    return {clear:!blocksReady,blocksDevelopment,blocksReady,categories,active,reasons:active.map(item => item.reason)};
+  }
+  function entryStateFromEvidence37(evidence){
+    const {candidate,interaction,pressure,gate,invalidated,chaseExceeded,timedOut} = evidence;
+    const long = candidate.direction > 0;
+    if(invalidated) return {state:"INVALIDATED",reason:`Invalidated - ${candidate.source} materially failed on closed candles`};
+    if(chaseExceeded) return {state:"EXPIRED",reason:"Entry expired - chase distance exceeded"};
+    if(timedOut) return {state:"EXPIRED",reason:`Entry expired - ${candidate.triggerWindow}-candle trigger window elapsed`};
+    if(!interaction.interacted) return {state:"SETUP ARMED",reason:`Waiting for ${candidate.source} interaction`};
+    if(!interaction.reaction || !interaction.movement){
+      const reason = pressure.effectiveOpposition
+        ? `${pressure.blocker}; no ${long ? "reclaim" : "rejection"}`
+        : `Zone engaged - waiting for ${long ? "hold or reclaim and movement away" : "rejection or fall back below and movement away"}`;
+      return {state:"ZONE ENGAGED",reason};
+    }
+    if(gate.blocksDevelopment || !pressure.improved){
+      return {state:"ZONE ENGAGED",reason:gate.reasons[0] || pressure.blocker || "Zone engaged - adverse evidence has not cleared"};
+    }
+    if(!interaction.confirmedReaction || !interaction.sustainedMovement || !pressure.confirmed || gate.blocksReady){
+      return {state:"TRIGGER DEVELOPING",reason:pressure.blocker || `${interaction.trigger} is developing; awaiting sustained movement and ${pressure.triggerTf} pressure confirmation`};
+    }
+    return {state:"READY",reason:`${interaction.trigger} with sustained movement and ${pressure.triggerTf} pressure confirmation`};
+  }
+  function absorptionState37(candidate,interaction,pressure,samples){
+    if(!candidate || !interaction.interacted) return {state:"cleared",reason:"No active level interaction"};
+    const sample = (Array.isArray(samples) ? samples : []).find(item => item.tf === candidate.tf);
+    const sampleSide = sample && (sample.rawSideSign || sample.sideSign) || candidate.direction;
+    const oneSided = !!(sample && sample.dominantPct >= PRESSURE_POLICY37.strongShare);
+    const rows = signalRows37(candidate.tf).slice(-Math.min(candidate.triggerWindow+2,8));
+    const attempts = rows.filter(row => Number(row.low) <= candidate.zone.high+candidate.volatility.tolerance && Number(row.high) >= candidate.zone.low-candidate.volatility.tolerance).length;
+    const net = rows.length >= 2 ? Number(rows[rows.length-1].close)-Number(rows[0].close) : 0;
+    const failedProgress = Math.abs(net) <= candidate.volatility.atr*0.28;
+    const oppositeResponse = rows.length >= 2 && (sampleSide > 0
+      ? Number(rows[rows.length-1].close) < Number(rows[rows.length-2].low)
+      : Number(rows[rows.length-1].close) > Number(rows[rows.length-2].high));
+    if(oneSided && attempts >= 2 && failedProgress && oppositeResponse){
+      return {state:"confirmed",reason:`One-sided pressure repeatedly failed at ${candidate.source} and opposite follow-through developed`};
+    }
+    if(oneSided && attempts >= 2 && failedProgress){
+      return {state:"possible",reason:`Possible absorption at ${candidate.source}; repeated pressure attempts have not progressed`};
+    }
+    return {state:"cleared",reason:interaction.movement ? "Price progress cleared absorption risk" : "No persistent one-sided failure is confirmed"};
+  }
+  function candidateMaterialFailure37(candidate,closed){
+    if(!Array.isArray(closed) || closed.length < 2) return {failed:false,reason:"No closed-candle material failure"};
+    const desired = candidate.direction;
+    const adverseBeyond = level => level != null && closed.slice(-2).every(row => desired > 0 ? Number(row.close) < level : Number(row.close) > level);
+    const ema55 = signalMaSlot37(candidate.tf,"MA3",true).value;
+    const adverseZoneBoundary = desired > 0 ? candidate.zone.low : candidate.zone.high;
+    if(candidate.family === "EMA9/21 bounce" && adverseBeyond(adverseZoneBoundary) && adverseBeyond(ema55)){
+      return {failed:true,reason:`${candidate.tf} EMA9/21 continuation and EMA55 failed on closed candles`};
+    }
+    if(candidate.family === "EMA55 bounce" && adverseBeyond(adverseZoneBoundary)){
+      return {failed:true,reason:`${candidate.tf} EMA55 continuation failed on closed candles`};
+    }
+    return {failed:false,reason:"Candidate MA structure remains valid"};
+  }
+  function entryQualityScore37(result){
+    const base = {
+      "NO BIAS":15,"BIAS CONFIRMED":25,"SETUP ARMED":34,"ZONE ENGAGED":42,
+      "TRIGGER DEVELOPING":62,READY:84,EXPIRED:12,INVALIDATED:5
+    }[result.state] ?? 20;
+    const movementAdjustment = result.interaction && result.interaction.sustainedMovement ? 6 : result.interaction && result.interaction.movement ? 3 : 0;
+    const pressureAdjustment = result.pressure && result.pressure.confirmed ? 6 : result.pressure && result.pressure.improved ? 2 : result.pressure && result.pressure.effectiveOpposition ? -8 : 0;
+    const gateAdjustment = result.adverseGate && result.adverseGate.blocksDevelopment ? -7 : 0;
+    return Math.round(clamp37(base+movementAdjustment+pressureAdjustment+gateAdjustment,0,100));
+  }
+  function evaluateCandidateState37(candidate,samples,prior=null){
+    const priorSide = prior && (num37(prior.side) != null ? Number(prior.side) : prior.direction === "SHORT" ? -1 : prior.direction === "LONG" ? 1 : 0);
+    const samePrior = prior && prior.family === candidate.family && prior.tf === candidate.tf && prior.source === candidate.source && priorSide === candidate.direction;
+    if(samePrior && ["EXPIRED","INVALIDATED"].includes(prior.state) && prior.fingerprint === candidate.fingerprint){
+      return {...candidate,state:prior.state,reason:prior.reason,interaction:prior.interaction,pressure:prior.pressure,absorption:prior.absorption,adverseGate:prior.adverseGate,chase:prior.chase,chaseExceeded:prior.chaseExceeded,timedOut:prior.timedOut,validFor:0,chaseDistance:prior.chaseDistance,entryQuality:prior.entryQuality,triggerState:"absent",entryAction:"WAIT"};
+    }
+    if(samePrior && ["ZONE ENGAGED","TRIGGER DEVELOPING","READY"].includes(prior.state)){
+      candidate = {...candidate,zone:{...prior.zone},invalidation:prior.invalidation,volatility:{...candidate.volatility,chaseDistance:prior.chaseDistance || candidate.volatility.chaseDistance}};
+    }
+    const interaction = interactionAndReaction37(candidate);
+    const pressure = candidatePressureConfirmation37(candidate,samples);
+    const currentPrice = signalCurrentPrice37();
+    const closed = (state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[candidate.tf] || []).slice(-2);
+    const definedInvalidationFailed = closed.length >= 2 && closed.every(row => candidate.direction > 0 ? Number(row.close) < candidate.invalidation : Number(row.close) > candidate.invalidation);
+    const materialFailure = candidateMaterialFailure37(candidate,closed);
+    const invalidated = definedInvalidationFailed || materialFailure.failed;
+    const chase = currentPrice == null ? 0 : candidate.direction > 0 ? currentPrice-candidate.zone.high : candidate.zone.low-currentPrice;
+    const chaseExceeded = interaction.interacted && chase > candidate.volatility.chaseDistance;
+    const timedOut = interaction.interacted && interaction.age > candidate.triggerWindow;
+    const adverseGate = adverseEvidenceGate37(candidate,interaction,pressure);
+    const stateResult = entryStateFromEvidence37({candidate,interaction,pressure,gate:adverseGate,invalidated,chaseExceeded,timedOut});
+    if(materialFailure.failed) stateResult.reason = `Invalidated - ${materialFailure.reason}`;
+    const absorption = absorptionState37(candidate,interaction,pressure,samples);
+    if(absorption.state === "confirmed" && stateResult.state === "READY"){
+      stateResult.state = "TRIGGER DEVELOPING";
+      stateResult.reason = absorption.reason;
+    }
+    if(absorption.state === "possible" && stateResult.state === "TRIGGER DEVELOPING") stateResult.reason = absorption.reason;
+    const result = {
+      ...candidate,...stateResult,interaction,pressure,absorption,adverseGate,materialFailure,chase,chaseExceeded,timedOut,
+      validFor:Math.max(0,candidate.triggerWindow-(interaction.age || 0)),chaseDistance:candidate.volatility.chaseDistance
+    };
+    result.triggerState = result.state === "READY" ? "confirmed" : result.state === "TRIGGER DEVELOPING" ? "developing" : "absent";
+    result.entryAction = result.state === "READY" ? candidate.direction > 0 ? "READY LONG" : "READY SHORT" : "WAIT";
+    result.entryQuality = entryQualityScore37(result);
+    return result;
+  }
+  function emaCandidates37(bias,horizonId){
+    const candidates = [];
+    const direction = bias.side;
+    const policy = entryPolicy37(horizonId);
+    policy.setupTfs.forEach(tf => {
+      const stack = bias.stacks.find(item => item.tf === tf) || maStackState37(tf);
+      if(!stack.available || stack.side !== direction) return;
+      const ema9 = signalMaSlot37(tf,"MA1");
+      const ema21 = signalMaSlot37(tf,"MA2");
+      const ema55 = signalMaSlot37(tf,"MA3");
+      const ema100 = signalMaSlot37(tf,"MA4");
+      const ema200 = signalMaSlot37(tf,"MA5");
+      if(stack.alignment >= 0.62 && ema9.value != null && ema21.value != null){
+        candidates.push(makeEntryCandidate37({family:"EMA9/21 bounce",priority:1,direction,tf,source:`${ema9.label}/${ema21.label}`,levelLow:ema9.value,levelHigh:ema21.value,stack,requirements:"Hold, reclaim, or reject the fast zone with pressure resumption"},horizonId));
+      }
+      if(stack.alignment >= 0.70 && ema55.value != null){
+        candidates.push(makeEntryCandidate37({family:"EMA55 bounce",priority:2,direction,tf,source:ema55.label,levelLow:ema55.value,levelHigh:ema55.value,stack,requirements:"Visible move away with opposing pressure weakening or reversing"},horizonId));
+      }
+      if(stack.alignment >= 0.80){
+        [ema100,ema200].filter(ma => ma.value != null).forEach(ma => candidates.push(makeEntryCandidate37({family:"Structural EMA reaction",priority:4,direction,tf,source:ma.label,levelLow:ma.value,levelHigh:ma.value,stack,requirements:"Strict structure and pressure agreement at the structural EMA"},horizonId)));
+      }
+    });
+    return candidates;
+  }
+  function structureCandidates37(bias,horizonId){
+    const candidates = [];
+    const direction = bias.side;
+    const engine = horizonEngine37(horizonId);
+    [...new Set([...engine.eventTfs,...engine.structureTfs])].forEach(tf => {
+      const structure = signalStructure37(tf,"swing") || signalStructure37(tf,"internal");
+      const event = structure && structure.latestEvent;
+      if(event && (event.direction === "bullish" ? 1 : -1) === direction && num37(event.price) != null){
+        candidates.push(makeEntryCandidate37({family:"Structure breakout and retest",priority:3,direction,tf,source:`${String(event.text || event.structureType || "structure break").toUpperCase()} level`,levelLow:Number(event.price),levelHigh:Number(event.price),breakTime:Number(event.breakTime),requirements:"Confirmed retest with pressure continuation"},horizonId));
+      }
+      const pivots = canonicalPivots37(tf,"swing");
+      const pivot = direction > 0 ? pivots.low : pivots.high;
+      if(pivot && num37(pivot.price) != null){
+        candidates.push(makeEntryCandidate37({family:"Structure rejection",priority:4,direction,tf,source:`confirmed ${structureClassName37(pivot.classification,pivot.side)}`,levelLow:Number(pivot.price),levelHigh:Number(pivot.price),requirements:"Rejection with pressure reversal or failure to continue"},horizonId));
+      }
+    });
+    return candidates;
+  }
+  function compressionCandidates37(bias,horizonId){
+    const candidates = [];
+    const policy = entryPolicy37(horizonId);
+    policy.setupTfs.forEach(tf => {
+      const stack = bias.stacks.find(item => item.tf === tf) || maStackState37(tf);
+      const ema9 = signalMaSlot37(tf,"MA1");
+      const ema21 = signalMaSlot37(tf,"MA2");
+      if(!stack.available || stack.side !== bias.side || stack.phase !== "expanding" || stack.priorSpread > 0.0012 || ema9.value == null || ema21.value == null) return;
+      candidates.push(makeEntryCandidate37({family:"Compression release",priority:5,direction:bias.side,tf,source:`${ema9.label}/${ema21.label} compression`,levelLow:ema9.value,levelHigh:ema21.value,stack,requirements:"Directional release with pressure and participation expansion"},horizonId));
+    });
+    return candidates;
+  }
+  function candidateRank37(candidate){
+    const stateBoost = {READY:140,"TRIGGER DEVELOPING":95,"ZONE ENGAGED":55,"SETUP ARMED":0,EXPIRED:-100,INVALIDATED:-120}[candidate.state] || 0;
+    const priorityScore = (6-candidate.priority)*18;
+    const alignment = candidate.stack ? candidate.stack.alignment*25 : 8;
+    const distancePenalty = Math.min(25,Number(candidate.distance || 0)*2500);
+    return stateBoost+priorityScore+alignment-distancePenalty;
+  }
+  function selectEntryCandidate37(evaluated){
+    const candidates = Array.isArray(evaluated) ? evaluated : [];
+    const active = candidates.filter(candidate => candidate.state !== "INVALIDATED" && candidate.state !== "EXPIRED");
+    return (active.length ? active : candidates).slice().sort((a,b) => b.rankScore-a.rankScore || a.priority-b.priority || Number(a.distance)-Number(b.distance))[0] || null;
+  }
+  function runEntrySelfTests37(){
+    const candidate = {direction:1,tf:"5m",family:"Structural EMA reaction",source:"EMA100",triggerWindow:5};
+    const engaged = {interacted:true,reaction:false,confirmedReaction:false,movement:false,sustainedMovement:false,trigger:"No reclaim"};
+    const opposition = {buyShare:0.44,sellShare:0.56,effectiveOpposition:true,improved:false,confirmed:false,blocker:"5m selling remains active"};
+    const blocked = {blocksDevelopment:true,blocksReady:true,reasons:["Recovery absent"]};
+    const clear = {blocksDevelopment:false,blocksReady:false,reasons:[]};
+    const observedLong = entryStateFromEvidence37({candidate,interaction:engaged,pressure:opposition,gate:blocked,invalidated:false,chaseExceeded:false,timedOut:false});
+    const observedShort = entryStateFromEvidence37({candidate:{...candidate,direction:-1},interaction:{...engaged,trigger:"No rejection"},pressure:{...opposition,buyShare:0.56,sellShare:0.44,blocker:"5m buying remains active"},gate:blocked,invalidated:false,chaseExceeded:false,timedOut:false});
+    const developingInteraction = {...engaged,reaction:true,movement:true,trigger:"Closed reclaim with movement",provisionalReaction:false};
+    const improving = {effectiveOpposition:false,improved:true,confirmed:false,blocker:"Awaiting sustained pressure confirmation",triggerTf:"3m"};
+    const developing = entryStateFromEvidence37({candidate,interaction:developingInteraction,pressure:improving,gate:clear,invalidated:false,chaseExceeded:false,timedOut:false});
+    const readyInteraction = {...developingInteraction,confirmedReaction:true,sustainedMovement:true};
+    const confirmed = {...improving,confirmed:true,blocker:null};
+    const ready = entryStateFromEvidence37({candidate,interaction:readyInteraction,pressure:confirmed,gate:clear,invalidated:false,chaseExceeded:false,timedOut:false});
+    const highBias = entryStateFromEvidence37({candidate,interaction:engaged,pressure:opposition,gate:blocked,invalidated:false,chaseExceeded:false,timedOut:false,biasConfidence:82});
+    const lowBias = entryStateFromEvidence37({candidate,interaction:engaged,pressure:opposition,gate:blocked,invalidated:false,chaseExceeded:false,timedOut:false,biasConfidence:52});
+    const replacement = selectEntryCandidate37([
+      {source:"EMA9/EMA21",state:"INVALIDATED",rankScore:999,priority:1,distance:0},
+      {source:"EMA100",state:"ZONE ENGAGED",rankScore:40,priority:4,distance:0}
+    ]);
+    const cases = {
+      observedLongWait:observedLong.state === "ZONE ENGAGED" && /selling remains active; no reclaim/i.test(observedLong.reason),
+      mirroredShortWait:observedShort.state === "ZONE ENGAGED" && /buying remains active; no rejection/i.test(observedShort.reason),
+      genuineProgression:developing.state === "TRIGGER DEVELOPING" && ready.state === "READY",
+      biasCannotPromoteEntry:highBias.state === lowBias.state && highBias.state === "ZONE ENGAGED",
+      failedFastCandidateReplaced:replacement && replacement.source === "EMA100"
+    };
+    return {
+      allPassed:Object.values(cases).every(Boolean),cases,
+      states:{observedLong:observedLong.state,observedShort:observedShort.state,developing:developing.state,ready:ready.state,replacement:replacement && replacement.source},
+      observedScenario:{bias:"LONG",biasUnchanged:true,setup:"5m EMA100 support test",pressure:"44% buying / 56% selling",formingProvisional:true,state:observedLong.state,entry:"WAIT",trigger:"absent",reason:observedLong.reason},
+      mirroredScenario:{bias:"SHORT",setup:"5m EMA100 resistance test",pressure:"56% buying / 44% selling",state:observedShort.state,entry:"WAIT",trigger:"absent",reason:observedShort.reason}
+    };
+  }
+  function evaluateEntryDecision37(bias,samples,horizonId){
+    const prior = state.entryTrackers.get(horizonId) || null;
+    const priorWasActive = prior && prior.family && !["EXPIRED","INVALIDATED"].includes(prior.state);
+    if(!bias.permission){
+      if(priorWasActive){
+        const invalidated = {...prior,state:"INVALIDATED",reason:"Invalidated - directional permission or MA alignment failed",validFor:0,terminalVersion:Number(state.activeSnapshot && state.activeSnapshot.version || 0)};
+        state.entryTrackers.set(horizonId,invalidated);
+        return invalidated;
+      }
+      state.entryTrackers.delete(horizonId);
+      return {state:"NO BIAS",direction:null,family:null,reason:bias.reason,candidates:[],candidateAudit:[],selected:null};
+    }
+    if(priorWasActive && prior.direction !== bias.direction){
+      const invalidated = {...prior,state:"INVALIDATED",reason:"Invalidated - authoritative bias changed direction",validFor:0,terminalVersion:Number(state.activeSnapshot && state.activeSnapshot.version || 0)};
+      state.entryTrackers.set(horizonId,invalidated);
+      return invalidated;
+    }
+    const raw = [...emaCandidates37(bias,horizonId),...structureCandidates37(bias,horizonId),...compressionCandidates37(bias,horizonId)];
+    const priorStillLocated = !priorWasActive || raw.some(candidate => candidate.family === prior.family && candidate.tf === prior.tf && candidate.source === prior.source);
+    let previousCandidate = null;
+    let evaluationPrior = prior;
+    if(!priorStillLocated){
+      previousCandidate = {...prior,state:"INVALIDATED",reason:"Invalidated - setup structure or MA alignment materially deteriorated",validFor:0,terminalVersion:Number(state.activeSnapshot && state.activeSnapshot.version || 0)};
+      evaluationPrior = null;
+    }
+    const unique = [];
+    const seen = new Set();
+    raw.forEach(candidate => {
+      const interactionKey = `${candidate.direction}|${candidate.tf}|${Math.round((candidate.zone.low+candidate.zone.high)/2/Math.max(candidate.volatility.atr*0.35,1e-8))}`;
+      if(seen.has(interactionKey)) return;
+      seen.add(interactionKey);
+      unique.push(candidate);
+    });
+    const maximumArmAtr = horizonId === "quick" ? 4.5 : horizonId === "2_3h" ? 6 : 7.5;
+    const minimumArmPct = horizonId === "quick" ? 0.0025 : horizonId === "2_3h" ? 0.006 : 0.012;
+    const maximumArmPct = horizonId === "quick" ? 0.008 : horizonId === "2_3h" ? 0.02 : 0.04;
+    const discarded = unique.filter(candidate => {
+      const absoluteDistance = candidate.distance == null ? Infinity : candidate.distance*Math.max(Math.abs(candidate.currentPrice),1);
+      const armingDistance = clamp37(candidate.volatility.atr*maximumArmAtr,Math.abs(candidate.currentPrice || 0)*minimumArmPct,Math.abs(candidate.currentPrice || 0)*maximumArmPct);
+      return absoluteDistance > armingDistance;
+    });
+    const tradable = unique.filter(candidate => !discarded.includes(candidate));
+    const evaluated = tradable.map(candidate => evaluateCandidateState37(candidate,samples,evaluationPrior));
+    evaluated.forEach(candidate => { candidate.rankScore = candidateRank37(candidate); });
+    const terminalStates = ["EXPIRED","INVALIDATED"];
+    const priorTerminal = prior && evaluated.find(candidate => candidate.family === prior.family && candidate.tf === prior.tf && candidate.source === prior.source && terminalStates.includes(candidate.state));
+    const snapshotVersion = Number(state.activeSnapshot && state.activeSnapshot.version || 0);
+    if(priorTerminal) previousCandidate = {...priorTerminal,terminalVersion:snapshotVersion};
+    const selected = selectEntryCandidate37(evaluated);
+    if(!selected){
+      const decision = {
+        state:"BIAS CONFIRMED",direction:bias.direction,family:null,
+        reason:discarded.length ? "Bias confirmed - candidate locations are outside the tradable arming distance" : "Bias confirmed - no valid entry family is currently located",
+        candidates:evaluated,
+        candidateAudit:discarded.map(candidate => ({family:candidate.family,tf:candidate.tf,state:"REMOVED",rankScore:null,zone:zoneText37(candidate),reason:`Outside the volatility-aware arming distance (${maximumArmAtr.toFixed(1)} ATR, capped by horizon)`})),
+        selected:null,
+        previousCandidate
+      };
+      state.entryTrackers.set(horizonId,decision);
+      return decision;
+    }
+    const decision = {
+      ...selected,side:selected.direction,direction:bias.direction,
+      previousCandidate,
+      candidates:evaluated,
+      candidateAudit:[
+        ...(previousCandidate ? [{family:previousCandidate.family,tf:previousCandidate.tf,state:"INVALIDATED",rankScore:null,zone:zoneText37(previousCandidate),reason:previousCandidate.reason}] : []),
+        ...evaluated.slice().sort((a,b) => b.rankScore-a.rankScore).map(candidate => ({family:candidate.family,tf:candidate.tf,state:candidate.state,rankScore:Math.round(candidate.rankScore),zone:zoneText37(candidate),reason:candidate.reason})),
+        ...discarded.map(candidate => ({family:candidate.family,tf:candidate.tf,state:"REMOVED",rankScore:null,zone:zoneText37(candidate),reason:`Outside the volatility-aware arming distance (${maximumArmAtr.toFixed(1)} ATR, capped by horizon)`}))
+      ]
+    };
+    state.entryTrackers.set(horizonId,{...decision,zone:{...decision.zone},candidates:[],terminalVersion:terminalStates.includes(decision.state) ? snapshotVersion : null});
+    return decision;
+  }
+  function evaluateToolbarPressureSignal37(horizonId){
+    const engine = horizonEngine37(horizonId);
+    const configsForHorizon = engine.pressure;
+    const samples = configsForHorizon.map(item => ({...samplePressureSignal37(item.tf,item.lookback,item.maSlot),weight:item.weight,role:item.role}));
+    if(samples.some(sample => !sample.available)){
+      const maEvaluation = evaluateMaEvents37(horizonId,samples,0);
+      const incomplete = {
+        entry:"ENTRY WAIT",
+        confidence:null,
+        action:"Data incomplete",
+        exit:"EXIT WAIT",
+        normalized:0,
+        dominantSide:0,
+        marketDirection:null,
+        position:openPositionSignal37(),
+        samples,
+        maEvents:maEvaluation.events,
+        maImpact:0,
+        maAudit:maEvaluation.audit,
+        dataIncomplete:true
+      };
+      incomplete.management = evaluatePositionManagement37(incomplete,horizonId);
+      incomplete.exit = incomplete.management.exit;
+      return incomplete;
+    }
+    const bias = evaluateBias37(samples,horizonId);
+    const signalDirection = bias.side;
+    const maEvaluation = evaluateMaEvents37(horizonId,samples,signalDirection);
+    const entryDecision = evaluateEntryDecision37(bias,samples,horizonId);
+    const confidence = bias.confidence;
+    const entry = entryDecision.state === "READY" && bias.direction ? `ENTRY ${bias.direction}` : "ENTRY WAIT";
+    const structural = bias.direction ? structuralMarketContext37(bias.direction,horizonId) : structuralMarketContext37(1,horizonId);
+    const position = openPositionSignal37();
+    const result = {
+      entry,
+      confidence,
+      action:entryDecision.reason,
+      exit:"EXIT WAIT",
+      normalized:bias.score,
+      rawNormalized:bias.pressureScore,
+      coreNormalized:bias.stackScore,
+      dominantSide:bias.side,
+      marketDirection:bias.direction,
+      fadeDirection:null,
+      position,
+      samples,
+      bias,
+      entryDecision,
+      entryQuality:entryDecision.entryQuality,
+      maEvents:maEvaluation.events,
+      maImpact:maEvaluation.impact,
+      maAudit:maEvaluation.audit,
+      breakdown:{base:54,stack:Math.round(Math.abs(bias.stackScore)*18),pressure:Math.round(Math.abs(bias.pressureScore)*8),structure:Math.round(Math.abs(bias.structureScore)*5),setup:0,ma:0,context:0,participation:0,forming:0,micro:0},
+      structuralContext:structural
+    };
+    result.independentThesis = result.marketDirection
+      ? evaluateDirectionThesis37(result,result.marketDirection,horizonId)
+      : null;
+    result.management = evaluatePositionManagement37(result,horizonId);
+    result.exit = result.management.exit;
+    return result;
+  }
+  function evaluateDirectionThesis37(market,direction,horizonId){
+    const desired = direction === "SHORT" ? -1 : 1;
+    const samples = Array.isArray(market && market.samples) ? market.samples : [];
+    if(!samples.length || samples.some(sample => !sample.available)){
+      return {
+        status:"MISSING",
+        confidence:null,
+        action:"Data incomplete",
+        direction,
+        maEvents:[],
+        maImpact:0,
+        missing:true
+      };
+    }
+    const main = tooltipMainSample37(market);
+    const oriented = Number(market.normalized || 0) * desired;
+    const maEvaluation = evaluateMaEvents37(horizonId,samples,desired);
+    const structural = structuralMarketContext37(direction,horizonId);
+    const engine = horizonEngine37(horizonId);
+    const structureBroken = (engine.structureRoles && engine.structureRoles.swing || engine.structureTfs).some(tf => {
+      const pivots = canonicalPivots37(tf,"swing");
+      const pivot = desired > 0 ? pivots.low : pivots.high;
+      return !!(pivot && confirmedCloseBeyond37(tf,pivot.price,desired > 0 ? -1 : 1));
+    });
+    const contextOpposes = !!(main && main.contextSide === -desired);
+    const contextSupports = !!(main && main.contextSide === desired);
+    const primaryTf = horizonId === "quick" ? "5m" : horizonId === "2_3h" ? "15m" : "1h";
+    const currentPrice = signalCurrentPrice37();
+    const primaryMas = [1,2,3].map(slotIndex => signalMaSlot37(primaryTf,`MA${slotIndex}`)).filter(ma => ma.reliable && ma.value != null);
+    const maPriceAlignment = currentPrice == null ? 0 : primaryMas.reduce((sum,ma) => sum + ((currentPrice >= ma.value ? 1 : -1) * desired),0);
+    const pressureMomentumAlignment = samples.reduce((sum,sample) => {
+      if(sample.sideSign !== desired || sample.pressureMomentum <= 0.01) return sum;
+      return sum + (sample.tf === "1m" ? 0.35 : sample.weight);
+    },0);
+    const materialScore = oriented * 30
+      + maEvaluation.impact * 0.75
+      + structural.points * 1.25
+      + maPriceAlignment * 2
+      + pressureMomentumAlignment
+      + (contextSupports ? 1.5 : 0)
+      - (contextOpposes ? 1.5 : 0);
+    let status = "MIXED";
+    if(structureBroken && materialScore <= -5) status = "INVALID";
+    else if(materialScore <= -3) status = "ADVERSE";
+    else if(materialScore >= 3) status = "SUPPORTIVE";
+    const invalid = status === "INVALID";
+    const base = invalid ? 70 : 57;
+    const pressurePoints = Math.round(Math.abs(oriented) * (invalid ? 8 : 14));
+    const contextPoints = invalid ? (contextOpposes ? 3 : 0) : (contextSupports || contextOpposes ? 3 : 0);
+    const maPoints = invalid ? 0 : Math.min(4,Math.abs(maEvaluation.impact));
+    const structurePoints = invalid || status === "ADVERSE" ? Math.max(0,-structural.points) : Math.max(0,structural.points);
+    const participationPoints = Number(market.breakdown && market.breakdown.participation || 0);
+    const formingPoints = Number(market.breakdown && market.breakdown.forming || 0);
+    const rawConfidence = base + Math.min(12,Math.round(Math.abs(materialScore))) + pressurePoints + contextPoints + maPoints + structurePoints + participationPoints + formingPoints;
+    const confidence = status === "MIXED" ? null
+      : invalid
+        ? Math.max(68,Math.min(82,Math.round(rawConfidence)))
+        : Math.max(54,Math.min(78,Math.round(rawConfidence)));
+    const microSample = horizonId === "quick" ? samples.find(sample => sample.tf === "1m") : null;
+    const thesisFadeRisk = status === "SUPPORTIVE" && (
+      samples.some(sample => sample.sideSign === desired && sample.pressureMomentum < -0.03)
+      || !!(microSample && microSample.sideSign === -desired && microSample.dominantPct >= 0.55)
+    );
+    const action = thesisFadeRisk
+      ? (direction === "LONG" ? "Bullish edge weakening" : "Bearish edge weakening")
+      : status === "SUPPORTIVE"
+      ? (direction === "LONG" ? "Buy pullbacks" : "Sell bounces")
+      : status === "MIXED"
+        ? "Wait for confirmation"
+        : status === "ADVERSE"
+          ? "Avoid adds"
+          : `${direction === "LONG" ? "Long" : "Short"} thesis failed`;
+    return {
+      status,
+      confidence,
+      action,
+      direction,
+      fadeRisk:thesisFadeRisk,
+      oriented,
+      materialScore,
+      maPriceAlignment,
+      primaryTf,
+      structureBroken,
+      maEvents:maEvaluation.events,
+      maImpact:maEvaluation.impact,
+      maAudit:maEvaluation.audit,
+      structuralContext:structural,
+      breakdown:{base,pressure:pressurePoints,context:contextPoints,ma:maPoints,structure:structurePoints,participation:participationPoints,forming:formingPoints},
+      missing:false
+    };
+  }
+  function managementFingerprint37(management){
+    if(!management) return "missing";
+    return JSON.stringify({
+      health:management.health,
+      action:management.action,
+      state:management.state,
+      exit:management.exit,
+      reasons:management.reasons || [],
+      risks:management.risks || [],
+      tooltipReasons:management.tooltipReasons || [],
+      watchCondition:management.watchCondition || null,
+      horizonId:management.horizonId || null,
+      anchor:management.anchor || null,
+      pathA:management.pathA || null,
+      pathB:management.pathB || null,
+      progress:management.progress || null,
+      roi:management.roi || null
+    });
+  }
+  function validateFrozenManagement37(signal,horizonId){
+    const before = managementFingerprint37(signal && signal.management);
+    const interpretations = {AUTO:before};
+    ["LONG","SHORT"].forEach(direction => {
+      evaluateDirectionThesis37(signal,direction,horizonId);
+      interpretations[direction] = managementFingerprint37(signal && signal.management);
+    });
+    const after = managementFingerprint37(signal && signal.management);
+    return {valid:before === after && DIRECTIONS.every(direction => interpretations[direction] === before),before,after,interpretations};
+  }
+  function renderToolbarSignal37(){
+    if(!ensureToolbarSignalUi37()) return;
+    if(state.directionChip){
+      state.directionChip.textContent = `DIR: ${state.direction}`;
+      state.directionChip.classList.add("is-active");
+      state.directionChip.setAttribute("aria-label",`Direction mode ${state.direction}. Click to change.`);
+      state.directionChip.title = "Direction mode: AUTO → LONG → SHORT";
+    }
+    HORIZONS.forEach(item => {
+      const chip = state.chips.get(item.id);
+      if(chip) chip.classList.toggle("is-active",state.horizon === item.id);
+    });
+    windowSystem.setSignalHorizon(state.horizon);
+    const bundle = ensureSignalData37(state.horizon);
+    const ready = bundle.health.status === "sufficient" || bundle.health.status === "stale";
+    state.activeSnapshot = ready ? coherentSignalSnapshot37(bundle.plan,bundle.health) : null;
+    try{
+      let signal;
+      if(ready){
+        if(!state.activeSnapshot.signal){
+          state.activeSnapshot.signal = evaluateToolbarPressureSignal37(state.horizon);
+          state.activeSnapshot.managementValidation = validateFrozenManagement37(state.activeSnapshot.signal,state.horizon);
+        }
+        signal = state.activeSnapshot.signal;
+      }else{
+        signal = loadingSignal37(bundle);
+      }
+      signal.dataHealth = bundle.health;
+      if(ready && bundle.health.status === "stale" && num37(signal.confidence) != null){
+        signal.confidence = Math.min(62,signal.confidence);
+        signal.staleConfidenceCap = 62;
+      }
+      const thesis = state.direction === "AUTO"
+        ? null
+        : (ready ? evaluateDirectionThesis37(signal,state.direction,state.horizon) : loadingThesis37(state.direction));
+      if(thesis && ready && bundle.health.status === "stale" && num37(thesis.confidence) != null){
+        thesis.confidence = Math.min(62,thesis.confidence);
+        thesis.staleConfidenceCap = 62;
+      }
+      const entryDirection = state.direction === "AUTO"
+        ? (signal.fadeDirection || signal.marketDirection)
+        : state.direction;
+      const entryQuality = evaluateEntryQuality37(signal,thesis,entryDirection);
+      if(state.entry){
+        const decision = signal.entryDecision;
+        if(state.direction === "AUTO" && decision){
+          state.entry.dataset.tone = decision.state === "READY" ? pillTone37(signal.entry)
+            : decision.state === "INVALIDATED" || decision.state === "EXPIRED" ? "red"
+              : decision.state === "TRIGGER DEVELOPING" || decision.state === "ZONE ENGAGED" ? "orange" : "gray";
+          state.signalSummaryVariants = signalSummaryVariants37(signal,decision);
+        }else{
+          const displayValue = thesis && thesis.fadeRisk ? "ENTRY FADE RISK" : thesis ? `THESIS ${thesis.status}` : signal.entry;
+          state.entry.dataset.tone = pillTone37(displayValue);
+          if(thesis && state.direction !== signal.marketDirection){
+            state.signalSummaryVariants = signalSummaryVariants37({marketDirection:state.direction,confidence:thesis.confidence},null);
+          }else{
+            state.signalSummaryVariants = signalSummaryVariants37(signal,decision);
+          }
+        }
+        state.entry.textContent = state.signalSummaryVariants.full;
+        state.entry.removeAttribute("title");
+      }
+      if(state.exit){
+        state.exit.dataset.tone = pillTone37(signal.exit);
+        state.exit.textContent = exitDisplayText37(signal.exit);
+        state.exit.removeAttribute("title");
+      }
+      renderResponsiveSignalSummary37();
+      const signalReport = signalDetailsReport37(signal,thesis,entryQuality);
+      if(state.detailsBody){
+        renderSignalDetailsReport37(signalReport);
+        if(state.detailsTitle) state.detailsTitle.textContent = "Signal Details";
+        positionToolbarSignalDetails37();
+      }
+      if(state.activeSnapshot){
+        windowSystem.update({
+          signalReport,
+          management:signal.management,
+          snapshot:state.activeSnapshot,
+          horizonLabel:horizonLabel37(state.horizon),
+          signalHorizonId:state.horizon,
+          signalTooltip:signalToolbarTooltip37(signal,entryQuality,thesis)
+        });
+      }
+      state.lastRenderAt = Date.now();
+    }finally{
+      state.activeSnapshot = null;
+    }
+  }
+  function scheduleToolbarSignalRefresh37(immediate){
+    if(!state.initialized) return;
+    const run = () => {
+      state.refreshTimer = null;
+      try{
+        renderToolbarSignal37();
+        state.lastError = null;
+      }catch(error){
+        state.lastError = error && error.stack || String(error);
+      }
+    };
+    if(immediate){
+      if(state.refreshTimer != null) clearTimeout(state.refreshTimer);
+      run();
+      return;
+    }
+    const remaining = Math.max(0,featureConfig.refreshMs - (Date.now() - state.lastRenderAt));
+    if(remaining === 0){
+      run();
+    }else if(state.refreshTimer == null){
+      state.refreshTimer = setTimeout(run,remaining);
+    }
+  }
+
+  function diagnostics37(){
+    return {
+      module:MODULE,
+      initialized:state.initialized,
+      refreshLoops:state.lifecycleTimer == null ? 0 : 1,
+      controls:document.querySelectorAll("#pressureSignalToolbar").length,
+      signalWindows:document.querySelectorAll("#pressureSignalDetails").length,
+      positionWindows:document.querySelectorAll("#pressurePositionManagement").length,
+      horizon:state.horizon,
+      direction:state.direction,
+      managementHorizon:positionEngine.getManagementHorizon() || state.horizon,
+      lastError:state.lastError,
+      snapshot:state.marketSnapshot ? {
+        version:state.marketSnapshot.version,
+        createdAt:state.marketSnapshot.createdAt,
+        symbol:state.marketSnapshot.symbol,
+        managementInvariant:state.marketSnapshot.managementValidation && state.marketSnapshot.managementValidation.valid,
+        managementFingerprint:managementFingerprint37(state.marketSnapshot.signal && state.marketSnapshot.signal.management)
+      } : null,
+      management:positionEngine._diagnostics(),
+      selfTests:positionEngine._selfTest(),
+      entrySelfTests:runEntrySelfTests37()
+    };
+  }
+  function initialize37(){
+    if(state.initialized) return api;
+    state.initialized = true;
+    ensureToolbarSignalUi37();
+    scheduleToolbarSignalRefresh37(true);
+    state.lifecycleTimer = setInterval(scheduleToolbarSignalRefresh37,featureConfig.refreshMs);
+    if(typeof draw === "function" && !state.drawWrapper){
+      state.previousDraw = draw;
+      state.drawWrapper = function(){
+        const result = state.previousDraw.apply(this,arguments);
+        scheduleToolbarSignalRefresh37();
+        return result;
+      };
+      draw = window.draw = state.drawWrapper;
+    }
+    return api;
+  }
+  function destroy37(){
+    if(!state.initialized) return;
+    state.initialized = false;
+    if(state.lifecycleTimer != null) clearInterval(state.lifecycleTimer);
+    if(state.refreshTimer != null) clearTimeout(state.refreshTimer);
+    if(state.summaryFrame != null) cancelAnimationFrame(state.summaryFrame);
+    state.lifecycleTimer = null;
+    state.refreshTimer = null;
+    state.summaryFrame = null;
+    state.dataLoadGeneration += 1;
+    state.dataLoadPromise = null;
+    try{
+      const hub = window.PUBLIC_MARKET_DATA_HUB;
+      if(hub && typeof hub.setTimeframeRequirements === "function") hub.setTimeframeRequirements(MODULE,[]);
+    }catch(_e){}
+    if(state.uiAbort) state.uiAbort.abort();
+    state.uiAbort = null;
+    state.resizeObservers.splice(0).forEach(observer => observer.disconnect());
+    windowSystem.destroy();
+    positionEngine.destroy();
+    if(state.drawWrapper && typeof draw === "function" && draw === state.drawWrapper){
+      draw = window.draw = state.previousDraw;
+    }
+    state.previousDraw = null;
+    state.drawWrapper = null;
+    document.getElementById("pressureSignalToolbar")?.remove();
+    document.getElementById("pressureSignalDetails")?.remove();
+    document.getElementById("pressureSignalManagementTip")?.remove();
+    state.root = state.directionChip = state.entry = state.exit = null;
+    state.details = state.detailsBody = state.detailsTitle = null;
+    state.chips.clear();
+    state.marketSnapshot = null;
+    state.activeSnapshot = null;
+    state.signalSummaryVariants = null;
+  }
+  function setManagementHorizon37(next){
+    const selected = positionEngine.setManagementHorizon(next);
+    state.marketSnapshot = null;
+    scheduleToolbarSignalRefresh37(true);
+    return selected;
+  }
+  function recordEntryAnchor37(anchor){
+    const symbol = String(anchor && anchor.symbol || state.marketSnapshot && state.marketSnapshot.symbol || "BTCUSDT");
+    const side = String(anchor && anchor.side || "").toUpperCase();
+    return positionEngine.recordAnchor(`${symbol}|${side}`,anchor);
+  }
+  const api = Object.freeze({
+    initialize:initialize37,
+    destroy:destroy37,
+    refresh:() => scheduleToolbarSignalRefresh37(true),
+    setHorizon:setStoredHorizon,
+    setDirection:setStoredDirection,
+    setManagementHorizon:setManagementHorizon37,
+    recordEntryAnchor:recordEntryAnchor37,
+    openSignalDetails:windowSystem.openSignal,
+    openPositionManagement:windowSystem.openPosition,
+    getSignalCopyContent:windowSystem.getSignalCopy,
+    getManagementCopyContent:windowSystem.getPositionCopy,
+    getDiagnostics:diagnostics37
+  });
+  Object.defineProperty(window,"PRESSURE_SIGNAL",{value:api,configurable:true});
+  delete window.__PRESSURE_SIGNAL_FEATURE_BUILD__;
+  initialize37();
+})();
