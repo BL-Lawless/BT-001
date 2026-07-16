@@ -51,6 +51,61 @@
       return values.reduce((sum,value) => sum+value,0)/values.length;
     }
 
+    function trueRangeSeries(rows){
+      const source = Array.isArray(rows) ? rows.filter(row => row && row.final !== false) : [];
+      const values = [];
+      for(let index=1;index<source.length;index++){
+        const row = source[index];
+        const previous = source[index-1];
+        values.push(Math.max(
+          Number(row.high)-Number(row.low),
+          Math.abs(Number(row.high)-Number(previous.close)),
+          Math.abs(Number(row.low)-Number(previous.close))
+        ));
+      }
+      return values.filter(Number.isFinite);
+    }
+
+    function rollingAverage(values,period){
+      const out = [];
+      for(let index=period-1;index<values.length;index++){
+        const window = values.slice(index-period+1,index+1);
+        out.push(window.reduce((sum,value) => sum+value,0)/window.length);
+      }
+      return out;
+    }
+
+    function timeframeDataStatus(facts,tf){
+      const item = facts.dataHealth && Array.isArray(facts.dataHealth.items)
+        ? facts.dataHealth.items.find(entry => entry.tf === tf)
+        : null;
+      return item ? {status:item.status,ageMs:item.ageMs} : {status:"unavailable",ageMs:null};
+    }
+
+    function volatilityForTimeframe(facts,tf){
+      const policy = config.volatility;
+      const status = timeframeDataStatus(facts,tf);
+      const rows = rowsFor(facts,tf,true).filter(row => row && row.final !== false);
+      const ranges = trueRangeSeries(rows.slice(-(policy.historyCandles+policy.atrPeriod+1)));
+      const history = rollingAverage(ranges,policy.atrPeriod).slice(-policy.historyCandles);
+      if(status.status !== "sufficient" || history.length < policy.minimumSamples){
+        return {available:false,tf,state:"UNAVAILABLE",percentile:null,atr:null,toleranceMultiplier:null,samples:history.length,required:policy.minimumSamples,status:status.status,ageMs:status.ageMs};
+      }
+      const atr = history[history.length-1];
+      const percentile = history.length ? history.filter(value => value <= atr).length/history.length*100 : null;
+      const regime = percentile < policy.quietPercentile ? "QUIET"
+        : percentile < policy.highPercentile ? "NORMAL"
+          : percentile < policy.extremePercentile ? "HIGH" : "EXTREME";
+      return {available:true,tf,state:regime,percentile,atr,toleranceMultiplier:policy.toleranceMultipliers[regime],samples:history.length,required:policy.minimumSamples,status:status.status,ageMs:status.ageMs};
+    }
+
+    function volatilityRegime(facts,horizon){
+      const primary = volatilityForTimeframe(facts,horizon.primaryTf);
+      const context = volatilityForTimeframe(facts,horizon.contextTf);
+      const contextConfirmation = !context.available || !primary.available ? "UNAVAILABLE" : context.state === primary.state ? "CONFIRMED" : "DIVERGENT";
+      return {...primary,primaryTf:horizon.primaryTf,contextTf:horizon.contextTf,contextState:context.state,contextPercentile:context.percentile,contextAvailable:context.available,contextConfirmation};
+    }
+
     function pressureShare(row,direction){
       const volume = numeric(row && (row.volume ?? row.baseVolume));
       const buy = numeric(row && row.takerBuyBase);
@@ -85,6 +140,9 @@
           epochHistory:[{epoch:1,startedAt:now,basis:{qty:Math.abs(position.qty),entry:position.price,margin,leverage:numeric(position.leverage)}}],
           currentRoi:roi,peakRoi:roi,peakAt:roi == null ? null : now,
           maxFavorablePrice:currentPrice,campaignMfe:campaignResult,campaignResult,
+          initialQty:Math.abs(position.qty),maxQty:Math.abs(position.qty),partialProfitDetected:false,
+          lifecycle:"FRESH",lifecycleBasis:"Original thesis and invalidation remain active",
+          keyDefence:null,keyDefenceZoneWidth:null,originalInvalidation:null,lastMigrationKey:"",defenceMigration:null,
           health:"HEALTHY",healthHistory:[{state:"HEALTHY",at:now,reason:"Position campaign detected"}],
           pendingHealth:null,pendingCount:0,lastHealthSignature:"",paths:{A:{state:"CLEAR",history:[]},B:{state:"CLEAR",history:[]}},
           progress:{startedAt:now,startPrice:currentPrice,lastBasisKey:"",failedAttempts:0,state:"NORMAL"}
@@ -93,6 +151,10 @@
         return created;
       }
       const basis = existing.epochBasis;
+      existing.maxQty = Math.max(Number(existing.maxQty || 0),Math.abs(position.qty));
+      if(existing.maxQty > 0 && Math.abs(position.qty) <= existing.maxQty*(1-config.roiEpoch.quantityChange) && realized > 0){
+        existing.partialProfitDetected = true;
+      }
       const basisChanged = relativeChange(Math.abs(position.qty),basis.qty) >= config.roiEpoch.quantityChange
         || relativeChange(position.price,basis.entry) >= config.roiEpoch.entryChange
         || (margin != null && basis.margin != null && relativeChange(margin,basis.margin) >= config.roiEpoch.marginChange)
@@ -129,9 +191,15 @@
       const recorded = recordedAnchors.get(key);
       if(recorded && recorded.level != null){
         const tf = recorded.tf || horizon.anchorTf;
-        return {...recorded,tf,invalidation:numeric(recorded.invalidation) ?? recorded.level,source:"recorded",label:`Recorded ${recorded.family || "setup"} (${tf})`};
+        const userSelected = recorded.userSelected === true || recorded.selectionSource === "user-selected";
+        return {
+          ...recorded,tf,invalidation:numeric(recorded.invalidation) ?? recorded.level,
+          source:userSelected ? "user-selected" : "system-selected",
+          selectionSource:userSelected ? "user-selected" : "system-selected",
+          defenceType:recorded.defenceType || recorded.family || "setup level",
+          label:`${tf} ${recorded.defenceType || recorded.family || "setup level"}`
+        };
       }
-      const chosenByUser = selectedHorizon != null;
       const tf = horizon.anchorTf;
       const desired = sideNumber(facts.position.side);
       const swing = structure(facts,tf,"swing");
@@ -139,21 +207,299 @@
       const structuralLevel = numeric(pivot && pivot.price);
       const ema55 = maValue(facts,tf,"MA3",true);
       const level = structuralLevel ?? ema55 ?? facts.position.price;
+      const defenceType = structuralLevel != null ? "structure" : ema55 != null ? "EMA55" : "entry basis";
       return {
-        source:chosenByUser ? "user-selected" : "inferred",
+        source:"system-selected",
+        selectionSource:"system-selected",
         profile:selectedHorizon || facts.horizon,
-        tf,level,
-        label:`${chosenByUser ? "User-selected" : "Inferred"} ${tf} ${structuralLevel != null ? "structure" : ema55 != null ? "EMA55" : "entry basis"}`,
+        tf,level,defenceType,
+        label:`${tf} ${defenceType}`,
         invalidation:level,
         expectedBehavior:`${facts.position.side} continuation should hold ${tf} ${structuralLevel != null ? "structure" : "EMA55"}`,
-        inferred:!chosenByUser
+        inferred:true
       };
+    }
+
+    function positionLifecycle(facts,horizon,tracker,anchor){
+      const desired = sideNumber(facts.position.side);
+      const structureSnapshot = structure(facts,horizon.primaryTf,"swing");
+      const event = structureSnapshot && structureSnapshot.latestEvent;
+      const eventSide = event && event.direction === "bullish" ? 1 : event ? -1 : 0;
+      const eventPrice = numeric(event && event.price);
+      const breakTime = numeric(event && event.breakTime) || 0;
+      const breakTimeMs = breakTime > 1e12 ? breakTime : breakTime*1000;
+      const eventAfterPosition = breakTimeMs >= Number(tracker.startedAt || 0);
+      const rows = rowsFor(facts,horizon.primaryTf,true).filter(row => numeric(row.time) >= breakTime);
+      const held = eventPrice != null && rows.length >= horizon.confirmCloses && rows.slice(-horizon.confirmCloses).every(row => desired > 0 ? Number(row.close) > eventPrice : Number(row.close) < eventPrice);
+      const retested = eventPrice != null && rows.some(row => Number(row.low) <= eventPrice && Number(row.high) >= eventPrice) && held;
+      if(tracker.partialProfitDetected){
+        tracker.lifecycle = "RUNNER";
+        tracker.lifecycleBasis = "Meaningful partial profit realised; remainder managed against favourable structure";
+      }else if(tracker.lifecycle === "FRESH" && eventAfterPosition && eventSide === desired && held){
+        tracker.lifecycle = "ESTABLISHED";
+        tracker.lifecycleBasis = `${horizon.primaryTf} ${retested ? "break and successful retest" : "favourable structure cleared and held"}`;
+      }
+      return {state:tracker.lifecycle,basis:tracker.lifecycleBasis,held,retested,event,eventPrice,eventAfterPosition};
+    }
+
+    function resolveKeyDefence(facts,horizon,tracker,volatility,lifecycle){
+      const candidate = selectAnchor(facts,horizon,tracker);
+      const desired = sideNumber(facts.position.side);
+      const atr = volatility.atr || trueRangeAverage(rowsFor(facts,horizon.primaryTf,true),config.volatility.atrPeriod) || Math.max(Math.abs(facts.currentPrice || facts.position.price)*0.0005,1e-8);
+      if(!tracker.keyDefence){
+        tracker.keyDefence = {...candidate};
+        if(candidate.source !== "system-selected" || candidate.recordedAt){
+          tracker.originalInvalidation = {tf:candidate.tf,level:candidate.invalidation,source:candidate.source,label:candidate.label};
+        }
+      }else if(candidate.recordedAt && candidate.recordedAt !== tracker.keyDefence.recordedAt){
+        tracker.keyDefence = {...candidate};
+        tracker.originalInvalidation ||= {tf:candidate.tf,level:candidate.invalidation,source:candidate.source,label:candidate.label};
+      }
+      const current = tracker.keyDefence;
+      const forward = desired > 0 ? candidate.level-current.level : current.level-candidate.level;
+      const structureSnapshot = structure(facts,horizon.primaryTf,"swing");
+      const event = structureSnapshot && structureSnapshot.latestEvent;
+      const eventSide = event && event.direction === "bullish" ? 1 : event ? -1 : 0;
+      const migrationKey = `${numeric(event && event.breakTime) || 0}|${Number(candidate.level).toPrecision(12)}`;
+      const closes = rowsFor(facts,horizon.primaryTf,true).slice(-horizon.confirmCloses);
+      const confirmedHold = closes.length >= horizon.confirmCloses && closes.every(row => desired > 0 ? Number(row.close) > candidate.level : Number(row.close) < candidate.level);
+      const mayMigrate = lifecycle.state !== "FRESH" && candidate.source === "system-selected" && eventSide === desired
+        && forward >= atr*config.managementLevels.migrationMinAtr && confirmedHold && migrationKey !== tracker.lastMigrationKey;
+      if(mayMigrate){
+        tracker.keyDefence = {...candidate};
+        tracker.keyDefenceZoneWidth = null;
+        tracker.lastMigrationKey = migrationKey;
+        tracker.defenceMigration = {at:Number(facts.createdAt || Date.now()),from:current.level,to:candidate.level,basis:`${horizon.primaryTf} favourable structure confirmed and held on closed candles`};
+      }
+      const resolved = {...tracker.keyDefence};
+      const proposedWidth = atr*config.managementLevels.zoneAtr*(volatility.toleranceMultiplier || 1);
+      const latestClosed = last(rowsFor(facts,horizon.primaryTf,true));
+      const crossedReference = !!(latestClosed && (desired > 0 ? Number(latestClosed.close) < resolved.level : Number(latestClosed.close) > resolved.level));
+      const width = crossedReference && tracker.keyDefenceZoneWidth != null ? Math.min(proposedWidth,tracker.keyDefenceZoneWidth) : proposedWidth;
+      tracker.keyDefenceZoneWidth = width;
+      resolved.zone = {low:resolved.level-width,high:resolved.level+width,reference:resolved.level,width};
+      resolved.failureBoundary = desired > 0 ? resolved.zone.low : resolved.zone.high;
+      return {anchor:resolved,migration:tracker.defenceMigration,originalInvalidation:tracker.originalInvalidation,atr};
+    }
+
+    function levelRole(facts,level,anchor,atr){
+      if(Array.isArray(level.roles) && level.roles.length) return level.roles;
+      const desired = sideNumber(facts.position.side);
+      const current = numeric(facts.currentPrice);
+      const entry = numeric(facts.position.price);
+      const price = numeric(level.reference);
+      if(price == null || current == null) return ["distant context"];
+      const ahead = (price-current)*desired >= 0;
+      const beyondEntry = entry == null ? 0 : (price-entry)*desired;
+      const distanceAtr = Math.abs(price-current)/Math.max(atr,1e-8);
+      if(level.family === "original invalidation") return ["invalidation reinforcement"];
+      if(level.family === "key defence") return ["defence"];
+      if(level.family === "binance-exit") return ["objective"];
+      if(level.family === "binance-protection") return ["defence"];
+      if(level.family === "user"){
+        const roles = beyondEntry < 0 ? ["invalidation reinforcement","defence"]
+          : ahead ? ["objective",desired > 0 ? "resistance obstacle" : "support obstacle"]
+            : ["retest level","defence"];
+        if(distanceAtr > config.managementLevels.exceptionalDistanceAtr && !level.exceptional) roles.unshift("distant context");
+        return roles;
+      }
+      if(distanceAtr > config.managementLevels.exceptionalDistanceAtr && !level.exceptional) return ["distant context"];
+      if(ahead) return ["objective",desired > 0 ? "resistance obstacle" : "support obstacle"];
+      return ["defence",desired > 0 ? "support" : "resistance"];
+    }
+
+    function interactionState(facts,level,horizon,volatility,atr){
+      const desired = sideNumber(facts.position.side);
+      const rows = rowsFor(facts,level.tf || horizon.primaryTf,false);
+      const closed = rowsFor(facts,level.tf || horizon.primaryTf,true).slice(-3);
+      const latest = rows.length ? rows[rows.length-1] : null;
+      const zone = {low:level.low,high:level.high};
+      const touched = [...closed,latest].filter(Boolean).some(row => Number(row.low) <= zone.high && Number(row.high) >= zone.low);
+      const current = numeric(facts.currentPrice);
+      const ahead = current == null ? false : (level.reference-current)*desired >= 0;
+      const distance = current == null ? Infinity : current < zone.low ? zone.low-current : current > zone.high ? current-zone.high : 0;
+      const approaching = distance <= atr*config.managementLevels.proximityAtr*(volatility.toleranceMultiplier || 1);
+      const adverse = row => desired > 0 ? Number(row.close) < zone.low : Number(row.close) > zone.high;
+      const supportive = row => desired > 0 ? Number(row.close) >= zone.high : Number(row.close) <= zone.low;
+      const priorDistance = closed.length >= 2 ? Math.abs(Number(closed.at(-2).close)-level.reference) : null;
+      const latestDistance = closed.length ? Math.abs(Number(closed.at(-1).close)-level.reference) : null;
+      const approachQuality = priorDistance == null || latestDistance == null ? "unavailable" : latestDistance < priorDistance ? "improving" : latestDistance > priorDistance ? "moving away" : "flat";
+      const failed = closed.length >= horizon.confirmCloses && closed.slice(-horizon.confirmCloses).every(adverse)
+        && Math.abs(Number(closed.at(-1).close)-(desired > 0 ? zone.low : zone.high)) >= (zone.high-zone.low)*0.5;
+      if(!ahead && failed) return {state:"FAILED",touched,formingWarning:false,confirmation:"Closed candle",approachQuality};
+      if(!ahead && closed.length >= 2 && adverse(closed.at(-2)) && supportive(closed.at(-1))) return {state:"RECLAIMED",touched:true,formingWarning:false,confirmation:"Closed candle",approachQuality};
+      const adverseMove = closed.length >= 2 && (Number(closed.at(-1).close)-Number(closed.at(-2).close))*desired < 0;
+      if(touched && ahead && adverseMove && distance > (zone.high-zone.low)*0.5) return {state:"REJECTED",touched:true,formingWarning:false,confirmation:"Closed candle",approachQuality};
+      if(!ahead && touched && closed.length >= 2 && closed.slice(-2).every(supportive)) return {state:"HOLDING",touched:true,formingWarning:false,confirmation:"Closed candle",approachQuality};
+      const opposing = (facts.samples || []).some(sample => sample.available && sample.tf === horizon.primaryTf && sample.sideSign === -desired && Number(sample.dominantPct || 0) >= config.pressure.materialShare);
+      const emaDegrading = level.family === "moving averages" && ((level.emaSlope != null && level.emaSlope*desired < 0) || level.stackCondition === "opposed");
+      if(touched && adverseMove && (opposing || emaDegrading)) return {state:"WEAKENING",touched:true,formingWarning:!!(latest && latest.final === false),confirmation:latest && latest.final === false ? "Forming candle" : "Closed candle",approachQuality};
+      if(touched) return {state:"TESTING",touched:true,formingWarning:!!(latest && latest.final === false),confirmation:latest && latest.final === false ? "Forming candle" : "Closed candle",approachQuality};
+      if(approaching) return {state:"APPROACHING",touched:false,formingWarning:false,confirmation:"Proximity",approachQuality};
+      return {state:null,touched:false,formingWarning:false,confirmation:"Unavailable",approachQuality};
+    }
+
+    function buildManagementLevelMap(facts,horizon,anchor,originalInvalidation,volatility,atr){
+      const current = numeric(facts.currentPrice);
+      const desired = sideNumber(facts.position.side);
+      const raw = [];
+      const add = spec => {
+        const reference = numeric(spec.reference ?? spec.price);
+        if(reference == null) return;
+        const width = numeric(spec.width) ?? atr*config.managementLevels.zoneAtr*(volatility.toleranceMultiplier || 1);
+        const low = numeric(spec.low) ?? reference-width;
+        const high = numeric(spec.high) ?? reference+width;
+        const distance = current == null ? null : Math.abs(reference-current);
+        const level = {
+          id:spec.id || `level-${raw.length}`,reference,low:Math.min(low,high),high:Math.max(low,high),
+          source:spec.source || "System level",tf:spec.tf || horizon.primaryTf,family:spec.family || "structure",
+          distance,distanceAtr:distance == null ? null : distance/Math.max(atr,1e-8),
+          ahead:current == null ? null : (reference-current)*desired >= 0,
+          behind:current == null ? null : (reference-current)*desired < 0,
+          exceptional:!!spec.exceptional,requestedRole:spec.role || null,emaSlope:numeric(spec.emaSlope),stackCondition:spec.stackCondition || null,mergedZoneId:null
+        };
+        level.roles = spec.role ? [spec.role] : levelRole(facts,level,anchor,atr);
+        const interaction = interactionState(facts,level,horizon,volatility,atr);
+        Object.assign(level,{interactionState:interaction.state,interactionConfirmation:interaction.confirmation,approachQuality:interaction.approachQuality,formingWarning:interaction.formingWarning});
+        level.relevance = level.interactionState ? "active"
+          : level.exceptional ? "exceptional"
+            : level.distanceAtr != null && level.distanceAtr <= horizon.materiallyCloseAtr[1] ? "nearby" : "contextual";
+        raw.push(level);
+      };
+
+      if(originalInvalidation && numeric(originalInvalidation.level) != null){
+        add({id:"original-invalidation",reference:originalInvalidation.level,tf:originalInvalidation.tf || horizon.primaryTf,source:"Original setup invalidation",family:"original invalidation",exceptional:true});
+      }
+      add({id:"key-defence",reference:anchor.level,low:anchor.zone.low,high:anchor.zone.high,width:anchor.zone.width,tf:anchor.tf,source:"Key defence",family:"key defence",exceptional:true});
+
+      const structureTfs = [...new Set([horizon.primaryTf,horizon.contextTf,horizon.boundaryTf,...(horizon.extendedTfs || [])])];
+      structureTfs.forEach(tf => {
+        const snapshot = structure(facts,tf,"swing");
+        const levels = [{name:"swing high",value:snapshot && snapshot.latestHigh},{name:"swing low",value:snapshot && snapshot.latestLow}];
+        levels.forEach(item => {
+          const price = numeric(item.value && item.value.price);
+          if(price == null) return;
+          add({id:`structure-${tf}-${item.name.replace(/\s/g,"-")}`,reference:price,tf,source:`${tf} ${item.name}`,family:"structure",exceptional:tf === "1d"});
+        });
+      });
+
+      (Array.isArray(facts.userLevels) ? facts.userLevels : []).forEach((item,index) => add({
+        id:item.id || `user-${index}`,reference:item.price ?? item.level,tf:item.tf || horizon.primaryTf,
+        source:"User level",family:"user",role:item.role || null,exceptional:item.exceptional === true || item.strong === true
+      }));
+      (Array.isArray(facts.exitOrders) ? facts.exitOrders : []).forEach((item,index) => add({
+        id:item.id || `exit-${index}`,reference:item.price ?? item.level,tf:item.tf || horizon.primaryTf,
+        source:item.source || "Binance exit order",family:item.family || "binance-exit",exceptional:true
+      }));
+
+      const primaryEmaTfs = new Set(horizon.htfEmaTfs || []);
+      const conditionalEmaTfs = new Set(horizon.conditionalEmaTfs || []);
+      [...new Set([...primaryEmaTfs,...conditionalEmaTfs])].forEach(tf => {
+        const snapshot = maSnapshot(facts,tf,true);
+        const values = snapshot && snapshot.valuesBySlot || {};
+        const slots = snapshot && Array.isArray(snapshot.slots) ? snapshot.slots : [];
+        const available = Object.entries(values).map(([slotId,value]) => ({slotId,value:numeric(value),slot:slots.find(item => item.slotId === slotId)})).filter(item => item.value != null);
+        const clustered = available.some((item,index) => available.slice(index+1).some(other => Math.abs(item.value-other.value) <= atr*config.managementLevels.confluenceAtr));
+        const orderedValues = available.map(item => item.value);
+        const stackCondition = orderedValues.length >= 3 && orderedValues.slice(0,-1).every((value,index) => desired > 0 ? value >= orderedValues[index+1] : value <= orderedValues[index+1]) ? "position aligned"
+          : orderedValues.length >= 3 && orderedValues.slice(0,-1).every((value,index) => desired > 0 ? value <= orderedValues[index+1] : value >= orderedValues[index+1]) ? "opposed" : "mixed or flat";
+        available.forEach(item => {
+          const distanceAtr = current == null ? Infinity : Math.abs(item.value-current)/Math.max(atr,1e-8);
+          if(conditionalEmaTfs.has(tf) && distanceAtr > horizon.materiallyCloseAtr[1] && !clustered) return;
+          const period = Number(item.slot && item.slot.period) || String(item.slotId).replace(/\D/g,"");
+          const series = snapshot && snapshot.seriesBySlot && Array.isArray(snapshot.seriesBySlot[item.slotId]) ? snapshot.seriesBySlot[item.slotId] : [];
+          const seriesValue = point => numeric(point && typeof point === "object" ? point.value ?? point.close : point);
+          const latest = seriesValue(series.at(-1));
+          const previous = seriesValue(series.at(-2));
+          const emaSlope = latest != null && previous != null ? latest-previous : null;
+          add({id:`ema-${tf}-${item.slotId}`,reference:item.value,tf,source:`${tf} EMA${period}`,family:"moving averages",exceptional:clustered,emaSlope,stackCondition});
+        });
+      });
+
+      const sorted = raw.slice().sort((a,b) => a.low-b.low || a.reference-b.reference);
+      const groups = [];
+      sorted.forEach(level => {
+        const prior = groups[groups.length-1];
+        if(!prior || level.low-prior.high > atr*config.managementLevels.confluenceAtr){
+          groups.push({levels:[level],low:level.low,high:level.high});
+        }else{
+          prior.levels.push(level);
+          prior.low = Math.min(prior.low,level.low);
+          prior.high = Math.max(prior.high,level.high);
+        }
+      });
+      const interactionRank = {FAILED:7,WEAKENING:6,REJECTED:5,RECLAIMED:4,HOLDING:3,TESTING:2,APPROACHING:1};
+      const zones = groups.map((group,index) => {
+        const id = `zone-${index+1}`;
+        group.levels.forEach(level => { level.mergedZoneId = id; });
+        const contributorFamilies = new Set(group.levels.map(level => level.family === "moving averages" ? "moving averages" : level.family === "key defence" || level.family === "original invalidation" ? "structure" : level.family));
+        const activeInteraction = group.levels.slice().sort((a,b) => (interactionRank[b.interactionState] || 0)-(interactionRank[a.interactionState] || 0))[0];
+        if(activeInteraction && activeInteraction.interactionState) contributorFamilies.add("price reaction");
+        const pressureAvailable = (facts.samples || []).some(sample => sample.available && [horizon.triggerTf,horizon.primaryTf].includes(sample.tf));
+        if(pressureAvailable && activeInteraction && activeInteraction.interactionState) contributorFamilies.add("pressure and participation");
+        return {
+          id,low:group.low,high:group.high,reference:group.levels.reduce((sum,level) => sum+level.reference,0)/group.levels.length,
+          sources:group.levels.map(level => level.source),timeframes:[...new Set(group.levels.map(level => level.tf))],
+          evidenceFamilies:[...contributorFamilies],independentFamilyCount:contributorFamilies.size,
+          interactionState:activeInteraction && activeInteraction.interactionState || null,levelIds:group.levels.map(level => level.id)
+        };
+      });
+      return {atr,levels:raw,zones,activeLevels:raw.filter(level => level.interactionState),materiallyCloseAtr:{minimum:horizon.materiallyCloseAtr[0],maximum:horizon.materiallyCloseAtr[1]}};
+    }
+
+    function stallReview(facts,horizon,tracker,volatility,levelMap,lifecycle,structureResult,maResult,pressureResult){
+      const now = Number(facts.createdAt || Date.now());
+      const elapsedMs = now-tracker.progress.startedAt;
+      const volatilityFactor = volatility.state === "EXTREME" ? 0.75 : volatility.state === "HIGH" ? 0.85 : volatility.state === "QUIET" ? 1.5 : 1;
+      const eligibleAfterMs = horizon.stallReviewMs*volatilityFactor;
+      const eligible = elapsedMs >= eligibleAfterMs;
+      const objectiveReached = levelMap.activeLevels.some(level => level.roles.includes("objective") && ["TESTING","HOLDING","RECLAIMED","REJECTED"].includes(level.interactionState));
+      const boundaryConsolidation = levelMap.activeLevels.some(level => level.ahead && ["TESTING","APPROACHING"].includes(level.interactionState) && ["structure","user","moving averages","binance-exit"].includes(level.family));
+      const validRetest = levelMap.activeLevels.some(level => level.roles.includes("retest level") && ["HOLDING","RECLAIMED"].includes(level.interactionState));
+      const meaningfulProgress = lifecycle.state !== "FRESH" || (tracker.maxFavorablePrice != null && tracker.progress.startPrice != null && Math.abs(tracker.maxFavorablePrice-tracker.progress.startPrice) >= levelMap.atr*horizon.expectedAtr);
+      const constructiveCompression = (levelMap.zones || []).some(zone => zone.evidenceFamilies.includes("moving averages") && ["TESTING","HOLDING"].includes(zone.interactionState)) && !pressureResult.warning && !pressureResult.confirmed;
+      if(meaningfulProgress){
+        const progressKey = `${lifecycle.state}|${Math.round(Number(tracker.maxFavorablePrice || facts.currentPrice)/Math.max(levelMap.atr,1e-8))}`;
+        if(progressKey !== tracker.progress.lastBasisKey){
+          tracker.progress.lastBasisKey = progressKey;
+          tracker.progress.startedAt = now;
+          tracker.progress.startPrice = numeric(facts.currentPrice);
+        }
+      }
+      const nearestAhead = levelMap.levels.filter(level => level.ahead && level.distanceAtr != null).sort((a,b) => a.distanceAtr-b.distanceAtr)[0];
+      const openSpace = !nearestAhead || nearestAhead.distanceAtr >= 0.75;
+      const adequateVolatility = volatility.available && volatility.state !== "QUIET";
+      const adverseReasons = [];
+      if(pressureResult.warning || pressureResult.confirmed) adverseReasons.push(pressureResult.reason);
+      if(structureResult.warning || structureResult.confirmed) adverseReasons.push(structureResult.reason);
+      if(maResult.warning || maResult.confirmed) adverseReasons.push(maResult.reason);
+      levelMap.activeLevels.filter(level => ["WEAKENING","REJECTED","FAILED"].includes(level.interactionState)).forEach(level => adverseReasons.push(`${level.source} ${level.interactionState.toLowerCase()}`));
+      const adverseEvidence = [...new Set(adverseReasons)];
+      const softened = boundaryConsolidation || validRetest || objectiveReached || constructiveCompression || volatility.state === "QUIET" || meaningfulProgress;
+      const stalled = eligible && !meaningfulProgress && openSpace && adequateVolatility && adverseEvidence.length > 0 && !softened;
+      tracker.progress.state = stalled ? "STALLED" : eligible ? softened ? "SUSPENDED" : "REVIEW ELIGIBLE" : "NOT ELIGIBLE";
+      return {state:tracker.progress.state,stalled,eligible,eligibleAfterMs,elapsedMs,noMeaningfulProgress:!meaningfulProgress,openSpace,adequateVolatility,adverseEvidence,softened,softeningReasons:[boundaryConsolidation ? "Consolidating at a known boundary" : null,validRetest ? "Valid retest in progress" : null,objectiveReached ? "Objective reached" : null,constructiveCompression ? "Constructive compression at a known EMA zone" : null,volatility.state === "QUIET" ? "Quiet volatility" : null,meaningfulProgress ? "Meaningful favourable progress" : null].filter(Boolean)};
+    }
+
+    function currentConditions(facts,horizon,levelMap,lifecycle,stall,volatility){
+      const desired = sideNumber(facts.position.side);
+      const current = numeric(facts.currentPrice);
+      const activeObjective = levelMap.activeLevels.find(level => level.roles.includes("objective") && ["TESTING","HOLDING","RECLAIMED","REJECTED","APPROACHING"].includes(level.interactionState));
+      const supportive = levelMap.levels.filter(level => level.behind && (level.family === "structure" || level.family === "moving averages" || level.family === "key defence")).sort((a,b) => a.distance-b.distance)[0];
+      const boundaryAhead = levelMap.levels.filter(level => level.ahead && (level.exceptional || level.tf === horizon.boundaryTf)).sort((a,b) => a.distance-b.distance)[0];
+      const stretched = !!(current != null && supportive && supportive.distanceAtr >= 2.5 && (!boundaryAhead || boundaryAhead.distanceAtr <= horizon.materiallyCloseAtr[1] || volatility.state === "EXTREME"));
+      const conditions = [];
+      if(activeObjective) conditions.push("AT OBJECTIVE");
+      if(stretched) conditions.push("EXTENDED");
+      if(stall.stalled) conditions.push("STALLED");
+      return {items:conditions,atObjective:!!activeObjective,objective:activeObjective || null,extended:stretched,stalled:stall.stalled,eventRisk:false,lifecycle:lifecycle.state,direction:desired};
     }
 
     function structureFamily(facts,horizon,anchor){
       const desired = sideNumber(facts.position.side);
       const anchorRows = rowsFor(facts,anchor.tf,true);
-      const adverseCloses = anchorRows.slice(-horizon.confirmCloses).filter(row => desired > 0 ? Number(row.close) < anchor.invalidation : Number(row.close) > anchor.invalidation).length;
+      const failureBoundary = numeric(anchor.failureBoundary) ?? anchor.invalidation;
+      const adverseCloses = anchorRows.slice(-horizon.confirmCloses).filter(row => desired > 0 ? Number(row.close) < failureBoundary : Number(row.close) > failureBoundary).length;
       const adverseEvents = [...new Set([anchor.tf,...horizon.regimeTfs])].map(tf => {
         const swing = structure(facts,tf,"swing");
         const event = swing && swing.latestEvent;
@@ -216,34 +562,6 @@
         family:"Volume pressure and participation",state:confirmed ? "CONFIRMED" : warning || weakRecovery ? "WARNING" : "CLEAR",
         confirmed,warning:warning || weakRecovery,opposing,persistent,absorptionAgainst,weakRecovery,
         reason:absorptionAgainst.length ? `Confirmed ${absorptionAgainst[0].tf} absorption is refusing position-aligned pressure` : confirmed ? `Persistent opposing pressure confirmed on ${[...independentTfs].join(" and ") || persistent[0].sample.tf}` : warning ? `${opposing[0].sample.tf} opposing pressure is material` : weakRecovery ? "Recovery participation is weak" : "Pressure is supportive or non-destructive"
-      };
-    }
-
-    function progressFamily(facts,horizon,tracker,atr){
-      const desired = sideNumber(facts.position.side);
-      const progress = tracker.progress;
-      const current = numeric(facts.currentPrice);
-      const now = Number(facts.createdAt || Date.now());
-      const elapsed = now-progress.startedAt;
-      const favorable = current == null || progress.startPrice == null ? 0 : (current-progress.startPrice)*desired;
-      const anchorRows = rowsFor(facts,horizon.anchorTf,true).slice(-6);
-      let failedAttempts = 0;
-      for(let index=1;index<anchorRows.length;index++){
-        const previous = anchorRows[index-1];
-        const row = anchorRows[index];
-        if(desired > 0 && Number(row.high) <= Number(previous.high) && Number(row.close) < Number(previous.close)) failedAttempts += 1;
-        if(desired < 0 && Number(row.low) >= Number(previous.low) && Number(row.close) > Number(previous.close)) failedAttempts += 1;
-      }
-      progress.failedAttempts = failedAttempts;
-      const timedOut = elapsed >= horizon.progressMinutes*60000;
-      const insufficientMove = atr > 0 && favorable < atr*horizon.expectedAtr;
-      const confirmed = timedOut && insufficientMove && failedAttempts >= 2;
-      const warning = (timedOut && insufficientMove) || failedAttempts >= 2;
-      progress.state = confirmed ? "FAILED" : warning ? "STALLING" : "NORMAL";
-      return {
-        family:"Price progress and trade behavior",state:confirmed ? "CONFIRMED" : warning ? "WARNING" : "CLEAR",
-        confirmed,warning,timedOut,failedAttempts,favorable,expected:atr*horizon.expectedAtr,
-        reason:confirmed ? `${horizon.label} progress window elapsed with repeated continuation failure` : warning ? "Position progress is stalling" : "Position progress is normal for the management horizon"
       };
     }
 
@@ -324,31 +642,37 @@
       const horizonId = selectedHorizon || facts.horizon || "quick";
       const horizon = config.managementHorizons[horizonId] || config.managementHorizons.quick;
       const tracker = initializeCampaign(facts);
-      const anchor = selectAnchor(facts,horizon,tracker);
+      const volatility = volatilityRegime(facts,horizon);
+      const lifecycleSeed = tracker.keyDefence || selectAnchor(facts,horizon,tracker);
+      const lifecycle = positionLifecycle(facts,horizon,tracker,lifecycleSeed);
+      const defence = resolveKeyDefence(facts,horizon,tracker,volatility,lifecycle);
+      const anchor = defence.anchor;
       const signature = closedSignature(facts,horizon);
       const now = Number(facts.createdAt || Date.now());
-      const atr = trueRangeAverage(rowsFor(facts,horizon.anchorTf,true),14) || Math.max(Math.abs(facts.currentPrice || position.price)*0.0005,1e-8);
+      const atr = defence.atr;
       const structureResult = structureFamily(facts,horizon,anchor);
       const maResult = maFamily(facts,horizon);
       const pressureResult = pressureFamily(facts,horizon);
-      const progressResult = progressFamily(facts,horizon,tracker,atr);
+      const levelMap = buildManagementLevelMap(facts,horizon,anchor,defence.originalInvalidation,volatility,atr);
+      const stall = stallReview(facts,horizon,tracker,volatility,levelMap,lifecycle,structureResult,maResult,pressureResult);
+      const progressResult = {family:"Stall Review",state:stall.stalled ? "WARNING" : "CLEAR",confirmed:false,warning:stall.stalled,reason:stall.stalled ? `Stall Review active - ${stall.adverseEvidence[0]}` : stall.eligible ? `Stall Review ${stall.state.toLowerCase()}` : "Stall Review not yet eligible",...stall};
       const families = [structureResult,maResult,pressureResult,progressResult];
       const confirmedFamilies = families.filter(family => family.confirmed);
       const warningFamilies = families.filter(family => family.warning && !family.confirmed);
 
       const desired = sideNumber(position.side);
       const liveRow = last(rowsFor(facts,anchor.tf,false));
-      const formingBeyondAnchor = !!(liveRow && liveRow.final === false && (desired > 0 ? Number(liveRow.close) < anchor.invalidation : Number(liveRow.close) > anchor.invalidation));
+      const formingBeyondAnchor = !!(liveRow && liveRow.final === false && (desired > 0 ? Number(liveRow.close) < anchor.failureBoundary : Number(liveRow.close) > anchor.failureBoundary));
       const anchorClosedBeyond = structureResult.adverseCloses > 0;
       const recentAnchorRows = rowsFor(facts,anchor.tf,true).slice(-(horizon.confirmCloses+3));
       const failedReclaim = recentAnchorRows.some(row => {
-        const touched = desired > 0 ? Number(row.high) >= anchor.invalidation : Number(row.low) <= anchor.invalidation;
-        const closedAdverse = desired > 0 ? Number(row.close) < anchor.invalidation : Number(row.close) > anchor.invalidation;
+        const touched = desired > 0 ? Number(row.high) >= anchor.zone.low : Number(row.low) <= anchor.zone.high;
+        const closedAdverse = desired > 0 ? Number(row.close) < anchor.failureBoundary : Number(row.close) > anchor.failureBoundary;
         return touched && closedAdverse;
       });
-      const anchorConfirmed = structureResult.anchorFailed && (failedReclaim || maResult.confirmed || pressureResult.confirmed || progressResult.confirmed);
+      const anchorConfirmed = structureResult.anchorFailed && (failedReclaim || maResult.confirmed || pressureResult.confirmed);
       const pathAProposed = anchorConfirmed ? "CONFIRMED" : structureResult.anchorFailed ? "DEVELOPING" : anchorClosedBeyond ? "DEVELOPING" : formingBeyondAnchor ? "WARNING" : "CLEAR";
-      const pathAReason = pathAProposed === "CONFIRMED" ? "Management anchor failed on closed candles and reclaim/corroboration failed" : pathAProposed === "DEVELOPING" ? "Anchor failure is developing; closed recovery is not confirmed" : pathAProposed === "WARNING" ? "Forming candle is testing the management anchor" : "Management anchor remains intact";
+      const pathAReason = pathAProposed === "CONFIRMED" ? "Key defence zone failed on closed candles and reclaim/corroboration failed" : pathAProposed === "DEVELOPING" ? "Key defence failure is developing; closed recovery is not confirmed" : pathAProposed === "WARNING" ? "Forming candle is testing the key defence zone" : "Key defence zone remains intact";
 
       const oppositeStructure = structureResult.adverseEvents.some(item => item.tf !== "1m" && horizon.regimeTfs.includes(item.tf));
       const pathBCorroborated = maResult.confirmed || pressureResult.confirmed;
@@ -369,6 +693,7 @@
             : proposedHealth === "CAUTION" ? (warningFamilies[0] && warningFamilies[0].reason || "Early warning is active") : "Anchor, pressure, and progress remain healthy";
       const health = stabilizeHealth(tracker,proposedHealth,signature,healthReason,now);
       const takeProfit = takeProfitAssessment(facts,horizon,tracker,families,atr);
+      const conditions = currentConditions(facts,horizon,levelMap,lifecycle,stall,volatility);
 
       let action = "HOLD";
       if(health === "INVALIDATED") action = "CLOSE";
@@ -384,14 +709,33 @@
         health,action,state:action,exit:action === "CLOSE" ? "EXIT EXIT" : `EXIT ${action}`,
         primaryReason,reasons:[primaryReason],risks:threats,threats,tooltipReasons:[primaryReason,...threats].filter((value,index,array) => array.indexOf(value) === index).slice(0,4),
         watchCondition:health === "HEALTHY" ? "Escalate only after persistent, closed-candle deterioration" : "Recovery requires confirmed anchor, pressure, and progress improvement",
-        horizonId,horizonLabel:horizon.label,anchor,pathA,pathB,activatedPath,families,progress:progressResult,takeProfit,
+        horizonId,horizonLabel:horizon.label,profileSource:selectedHorizon == null ? "default" : "user-selected",
+        profileHierarchy:{earlyWarningTf:horizon.earlyWarningTf,triggerTf:horizon.triggerTf,primaryTf:horizon.primaryTf,contextTf:horizon.contextTf,boundaryTf:horizon.boundaryTf,extendedTfs:[...(horizon.extendedTfs || [])]},
+        anchor,originalInvalidation:defence.originalInvalidation,defenceMigration:defence.migration,pathA,pathB,activatedPath,families,progress:progressResult,stallReview:stall,takeProfit,
+        volatility,levelMap,lifecycle,conditions,
         position:{...position,currentPrice:facts.currentPrice},atr,
         roi:{epoch:tracker.epoch,epochStartedAt:tracker.epochStartedAt,epochHistory:tracker.epochHistory.slice(),current:tracker.currentRoi,peak:tracker.peakRoi,surrenderPoints,relativeSurrender,peakAt:tracker.peakAt,timeSincePeakMs:tracker.peakAt == null ? null : Math.max(0,now-tracker.peakAt),maxFavorablePrice:tracker.maxFavorablePrice,campaignResult:tracker.campaignResult,campaignMfe:tracker.campaignMfe},
         healthHistory:tracker.healthHistory.slice(-20),
-        analysis:[`Anchor: ${anchor.label} at ${format.price(anchor.level)}`,...families.map(family => `${family.family}: ${family.state} - ${family.reason}`),`Path B: ${pathB.state} - ${pathB.reason}`,`Path A: ${pathA.state} - ${pathA.reason}`],
+        evidence:{
+          primary:primaryReason,
+          supporting:levelMap.activeLevels.filter(level => ["HOLDING","RECLAIMED"].includes(level.interactionState)).map(level => `${level.source} ${level.interactionState.toLowerCase()}`),
+          conflicting:[...levelMap.activeLevels.filter(level => ["WEAKENING","REJECTED","FAILED"].includes(level.interactionState)).map(level => `${level.source} ${level.interactionState.toLowerCase()}`),...threats],
+          formingWarnings:levelMap.activeLevels.filter(level => level.formingWarning).map(level => `${level.source} forming-candle ${String(level.interactionState).toLowerCase()}`),
+          confirmation:anchorClosedBeyond || pathA.state === "CONFIRMED" || pathB.state === "CONFIRMED" ? "Closed candle" : formingBeyondAnchor ? "Forming candle" : "Monitoring",
+          unavailable:volatility.available ? [] : [`${horizon.primaryTf} volatility history unavailable`],
+          stale:volatility.status === "stale" ? [`${horizon.primaryTf} management data stale`] : [],
+          dataAgeMs:volatility.ageMs
+        },
+        analysis:[`Key defence zone: ${format.price(anchor.zone.low)}-${format.price(anchor.zone.high)}; reference ${format.price(anchor.level)}`,...families.map(family => `${family.family}: ${family.state} - ${family.reason}`),`Lifecycle: ${lifecycle.state} - ${lifecycle.basis}`,`Conditions: ${conditions.items.join(", ") || "None"}`,`Volatility: ${volatility.available ? `${volatility.state} - ${Math.round(volatility.percentile)}th percentile - tolerance ${volatility.toleranceMultiplier.toFixed(2)}x; ${volatility.contextTf} context ${volatility.contextState} (${volatility.contextConfirmation.toLowerCase()})` : "Unavailable"}`,`Path B: ${pathB.state} - ${pathB.reason}`,`Path A: ${pathA.state} - ${pathA.reason}`],
         diagnostics:[
-          `Snapshot: ${facts.version} at ${format.time(facts.createdAt)}`,
+          `Snapshot: ${facts.version} at ${format.time(facts.snapshotCreatedAt || facts.createdAt)}`,
           `Anchor source: ${anchor.source}; management horizon: ${horizon.label}`,
+          `Profile hierarchy: warning ${horizon.earlyWarningTf}; trigger ${horizon.triggerTf}; primary ${horizon.primaryTf}; context ${horizon.contextTf}; boundary ${horizon.boundaryTf}`,
+          `Original invalidation: ${defence.originalInvalidation ? `${defence.originalInvalidation.tf} ${format.price(defence.originalInvalidation.level)}` : "Unavailable"}`,
+          `Defence migration: ${defence.migration ? `${format.price(defence.migration.from)} to ${format.price(defence.migration.to)} - ${defence.migration.basis}` : "No confirmed migration"}`,
+          `Volatility policy: ${config.volatility.historyCandles} closed candles; minimum ${config.volatility.minimumSamples}; ATR ${config.volatility.atrPeriod}; state ${volatility.state}`,
+          `Management levels: ${levelMap.levels.length}; confluence zones: ${levelMap.zones.length}`,
+          `Stall Review: ${stall.state}; elapsed ${Math.round(stall.elapsedMs/60000)}m; eligible after ${Math.round(stall.eligibleAfterMs/60000)}m; adverse evidence ${stall.adverseEvidence.join(" / ") || "none"}`,
           `Closed signature: ${signature}`,
           `Anchor confirmation candles: ${structureResult.adverseCloses}/${horizon.confirmCloses}; failed reclaim: ${failedReclaim ? "yes" : "no"}`,
           `Path A sequence: ${pathA.history.map(item => `${format.time(item.at)} ${item.state} - ${item.reason}`).join(" | ") || "No transitions"}`,
@@ -498,6 +842,127 @@
         results.addStartsNewRoiEpoch = secondEpoch.roi.epoch === firstEpoch.roi.epoch+1;
         results.addDoesNotCreateSurrender = secondEpoch.roi.surrenderPoints === 0;
         results.campaignMfeRemainsContinuous = secondEpoch.roi.campaignMfe >= firstEpoch.roi.campaignMfe;
+
+        results.profileNamesUnchanged = config.managementHorizons.quick.label === "Quick" && config.managementHorizons["2_3h"].label === "2\u20133H" && config.managementHorizons["6_8h"].label === "6\u20138H";
+        results.profileHierarchy = config.managementHorizons.quick.primaryTf === "5m" && config.managementHorizons.quick.contextTf === "15m" && config.managementHorizons.quick.boundaryTf === "1h"
+          && config.managementHorizons["2_3h"].primaryTf === "15m" && config.managementHorizons["2_3h"].contextTf === "1h" && config.managementHorizons["2_3h"].boundaryTf === "4h"
+          && config.managementHorizons["6_8h"].primaryTf === "1h" && config.managementHorizons["6_8h"].contextTf === "4h" && config.managementHorizons["6_8h"].boundaryTf === "1d";
+
+        const historyRows = (count=130,close=100000) => Array.from({length:count},(_,index) => {
+          const spread = 80+(index%25)*4;
+          return {time:end-(count-1-index)*300,open:close-(index%3)*5,high:close+spread,low:close-spread,close,volume:1000,takerBuyBase:650,final:true};
+        });
+        const rich = facts(`${seed}_LEVELS`);
+        const managementTfs = ["1m","3m","5m","15m","1h","4h","1d"];
+        rich.closedByTf = Object.fromEntries(managementTfs.map(tf => [tf,historyRows()]));
+        rich.rowsByTf = Object.fromEntries(managementTfs.map(tf => [tf,rich.closedByTf[tf].map(row => ({...row}))]));
+        rich.dataHealth = {items:managementTfs.map(tf => ({tf,status:"sufficient",ageMs:3000}))};
+        const slots = [9,21,55,100,200].map((period,index) => ({slotId:`MA${index+1}`,period}));
+        const nearValues = {MA1:100080,MA2:100060,MA3:100040,MA4:100020,MA5:100000};
+        rich.maByTf = Object.fromEntries(managementTfs.map(tf => [tf,{closed:{valuesBySlot:{...nearValues},slots},live:{valuesBySlot:{...nearValues},slots}}]));
+        rich.maByTf["4h"] = {closed:{valuesBySlot:{MA1:110000,MA2:112000,MA3:114000,MA4:116000,MA5:118000},slots},live:{valuesBySlot:{MA1:110000,MA2:112000,MA3:114000,MA4:116000,MA5:118000},slots}};
+        rich.maByTf["1d"] = {closed:{valuesBySlot:{MA1:120000,MA2:123000,MA3:126000,MA4:129000,MA5:132000},slots},live:{valuesBySlot:{MA1:120000,MA2:123000,MA3:126000,MA4:129000,MA5:132000},slots}};
+        rich.structureByTf = {
+          "5m":{swing:{latestLow:{price:99500},latestHigh:{price:100040},latestEvent:null}},
+          "15m":{swing:{latestLow:{price:99000},latestHigh:{price:100050},latestEvent:null}},
+          "1h":{swing:{latestLow:{price:98000},latestHigh:{price:102000},latestEvent:null}},
+          "4h":{swing:{latestLow:{price:95000},latestHigh:{price:105000},latestEvent:null}},
+          "1d":{swing:{latestLow:{price:90000},latestHigh:{price:110000},latestEvent:null}}
+        };
+        rich.userLevels = [{id:"near-user",price:100050},{id:"far-user",price:90000}];
+        rich.exitOrders = [{id:"exit",price:100080,family:"binance-exit",source:"Binance exit order"}];
+        const richHorizon = config.managementHorizons.quick;
+        const richTracker = initializeCampaign(rich);
+        const richVolatility = volatilityRegime(rich,richHorizon);
+        const richLifecycle = positionLifecycle(rich,richHorizon,richTracker,selectAnchor(rich,richHorizon,richTracker));
+        const richDefence = resolveKeyDefence(rich,richHorizon,richTracker,richVolatility,richLifecycle);
+        const richMap = buildManagementLevelMap(rich,richHorizon,richDefence.anchor,richDefence.originalInvalidation,richVolatility,richDefence.atr);
+        const userNear = richMap.levels.find(level => level.id === "near-user");
+        const userFar = richMap.levels.find(level => level.id === "far-user");
+        const emaNear = richMap.levels.find(level => level.family === "moving averages" && level.tf === "1h");
+        const confluence = richMap.zones.find(zone => zone.levelIds.includes("near-user") && zone.evidenceFamilies.includes("moving averages") && zone.evidenceFamilies.includes("structure"));
+        const richResult = evaluate(rich);
+        results.userLevelsFirstClass = !!(userNear && userNear.source === "User level" && userNear.roles.includes("objective") && userFar && userFar.roles.includes("distant context") && userFar.roles.includes("invalidation reinforcement"));
+        results.userTouchActivatesWithoutExit = !!(userNear && ["TESTING","APPROACHING"].includes(userNear.interactionState) && !/User level/i.test(richResult.primaryReason) && richResult.pathA.state !== "CONFIRMED" && richResult.pathB.state !== "CONFIRMED");
+        results.htfEmaInteractionDetected = !!(emaNear && ["TESTING","APPROACHING"].includes(emaNear.interactionState));
+        results.emaTouchRemainsUnresolved = !!(emaNear && emaNear.interactionState === "TESTING");
+        results.repeatedEmaTestsAreContextual = !!(emaNear && emaNear.interactionState === "TESTING" && rich.closedByTf[emaNear.tf].length > 2);
+        results.singleEmaTouchCannotClose = richResult.action !== "CLOSE" && richResult.pathA.state !== "CONFIRMED" && richResult.pathB.state !== "CONFIRMED";
+        const profitableFacts = {...rich,currentPrice:101000};
+        const objectiveRoles = levelRole(profitableFacts,{reference:102000,family:"user",exceptional:false},richDefence.anchor,richDefence.atr);
+        const retestRoles = levelRole(profitableFacts,{reference:100500,family:"user",exceptional:false},richDefence.anchor,richDefence.atr);
+        const invalidationRoles = levelRole(profitableFacts,{reference:99000,family:"user",exceptional:false},richDefence.anchor,richDefence.atr);
+        results.userLevelRolesFollowLocation = objectiveRoles.includes("objective") && retestRoles.includes("retest level") && invalidationRoles.includes("invalidation reinforcement");
+        results.distantConditionalEmaExcluded = !richMap.levels.some(level => level.family === "moving averages" && ["4h","1d"].includes(level.tf));
+        results.confluenceMergesFamilies = !!(confluence && confluence.independentFamilyCount >= 3 && confluence.evidenceFamilies.filter(family => family === "moving averages").length === 1);
+
+        const formingOnly = {...rich,rowsByTf:{...rich.rowsByTf,"5m":[...rich.rowsByTf["5m"],{...rich.rowsByTf["5m"].at(-1),time:end+300,high:120000,low:80000,final:false}]}};
+        const formingVolatility = volatilityRegime(formingOnly,richHorizon);
+        results.volatilityUsesClosedHistory = richVolatility.available && formingVolatility.available && richVolatility.atr === formingVolatility.atr && richVolatility.percentile === formingVolatility.percentile;
+        const missingVolatility = volatilityRegime({...rich,dataHealth:{items:managementTfs.map(tf => ({tf,status:tf === "5m" ? "insufficient" : "sufficient",ageMs:3000}))}},richHorizon);
+        results.missingVolatilityUnavailable = !missingVolatility.available && missingVolatility.state === "UNAVAILABLE";
+
+        const penetration = {...rich,symbol:`${seed}_PENETRATION`,userLevels:[],exitOrders:[],closedByTf:{...rich.closedByTf},rowsByTf:{...rich.rowsByTf}};
+        recordedAnchors.set(`${penetration.symbol}|LONG`,{level:99500,tf:"5m",family:"original setup",invalidation:99500,recordedAt:now});
+        penetration.closedByTf["5m"] = penetration.closedByTf["5m"].map((row,index,array) => index >= array.length-2 ? {...row,open:99510,high:99530,low:99490,close:99495} : row);
+        penetration.rowsByTf["5m"] = penetration.closedByTf["5m"].map(row => ({...row}));
+        const penetrationResult = evaluate(penetration);
+        results.trivialReferencePenetrationNotFailure = penetrationResult.anchor.zone.low < 99495 && penetrationResult.pathA.state !== "CONFIRMED";
+
+        const profitOnlyTracker = initializeCampaign({...rich,symbol:`${seed}_PROFIT`,position:{...rich.position,symbol:`${seed}_PROFIT`,unrealizedPnl:2000}});
+        const profitOnlyLifecycle = positionLifecycle({...rich,symbol:`${seed}_PROFIT`,position:{...rich.position,symbol:`${seed}_PROFIT`,unrealizedPnl:2000},structureByTf:{"5m":{swing:{latestLow:{price:99500},latestHigh:{price:101000},latestEvent:null}}}},richHorizon,profitOnlyTracker,richDefence.anchor);
+        results.profitAloneDoesNotEstablish = profitOnlyLifecycle.state === "FRESH";
+
+        const runnerSymbol = `${seed}_RUNNER`;
+        const runnerOne = {...rich,symbol:runnerSymbol,position:{...rich.position,symbol:runnerSymbol,qty:1,realizedPnl:0}};
+        initializeCampaign(runnerOne);
+        const runnerTwo = {...runnerOne,createdAt:now+60000,position:{...runnerOne.position,qty:0.5,realizedPnl:100}};
+        const runnerTracker = initializeCampaign(runnerTwo);
+        const runnerLifecycle = positionLifecycle(runnerTwo,richHorizon,runnerTracker,richDefence.anchor);
+        results.meaningfulPartialCreatesRunner = runnerLifecycle.state === "RUNNER";
+
+        const establishedFacts = {...rich,symbol:`${seed}_ESTABLISHED`,createdAt:(end-7200)*1000,structureByTf:{...rich.structureByTf,"5m":{swing:{latestLow:{price:99500},latestHigh:{price:100500},latestEvent:{direction:"bullish",breakTime:end-3600,price:99900}}}}};
+        const establishedTracker = initializeCampaign(establishedFacts);
+        const establishedLifecycle = positionLifecycle(establishedFacts,richHorizon,establishedTracker,selectAnchor(establishedFacts,richHorizon,establishedTracker));
+        results.establishedEventAvailable = establishedLifecycle.eventPrice === 99900;
+        results.establishedRowsAvailable = rowsFor(establishedFacts,"5m",true).slice(-2).every(row => Number(row.close) > 99900);
+        results.establishedEvidenceHeld = establishedLifecycle.held;
+        results.establishedEvidenceState = establishedLifecycle.state === "ESTABLISHED";
+        results.structureCreatesEstablished = establishedLifecycle.state === "ESTABLISHED" && /cleared and held|retest/.test(establishedLifecycle.basis);
+        establishedTracker.keyDefence = {level:99000,invalidation:99000,tf:"5m",source:"system-selected",selectionSource:"system-selected",defenceType:"structure",label:"5m structure"};
+        const migrated = resolveKeyDefence(establishedFacts,richHorizon,establishedTracker,richVolatility,establishedLifecycle);
+        results.defenceMigratesForwardOnClosedConfirmation = migrated.anchor.level === 99500 && migrated.migration && /closed candles/.test(migrated.migration.basis);
+        const backwardTracker = initializeCampaign({...establishedFacts,symbol:`${seed}_BACKWARD`});
+        backwardTracker.lifecycle = "ESTABLISHED";
+        backwardTracker.keyDefence = {level:99600,invalidation:99600,tf:"5m",source:"system-selected",selectionSource:"system-selected",defenceType:"structure",label:"5m structure"};
+        const backward = resolveKeyDefence({...establishedFacts,symbol:`${seed}_BACKWARD`},richHorizon,backwardTracker,richVolatility,{...establishedLifecycle,state:"ESTABLISHED"});
+        results.defenceNeverMigratesBackward = backward.anchor.level === 99600 && !backward.migration;
+        results.originalInvalidationPreserved = !!penetrationResult.originalInvalidation;
+        const freshTracker = initializeCampaign({...establishedFacts,symbol:`${seed}_FORMING_MIGRATION`});
+        freshTracker.keyDefence = {level:99000,invalidation:99000,tf:"5m",source:"system-selected",selectionSource:"system-selected",defenceType:"structure",label:"5m structure"};
+        const formingMigration = resolveKeyDefence({...establishedFacts,symbol:`${seed}_FORMING_MIGRATION`},richHorizon,freshTracker,richVolatility,{state:"FRESH"});
+        results.formingNoiseCannotMigrateDefence = formingMigration.anchor.level === 99000 && !formingMigration.migration;
+        const lockedTracker = initializeCampaign({...penetration,symbol:`${seed}_LOCKED_ZONE`});
+        lockedTracker.keyDefence = {level:99500,invalidation:99500,tf:"5m",source:"system-selected",selectionSource:"system-selected",defenceType:"structure",label:"5m structure"};
+        const normalZone = resolveKeyDefence({...rich,symbol:`${seed}_LOCKED_ZONE`},richHorizon,lockedTracker,{...richVolatility,toleranceMultiplier:1},{state:"FRESH"});
+        const crossedFacts = {...penetration,symbol:`${seed}_LOCKED_ZONE`};
+        const extremeZone = resolveKeyDefence(crossedFacts,richHorizon,lockedTracker,{...richVolatility,toleranceMultiplier:1.5},{state:"FRESH"});
+        results.volatilityCannotWidenCrossedDefence = extremeZone.anchor.zone.width <= normalZone.anchor.zone.width;
+
+        const stallVolatility = {...richVolatility,available:true,state:"NORMAL"};
+        const noAdverseStall = stallReview({...rich,createdAt:now+richHorizon.stallReviewMs+1000},richHorizon,{...richTracker,progress:{...richTracker.progress,startedAt:now}},stallVolatility,{atr:richDefence.atr,levels:[],activeLevels:[]},{state:"FRESH"},{warning:false,confirmed:false},{warning:false,confirmed:false},{warning:false,confirmed:false});
+        const adverseStall = stallReview({...rich,createdAt:now+richHorizon.stallReviewMs+1000},richHorizon,{...richTracker,progress:{...richTracker.progress,startedAt:now}},stallVolatility,{atr:richDefence.atr,levels:[],activeLevels:[]},{state:"FRESH"},{warning:false,confirmed:false},{warning:false,confirmed:false},{warning:true,confirmed:false,reason:"Persistent opposing pressure"});
+        results.timeAloneCannotStall = !noAdverseStall.stalled;
+        results.stallRequiresAllSafeguards = adverseStall.stalled && adverseStall.openSpace && adverseStall.adequateVolatility && adverseStall.adverseEvidence.length === 1;
+        results.stallCannotConfirmExit = adverseStall.stalled && !("pathA" in adverseStall) && !("pathB" in adverseStall);
+        const simultaneous = currentConditions(rich,richHorizon,{
+          activeLevels:[{roles:["objective"],interactionState:"TESTING"}],
+          levels:[
+            {behind:true,family:"structure",distance:800,distanceAtr:3},
+            {ahead:true,exceptional:true,tf:"1h",distance:200,distanceAtr:0.8}
+          ]
+        },{state:"ESTABLISHED"},{stalled:true},{state:"HIGH"});
+        results.lifecycleConditionsRemainSeparate = simultaneous.lifecycle === "ESTABLISHED" && ["AT OBJECTIVE","EXTENDED","STALLED"].every(item => simultaneous.items.includes(item)) && simultaneous.eventRisk === false;
       }finally{
         [...campaigns.keys()].filter(key => key.startsWith(seed)).forEach(key => campaigns.delete(key));
         [...recordedAnchors.keys()].filter(key => key.startsWith(seed)).forEach(key => recordedAnchors.delete(key));

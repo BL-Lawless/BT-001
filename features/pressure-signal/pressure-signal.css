@@ -83,24 +83,52 @@
   outline-offset:1px;
 }
 .pressure-signal-pill[data-tone="green"]{
+  --pressure-trigger-text-rgb:22,101,52;
+  --pressure-trigger-bg-rest:rgba(14,203,129,.12);
+  --pressure-trigger-bg-peak:rgba(14,203,129,.24);
   background:rgba(14,203,129,.12);
   border-color:rgba(14,203,129,.32);
   color:#166534;
 }
 .pressure-signal-pill[data-tone="red"]{
+  --pressure-trigger-text-rgb:153,27,27;
+  --pressure-trigger-bg-rest:rgba(246,70,93,.10);
+  --pressure-trigger-bg-peak:rgba(246,70,93,.22);
   background:rgba(246,70,93,.10);
   border-color:rgba(246,70,93,.28);
   color:#991b1b;
 }
 .pressure-signal-pill[data-tone="orange"]{
+  --pressure-trigger-text-rgb:154,52,18;
+  --pressure-trigger-bg-rest:rgba(245,158,11,.12);
+  --pressure-trigger-bg-peak:rgba(245,158,11,.24);
   background:rgba(245,158,11,.12);
   border-color:rgba(245,158,11,.30);
   color:#9a3412;
 }
 .pressure-signal-pill[data-tone="gray"]{
+  --pressure-trigger-text-rgb:75,85,99;
+  --pressure-trigger-bg-rest:#f8fafc;
+  --pressure-trigger-bg-peak:#e8edf3;
   background:#f8fafc;
   border-color:#d7dce2;
   color:#4b5563;
+}
+#pressureSignalEntry.is-trigger-active-alert{
+  animation:pressure-trigger-active-pulse 3.2s ease-in-out infinite;
+}
+@keyframes pressure-trigger-active-pulse{
+  0%,100%{
+    background-color:var(--pressure-trigger-bg-rest);
+    color:rgba(var(--pressure-trigger-text-rgb),1);
+  }
+  50%{
+    background-color:var(--pressure-trigger-bg-peak);
+    color:rgba(var(--pressure-trigger-text-rgb),.55);
+  }
+}
+@media (prefers-reduced-motion:reduce){
+  #pressureSignalEntry.is-trigger-active-alert{animation-duration:6.4s}
 }
 #pressureSignalExit{cursor:pointer}
 #pressureSignalExit:focus-visible{

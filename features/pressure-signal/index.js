@@ -15,11 +15,22 @@
   const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
   const STORAGE_KEY = "bt001_topbar_pressure_signal_horizon";
   const DIRECTION_STORAGE_KEY = "bt001_topbar_pressure_signal_direction";
+  const TRIGGER_ALERT_DURATION37 = 30000;
   const DIRECTIONS = ["AUTO","LONG","SHORT"];
   const ENTRY_STATES37 = [
     "BIAS CONFIRMED","SETUP ARMED","ZONE ENGAGED","TRIGGER DEVELOPING",
     "READY","EXPIRED","INVALIDATED"
   ];
+  const SIGNAL_PRESENTATION37 = Object.freeze({
+    "SETUP ARMED":Object.freeze({label:"WATCHING",definition:"A VALID SETUP AREA EXISTS, BUT PRICE HAS NOT REACHED IT YET."}),
+    "ZONE ENGAGED":Object.freeze({label:"STAND BY",definition:"PRICE IS AT THE SETUP AREA; WAIT FOR A VALID REACTION."}),
+    "TRIGGER DEVELOPING":Object.freeze({label:"TRIGGER FORMING",definition:"THE EXPECTED REACTION HAS STARTED, BUT ENTRY CONFIRMATION IS INCOMPLETE."}),
+    READY:Object.freeze({label:"TRIGGER ACTIVE",definition:"THE SETUP IS CONFIRMED AND THE ACCEPTABLE ENTRY WINDOW IS CURRENTLY OPEN."}),
+    EXPIRED:Object.freeze({label:"NO CHASE",definition:"THE TRIGGER OCCURRED, BUT PRICE HAS MOVED BEYOND THE ACCEPTABLE ENTRY RANGE."}),
+    INVALIDATED:Object.freeze({label:"SETUP FAILED",definition:"THE SETUP LEVEL OR REQUIRED REACTION HAS FAILED."}),
+    "BIAS CONFIRMED":Object.freeze({label:"NO SETUP",definition:"A DIRECTIONAL BIAS EXISTS, BUT NO VALID ENTRY SETUP IS CURRENTLY AVAILABLE."}),
+    "NO BIAS":Object.freeze({label:"NO SETUP \u00b7 NO BIAS",definition:"NO SUFFICIENTLY CLEAR DIRECTIONAL BIAS OR ENTRY SETUP CURRENTLY EXISTS."})
+  });
   // Pressure bands are deliberately wider than a 50/50 knife edge. These are
   // policy constants so live testing can tune them without changing the engine.
   const PRESSURE_POLICY37 = {
@@ -40,8 +51,8 @@
   };
   const HORIZONS = [
     {id:"quick",label:"Quick"},
-    {id:"2_3h",label:"2–3H"},
-    {id:"6_8h",label:"6–8H"}
+    {id:"2_3h",label:"2\u20133H"},
+    {id:"6_8h",label:"6\u20138H"}
   ];
   const HORIZON_ENGINE = {
     quick:{
@@ -111,6 +122,11 @@
     resizeObservers:[],
     signalSummaryVariants:null,
     summaryFrame:null,
+    activeTriggerAlertId:null,
+    triggerAlertTimer:null,
+    triggerAlertEndsAt:0,
+    seenTriggerAlertIds:new Set(),
+    seenTriggerAlertOrder:[],
     uiAbort:null,
     lastError:null
   };
@@ -304,6 +320,8 @@
   }
   function signalDataPlan37(horizonId=state.horizon){
     const engine = horizonEngine37(horizonId);
+    const managementHorizonId = positionEngine.getManagementHorizon() || horizonId;
+    const management = featureConfig.managementHorizons[managementHorizonId] || featureConfig.managementHorizons.quick;
     const slots = signalCanonicalSlots37();
     const maxPeriod = Math.max(...slots.map(slot => Number(slot.period) || 0),200);
     const pressureByTf = new Map(engine.pressure.map(item => [item.tf,item]));
@@ -312,15 +330,21 @@
     engine.eventTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} MA-event history`]));
     engine.structureTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} canonical SMC structure`]));
     engine.boundaryTfs.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} canonical MA boundaries`]));
-    const timeframes = [...new Set([...engine.pressure.map(item => item.tf),...engine.eventTfs,...engine.structureTfs,...engine.boundaryTfs])];
+    const signalTimeframes = [...new Set([...engine.pressure.map(item => item.tf),...engine.eventTfs,...engine.structureTfs,...engine.boundaryTfs])];
+    const managementTimeframes = [...new Set([
+      management.earlyWarningTf,management.triggerTf,management.primaryTf,management.contextTf,management.boundaryTf,
+      ...(management.extendedTfs || []),...(management.htfEmaTfs || []),...(management.conditionalEmaTfs || [])
+    ].filter(Boolean))];
+    managementTimeframes.forEach(tf => roles.set(tf,[...(roles.get(tf) || []),`${tf} position-management evidence`]));
+    const timeframes = [...new Set([...signalTimeframes,...managementTimeframes])];
     const items = timeframes.map(tf => {
       const pressure = pressureByTf.get(tf);
       const lookbackDepth = pressure ? pressure.lookback * 3 : 0;
       const fullSessionDepth = typeof ivSec === "function" ? Math.ceil(172800 / Math.max(1,ivSec(tf))) + 20 : 0;
       const historyTarget = Math.max(320,maxPeriod + 80,lookbackDepth,fullSessionDepth,120);
-      return {tf,historyTarget,roles:roles.get(tf) || [`${tf} market history`]};
+      return {tf,historyTarget,roles:roles.get(tf) || [`${tf} market history`],signalRequired:signalTimeframes.includes(tf),managementRequired:managementTimeframes.includes(tf)};
     });
-    return {horizonId,engine,slots,items,timeframes};
+    return {horizonId,managementHorizonId,engine,management,slots,items,timeframes};
   }
   function signalDataAge37(tf,rows){
     const list = Array.isArray(rows) ? rows : [];
@@ -332,7 +356,7 @@
     return Number.isFinite(activityMs) ? Math.max(0,(typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now()) - activityMs) : Infinity;
   }
   function inspectSignalData37(plan,hub){
-    if(!hub) return {status:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"shared market-data hub unavailable"}))};
+    if(!hub) return {status:"unavailable",managementStatus:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"shared market-data hub unavailable"}))};
     const items = plan.items.map(item => {
       const closed = typeof hub.getClosedBuffer === "function" ? hub.getClosedBuffer(item.tf) || [] : [];
       const chart = typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : closed;
@@ -353,19 +377,25 @@
       const item = items.find(entry => entry.tf === failure.tf);
       if(item && item.status !== "sufficient") Object.assign(item,{status:"failed",reason:failure.reason});
     });
-    const statuses = new Set(items.map(item => item.status));
-    const status = statuses.has("failed") ? "failed"
-      : statuses.has("loading") ? "loading"
-        : statuses.has("insufficient") ? "insufficient"
-          : statuses.has("stale") ? "stale"
-            : "sufficient";
-    return {status,items,checkedAt:Date.now()};
+    const aggregateStatus = selected => {
+      const statuses = new Set(selected.map(item => item.status));
+      return statuses.has("failed") ? "failed"
+        : statuses.has("loading") ? "loading"
+          : statuses.has("insufficient") ? "insufficient"
+            : statuses.has("stale") ? "stale"
+              : selected.length ? "sufficient" : "unavailable";
+    };
+    return {
+      status:aggregateStatus(items.filter(item => item.signalRequired)),
+      managementStatus:aggregateStatus(items.filter(item => item.managementRequired)),
+      items,checkedAt:Date.now()
+    };
   }
   function ensureSignalData37(horizonId=state.horizon){
     const hub = window.PUBLIC_MARKET_DATA_HUB || null;
     const plan = signalDataPlan37(horizonId);
     const symbol = String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase();
-    const key = `${symbol}|${horizonId}|${plan.slots.map(slot => slot.period).join("-")}`;
+    const key = `${symbol}|${horizonId}|${plan.managementHorizonId}|${plan.slots.map(slot => slot.period).join("-")}`;
     if(hub && typeof hub.setTimeframeRequirements === "function") hub.setTimeframeRequirements(MODULE,plan.items.map(item => ({tf:item.tf,count:item.historyTarget})));
     if(state.dataKey !== key){
       state.dataKey = key;
@@ -2011,13 +2041,53 @@
     const latest = Array.isArray(rows) ? rows.slice(-2) : [];
     return latest.length >= 2 && latest.every(row => side > 0 ? Number(row.close) > level : Number(row.close) < level);
   }
+  function managementExternalLevels37(position){
+    const userLevels = [];
+    const exitOrders = [];
+    try{
+      const source = window.PRICE_LEVELS_OVERLAY;
+      const levels = source && typeof source.parseLevels === "function" ? source.parseLevels() : [];
+      (Array.isArray(levels) ? levels : []).forEach((price,index) => {
+        if(num37(price) != null) userLevels.push({id:`user-${index}-${price}`,price:Number(price),source:"User level",family:"user"});
+      });
+    }catch(_e){}
+    const collectRow = (row,family) => {
+      if(!row || row.dataset.needsReview === "1") return;
+      const input = row.querySelector(".calc-module-level");
+      const price = num37(input && input.value);
+      if(price == null) return;
+      exitOrders.push({id:row.dataset.calcRowId || row.dataset.calcPartialStopRowId || `${family}-${exitOrders.length}`,price,source:"Binance exit order",family,side:position && position.side || null});
+    };
+    try{
+      document.querySelectorAll('#calcModuleExitRows .calc-module-row[data-source="binance-limit"]').forEach(row => collectRow(row,"binance-exit"));
+      document.querySelectorAll('#calcModulePartialStopRows .calc-module-row[data-source="binance-partial-stop"]').forEach(row => collectRow(row,"binance-protection"));
+    }catch(_e){}
+    try{
+      const rows = window.GRAD_CALCULATOR && typeof window.GRAD_CALCULATOR.getOwnedRows === "function" ? window.GRAD_CALCULATOR.getOwnedRows() : [];
+      (Array.isArray(rows) ? rows : []).filter(row => ["exit","protection"].includes(row.section) && ["sent","executed"].includes(row.status)).forEach(row => {
+        const price = num37(row.level);
+        if(price != null) exitOrders.push({id:row.clientOrderId || `gr-${row.section}-${exitOrders.length}`,price:Number(price),source:"Binance exit order",family:row.section === "exit" ? "binance-exit" : "binance-protection",side:position && position.side || null});
+      });
+    }catch(_e){}
+    const uniqueOrders = [];
+    const seen = new Set();
+    exitOrders.forEach(order => {
+      const key = `${order.family}|${Number(order.price).toPrecision(12)}`;
+      if(seen.has(key)) return;
+      seen.add(key);
+      uniqueOrders.push(order);
+    });
+    return {userLevels,exitOrders:uniqueOrders};
+  }
   function evaluatePositionManagement37(signal,horizonId){
     const snapshot = state.activeSnapshot || state.marketSnapshot;
     const position = signal && signal.position ? {...signal.position} : null;
+    const externalLevels = managementExternalLevels37(position);
     return positionEngine.evaluate({
       symbol:String(snapshot && snapshot.symbol || position && position.symbol || "BTCUSDT"),
       horizon:horizonId,
-      createdAt:Number(snapshot && snapshot.createdAt || Date.now()),
+      createdAt:Date.now(),
+      snapshotCreatedAt:Number(snapshot && snapshot.createdAt || Date.now()),
       version:snapshot && snapshot.version || "unavailable",
       position,
       currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position && position.markPrice),
@@ -2025,7 +2095,10 @@
       rowsByTf:snapshot && snapshot.rowsByTf || {},
       closedByTf:snapshot && snapshot.closedByTf || {},
       maByTf:snapshot && snapshot.maByTf || {},
-      structureByTf:snapshot && snapshot.structureByTf || {}
+      structureByTf:snapshot && snapshot.structureByTf || {},
+      dataHealth:snapshot && snapshot.health || null,
+      userLevels:externalLevels.userLevels,
+      exitOrders:externalLevels.exitOrders
     });
   }
   function entryPolicy37(horizonId=state.horizon){
@@ -2213,20 +2286,29 @@
     if(candidate.family === "Structure rejection") return `${candidate.tf} ${candidate.source} rejection`;
     return `${candidate.tf} ${candidate.source || candidate.family}`;
   }
+  function signalPresentation37(signal,decision){
+    const bias = signal && signal.marketDirection;
+    const internalState = decision && decision.state;
+    if(internalState && SIGNAL_PRESENTATION37[internalState] && internalState !== "BIAS CONFIRMED" && internalState !== "NO BIAS"){
+      return SIGNAL_PRESENTATION37[internalState];
+    }
+    return bias ? SIGNAL_PRESENTATION37["BIAS CONFIRMED"] : SIGNAL_PRESENTATION37["NO BIAS"];
+  }
+  function signalDirectionConfidence37(signal){
+    const direction = signal && signal.marketDirection;
+    const confidence = num37(signal && signal.confidence);
+    return direction && confidence != null ? `${direction} ${Math.round(confidence)}%` : direction || "";
+  }
   function signalSummaryVariants37(signal,decision){
     const bias = signal && signal.marketDirection;
-    const confidence = num37(signal && signal.confidence);
-    const confidenceText = confidence == null ? "" : ` ${Math.round(confidence)}%`;
-    if(!bias) return {full:"WAIT \u00b7 NO BIAS",short:"WAIT",minimal:"WAIT"};
-    if(decision && decision.state === "READY") return {full:`READY ${bias}${confidenceText}`,short:`READY ${bias}`,minimal:`READY ${bias}`};
-    const fullState = decision && decision.state === "SETUP ARMED" ? "ARMED"
-      : decision && decision.state === "ZONE ENGAGED" ? "ENGAGED"
-        : decision && decision.state === "TRIGGER DEVELOPING" ? "DEVELOPING" : "WAIT";
-    const shortState = fullState === "DEVELOPING" ? "DEV" : fullState === "ENGAGED" ? "ENG" : fullState === "ARMED" ? "ARM" : "WAIT";
+    if(!bias) return {full:"NO SETUP \u00b7 NO BIAS",short:"NO SETUP \u00b7 NO BIAS",minimal:"NO SETUP \u00b7 NO BIAS"};
+    const directionConfidence = signalDirectionConfidence37(signal);
+    const presentation = signalPresentation37(signal,decision);
+    const full = `${directionConfidence} \u00b7 ${presentation.label}`;
     return {
-      full:`${bias}${confidenceText} \u00b7 ${fullState}`,
-      short:`${bias}${confidenceText} \u00b7 ${shortState}`,
-      minimal:`${bias}${confidenceText}`
+      full,
+      short:full,
+      minimal:full
     };
   }
   function topSignalText37(signal,decision){
@@ -2253,21 +2335,74 @@
     if(state.summaryFrame != null) return;
     state.summaryFrame = requestAnimationFrame(renderResponsiveSignalSummary37);
   }
-  function signalToolbarTooltip37(signal,entryQuality,thesis){
-    if(!signal || signal.loading || signal.dataIncomplete){
-      return ["Bias: Unavailable","State: WAIT","Entry: Data incomplete",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`].join("\n");
+  function triggerIdentity37(signal,decision){
+    if(!decision || decision.state !== "READY") return null;
+    const snapshot = state.activeSnapshot || state.marketSnapshot;
+    const zone = decision.zone || {};
+    const activationTime = decision.interaction && (decision.interaction.reactionTime ?? decision.interaction.interactionTime);
+    return [
+      snapshot && snapshot.symbol || "",
+      decision.direction || signal && signal.marketDirection || "",
+      decision.family || "",
+      decision.source || "",
+      decision.tf || "",
+      num37(zone.low) == null ? "" : Number(zone.low).toPrecision(12),
+      num37(zone.high) == null ? "" : Number(zone.high).toPrecision(12),
+      decision.pressure && decision.pressure.triggerTf || decision.tf || "",
+      activationTime ?? decision.breakTime ?? decision.fingerprint ?? ""
+    ].join("|");
+  }
+  function stopTriggerAlert37(clearIdentity=true){
+    if(state.triggerAlertTimer != null) clearTimeout(state.triggerAlertTimer);
+    state.triggerAlertTimer = null;
+    state.triggerAlertEndsAt = 0;
+    if(state.entry) state.entry.classList.remove("is-trigger-active-alert");
+    if(clearIdentity) state.activeTriggerAlertId = null;
+  }
+  function rememberTriggerAlert37(identity){
+    state.seenTriggerAlertIds.add(identity);
+    state.seenTriggerAlertOrder.push(identity);
+    while(state.seenTriggerAlertOrder.length > 256){
+      const oldest = state.seenTriggerAlertOrder.shift();
+      state.seenTriggerAlertIds.delete(oldest);
     }
-    const decision = entryQuality && entryQuality.decision || signal.entryDecision;
-    const bias = signal.marketDirection || "NEUTRAL";
-    const confidence = signal.confidence == null ? "" : ` ${Math.round(signal.confidence)}%`;
-    const lines = [`Bias: ${bias}${confidence}`,`Horizon: ${horizonLabel37(state.horizon)}`];
+  }
+  function updateTriggerAlert37(signal,decision){
+    const identity = triggerIdentity37(signal,decision);
+    if(!identity){
+      stopTriggerAlert37();
+      return;
+    }
+    if(identity === state.activeTriggerAlertId){
+      if(state.triggerAlertEndsAt > Date.now() && state.entry) state.entry.classList.add("is-trigger-active-alert");
+      return;
+    }
+    stopTriggerAlert37();
+    state.activeTriggerAlertId = identity;
+    if(state.seenTriggerAlertIds.has(identity)) return;
+    rememberTriggerAlert37(identity);
+    state.triggerAlertEndsAt = Date.now()+TRIGGER_ALERT_DURATION37;
+    if(state.entry) state.entry.classList.add("is-trigger-active-alert");
+    state.triggerAlertTimer = setTimeout(() => {
+      if(state.activeTriggerAlertId === identity) stopTriggerAlert37(false);
+    },TRIGGER_ALERT_DURATION37);
+  }
+  function signalToolbarTooltip37(signal,entryQuality,thesis){
+    const decision = entryQuality && entryQuality.decision || signal && signal.entryDecision;
+    const presentation = signalPresentation37(signal,decision);
+    if(!signal || signal.loading || signal.dataIncomplete){
+      return [presentation.definition,"","Direction: NO BIAS","Bias confidence: Unavailable",`State: ${presentation.label}`,"Entry: Data incomplete",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`].join("\n");
+    }
+    const bias = signal.marketDirection || "NO BIAS";
+    const confidence = signal.confidence == null ? "Unavailable" : `${Math.round(signal.confidence)}%`;
+    const lines = [presentation.definition,"",`Direction: ${bias}`,`Bias confidence: ${confidence}`,`Horizon: ${horizonLabel37(state.horizon)}`];
     if(thesis) lines.push(`Selected thesis: ${state.direction} ${thesis.status}${thesis.confidence == null ? "" : ` ${Math.round(thesis.confidence)}%`}`);
     if(!decision || !decision.family){
-      lines.push("State: BIAS CONFIRMED","Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`);
+      lines.push(`State: ${presentation.label}`,"Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`);
       return lines.join("\n");
     }
     lines.push(
-      `State: ${decision.state}`,
+      `State: ${presentation.label}`,
       `Setup family: ${decision.family}`,
       `Setup timeframe: ${decision.tf}`,
       `Setup: ${setupDisplayName37(decision)}`,
@@ -2678,6 +2813,100 @@
       mirroredScenario:{bias:"SHORT",setup:"5m EMA100 resistance test",pressure:"56% buying / 44% selling",state:observedShort.state,entry:"WAIT",trigger:"absent",reason:observedShort.reason}
     };
   }
+  function runPresentationSelfTests37(){
+    const expected = {
+      "SETUP ARMED":"WATCHING",
+      "ZONE ENGAGED":"STAND BY",
+      "TRIGGER DEVELOPING":"TRIGGER FORMING",
+      READY:"TRIGGER ACTIVE",
+      EXPIRED:"NO CHASE",
+      INVALIDATED:"SETUP FAILED"
+    };
+    const baseSignal = {marketDirection:"LONG",confidence:72};
+    const stateMappings = Object.fromEntries(Object.entries(expected).map(([internal,label]) => [
+      internal,
+      signalSummaryVariants37(baseSignal,{state:internal}).full === `LONG 72% \u00b7 ${label}`
+    ]));
+    const readyDecision = {
+      state:"READY",direction:"LONG",family:"EMA9/21 bounce",source:"EMA9/EMA21",tf:"3m",
+      zone:{low:99000,high:99100},pressure:{triggerTf:"3m",triggerParticipation:{text:"Normal"}},
+      interaction:{interactionTime:100,reactionTime:200},invalidation:98500,entryAction:"READY LONG",reason:"Confirmed"
+    };
+    const tooltip = signalToolbarTooltip37({...baseSignal,entryDecision:readyDecision},{decision:readyDecision},null);
+    const definition = SIGNAL_PRESENTATION37.READY.definition;
+    const approvedVariants = signalSummaryVariants37(baseSignal,{state:"TRIGGER DEVELOPING"});
+    const identity = triggerIdentity37(baseSignal,readyDecision);
+    const sameIdentity = triggerIdentity37(baseSignal,{...readyDecision,reason:"Routine refresh"});
+    const newIdentity = triggerIdentity37(baseSignal,{...readyDecision,interaction:{...readyDecision.interaction,reactionTime:300}});
+    const alertLifecycle = runTriggerAlertSelfTests37(baseSignal,readyDecision);
+    const cases = {
+      ...stateMappings,
+      directionalBiasWithoutSetup:signalSummaryVariants37(baseSignal,{state:"BIAS CONFIRMED"}).full === "LONG 72% \u00b7 NO SETUP",
+      confidenceHasNoBrackets:!/[()]/.test(signalSummaryVariants37(baseSignal,{state:"SETUP ARMED"}).full),
+      approvedWordingNotShortened:Object.values(approvedVariants).every(value => value === "LONG 72% \u00b7 TRIGGER FORMING"),
+      noBiasWordingNotShortened:Object.values(signalSummaryVariants37({marketDirection:null,confidence:null},{state:"NO BIAS"})).every(value => value === "NO SETUP \u00b7 NO BIAS"),
+      noBiasWithoutSetup:signalSummaryVariants37({marketDirection:null,confidence:null},{state:"NO BIAS"}).full === "NO SETUP \u00b7 NO BIAS",
+      tooltipDefinitionFirst:tooltip.split("\n")[0] === definition,
+      tooltipHasOneBlankLine:tooltip.split("\n")[1] === "" && tooltip.split("\n")[2] === "Direction: LONG",
+      tooltipDefinitionNotDuplicated:tooltip.split(definition).length-1 === 1,
+      triggerIdentityStable:identity === sameIdentity,
+      materiallyNewTriggerIdentity:identity !== newIdentity,
+      ...alertLifecycle
+    };
+    return {passed:Object.values(cases).every(Boolean),cases};
+  }
+  function runTriggerAlertSelfTests37(signal,readyDecision){
+    const saved = {
+      entry:state.entry,
+      activeTriggerAlertId:state.activeTriggerAlertId,
+      triggerAlertTimer:state.triggerAlertTimer,
+      triggerAlertEndsAt:state.triggerAlertEndsAt,
+      seenTriggerAlertIds:state.seenTriggerAlertIds,
+      seenTriggerAlertOrder:state.seenTriggerAlertOrder,
+      setTimeout:window.setTimeout,
+      clearTimeout:window.clearTimeout
+    };
+    const callbacks = new Map();
+    let nextTimer = 1;
+    try{
+      state.entry = document.createElement("span");
+      state.activeTriggerAlertId = null;
+      state.triggerAlertTimer = null;
+      state.triggerAlertEndsAt = 0;
+      state.seenTriggerAlertIds = new Set();
+      state.seenTriggerAlertOrder = [];
+      window.setTimeout = (callback,delay) => { const id = nextTimer++; callbacks.set(id,{callback,delay}); return id; };
+      window.clearTimeout = id => callbacks.delete(id);
+
+      updateTriggerAlert37(signal,readyDecision);
+      const firstTimer = state.triggerAlertTimer;
+      const first = callbacks.get(firstTimer);
+      const startsOnce = state.entry.classList.contains("is-trigger-active-alert") && first && first.delay === TRIGGER_ALERT_DURATION37;
+      updateTriggerAlert37(signal,{...readyDecision,reason:"Routine refresh"});
+      const refreshDoesNotRestart = state.triggerAlertTimer === firstTimer && callbacks.size === 1;
+      first.callback();
+      const endsNormally = !state.entry.classList.contains("is-trigger-active-alert") && state.triggerAlertTimer == null;
+      updateTriggerAlert37(signal,readyDecision);
+      const sameTriggerDoesNotReplay = !state.entry.classList.contains("is-trigger-active-alert") && state.triggerAlertTimer == null;
+      const replacement = {...readyDecision,interaction:{...readyDecision.interaction,reactionTime:Number(readyDecision.interaction.reactionTime)+100}};
+      updateTriggerAlert37(signal,replacement);
+      const newTriggerRestarts = state.entry.classList.contains("is-trigger-active-alert") && state.triggerAlertTimer != null;
+      updateTriggerAlert37(signal,{...replacement,state:"TRIGGER DEVELOPING"});
+      const stateChangeStopsImmediately = !state.entry.classList.contains("is-trigger-active-alert") && state.triggerAlertTimer == null && state.activeTriggerAlertId == null;
+      updateTriggerAlert37(signal,replacement);
+      const stateReentryDoesNotReplay = !state.entry.classList.contains("is-trigger-active-alert") && state.triggerAlertTimer == null;
+      return {triggerAlertStartsOnce:startsOnce,routineRefreshDoesNotRestart:refreshDoesNotRestart,triggerAlertEndsAfterDuration:endsNormally,sameTriggerDoesNotReplay,newTriggerStartsAlert:newTriggerRestarts,stateChangeStopsAlert:stateChangeStopsImmediately,stateReentryDoesNotReplay};
+    }finally{
+      window.setTimeout = saved.setTimeout;
+      window.clearTimeout = saved.clearTimeout;
+      state.entry = saved.entry;
+      state.activeTriggerAlertId = saved.activeTriggerAlertId;
+      state.triggerAlertTimer = saved.triggerAlertTimer;
+      state.triggerAlertEndsAt = saved.triggerAlertEndsAt;
+      state.seenTriggerAlertIds = saved.seenTriggerAlertIds;
+      state.seenTriggerAlertOrder = saved.seenTriggerAlertOrder;
+    }
+  }
   function evaluateEntryDecision37(bias,samples,horizonId){
     const prior = state.entryTrackers.get(horizonId) || null;
     const priorWasActive = prior && prior.family && !["EXPIRED","INVALIDATED"].includes(prior.state);
@@ -2950,14 +3179,20 @@
     const bundle = ensureSignalData37(state.horizon);
     const ready = bundle.health.status === "sufficient" || bundle.health.status === "stale";
     state.activeSnapshot = ready ? coherentSignalSnapshot37(bundle.plan,bundle.health) : null;
+    if(state.activeSnapshot) state.activeSnapshot.health = bundle.health;
     try{
       let signal;
       if(ready){
-        if(!state.activeSnapshot.signal){
+        const cached = !!state.activeSnapshot.signal;
+        if(!cached){
           state.activeSnapshot.signal = evaluateToolbarPressureSignal37(state.horizon);
           state.activeSnapshot.managementValidation = validateFrozenManagement37(state.activeSnapshot.signal,state.horizon);
         }
         signal = state.activeSnapshot.signal;
+        if(cached){
+          signal.management = evaluatePositionManagement37(signal,state.horizon);
+          signal.exit = signal.management.exit;
+        }
       }else{
         signal = loadingSignal37(bundle);
       }
@@ -2995,6 +3230,7 @@
         }
         state.entry.textContent = state.signalSummaryVariants.full;
         state.entry.removeAttribute("title");
+        updateTriggerAlert37(signal,decision);
       }
       if(state.exit){
         state.exit.dataset.tone = pillTone37(signal.exit);
@@ -3008,16 +3244,15 @@
         if(state.detailsTitle) state.detailsTitle.textContent = "Signal Details";
         positionToolbarSignalDetails37();
       }
-      if(state.activeSnapshot){
-        windowSystem.update({
-          signalReport,
-          management:signal.management,
-          snapshot:state.activeSnapshot,
-          horizonLabel:horizonLabel37(state.horizon),
-          signalHorizonId:state.horizon,
-          signalTooltip:signalToolbarTooltip37(signal,entryQuality,thesis)
-        });
-      }
+      windowSystem.update({
+        signalReport,
+        management:signal.management,
+        managementDataStatus:bundle.health.managementStatus || bundle.health.status,
+        snapshot:state.activeSnapshot || state.marketSnapshot,
+        horizonLabel:horizonLabel37(state.horizon),
+        signalHorizonId:state.horizon,
+        signalTooltip:signalToolbarTooltip37(signal,entryQuality,thesis)
+      });
       state.lastRenderAt = Date.now();
     }finally{
       state.activeSnapshot = null;
@@ -3068,7 +3303,9 @@
       } : null,
       management:positionEngine._diagnostics(),
       selfTests:positionEngine._selfTest(),
-      entrySelfTests:runEntrySelfTests37()
+      entrySelfTests:runEntrySelfTests37(),
+      presentationSelfTests:runPresentationSelfTests37(),
+      windowPresentationSelfTests:windowSystem._selfTest()
     };
   }
   function initialize37(){
@@ -3094,6 +3331,7 @@
     if(state.lifecycleTimer != null) clearInterval(state.lifecycleTimer);
     if(state.refreshTimer != null) clearTimeout(state.refreshTimer);
     if(state.summaryFrame != null) cancelAnimationFrame(state.summaryFrame);
+    stopTriggerAlert37();
     state.lifecycleTimer = null;
     state.refreshTimer = null;
     state.summaryFrame = null;
@@ -3122,6 +3360,8 @@
     state.marketSnapshot = null;
     state.activeSnapshot = null;
     state.signalSummaryVariants = null;
+    state.seenTriggerAlertIds.clear();
+    state.seenTriggerAlertOrder.length = 0;
   }
   function setManagementHorizon37(next){
     const selected = positionEngine.setManagementHorizon(next);

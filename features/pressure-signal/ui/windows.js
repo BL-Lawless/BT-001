@@ -5,7 +5,7 @@
 
   build.createWindowSystem = function createWindowSystem(config,format){
     const state = {
-      signalReport:null,management:null,snapshot:null,signalCopy:"",positionCopy:"",
+      signalReport:null,management:null,managementDataStatus:null,snapshot:null,signalCopy:"",positionCopy:"",
       signalHorizonId:null,
       signalWindow:null,positionWindow:null,positionBody:null,positionTitle:null,
       signalTooltip:"",positionTooltip:"",signalTip:null,positionTip:null,
@@ -365,25 +365,64 @@
       listen(control,"blur",() => hideToolbarTooltip(kind));
       listen(control,"pointerdown",() => hideToolbarTooltip(kind));
     }
-    function positionTooltipText(management){
-      if(!management) return "Action: WAIT\nPosition health: Unavailable\nPrimary reason: Position management is unavailable\nManagement anchor: Unavailable\nExit monitor: None";
+    function profileSourceText(management){
+      const source = String(management && management.profileSource || "").toLowerCase();
+      if(source === "user-selected") return "User selected";
+      if(source === "default") return "Default";
+      return management && management.horizonLabel ? "Default" : "Unavailable";
+    }
+    const displayTimeframe = value => String(value || "-") === "1d" ? "1D" : String(value || "-");
+    function keyDefenceText(anchor){
+      if(!anchor || anchor.level == null) return "Unavailable";
+      const sourceLabel = anchor.defenceType
+        ? `${anchor.tf || ""} ${anchor.defenceType}`
+        : anchor.label || `${anchor.tf || ""} level`;
+      const rawLabel = sourceLabel
+        .replace(/\b(?:User-selected|Inferred|Recorded)\s+/gi,"")
+        .replace(/\s*\([^)]*\)\s*$/g,"")
+        .replace(/\s+/g," ")
+        .trim();
+      const userSelected = anchor.userSelected === true || String(anchor.selectionSource || "").toLowerCase() === "user-selected";
+      return `${rawLabel || "Level"} at ${format.price(anchor.level)} \u00b7 ${userSelected ? "User selected" : "System selected"}`;
+    }
+    function exitWarningText(management,dataStatus){
+      if(!management || management.sufficient !== true || (dataStatus && dataStatus !== "sufficient") || !management.position || !management.anchor) return "Unavailable";
+      const pathA = management.pathA && management.pathA.state;
+      const pathB = management.pathB && management.pathB.state;
+      if(!pathA || !pathB) return "Unavailable";
+      if(management.activatedPath || pathA === "CONFIRMED" || pathB === "CONFIRMED") return "Confirmed";
+      const rank = {DEVELOPING:2,WARNING:1};
+      if((rank[pathA] || 0) >= (rank[pathB] || 0) && rank[pathA]) return "Key defence weakening";
+      if(rank[pathB]) return "Opposite regime developing";
+      if(["CLEAR","CLEARED"].includes(pathA) && ["CLEAR","CLEARED"].includes(pathB)) return "Clear";
+      return "Unavailable";
+    }
+    function positionTooltipText(management,dataStatus){
+      if(!management) return "Action: WAIT\nPosition health: Unavailable\nPrimary reason: Position management is unavailable\nManagement profile: Unavailable\nKey defence: Unavailable\nExit warning: Unavailable";
       const anchor = management.anchor;
-      const source = anchor && String(anchor.source || "selected").toLowerCase();
-      const anchorText = anchor
-        ? `${anchor.label} at ${format.price(anchor.level)} (${source})`
+      const profile = management.horizonLabel
+        ? `${management.horizonLabel} \u00b7 ${profileSourceText(management)}`
         : "Unavailable";
-      const pathRank = {CONFIRMED:4,DEVELOPING:3,WARNING:2,CLEAR:1};
-      const paths = [["Path A",management.pathA],["Path B",management.pathB]].filter(([,path]) => path);
-      const advanced = paths.sort((a,b) => (pathRank[b[1].state] || 0)-(pathRank[a[1].state] || 0))[0];
-      const monitor = management.activatedPath || (advanced && advanced[1].state !== "CLEAR"
-        ? `${advanced[0]} ${advanced[1].state}${advanced[1].reason ? ` - ${advanced[1].reason}` : ""}`
-        : "None");
+      const volatility = management.volatility || {};
+      const lifecycle = management.lifecycle || {};
+      const conditions = management.conditions && Array.isArray(management.conditions.items) ? management.conditions.items : [];
+      const stall = management.stallReview || {};
+      const evidence = management.evidence || {};
       return [
         `Action: ${management.action || "WAIT"}`,
         `Position health: ${management.health || "Unavailable"}`,
         `Primary reason: ${management.primaryReason || "Unavailable"}`,
-        `Management anchor: ${anchorText}`,
-        `Exit monitor: ${monitor}`
+        `Management profile: ${profile}`,
+        `Key defence: ${keyDefenceText(anchor)}`,
+        `Exit warning: ${exitWarningText(management,dataStatus)}`,
+        `Volatility: ${volatility.available ? `${volatility.state} \u00b7 ${Math.round(volatility.percentile)}th percentile \u00b7 Tolerance ${Number(volatility.toleranceMultiplier).toFixed(2)}x \u00b7 ${volatility.contextTf} ${volatility.contextState}` : "Unavailable"}`,
+        `Lifecycle: ${lifecycle.state || "Unavailable"}`,
+        `Current conditions: ${conditions.join(" \u00b7 ") || "None"}`,
+        `Stall Review: ${stall.state || "Unavailable"}`,
+        `Confirmation: ${evidence.confirmation || "Unavailable"}`,
+        `Support: ${(evidence.supporting || []).join(" / ") || "None"}`,
+        `Conflict: ${(evidence.conflicting || []).join(" / ") || "None"}`,
+        `Data age: ${evidence.dataAgeMs == null ? "Unavailable" : `${Math.round(evidence.dataAgeMs/1000)} seconds`}`
       ].join("\n");
     }
 
@@ -601,6 +640,13 @@
         return {summary:"No open position.",analysis:"Management starts when a position is detected.",diagnostics:"No position campaign or ROI epoch is active."};
       }
       const roi = management.roi || {};
+      const volatility = management.volatility || {};
+      const lifecycle = management.lifecycle || {};
+      const conditions = management.conditions && Array.isArray(management.conditions.items) ? management.conditions.items : [];
+      const stall = management.stallReview || {};
+      const evidence = management.evidence || {};
+      const hierarchy = management.profileHierarchy || {};
+      const levelMap = management.levelMap || {levels:[],zones:[]};
       const summary = [
         `Symbol: ${snapshot.symbol}`,
         `Position: ${position.side} ${format.quantity(position.qty)}`,
@@ -616,20 +662,34 @@
         `Maximum favorable price: ${format.price(roi.maxFavorablePrice)}`,
         `Campaign result: ${format.money(roi.campaignResult)}`,
         `Campaign monetary MFE: ${format.money(roi.campaignMfe)}`,
-        `Management horizon: ${management.horizonLabel}`,
-        `Management anchor: ${management.anchor.label} at ${format.price(management.anchor.level)}`,
-        `Anchor source: ${management.anchor.source}`,
+        `Management profile: ${management.horizonLabel} \u00b7 ${profileSourceText(management)}`,
+        `Profile timeframes: warning ${displayTimeframe(hierarchy.earlyWarningTf)} \u00b7 trigger ${displayTimeframe(hierarchy.triggerTf)} \u00b7 primary ${displayTimeframe(hierarchy.primaryTf)} \u00b7 context ${displayTimeframe(hierarchy.contextTf)} \u00b7 boundary ${displayTimeframe(hierarchy.boundaryTf)}`,
+        `Key defence: ${keyDefenceText(management.anchor)}`,
+        `Key defence zone: ${management.anchor.zone ? `${format.price(management.anchor.zone.low)}-${format.price(management.anchor.zone.high)}` : "Unavailable"}`,
+        `Original invalidation: ${management.originalInvalidation ? `${management.originalInvalidation.tf} at ${format.price(management.originalInvalidation.level)}` : "Unavailable"}`,
+        `Key defence migration: ${management.defenceMigration ? management.defenceMigration.basis : "No confirmed migration"}`,
+        `Volatility: ${volatility.available ? `${volatility.state} \u00b7 ${Math.round(volatility.percentile)}th percentile \u00b7 Tolerance ${Number(volatility.toleranceMultiplier).toFixed(2)}x \u00b7 ${volatility.contextTf} ${volatility.contextState}` : "Unavailable"}`,
+        `Lifecycle: ${lifecycle.state || "Unavailable"}`,
+        `Lifecycle basis: ${lifecycle.basis || "Unavailable"}`,
+        `Current conditions: ${conditions.join(" \u00b7 ") || "None"}`,
+        `Stall Review: ${stall.state || "Unavailable"}`,
         `Position health: ${management.health}`,
         `Action: ${management.action}`,
         `Primary reason: ${management.primaryReason}`,
-        `Failure to progress: ${management.progress.state}`,
+        `Confirmation: ${evidence.confirmation || "Unavailable"}`,
+        `Support: ${(evidence.supporting || []).join(" / ") || "None"}`,
+        `Conflict: ${(evidence.conflicting || []).join(" / ") || "None"}`,
+        `Forming warning: ${(evidence.formingWarnings || []).join(" / ") || "None"}`,
+        `Data age: ${evidence.dataAgeMs == null ? "Unavailable" : `${Math.round(evidence.dataAgeMs/1000)} seconds`}`,
         `Path B - Opposite regime: ${management.pathB.state}`,
         `Path A - Anchor invalidation: ${management.pathA.state}`,
         management.activatedPath ? `Exit activated: ${management.activatedPath}` : "Exit activated: No"
       ].join("\n");
+      const levelLines = (levelMap.levels || []).map(level => `${level.source}: ${format.price(level.low)}-${format.price(level.high)}; reference ${format.price(level.reference)}; ${level.roles.join(" / ")}; ${level.interactionState || "not active"}; approach ${level.approachQuality || "unavailable"}; ${level.relevance}; ${level.mergedZoneId || "unmerged"}`);
+      const zoneLines = (levelMap.zones || []).map(zone => `${zone.id}: ${format.price(zone.low)}-${format.price(zone.high)}; reference ${format.price(zone.reference)}; ${zone.independentFamilyCount} independent families (${zone.evidenceFamilies.join(", ")}); ${zone.interactionState || "not active"}`);
       return {
         summary,
-        analysis:(management.analysis || []).join("\n"),
+        analysis:[...(management.analysis || []),"Management level map:",...(levelLines.length ? levelLines : ["Unavailable"]),"Confluence zones:",...(zoneLines.length ? zoneLines : ["Unavailable"])].join("\n"),
         diagnostics:[...(management.diagnostics || []),"Health history:",...(management.healthHistory || []).map(item => `${format.time(item.at)} - ${item.state}: ${item.reason}`),"Threats:",...(management.threats || ["None"])].join("\n")
       };
     }
@@ -658,10 +718,11 @@
     function update(payload){
       state.signalReport = payload.signalReport || state.signalReport;
       state.management = payload.management || state.management;
+      if(Object.prototype.hasOwnProperty.call(payload,"managementDataStatus")) state.managementDataStatus = payload.managementDataStatus;
       state.snapshot = payload.snapshot || state.snapshot;
       setSignalHorizon(payload.signalHorizonId || state.signalHorizonId);
       state.signalTooltip = payload.signalTooltip || state.signalTooltip;
-      state.positionTooltip = positionTooltipText(state.management);
+      state.positionTooltip = positionTooltipText(state.management,state.managementDataStatus);
       bindToolbar();
       renderToolbarTooltip("signal");
       renderToolbarTooltip("position");
@@ -754,6 +815,35 @@
       if(state.signalWindow){ bringToFront(state.signalWindow); requestAnimationFrame(() => clampToViewport(state.signalWindow)); }
     };
 
-    return {update,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,getSignalCopy:() => state.signalCopy,getPositionCopy:() => state.positionCopy,destroy};
+    function runPresentationSelfTests(){
+      const base = {
+        sufficient:true,position:{side:"LONG"},horizonLabel:"Quick",profileSource:"default",
+        action:"HOLD",health:"HEALTHY",primaryReason:"Healthy",
+        anchor:{tf:"5m",defenceType:"structure",label:"User-selected 5m structure",level:64913,source:"user-selected",selectionSource:"system-selected"},
+        pathA:{state:"CLEAR"},pathB:{state:"CLEAR"},activatedPath:null
+      };
+      const defaultText = positionTooltipText(base,"sufficient");
+      const selectedText = positionTooltipText({...base,profileSource:"user-selected"},"sufficient");
+      const explicitDefence = positionTooltipText({...base,anchor:{...base.anchor,selectionSource:"user-selected"}},"sufficient");
+      const pathAText = positionTooltipText({...base,pathA:{state:"WARNING"}},"sufficient");
+      const pathBText = positionTooltipText({...base,pathB:{state:"DEVELOPING"}},"sufficient");
+      const confirmedText = positionTooltipText({...base,pathA:{state:"CONFIRMED"}},"sufficient");
+      const staleText = positionTooltipText(base,"stale");
+      const cases = {
+        defaultProfile:defaultText.includes("Management profile: Quick \u00b7 Default"),
+        userSelectedProfile:selectedText.includes("Management profile: Quick \u00b7 User selected"),
+        systemSelectedDefence:defaultText.includes("Key defence: 5m structure at") && defaultText.includes("\u00b7 System selected"),
+        explicitUserDefence:explicitDefence.includes("\u00b7 User selected"),
+        clearWarning:defaultText.includes("Exit warning: Clear"),
+        keyDefenceWeakening:pathAText.includes("Exit warning: Key defence weakening"),
+        oppositeRegimeDeveloping:pathBText.includes("Exit warning: Opposite regime developing"),
+        confirmedWarning:confirmedText.includes("Exit warning: Confirmed"),
+        staleUnavailable:staleText.includes("Exit warning: Unavailable"),
+        noLegacyExitMonitor:![defaultText,selectedText,pathAText,pathBText,confirmedText,staleText].some(text => text.includes("Exit monitor:") || text.includes("Exit monitor: None"))
+      };
+      return {passed:Object.values(cases).every(Boolean),cases};
+    }
+
+    return {update,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,getSignalCopy:() => state.signalCopy,getPositionCopy:() => state.positionCopy,destroy,_selfTest:runPresentationSelfTests};
   };
 })();
