@@ -2657,6 +2657,51 @@ button:hover{filter:brightness(1.04)}
   line-height:1;
 }
 .wf-axis-label.is-zero{color:#4a5562}
+.wf-crosshair{
+  position:absolute;
+  inset:0;
+  z-index:6;
+  pointer-events:none;
+  overflow:hidden;
+}
+.wf-crosshair.hidden{display:none}
+.wf-crosshair-v,
+.wf-crosshair-h{
+  position:absolute;
+  pointer-events:none;
+  background-color:transparent;
+}
+.wf-crosshair-v{
+  width:var(--wf-crosshair-hairline,1px);
+  background-image:repeating-linear-gradient(to bottom,rgba(112,122,138,.38) 0 4px,transparent 4px 8px);
+}
+.wf-crosshair-h{
+  height:var(--wf-crosshair-hairline,1px);
+  background-image:repeating-linear-gradient(to right,rgba(112,122,138,.38) 0 4px,transparent 4px 8px);
+}
+.wf-crosshair-values{
+  position:absolute;
+  z-index:1;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  min-width:max-content;
+  color:#111;
+  font:400 14px/18px Arial,Helvetica,sans-serif;
+  letter-spacing:normal;
+  text-rendering:auto;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+.wf-crosshair-label{
+  position:relative;
+  height:18px;
+  padding:0;
+  font-weight:400;
+}
+.wf-crosshair-values[data-side="right"] .wf-crosshair-label{text-align:left}
+.wf-crosshair-values[data-side="left"] .wf-crosshair-label{text-align:right}
+.wf-crosshair-amount{color:#111;font-weight:400}
 .wf-bars{
   position:absolute;
   display:grid;

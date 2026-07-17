@@ -797,6 +797,10 @@
     const response=await API.fetch(url+"?"+query+"&signature="+signature,{method,cache:"no-store",headers:{"X-MBX-APIKEY":key}});
     const data=await response.json().catch(()=>({}));
     if(!response.ok) throw new Error(data&&data.msg?data.msg:"HTTP "+response.status);
+    try{
+      const cache=window.BINANCE_OPEN_ORDERS_CACHE;
+      if(cache&&typeof cache.refresh==="function") cache.refresh({reason:"gr-order-write",maxAgeMs:0}).catch(()=>{});
+    }catch(_e){}
     return data;
   }
   async function livePosition(){

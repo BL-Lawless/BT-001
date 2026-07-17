@@ -294,7 +294,7 @@
       const distanceAtr = Math.abs(price-current)/Math.max(atr,1e-8);
       if(level.family === "original invalidation") return ["invalidation reinforcement"];
       if(level.family === "key defence") return ["defence"];
-      if(level.family === "binance-exit") return ["objective"];
+      if(level.family === "binance-exit") return ["planned exit"];
       if(level.family === "binance-protection") return ["defence"];
       if(level.family === "user"){
         const roles = beyondEntry < 0 ? ["invalidation reinforcement","defence"]
@@ -387,11 +387,6 @@
         id:item.id || `user-${index}`,reference:item.price ?? item.level,tf:item.tf || horizon.primaryTf,
         source:"User level",family:"user",role:item.role || null,exceptional:item.exceptional === true || item.strong === true
       }));
-      (Array.isArray(facts.exitOrders) ? facts.exitOrders : []).forEach((item,index) => add({
-        id:item.id || `exit-${index}`,reference:item.price ?? item.level,tf:item.tf || horizon.primaryTf,
-        source:item.source || "Binance exit order",family:item.family || "binance-exit",exceptional:true
-      }));
-
       const primaryEmaTfs = new Set(horizon.htfEmaTfs || []);
       const conditionalEmaTfs = new Set(horizon.conditionalEmaTfs || []);
       [...new Set([...primaryEmaTfs,...conditionalEmaTfs])].forEach(tf => {
@@ -454,7 +449,7 @@
       const eligibleAfterMs = horizon.stallReviewMs*volatilityFactor;
       const eligible = elapsedMs >= eligibleAfterMs;
       const objectiveReached = levelMap.activeLevels.some(level => level.roles.includes("objective") && ["TESTING","HOLDING","RECLAIMED","REJECTED"].includes(level.interactionState));
-      const boundaryConsolidation = levelMap.activeLevels.some(level => level.ahead && ["TESTING","APPROACHING"].includes(level.interactionState) && ["structure","user","moving averages","binance-exit"].includes(level.family));
+      const boundaryConsolidation = levelMap.activeLevels.some(level => level.ahead && ["TESTING","APPROACHING"].includes(level.interactionState) && ["structure","user","moving averages"].includes(level.family));
       const validRetest = levelMap.activeLevels.some(level => level.roles.includes("retest level") && ["HOLDING","RECLAIMED"].includes(level.interactionState));
       const meaningfulProgress = lifecycle.state !== "FRESH" || (tracker.maxFavorablePrice != null && tracker.progress.startPrice != null && Math.abs(tracker.maxFavorablePrice-tracker.progress.startPrice) >= levelMap.atr*horizon.expectedAtr);
       const constructiveCompression = (levelMap.zones || []).some(zone => zone.evidenceFamilies.includes("moving averages") && ["TESTING","HOLDING"].includes(zone.interactionState)) && !pressureResult.warning && !pressureResult.confirmed;
@@ -484,7 +479,9 @@
     function currentConditions(facts,horizon,levelMap,lifecycle,stall,volatility){
       const desired = sideNumber(facts.position.side);
       const current = numeric(facts.currentPrice);
-      const activeObjective = levelMap.activeLevels.find(level => level.roles.includes("objective") && ["TESTING","HOLDING","RECLAIMED","REJECTED","APPROACHING"].includes(level.interactionState));
+      const formalTargets=[facts.targetFramework && facts.targetFramework.primary,facts.targetFramework && facts.targetFramework.extended].filter(target => target && target.available && numeric(target.price)!=null);
+      const activeObjectiveTarget=formalTargets.find(target => current!=null && Math.abs(Number(target.price)-current)<=levelMap.atr*config.takeProfit.objectiveAtr);
+      const activeObjective=activeObjectiveTarget ? levelMap.activeLevels.find(level => Math.abs(level.reference-activeObjectiveTarget.price)<=levelMap.atr*config.targetFramework.mergeAtr && ["TESTING","HOLDING","RECLAIMED","REJECTED","APPROACHING"].includes(level.interactionState)) || {...activeObjectiveTarget,reference:activeObjectiveTarget.price,interactionState:"APPROACHING",roles:["objective"]} : null;
       const supportive = levelMap.levels.filter(level => level.behind && (level.family === "structure" || level.family === "moving averages" || level.family === "key defence")).sort((a,b) => a.distance-b.distance)[0];
       const boundaryAhead = levelMap.levels.filter(level => level.ahead && (level.exceptional || level.tf === horizon.boundaryTf)).sort((a,b) => a.distance-b.distance)[0];
       const stretched = !!(current != null && supportive && supportive.distanceAtr >= 2.5 && (!boundaryAhead || boundaryAhead.distanceAtr <= horizon.materiallyCloseAtr[1] || volatility.state === "EXTREME"));
@@ -611,10 +608,7 @@
       const current = numeric(facts.currentPrice);
       const ema21 = maValue(facts,horizon.anchorTf,"MA2",true);
       const extension = current != null && ema21 != null && atr > 0 ? Math.abs(current-ema21)/atr : 0;
-      const boundaries = horizon.regimeTfs.flatMap(tf => {
-        const swing = structure(facts,tf,"swing");
-        return [swing && swing.latestHigh,swing && swing.latestLow].filter(Boolean).map(level => ({tf,price:numeric(level.price)}));
-      }).filter(level => level.price != null && current != null && (desired > 0 ? level.price >= current : level.price <= current));
+      const boundaries = [facts.targetFramework && facts.targetFramework.primary,facts.targetFramework && facts.targetFramework.extended].filter(level => level && level.available && numeric(level.price)!=null).map(level => ({tf:level.tf,price:numeric(level.price),source:level.source}));
       const objective = boundaries.sort((a,b) => Math.abs(a.price-current)-Math.abs(b.price-current))[0];
       const atObjective = !!(objective && atr > 0 && Math.abs(objective.price-current) <= atr*config.takeProfit.objectiveAtr);
       const surrenderPoints = tracker.peakRoi != null && roi != null ? Math.max(0,tracker.peakRoi-roi) : 0;
@@ -624,6 +618,208 @@
       if(extension >= config.takeProfit.extensionAtr) return {active:true,reason:`Price is extended ${extension.toFixed(1)} ATR from ${horizon.anchorTf} EMA21`,extension};
       if(relativeSurrender >= config.takeProfit.relativeSurrender && deterioration) return {active:true,reason:"Material peak-ROI surrender is confirmed by independent deterioration",relativeSurrender};
       return {active:false,reason:"No objective, exhaustion, extension, or confirmed surrender condition"};
+    }
+
+    function stopPurpose(facts,lifecycle,conditions,levelMap,defence={}){
+      const items = conditions && conditions.items || [];
+      const objectiveRejected = (levelMap.activeLevels || []).some(level => level.roles.includes("objective") && level.interactionState === "REJECTED");
+      if(lifecycle.state === "RUNNER" || (items.includes("AT OBJECTIVE") && objectiveRejected)) return {value:"PROFIT-PROTECTION STOP",reason:lifecycle.state === "RUNNER" ? "The remaining position is a confirmed runner" : "An objective rejected with favourable structure retained"};
+      if(lifecycle.state === "ESTABLISHED" && defence.migration) return {value:"CURRENT STRUCTURAL STOP",reason:"The position is established and management defence migration is confirmed"};
+      if(lifecycle.state === "ESTABLISHED") return {value:"ORIGINAL THESIS STOP",reason:"Favourable structure exists, but no confirmed defence migration permits tightening"};
+      if(lifecycle.state === "FRESH") return {value:"ORIGINAL THESIS STOP",reason:"The position remains fresh"};
+      return {value:"UNKNOWN / UNCLASSIFIED",reason:"Lifecycle evidence does not establish a stop purpose"};
+    }
+
+    function originalInvalidationFailed(facts,horizon,invalidation){
+      const level = numeric(invalidation && invalidation.level);
+      if(level == null) return false;
+      const desired = sideNumber(facts.position.side);
+      const rows = rowsFor(facts,invalidation.tf || horizon.primaryTf,true).slice(-horizon.confirmCloses);
+      return rows.length >= horizon.confirmCloses && rows.every(row => desired > 0 ? Number(row.close) < level : Number(row.close) > level);
+    }
+
+    function selectStopInvalidation(facts,horizon,purpose,defence,lifecycle,levelMap,structureResult){
+      const desired = sideNumber(facts.position.side);
+      const original = defence.originalInvalidation && numeric(defence.originalInvalidation.level) != null ? {type:"original",price:Number(defence.originalInvalidation.level),low:Number(defence.originalInvalidation.level),high:Number(defence.originalInvalidation.level),tf:defence.originalInvalidation.tf || horizon.primaryTf,source:"Original setup invalidation"} : null;
+      const anchorEligible = defence.anchor && defence.anchor.zone && String(defence.anchor.defenceType || "").toLowerCase() !== "entry basis";
+      const anchor = anchorEligible ? {type:"structural",price:desired > 0 ? Number(defence.anchor.zone.low) : Number(defence.anchor.zone.high),low:Number(defence.anchor.zone.low),high:Number(defence.anchor.zone.high),tf:defence.anchor.tf || horizon.primaryTf,source:defence.anchor.label || "Management key defence"} : null;
+      const execution = facts.currentExecutionInvalidation && facts.currentExecutionInvalidation.available && numeric(facts.currentExecutionInvalidation.price) != null ? {type:"execution",price:Number(facts.currentExecutionInvalidation.price),low:Number(facts.currentExecutionInvalidation.price),high:Number(facts.currentExecutionInvalidation.price),tf:horizon.triggerTf,source:facts.currentExecutionInvalidation.basis || "Current execution invalidation"} : null;
+      let selected = null;
+      if(purpose.value === "ORIGINAL THESIS STOP") selected = original || anchor;
+      else if(purpose.value === "CURRENT STRUCTURAL STOP") selected = anchor || execution || original;
+      else if(purpose.value === "PROFIT-PROTECTION STOP") selected = execution || anchor;
+      else selected = anchor || original;
+      const failed = selected ? (selected.type === "original" ? originalInvalidationFailed(facts,horizon,defence.originalInvalidation) : structureResult.anchorFailed === true) : false;
+      return {selected,original,currentStructural:anchor,currentExecution:execution,failed,lifecycle:lifecycle.state};
+    }
+
+    function technicalStop(facts,horizonId,volatility,invalidation){
+      if(!invalidation.selected || !(volatility && volatility.available) || !(volatility.atr > 0)) return {available:false,price:null,reason:!invalidation.selected ? "No genuine structural invalidation is available" : "Management volatility is unavailable"};
+      if(invalidation.failed) return {available:false,price:null,reason:"Relevant structural invalidation has already failed"};
+      const policy = config.stopEvaluation.buffers[horizonId] || config.stopEvaluation.buffers.quick;
+      const multiplier = Math.max(policy.minimumAtr,Math.min(policy.maximumAtr,policy.defaultAtr*Number(volatility.toleranceMultiplier || 1)));
+      const buffer = volatility.atr*multiplier;
+      const desired = sideNumber(facts.position.side);
+      const price = invalidation.selected.price-desired*buffer;
+      const current = numeric(facts.currentPrice);
+      if(current == null || (current-price)*desired <= 0) return {available:false,price,buffer,multiplier,reason:"Buffered technical stop is not on the valid adverse side of current price"};
+      return {available:true,price,buffer,multiplier,atr:volatility.atr,reason:`${multiplier.toFixed(3)} ATR beyond ${invalidation.selected.source}`};
+    }
+
+    function normalizeProtectionOrder(order,position,current){
+      const desired = sideNumber(position.side);
+      const expectedOrderSide = desired > 0 ? "SELL" : "BUY";
+      const trigger = numeric(order && order.triggerPrice);
+      const positionSide = String(order && order.positionSide || "").toUpperCase();
+      const wrongPositionSide = !!positionSide && positionSide !== "BOTH" && positionSide !== String(position.side).toUpperCase();
+      const wrongOrderSide = !!order.side && String(order.side).toUpperCase() !== expectedOrderSide;
+      const wrongSide = wrongPositionSide || wrongOrderSide || trigger == null;
+      const crossed = trigger != null && current != null && (desired > 0 ? current <= trigger : current >= trigger);
+      const adverse = trigger != null && current != null && (current-trigger)*desired > 0;
+      const stale = !order || order.isLive !== true;
+      return {...order,triggerPrice:trigger,quantity:numeric(order && order.quantity),wrongPositionSide,wrongOrderSide,wrongSide,crossed,stale,adverse,valid:!stale && !wrongSide && !crossed && adverse};
+    }
+
+    function simulateProtectionSequence(facts,volatility){
+      const position = facts.position;
+      const current = numeric(facts.currentPrice);
+      const desired = sideNumber(position.side);
+      const quantity = Math.abs(Number(position.qty || 0));
+      const source = facts.protectiveOrders || {orders:[]};
+      const normalized = (source.orders || []).map(order => normalizeProtectionOrder(order,position,current));
+      const masters = normalized.filter(order => order.kind === "MASTER_SL");
+      const psls = normalized.filter(order => order.kind === "PSL");
+      const valid = normalized.filter(order => order.valid).sort((a,b) => desired > 0 ? b.triggerPrice-a.triggerPrice : a.triggerPrice-b.triggerPrice);
+      let remaining = quantity;
+      let pslExecuted = 0;
+      let masterResidual = 0;
+      let masterTriggered = false;
+      const sequence = valid.map((order,index) => {
+        const before = remaining;
+        let executed = 0;
+        let ineffective = remaining <= config.stopEvaluation.quantityTolerance;
+        if(!ineffective && order.kind === "PSL"){
+          executed = Math.min(remaining,Math.max(0,Number(order.quantity || 0)));
+          remaining = Math.max(0,remaining-executed);
+          pslExecuted += executed;
+        }else if(!ineffective && order.kind === "MASTER_SL" && order.closePosition){
+          executed = remaining;
+          masterResidual = remaining;
+          remaining = 0;
+          masterTriggered = true;
+        }else if(order.kind === "MASTER_SL") ineffective = true;
+        return {index:index+1,id:order.id,kind:order.kind,triggerPrice:order.triggerPrice,requestedQuantity:order.quantity,quantityBefore:before,executedQuantity:executed,remainingQuantity:remaining,closePosition:order.closePosition,ineffective};
+      });
+      const validPsls = psls.filter(order => order.valid && !sequence.find(stage => stage.id === order.id && stage.ineffective));
+      const effectivePslQty = validPsls.reduce((sum,order) => sum+Math.max(0,Number(order.quantity || 0)),0);
+      const overcoverage = effectivePslQty > quantity+config.stopEvaluation.quantityTolerance;
+      const validMaster = valid.find(order => order.kind === "MASTER_SL" && order.closePosition) || null;
+      const protectedQuantity = validMaster ? quantity : Math.min(quantity,effectivePslQty);
+      const uncoveredQuantity = Math.max(0,quantity-protectedQuantity);
+      const protection = source.status !== "ok" || source.sourcesChecked !== true ? "UNAVAILABLE" : protectedQuantity <= config.stopEvaluation.quantityTolerance ? "UNPROTECTED" : uncoveredQuantity > config.stopEvaluation.quantityTolerance ? "PARTIALLY PROTECTED" : "FULLY PROTECTED";
+      const atr = Number(volatility && volatility.atr || 0);
+      const orderedPsls = psls.filter(order => order.valid).sort((a,b) => desired > 0 ? b.triggerPrice-a.triggerPrice : a.triggerPrice-b.triggerPrice);
+      const duplicate = atr > 0 && orderedPsls.some((order,index) => index > 0 && Math.abs(order.triggerPrice-orderedPsls[index-1].triggerPrice) <= atr*config.stopEvaluation.duplicateAtr);
+      const totalPsl = orderedPsls.reduce((sum,order) => sum+Math.max(0,Number(order.quantity || 0)),0);
+      const concentrated = totalPsl > 0 && orderedPsls.some(order => Number(order.quantity || 0)/totalPsl >= config.stopEvaluation.concentrationShare);
+      const pathPrices = [current,...orderedPsls.map(order => order.triggerPrice),validMaster && validMaster.triggerPrice].filter(value => value != null);
+      const wideGaps = atr > 0 && pathPrices.some((price,index) => index > 0 && Math.abs(price-pathPrices[index-1]) > atr*config.stopEvaluation.wideGapAtr);
+      let distribution = "BALANCED";
+      if(!orderedPsls.length) distribution = "UNAVAILABLE";
+      else if(duplicate) distribution = "DUPLICATED";
+      else if(concentrated) distribution = "CONCENTRATED";
+      else if(wideGaps) distribution = "WIDE GAPS";
+      else if(orderedPsls.length > 1){
+        const half = Math.ceil(orderedPsls.length/2);
+        const nearQty = orderedPsls.slice(0,half).reduce((sum,order) => sum+Number(order.quantity || 0),0);
+        distribution = nearQty > totalPsl*0.65 ? "FRONT-LOADED" : nearQty < totalPsl*0.35 ? "BACK-LOADED" : "BALANCED";
+      }
+      return {orders:normalized,masters,psls,validMaster,sequence,positionQuantity:quantity,pslQuantity:effectivePslQty,pslExecuted,masterResidual,masterTriggered,remainingQuantity:remaining,protectedQuantity,uncoveredQuantity,overcoverage,protection,distribution,duplicate,concentrated,wideGaps,invalidOrders:normalized.filter(order => !order.valid)};
+    }
+
+    function masterStopQuality(facts,technical,invalidation,simulation,volatility,purpose){
+      const issues = [];
+      const master = simulation.validMaster || simulation.masters[0] || null;
+      if(simulation.masters.length > 1) issues.push("DUPLICATE / OVERLAPPING STOPS");
+      simulation.invalidOrders.forEach(order => {
+        if(order.wrongSide) issues.push("WRONG POSITION SIDE");
+        if(order.crossed || order.stale) issues.push("STALE / ALREADY CROSSED");
+      });
+      if(simulation.overcoverage) issues.push("PSL COVERAGE ISSUE");
+      if(["DUPLICATED","CONCENTRATED","WIDE GAPS","FRONT-LOADED","BACK-LOADED"].includes(simulation.distribution)) issues.push("PSL DISTRIBUTION ISSUE");
+      if(!master || !master.valid) return {value:master ? (master.wrongSide ? "WRONG POSITION SIDE" : master.crossed || master.stale ? "STALE / ALREADY CROSSED" : "PSL COVERAGE ISSUE") : simulation.uncoveredQuantity <= config.stopEvaluation.quantityTolerance ? "UNAVAILABLE" : "PSL COVERAGE ISSUE",issues:[...new Set(issues)],master};
+      if(!technical.available || !invalidation.selected) return {value:"UNAVAILABLE",issues:[...new Set(issues)],master};
+      const desired = sideNumber(facts.position.side);
+      const minBuffer = volatility.atr*(config.stopEvaluation.buffers[facts.horizon] || config.stopEvaluation.buffers.quick).minimumAtr;
+      const tightBoundary = invalidation.selected.price-desired*minBuffer;
+      const tooTight = purpose.value !== "PROFIT-PROTECTION STOP" && (master.triggerPrice-tightBoundary)*desired > volatility.atr*config.stopEvaluation.tightToleranceAtr;
+      const tooWide = (technical.price-master.triggerPrice)*desired > volatility.atr*config.stopEvaluation.wideToleranceAtr;
+      const value = tooTight ? "TOO TIGHT" : tooWide ? "TOO WIDE" : "STRUCTURALLY ALIGNED";
+      if(value !== "STRUCTURALLY ALIGNED") issues.push(value);
+      return {value,issues:[...new Set(issues)],master,tightBoundary,tooTight,tooWide};
+    }
+
+    function liquidationAssessment(facts,technical,volatility){
+      const liquidation = numeric(facts.position && facts.position.liquidationPrice);
+      if(liquidation == null) return {available:false,value:"UNAVAILABLE",price:null,reason:"Binance liquidation price is unavailable"};
+      if(!technical.available) return {available:true,value:"UNAVAILABLE",price:liquidation,reason:"Technical stop is unavailable"};
+      const desired = sideNumber(facts.position.side);
+      const distance = (technical.price-liquidation)*desired;
+      const value = distance <= 0 || distance < volatility.atr*config.stopEvaluation.liquidationMinimumAtr ? "HIGH" : "NORMAL";
+      return {available:true,value,price:liquidation,distance,distanceAtr:volatility.atr > 0 ? distance/volatility.atr : null,reason:value === "HIGH" ? "Insufficient execution buffer between the technical stop and liquidation" : "Technical stop retains a volatility-aware buffer before liquidation"};
+    }
+
+    function monetaryStopRisk(facts,technical){
+      if(!technical.available || numeric(facts.position.qty) == null || numeric(facts.position.price) == null) return {available:false,grossLoss:null,fees:null,slippage:null,totalLoss:null,riskLimit:null,sizeRecommendation:null};
+      const desired = sideNumber(facts.position.side);
+      const grossLoss = Math.max(0,(Number(facts.position.price)-technical.price)*desired)*Math.abs(Number(facts.position.qty));
+      const assumptions = facts.costAssumptions || null;
+      const fees = assumptions && numeric(assumptions.fees) != null ? Number(assumptions.fees) : null;
+      const slippage = assumptions && numeric(assumptions.slippage) != null ? Number(assumptions.slippage) : null;
+      const totalLoss = fees != null && slippage != null ? grossLoss+fees+slippage : null;
+      return {available:true,grossLoss,fees,slippage,totalLoss,riskLimit:null,sizeRecommendation:null,assumptions:assumptions || "Fees and slippage unavailable; no user risk limit configured"};
+    }
+
+    function stopRecommendation(freshness,invalidation,simulation,quality,purpose){
+      if(!freshness || freshness.stopStatus !== "LIVE") return {value:"UNAVAILABLE — REQUIRED DATA STALE",reason:"A decision-critical stop input is stale or unavailable"};
+      if(invalidation.failed) return {value:"DO NOT WIDEN — INVALIDATION FAILED",reason:"The relevant structural invalidation has already failed"};
+      if(quality.master && quality.master.wrongSide) return {value:"REPLACE WRONG-SIDE STOP",reason:"The Master SL does not match the open-position side"};
+      if(quality.master && (quality.master.crossed || quality.master.stale)) return {value:"REMOVE STALE STOP",reason:quality.master.crossed ? "The Master SL trigger is already crossed" : "The Master SL order is no longer live"};
+      if(!simulation.validMaster && simulation.protection === "UNPROTECTED") return {value:"ADD MASTER SL",reason:"No valid protective stop covers the position"};
+      if(!simulation.validMaster && simulation.uncoveredQuantity > config.stopEvaluation.quantityTolerance) return {value:"COMPLETE PSL COVERAGE",reason:"No valid closePosition Master SL protects the residual quantity"};
+      if(!simulation.validMaster) return {value:"ADD MASTER SL",reason:"PSLs cover the quantity, but no closePosition Master SL is present"};
+      if(simulation.distribution !== "BALANCED" && simulation.distribution !== "UNAVAILABLE") return {value:"REBALANCE PSL DISTRIBUTION",reason:`PSL distribution is ${simulation.distribution.toLowerCase()}`};
+      if(quality.value === "TOO TIGHT") return {value:"MOVE STOP BEYOND VALID INVALIDATION",reason:"Current stop is inside structural/noise tolerance"};
+      if(quality.value === "TOO WIDE") return {value:"TIGHTEN TO CONFIRMED DEFENCE",reason:"Current stop is materially beyond the confirmed defence and buffer"};
+      if(purpose.value === "PROFIT-PROTECTION STOP" && quality.value !== "STRUCTURALLY ALIGNED") return {value:"USE PROFIT-PROTECTION STOP",reason:"Runner context supports a confirmed profit-protection reference"};
+      return {value:"KEEP CURRENT STOP",reason:"Current Master SL is structurally aligned and residual coverage is valid"};
+    }
+
+    function evaluateStops(facts,horizonId,horizon,defence,lifecycle,conditions,levelMap,structureResult,volatility){
+      const purpose = stopPurpose(facts,lifecycle,conditions,levelMap,defence);
+      const invalidation = selectStopInvalidation(facts,horizon,purpose,defence,lifecycle,levelMap,structureResult);
+      const technical = technicalStop(facts,horizonId,volatility,invalidation);
+      const simulation = simulateProtectionSequence(facts,volatility);
+      const quality = masterStopQuality({...facts,horizon:horizonId},technical,invalidation,simulation,volatility,purpose);
+      const liquidation = liquidationAssessment(facts,technical,volatility);
+      if(liquidation.value === "HIGH") quality.issues.push("LIQUIDATION RISK");
+      const freshness = facts.freshness ? {...facts.freshness,stopStaleSources:[...(facts.freshness.stopStaleSources || [])]} : {stopStatus:"UNAVAILABLE",stopStaleSources:[]};
+      if(!invalidation.selected){ freshness.stopStatus = "UNAVAILABLE"; freshness.stopStaleSources.push({source:"Structural invalidation",ageMs:null}); }
+      if(!volatility || !volatility.available){ freshness.stopStatus = "UNAVAILABLE"; freshness.stopStaleSources.push({source:"Management volatility",ageMs:volatility && volatility.ageMs}); }
+      if(!freshness || freshness.stopStatus !== "LIVE") quality.issues.push("REQUIRED DATA STALE");
+      quality.issues = [...new Set(quality.issues)];
+      const recommendation = stopRecommendation(freshness,invalidation,simulation,quality,purpose);
+      const risk = monetaryStopRisk(facts,technical);
+      const snapshotAt = Number(facts.createdAt || Date.now());
+      const protectionSnapshot = {
+        snapshotAt,symbol:facts.symbol,direction:facts.position.side,quantity:Number(facts.position.qty),averageEntry:Number(facts.position.price),currentPrice:Number(facts.currentPrice),liquidationPrice:numeric(facts.position.liquidationPrice),
+        ordersUpdatedAt:facts.protectiveOrders && facts.protectiveOrders.updatedAt,orders:(facts.protectiveOrders && facts.protectiveOrders.orders || []).map(order => ({...order})),
+        keyDefence:defence.anchor ? {tf:defence.anchor.tf,level:defence.anchor.level,zone:{...defence.anchor.zone},failureBoundary:defence.anchor.failureBoundary,source:defence.anchor.source} : null,
+        originalInvalidation:defence.originalInvalidation ? {...defence.originalInvalidation} : null,currentExecutionInvalidation:facts.currentExecutionInvalidation ? {...facts.currentExecutionInvalidation} : null,
+        userLevels:(facts.userLevels || []).map(level => ({...level})),managementStructure:facts.structureByTf && facts.structureByTf[horizon.primaryTf] || null,htfStructure:Object.fromEntries([horizon.contextTf,horizon.boundaryTf].map(tf => [tf,facts.structureByTf && facts.structureByTf[tf] || null])),
+        managementEma:facts.maByTf && facts.maByTf[horizon.primaryTf] || null,htfEma:Object.fromEntries((horizon.htfEmaTfs || []).map(tf => [tf,facts.maByTf && facts.maByTf[tf] || null])),confluenceZones:(levelMap.zones || []).map(zone => ({...zone})),volatility:{...volatility},freshness:freshness ? {...freshness} : null
+      };
+      return {snapshotAt,protectionSnapshot,available:!!(freshness && freshness.stopStatus === "LIVE"),evaluation:!freshness || freshness.stopStatus !== "LIVE" ? "UNAVAILABLE" : quality.value,purpose,invalidation,technical,simulation,protection:!freshness || freshness.stopStatus !== "LIVE" ? "UNAVAILABLE" : simulation.protection,quality,liquidation,risk,recommendation,freshness,advisoryOnly:true};
     }
 
     function evaluate(facts){
@@ -694,6 +890,7 @@
       const health = stabilizeHealth(tracker,proposedHealth,signature,healthReason,now);
       const takeProfit = takeProfitAssessment(facts,horizon,tracker,families,atr);
       const conditions = currentConditions(facts,horizon,levelMap,lifecycle,stall,volatility);
+      const stopEvaluation = evaluateStops(facts,horizonId,horizon,defence,lifecycle,conditions,levelMap,structureResult,volatility);
 
       let action = "HOLD";
       if(health === "INVALIDATED") action = "CLOSE";
@@ -701,17 +898,21 @@
       else if(takeProfit.active && health !== "AT RISK") action = "TAKE PROFIT";
       else if(health === "WEAKENING") action = "TIGHTEN SL";
       const primaryReason = action === "TAKE PROFIT" ? takeProfit.reason : healthReason;
+      const freshness = facts.freshness || null;
+      const actionAvailable = !freshness || freshness.managementStatus === "LIVE";
+      const presentationAction = actionAvailable ? action : "Unavailable pending refresh";
       const surrenderPoints = tracker.peakRoi != null && tracker.currentRoi != null ? Math.max(0,tracker.peakRoi-tracker.currentRoi) : null;
       const relativeSurrender = tracker.peakRoi > 0 && surrenderPoints != null ? surrenderPoints/tracker.peakRoi : null;
       const threats = families.filter(family => family.state !== "CLEAR").map(family => family.reason);
       const activatedPath = pathB.state === "CONFIRMED" ? "Path B - Confirmed opposite regime" : pathA.state === "CONFIRMED" ? "Path A - Management-anchor invalidation" : null;
       return {
-        health,action,state:action,exit:action === "CLOSE" ? "EXIT EXIT" : `EXIT ${action}`,
+        health,action,state:action,presentationAction,actionAvailable,freshness,exit:actionAvailable ? (action === "CLOSE" ? "EXIT EXIT" : `EXIT ${action}`) : "EXIT WAIT",
         primaryReason,reasons:[primaryReason],risks:threats,threats,tooltipReasons:[primaryReason,...threats].filter((value,index,array) => array.indexOf(value) === index).slice(0,4),
         watchCondition:health === "HEALTHY" ? "Escalate only after persistent, closed-candle deterioration" : "Recovery requires confirmed anchor, pressure, and progress improvement",
         horizonId,horizonLabel:horizon.label,profileSource:selectedHorizon == null ? "default" : "user-selected",
         profileHierarchy:{earlyWarningTf:horizon.earlyWarningTf,triggerTf:horizon.triggerTf,primaryTf:horizon.primaryTf,contextTf:horizon.contextTf,boundaryTf:horizon.boundaryTf,extendedTfs:[...(horizon.extendedTfs || [])]},
-        anchor,originalInvalidation:defence.originalInvalidation,defenceMigration:defence.migration,pathA,pathB,activatedPath,families,progress:progressResult,stallReview:stall,takeProfit,
+        anchor,originalInvalidation:defence.originalInvalidation,defenceMigration:defence.migration,pathA,pathB,activatedPath,families,progress:progressResult,stallReview:stall,takeProfit,stopEvaluation,
+        targetFramework:facts.targetFramework || null,exitEvaluations:Array.isArray(facts.exitEvaluations) ? facts.exitEvaluations.map(item => ({...item})) : [],grExitLadder:facts.grExitLadder || null,
         volatility,levelMap,lifecycle,conditions,
         position:{...position,currentPrice:facts.currentPrice},atr,
         roi:{epoch:tracker.epoch,epochStartedAt:tracker.epochStartedAt,epochHistory:tracker.epochHistory.slice(),current:tracker.currentRoi,peak:tracker.peakRoi,surrenderPoints,relativeSurrender,peakAt:tracker.peakAt,timeSincePeakMs:tracker.peakAt == null ? null : Math.max(0,now-tracker.peakAt),maxFavorablePrice:tracker.maxFavorablePrice,campaignResult:tracker.campaignResult,campaignMfe:tracker.campaignMfe},
@@ -726,7 +927,7 @@
           stale:volatility.status === "stale" ? [`${horizon.primaryTf} management data stale`] : [],
           dataAgeMs:volatility.ageMs
         },
-        analysis:[`Key defence zone: ${format.price(anchor.zone.low)}-${format.price(anchor.zone.high)}; reference ${format.price(anchor.level)}`,...families.map(family => `${family.family}: ${family.state} - ${family.reason}`),`Lifecycle: ${lifecycle.state} - ${lifecycle.basis}`,`Conditions: ${conditions.items.join(", ") || "None"}`,`Volatility: ${volatility.available ? `${volatility.state} - ${Math.round(volatility.percentile)}th percentile - tolerance ${volatility.toleranceMultiplier.toFixed(2)}x; ${volatility.contextTf} context ${volatility.contextState} (${volatility.contextConfirmation.toLowerCase()})` : "Unavailable"}`,`Path B: ${pathB.state} - ${pathB.reason}`,`Path A: ${pathA.state} - ${pathA.reason}`],
+        analysis:[`Key defence zone: ${format.price(anchor.zone.low)}-${format.price(anchor.zone.high)}; reference ${format.price(anchor.level)}`,...families.map(family => `${family.family}: ${family.state} - ${family.reason}`),`Lifecycle: ${lifecycle.state} - ${lifecycle.basis}`,`Conditions: ${conditions.items.join(", ") || "None"}`,`Volatility: ${volatility.available ? `${volatility.state} - ${Math.round(volatility.percentile)}th percentile - tolerance ${volatility.toleranceMultiplier.toFixed(2)}x; ${volatility.contextTf} context ${volatility.contextState} (${volatility.contextConfirmation.toLowerCase()})` : "Unavailable"}`,`Stop protection: ${stopEvaluation.protection}`,`Stop quality: ${stopEvaluation.evaluation}`,`Stop recommendation: ${stopEvaluation.recommendation.value} - ${stopEvaluation.recommendation.reason}`,`Path B: ${pathB.state} - ${pathB.reason}`,`Path A: ${pathA.state} - ${pathA.reason}`],
         diagnostics:[
           `Snapshot: ${facts.version} at ${format.time(facts.snapshotCreatedAt || facts.createdAt)}`,
           `Anchor source: ${anchor.source}; management horizon: ${horizon.label}`,
@@ -796,6 +997,52 @@
       };
       const results = {};
       try{
+        const protectionFacts = (orders,overrides={}) => ({symbol:`${seed}_STOP`,horizon:"quick",createdAt:now,currentPrice:100,position:{symbol:`${seed}_STOP`,side:"LONG",qty:1,price:110,liquidationPrice:70},protectiveOrders:{status:"ok",sourcesChecked:true,updatedAt:now,orders},freshness:{stopStatus:"LIVE",stopStaleSources:[]},...overrides});
+        const psl = (id,triggerPrice,quantity) => ({id,kind:"PSL",side:"SELL",positionSide:"LONG",triggerPrice,quantity,closePosition:false,reduceOnly:true,isLive:true});
+        const master = (id,triggerPrice) => ({id,kind:"MASTER_SL",side:"SELL",positionSide:"LONG",triggerPrice,quantity:null,closePosition:true,reduceOnly:false,isLive:true});
+        const stopVolatility = {available:true,atr:10,toleranceMultiplier:1};
+        const sequenced = simulateProtectionSequence(protectionFacts([psl("p1",95,0.4),psl("p2",90,0.3),master("m1",85)]),stopVolatility);
+        results.pslsProcessedInTriggerOrder = sequenced.sequence.map(stage => stage.id).join(",") === "p1,p2,m1";
+        results.pslResidualRecalculated = Math.abs(sequenced.sequence[0].remainingQuantity-0.6) < 1e-9 && Math.abs(sequenced.sequence[1].remainingQuantity-0.3) < 1e-9;
+        results.closePositionMasterCoversResidual = sequenced.protection === "FULLY PROTECTED" && Math.abs(sequenced.masterResidual-0.3) < 1e-9 && sequenced.remainingQuantity === 0;
+        const masterBeforePsl = simulateProtectionSequence(protectionFacts([master("m1",92),psl("late",85,0.5)]),stopVolatility);
+        results.ordersAfterMasterBecomeIneffective = masterBeforePsl.sequence.find(stage => stage.id === "late").ineffective === true;
+        const partialProtection = simulateProtectionSequence(protectionFacts([psl("p1",95,0.4)]),stopVolatility);
+        results.uncoveredResidualDetected = partialProtection.protection === "PARTIALLY PROTECTED" && Math.abs(partialProtection.uncoveredQuantity-0.6) < 1e-9;
+        const pslOnlyProtection = simulateProtectionSequence(protectionFacts([psl("p1",95,1)]),stopVolatility);
+        results.fullyCoveredPslStillIdentifiesMissingMaster = stopRecommendation({stopStatus:"LIVE"},{failed:false},pslOnlyProtection,{value:"UNAVAILABLE",master:null},{value:"ORIGINAL THESIS STOP"}).value === "ADD MASTER SL";
+        const overcovered = simulateProtectionSequence(protectionFacts([psl("p1",95,0.8),psl("p2",90,0.5)]),stopVolatility);
+        results.pslOvercoverageDetected = overcovered.overcoverage === true;
+        results.stalePslQuantityAfterResizeDetected = overcovered.overcoverage === true && overcovered.pslQuantity > overcovered.positionQuantity;
+        const duplicate = simulateProtectionSequence(protectionFacts([psl("p1",95,0.2),psl("p2",94.5,0.8),master("m1",85)]),stopVolatility);
+        results.duplicateAndConcentratedPslDetected = duplicate.duplicate === true && ["DUPLICATED","CONCENTRATED"].includes(duplicate.distribution);
+        const wideGap = simulateProtectionSequence(protectionFacts([psl("p1",95,0.5),psl("p2",75,0.5)]),stopVolatility);
+        results.widePslGapDetected = wideGap.wideGaps === true && wideGap.distribution === "WIDE GAPS";
+        const wrongAndCrossed = simulateProtectionSequence(protectionFacts([{...psl("wrong",105,0.2),side:"BUY"}]),stopVolatility);
+        results.wrongSideAndCrossedDetected = wrongAndCrossed.invalidOrders[0].wrongSide === true && wrongAndCrossed.invalidOrders[0].crossed === true;
+        const originalPurpose = stopPurpose(protectionFacts([]),{state:"FRESH"},{items:[]},{activeLevels:[]});
+        const structuralPurpose = stopPurpose(protectionFacts([]),{state:"ESTABLISHED"},{items:[]},{activeLevels:[]},{migration:{from:80,to:90}});
+        const profitPurpose = stopPurpose(protectionFacts([]),{state:"RUNNER"},{items:[]},{activeLevels:[]});
+        results.stopPurposesDistinguished = originalPurpose.value === "ORIGINAL THESIS STOP" && structuralPurpose.value === "CURRENT STRUCTURAL STOP" && profitPurpose.value === "PROFIT-PROTECTION STOP";
+        const invalidationTest = {selected:{price:90,source:"test"},failed:false};
+        const technicalTest = technicalStop(protectionFacts([]),"quick",stopVolatility,invalidationTest);
+        const alignedSimulation = simulateProtectionSequence(protectionFacts([master("m1",87.25)]),stopVolatility);
+        const tightSimulation = simulateProtectionSequence(protectionFacts([master("m1",91)]),stopVolatility);
+        const wideSimulation = simulateProtectionSequence(protectionFacts([master("m1",80)]),stopVolatility);
+        results.stopQualityTightAlignedWide = masterStopQuality({...protectionFacts([]),horizon:"quick"},technicalTest,invalidationTest,tightSimulation,stopVolatility,originalPurpose).value === "TOO TIGHT"
+          && masterStopQuality({...protectionFacts([]),horizon:"quick"},technicalTest,invalidationTest,alignedSimulation,stopVolatility,originalPurpose).value === "STRUCTURALLY ALIGNED"
+          && masterStopQuality({...protectionFacts([]),horizon:"quick"},technicalTest,invalidationTest,wideSimulation,stopVolatility,originalPurpose).value === "TOO WIDE";
+        results.profitProtectionNotAutomaticallyTooTight = masterStopQuality({...protectionFacts([]),horizon:"quick"},technicalTest,invalidationTest,tightSimulation,stopVolatility,profitPurpose).value !== "TOO TIGHT";
+        const failedRecommendation = stopRecommendation({stopStatus:"LIVE"},{failed:true},alignedSimulation,{value:"STRUCTURALLY ALIGNED",master:alignedSimulation.validMaster},originalPurpose);
+        results.failedInvalidationCannotWiden = !technicalStop(protectionFacts([]),"quick",stopVolatility,{selected:{price:90,source:"failed"},failed:true}).available && failedRecommendation.value === "DO NOT WIDEN \u2014 INVALIDATION FAILED";
+        results.liquidationRiskDetected = liquidationAssessment(protectionFacts([]),{available:true,price:72},stopVolatility).value === "HIGH" && liquidationAssessment(protectionFacts([]),{available:true,price:90},stopVolatility).value === "NORMAL";
+        results.missingLiquidationNotInvented = liquidationAssessment(protectionFacts([],{position:{symbol:`${seed}_STOP`,side:"LONG",qty:1,price:110}}),{available:true,price:90},stopVolatility).value === "UNAVAILABLE";
+        const riskTest = monetaryStopRisk(protectionFacts([]),{available:true,price:90});
+        results.lossEstimateNoInventedRiskLimit = riskTest.grossLoss === 20 && riskTest.totalLoss == null && riskTest.riskLimit == null && riskTest.sizeRecommendation == null;
+        const costRiskTest = monetaryStopRisk(protectionFacts([],{costAssumptions:{fees:2,slippage:3,source:"authoritative test"}}),{available:true,price:90});
+        results.reliableFeesAndSlippageIncluded = costRiskTest.grossLoss === 20 && costRiskTest.fees === 2 && costRiskTest.slippage === 3 && costRiskTest.totalLoss === 25;
+        results.staleStopInputBlocksRecommendation = stopRecommendation({stopStatus:"STALE"},{failed:false},alignedSimulation,{value:"STRUCTURALLY ALIGNED",master:alignedSimulation.validMaster},originalPurpose).value === "UNAVAILABLE \u2014 REQUIRED DATA STALE";
+
         const oneMinute = facts(`${seed}_1M`,{
           structureByTf:{
             "5m":{swing:{latestLow:{price:90000},latestHigh:{price:105000},latestEvent:null}},
@@ -830,6 +1077,10 @@
         pathA.rowsByTf["5m"] = pathA.closedByTf["5m"].map(row => ({...row}));
         const pathAResult = evaluate(pathA);
         results.pathAConfirmsIndependently = pathAResult.pathA.state === "CONFIRMED" && pathAResult.pathB.state !== "CONFIRMED" && pathAResult.action === "CLOSE";
+        const stalePathA = {...pathA,symbol:`${seed}_PATH_A_STALE`,position:{...pathA.position,symbol:`${seed}_PATH_A_STALE`},freshness:{managementStatus:"STALE",managementStaleSources:[{source:"Position/account",ageMs:171000}]}};
+        recordedAnchors.set(`${stalePathA.symbol}|LONG`,{level:99500,tf:"5m",family:"test",invalidation:99500});
+        const stalePathAResult = evaluate(stalePathA);
+        results.staleCriticalInputBlocksFreshClosePresentation = stalePathAResult.action === "CLOSE" && stalePathAResult.actionAvailable === false && stalePathAResult.presentationAction === "Unavailable pending refresh" && stalePathAResult.exit === "EXIT WAIT";
 
         const roiOne = facts(`${seed}_ROI`);
         roiOne.position = {...roiOne.position,unrealizedPnl:1000};
@@ -955,8 +1206,9 @@
         results.timeAloneCannotStall = !noAdverseStall.stalled;
         results.stallRequiresAllSafeguards = adverseStall.stalled && adverseStall.openSpace && adverseStall.adequateVolatility && adverseStall.adverseEvidence.length === 1;
         results.stallCannotConfirmExit = adverseStall.stalled && !("pathA" in adverseStall) && !("pathB" in adverseStall);
-        const simultaneous = currentConditions(rich,richHorizon,{
-          activeLevels:[{roles:["objective"],interactionState:"TESTING"}],
+        const simultaneous = currentConditions({...rich,targetFramework:{primary:{available:true,price:rich.currentPrice,tf:"1h",source:"Test 1h objective"}}},richHorizon,{
+          atr:richDefence.atr,
+          activeLevels:[{reference:rich.currentPrice,roles:["objective"],interactionState:"TESTING"}],
           levels:[
             {behind:true,family:"structure",distance:800,distanceAtr:3},
             {ahead:true,exceptional:true,tf:"1h",distance:200,distanceAtr:0.8}

@@ -5,11 +5,12 @@
     if(window.PRESSURE_SIGNAL && typeof window.PRESSURE_SIGNAL.destroy === "function") window.PRESSURE_SIGNAL.destroy();
   }catch(_e){}
   const build = window.__PRESSURE_SIGNAL_FEATURE_BUILD__ || {};
-  if(!build.config || !build.reporting || !build.createPositionEngine || !build.createWindowSystem){
+  if(!build.config || !build.reporting || !build.createTargetEngine || !build.createPositionEngine || !build.createWindowSystem){
     throw new Error("Pressure Signal dependencies are not loaded");
   }
   const featureConfig = build.config;
   const featureFormat = build.reporting;
+  const targetEngine = build.createTargetEngine(featureConfig);
   const positionEngine = build.createPositionEngine(featureConfig,featureFormat);
   const windowSystem = build.createWindowSystem(featureConfig,featureFormat);
   const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
@@ -25,8 +26,8 @@
     "SETUP ARMED":Object.freeze({label:"WATCHING",definition:"A VALID SETUP AREA EXISTS, BUT PRICE HAS NOT REACHED IT YET."}),
     "ZONE ENGAGED":Object.freeze({label:"STAND BY",definition:"PRICE IS AT THE SETUP AREA; WAIT FOR A VALID REACTION."}),
     "TRIGGER DEVELOPING":Object.freeze({label:"TRIGGER FORMING",definition:"THE EXPECTED REACTION HAS STARTED, BUT ENTRY CONFIRMATION IS INCOMPLETE."}),
-    READY:Object.freeze({label:"TRIGGER ACTIVE",definition:"THE SETUP IS CONFIRMED AND THE ACCEPTABLE ENTRY WINDOW IS CURRENTLY OPEN."}),
-    EXPIRED:Object.freeze({label:"NO CHASE",definition:"THE TRIGGER OCCURRED, BUT PRICE HAS MOVED BEYOND THE ACCEPTABLE ENTRY RANGE."}),
+    READY:Object.freeze({label:"TRIGGER ACTIVE",definition:"ENTRY CONDITIONS ARE ACTIVE FROM THE CURRENT MARKET CONTEXT."}),
+    EXPIRED:Object.freeze({label:"NO CHASE",definition:"THE CURRENT MARKET OPPORTUNITY IS NOT VIABLE FOR A NEW ENTRY."}),
     INVALIDATED:Object.freeze({label:"SETUP FAILED",definition:"THE SETUP LEVEL OR REQUIRED REACTION HAS FAILED."}),
     "BIAS CONFIRMED":Object.freeze({label:"NO SETUP",definition:"A DIRECTIONAL BIAS EXISTS, BUT NO VALID ENTRY SETUP IS CURRENTLY AVAILABLE."}),
     "NO BIAS":Object.freeze({label:"NO SETUP \u00b7 NO BIAS",definition:"NO SUFFICIENTLY CLEAR DIRECTIONAL BIAS OR ENTRY SETUP CURRENTLY EXISTS."})
@@ -110,6 +111,7 @@
     dataLoadPromise:null,
     dataLoadGeneration:0,
     dataStatus:null,
+    orderRefreshObservedAt:0,
     activeSnapshot:null,
     marketSnapshot:null,
     snapshotVersion:0,
@@ -127,8 +129,15 @@
     triggerAlertEndsAt:0,
     seenTriggerAlertIds:new Set(),
     seenTriggerAlertOrder:[],
+    setupHistories:new Map(),
     uiAbort:null,
-    lastError:null
+    lastError:null,
+    refreshGeneration:0,
+    refreshState:"IDLE",
+    workingSnapshot:null,
+    lastPublishedSnapshot:null,
+    lastValidPublishedSnapshot:null,
+    refreshStartedAt:null
   };
 
   function num37(value){
@@ -149,6 +158,10 @@
     state.dataKey = "";
     state.dataStatus = null;
     state.marketSnapshot = null;
+    state.entryTrackers.clear();
+    state.setupHistories.clear();
+    stopTriggerAlert37();
+    invalidatePublishedContext37(presentationContextKey37());
     try{ localStorage.setItem(STORAGE_KEY,state.horizon); }catch(_e){}
     scheduleToolbarSignalRefresh37(true);
   }
@@ -162,6 +175,10 @@
   }
   function setStoredDirection(next){
     state.direction = DIRECTIONS.includes(next) ? next : "AUTO";
+    state.entryTrackers.clear();
+    state.setupHistories.clear();
+    stopTriggerAlert37();
+    invalidatePublishedContext37(presentationContextKey37());
     try{ localStorage.setItem(DIRECTION_STORAGE_KEY,state.direction); }catch(_e){}
     scheduleToolbarSignalRefresh37(true);
   }
@@ -355,6 +372,43 @@
       : Number(latest.closeTime || (Number(latest.time) + (typeof ivSec === "function" ? ivSec(tf) : 0)) * 1000);
     return Number.isFinite(activityMs) ? Math.max(0,(typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now()) - activityMs) : Infinity;
   }
+  function latestClosedEvidence37(snapshot,tf){
+    const rows = snapshot && snapshot.closedByTf && snapshot.closedByTf[tf] || [];
+    const row = rows.length ? rows[rows.length-1] : null;
+    return row ? {tf,time:Number(row.time),openTime:Number(row.openTime || Number(row.time)*1000),closeTime:Number(row.closeTime || (Number(row.time)+(typeof ivSec === "function" ? ivSec(tf) : 0))*1000)} : null;
+  }
+  function buildSourceFreshness37(snapshot,plan){
+    const now = typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now();
+    const diag = window.PUBLIC_MARKET_DATA_HUB && window.PUBLIC_MARKET_DATA_HUB.diag || window.BINANCE_REALTIME_DIAG || {};
+    const priceAt = Math.max(Number(diag.latestAggTradeTickTime || 0),Number(diag.lastMarkPriceTickTime || 0));
+    const priceAgeMs = priceAt ? Math.max(0,now-priceAt) : Infinity;
+    const positionAt = snapshot.position && num37(snapshot.position.updatedAt);
+    const positionAgeMs = positionAt == null ? (snapshot.position ? Infinity : null) : Math.max(0,now-positionAt);
+    const signalPolicy = entryPolicy37(plan.horizonId);
+    const management = plan.management;
+    const formingAt = Math.max(Number(diag.lastKlineTickByTf && diag.lastKlineTickByTf[signalPolicy.triggerTf] || 0),Number(diag.lastChartActivityByTf && diag.lastChartActivityByTf[signalPolicy.triggerTf] || 0));
+    const formingAgeMs = formingAt ? Math.max(0,now-formingAt) : Infinity;
+    const triggerClosed = latestClosedEvidence37(snapshot,signalPolicy.triggerTf);
+    const managementClosed = latestClosedEvidence37(snapshot,management.primaryTf);
+    const contextClosed = latestClosedEvidence37(snapshot,management.contextTf);
+    const priceStale = priceAgeMs > featureConfig.freshness.priceStaleMs;
+    const formingStale = formingAgeMs > Math.max(featureConfig.freshness.priceStaleMs,(typeof ivSec === "function" ? ivSec(signalPolicy.triggerTf) : 60)*1000*featureConfig.freshness.formingCadenceMultiplier);
+    const signalStaleSources = [];
+    if(priceStale) signalStaleSources.push({source:"Live price",ageMs:priceAgeMs});
+    if(formingStale) signalStaleSources.push({source:`${signalPolicy.triggerTf} forming candle`,ageMs:formingAgeMs});
+    (snapshot.health && snapshot.health.items || []).filter(entry => entry.signalRequired).forEach(health => { if(health.status !== "sufficient" && !signalStaleSources.some(item => item.source === `${health.tf} closed evidence`)) signalStaleSources.push({source:`${health.tf} closed evidence`,ageMs:health.ageMs}); });
+    const managementStaleSources = [];
+    if(snapshot.position && (positionAgeMs == null || positionAgeMs > featureConfig.freshness.positionStaleMs)) managementStaleSources.push({source:"Position/account",ageMs:positionAgeMs});
+    if(priceStale) managementStaleSources.push({source:"Live price",ageMs:priceAgeMs});
+    (snapshot.health && snapshot.health.items || []).filter(entry => entry.managementRequired).forEach(health => { if(health.status !== "sufficient") managementStaleSources.push({source:`${health.tf} management evidence`,ageMs:health.ageMs}); });
+    const statusFor = list => list.some(entry => entry.ageMs == null || !Number.isFinite(entry.ageMs)) ? "UNAVAILABLE" : list.length ? "STALE" : "LIVE";
+    const orderAt = snapshot.protectiveOrders && num37(snapshot.protectiveOrders.updatedAt);
+    const orderAgeMs = orderAt == null ? Infinity : Math.max(0,now-orderAt);
+    const stopStaleSources = managementStaleSources.map(item => ({...item}));
+    if(snapshot.position && (!snapshot.protectiveOrders || snapshot.protectiveOrders.sourcesChecked !== true || snapshot.protectiveOrders.status !== "ok")) stopStaleSources.push({source:"Protective orders",ageMs:orderAgeMs});
+    else if(snapshot.position && orderAgeMs > featureConfig.freshness.protectiveOrderStaleMs) stopStaleSources.push({source:"Protective orders",ageMs:orderAgeMs});
+    return {checkedAt:now,priceAt,priceAgeMs,positionAt,positionAgeMs,orderAt,orderAgeMs,formingAt,formingAgeMs,triggerClosed,managementClosed,contextClosed,signalStatus:statusFor(signalStaleSources),managementStatus:statusFor(managementStaleSources),stopStatus:statusFor(stopStaleSources),signalStaleSources,managementStaleSources,stopStaleSources};
+  }
   function inspectSignalData37(plan,hub){
     if(!hub) return {status:"unavailable",managementStatus:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"shared market-data hub unavailable"}))};
     const items = plan.items.map(item => {
@@ -362,7 +416,7 @@
       const chart = typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : closed;
       const count = Array.isArray(closed) ? closed.length : 0;
       const ageMs = signalDataAge37(item.tf,chart);
-      const staleAfterMs = Math.max(90000,(typeof ivSec === "function" ? ivSec(item.tf) : 60) * 3000);
+      const staleAfterMs = Math.max(90000,(typeof ivSec === "function" ? ivSec(item.tf) : 60) * 1000 * featureConfig.freshness.closedEvidenceCadenceMultiplier);
       const tail = (Array.isArray(closed) ? closed : []).slice(-Math.min(count,item.historyTarget));
       const step = typeof ivSec === "function" ? ivSec(item.tf) : 0;
       const continuous = tail.length > 1 && tail.every((row,index) => index === 0 || Number(row.time)-Number(tail[index-1].time) === step);
@@ -403,6 +457,8 @@
       state.dataLoadGeneration += 1;
       state.marketSnapshot = null;
       state.entryTrackers.clear();
+      state.setupHistories.clear();
+      stopTriggerAlert37();
     }
     let health = inspectSignalData37(plan,hub);
     const retryFailed = state.dataStatus && state.dataStatus.failedAt && Date.now()-state.dataStatus.failedAt >= 30000;
@@ -427,6 +483,7 @@
   }
   function buildSignalSnapshot37(plan,health,frozen={}){
     const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const symbol = String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase();
     const rowsByTf = {};
     const closedByTf = {};
     const maByTf = {};
@@ -447,24 +504,30 @@
         structureByTf[item.tf] = null;
       }
     });
-    return {
-      symbol:String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),
+    const snapshot = {
+      symbol,
       horizonId:plan.horizonId,
       createdAt:Date.now(),
       version:++state.snapshotVersion,
       currentPrice:Object.prototype.hasOwnProperty.call(frozen,"currentPrice") ? frozen.currentPrice : (typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null),
       position:Object.prototype.hasOwnProperty.call(frozen,"position") ? frozen.position : openPositionSignal37(),
+      protectiveOrders:Object.prototype.hasOwnProperty.call(frozen,"protectiveOrders") ? frozen.protectiveOrders : protectiveOrdersSnapshot37(symbol),
+      exitOrderState:Object.prototype.hasOwnProperty.call(frozen,"exitOrderState") ? frozen.exitOrderState : exitOrderStateSnapshot37(symbol),
       rowsByTf,
       closedByTf,
       maByTf,
       structureByTf,
       health
     };
+    snapshot.freshness = buildSourceFreshness37(snapshot,plan);
+    return snapshot;
   }
   function signalSnapshotSignature37(plan){
     const hub = window.PUBLIC_MARKET_DATA_HUB || null;
     const currentPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null;
     const position = openPositionSignal37();
+    const protectionOrders = protectiveOrdersSnapshot37(String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase());
+    const exitOrderState = exitOrderStateSnapshot37(String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase());
     let smcIdentity = "smc:waiting";
     try{
       if(window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot === "function"){
@@ -491,13 +554,21 @@
       position && position.leverage,
       position && position.realizedPnl,
       position && position.unrealizedPnl,
-      position && position.chainId
+      position && position.chainId,
+      position && position.updatedAt,
+      position && position.liquidationPrice
     );
-    return {signature:parts.join("|"),currentPrice,position};
+    parts.push(protectionOrders.updatedAt,protectionOrders.status,protectionOrders.sourcesChecked,JSON.stringify(protectionOrders.orders.map(order => [order.id,order.kind,order.triggerPrice,order.quantity,order.closePosition,order.reduceOnly,order.status])));
+    parts.push(exitOrderState.updatedAt,exitOrderState.status,JSON.stringify(exitOrderState.orders.map(order => [order.orderId,order.clientOrderId,order.status,order.price,order.origQty,order.executedQty])),JSON.stringify(exitOrderState.grRows.map(row => [row.clientOrderId,row.localRowId,row.status,row.level,row.lot])));
+    return {signature:parts.join("|"),currentPrice,position,protectiveOrders:protectionOrders,exitOrderState};
   }
   function coherentSignalSnapshot37(plan,health){
     const frozen = signalSnapshotSignature37(plan);
-    if(state.marketSnapshot && state.marketSnapshot.signature === frozen.signature) return state.marketSnapshot;
+    if(state.marketSnapshot && state.marketSnapshot.signature === frozen.signature){
+      state.marketSnapshot.health = health;
+      state.marketSnapshot.freshness = buildSourceFreshness37(state.marketSnapshot,plan);
+      return state.marketSnapshot;
+    }
     const snapshot = buildSignalSnapshot37(plan,health,frozen);
     snapshot.signature = frozen.signature;
     state.marketSnapshot = snapshot;
@@ -600,8 +671,10 @@
         margin:typeof openBoxMargin === "function" ? num37(openBoxMargin(box)) : num37(box.positionInitialMargin ?? box.isolatedMargin ?? box.margin),
         positionInitialMargin:num37(box.positionInitialMargin),
         isolatedMargin:num37(box.isolatedMargin),
+        liquidationPrice:num37(box.liquidationPrice),
         chainId,
-        time:num37(box.time)
+        time:num37(box.time),
+        updatedAt:num37(box.updatedAt)
       };
     }catch(_e){
       return null;
@@ -618,6 +691,79 @@
       if(close != null) return close;
     }
     return num37(fallback);
+  }
+  function authoritativeOrders37(symbol){
+    try{
+      const source=window.BINANCE_OPEN_ORDERS_CACHE;
+      if(source && typeof source.getSnapshot === "function") return source.getSnapshot(symbol);
+    }catch(_e){}
+    return {
+      symbol:String(symbol || "").toUpperCase(),status:String(window.v13OpenOrdersStatus21 || "unavailable").toLowerCase(),
+      sourcesChecked:window.v13StopSourcesChecked21===true,requestInFlight:String(window.v13OpenOrdersStatus21 || "").toLowerCase()==="pending",
+      updatedAt:num37(window.v13OpenOrdersTs21),attemptedAt:num37(window.v13OpenOrdersAttemptTs21),
+      orders:Array.isArray(window.v13OpenOrders21) ? window.v13OpenOrders21 : [],algoOrders:Array.isArray(window.v13OpenAlgoOrders21) ? window.v13OpenAlgoOrders21 : []
+    };
+  }
+  function requestAuthoritativeOrders37(){
+    try{
+      const source=window.BINANCE_OPEN_ORDERS_CACHE;
+      if(!source || typeof source.refresh!=="function") return;
+      source.refresh({reason:"position-management",maxAgeMs:5000}).then(snapshot => {
+        const updatedAt=num37(snapshot && snapshot.updatedAt) || 0;
+        if(updatedAt<=state.orderRefreshObservedAt) return;
+        state.orderRefreshObservedAt=updatedAt;
+        scheduleToolbarSignalRefresh37(true);
+      }).catch(error => { state.lastError=error && error.stack || String(error); });
+    }catch(error){ state.lastError=error && error.stack || String(error); }
+  }
+  function orderMatchesPosition37(order,position){
+    if(!order || !position) return false;
+    const status=String(order.status || order.orderStatus || "NEW").toUpperCase();
+    const live=!status || ["NEW","PENDING","ACCEPTED","PARTIALLY_FILLED"].includes(status) || status.includes("NEW");
+    const positionSide=String(order.positionSide || "").toUpperCase();
+    const expectedSide=position.side === "SHORT" ? "BUY" : "SELL";
+    return live && (!positionSide || positionSide==="BOTH" || positionSide===position.side) && String(order.side || "").toUpperCase()===expectedSide;
+  }
+  function protectiveOrdersSnapshot37(symbol){
+    const helper = window.BinanceConditionalOrderClassifier;
+    const authoritative=authoritativeOrders37(symbol);
+    const updatedAt = num37(authoritative.updatedAt);
+    const status = String(authoritative.status || "unavailable").toLowerCase();
+    const sourcesChecked = authoritative.sourcesChecked === true;
+    const position=openPositionSignal37();
+    const source = [...(Array.isArray(authoritative.orders) ? authoritative.orders : []),...(Array.isArray(authoritative.algoOrders) ? authoritative.algoOrders : [])];
+    const orders = [];
+    const seen = new Set();
+    source.forEach(order => {
+      if(!order || String(order.symbol || "").toUpperCase() !== String(symbol || "").toUpperCase() || !orderMatchesPosition37(order,position)) return;
+      const classified = helper && typeof helper.classify === "function" ? helper.classify(order) : null;
+      if(!classified || !["MASTER_SL","PSL"].includes(classified.kind) || classified.isLive!==true) return;
+      const id = String(classified.algoId != null ? `algo:${classified.algoId}` : classified.orderId != null ? `order:${classified.orderId}` : classified.clientAlgoId || classified.clientOrderId || `${classified.kind}:${classified.triggerPrice}:${classified.quantity || "close"}`);
+      if(seen.has(id)) return;
+      seen.add(id);
+      orders.push({
+        id,kind:classified.kind,symbol:String(classified.symbol || symbol || "").toUpperCase(),side:String(classified.side || "").toUpperCase(),positionSide:String(classified.positionSide || "").toUpperCase(),
+        triggerPrice:num37(classified.triggerPrice),quantity:num37(classified.quantity),closePosition:classified.closePosition === true,reduceOnly:order.reduceOnly === true || String(order.reduceOnly).toLowerCase() === "true",
+        workingType:order.workingType || order.priceProtect || null,status:String(order.status || order.orderStatus || "NEW").toUpperCase(),isLive:classified.isLive === true,updatedAt
+      });
+    });
+    return {symbol:String(symbol || "").toUpperCase(),createdAt:Date.now(),updatedAt,attemptedAt:num37(authoritative.attemptedAt),status,sourcesChecked,requestInFlight:authoritative.requestInFlight===true,orders};
+  }
+  function exitOrderStateSnapshot37(symbol){
+    const normalizedSymbol=String(symbol || "").toUpperCase();
+    const authoritative=authoritativeOrders37(normalizedSymbol);
+    const updatedAt=num37(authoritative.updatedAt);
+    const status=String(authoritative.status || "unavailable").toLowerCase();
+    const position=openPositionSignal37();
+    const orders=(Array.isArray(authoritative.orders) ? authoritative.orders : []).filter(order => order && String(order.symbol || "").toUpperCase()===normalizedSymbol && String(order.type || order.orderType || "").toUpperCase()==="LIMIT" && orderMatchesPosition37(order,position)).map(order => ({
+      orderId:order.orderId,clientOrderId:order.clientOrderId || null,symbol:normalizedSymbol,side:order.side,positionSide:order.positionSide,type:order.type || order.orderType,status:order.status || order.orderStatus,price:num37(order.price),origQty:num37(order.origQty ?? order.quantity ?? order.qty),executedQty:num37(order.executedQty),reduceOnly:order.reduceOnly===true || String(order.reduceOnly).toLowerCase()==="true"
+    }));
+    let grRows=[];
+    try{
+      const owned=window.GRAD_CALCULATOR && typeof window.GRAD_CALCULATOR.getOwnedRows === "function" ? window.GRAD_CALCULATOR.getOwnedRows() : [];
+      grRows=(Array.isArray(owned) ? owned : []).filter(row => row && row.owner==="GR" && row.section==="exit").map(row => ({owner:"GR",section:"exit",status:row.status,clientOrderId:row.clientOrderId || null,localRowId:row.localRowId || null,level:num37(row.level),lot:num37(row.lot)}));
+    }catch(_e){}
+    return {symbol:normalizedSymbol,createdAt:Date.now(),updatedAt,attemptedAt:num37(authoritative.attemptedAt),status,sourcesChecked:authoritative.sourcesChecked===true,requestInFlight:authoritative.requestInFlight===true,orders,grRows};
   }
   function signalStructure37(tf,scope="swing"){
     const snapshot = state.activeSnapshot && state.activeSnapshot.structureByTf && state.activeSnapshot.structureByTf[tf];
@@ -1587,7 +1733,7 @@
     if(decision.state === "SETUP ARMED") return `${decision.source || decision.family} interaction`;
     if(decision.state === "ZONE ENGAGED") return "Waiting for reaction";
     if(decision.state === "READY") return "Trigger confirmed";
-    if(decision.state === "EXPIRED") return decision.chaseExceeded ? "Chase distance exceeded" : "Trigger expired";
+    if(decision.state === "EXPIRED") return "Current entry not viable";
     if(decision.state === "INVALIDATED") return "Setup invalidated";
     if(/participation/i.test(decision.reason || "")) return "Weak participation";
     if(/opposition/i.test(decision.reason || "")) return `${decision.pressure && decision.pressure.primaryTf || "Primary"} opposition`;
@@ -1768,29 +1914,45 @@
       summary.push(
         "",
         `Bias: ${signal.marketDirection || "NEUTRAL"}`,
-        `Bias confidence: ${signal.confidence == null ? "Unavailable" : `${Math.round(signal.confidence)}%`}`,
-        `Entry quality: ${entryQuality.score == null ? "Unavailable" : `${Math.round(entryQuality.score)}%`}`
+        `Bias confidence: ${signal.confidence == null ? "Unavailable" : `${Math.round(signal.confidence)}%`}`
       );
       if(mode !== "AUTO") summary.push(`${mode === "LONG" ? "Long" : "Short"} thesis: ${thesis ? thesis.status : "MIXED"}`);
       const decision = entryQuality.decision;
       if(decision){
+        const assessments = decision.assessments || {};
+        const targets = assessments.targetFramework || {};
+        const obstacle = targets.obstacle || {};
+        const primaryTarget = targets.primary || assessments.target || {};
+        const extendedTarget = targets.extended || {};
         summary.push(
           `Setup: ${setupDisplayName37(decision)}`,
           `Family: ${decision.family}`,
-          `Zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
+          `Setup origin zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
           `State: ${decision.state}`,
+          `Entry mode: ${assessments.entryMode || "UNAVAILABLE"}`,
+          `Setup quality: ${assessments.setup && assessments.setup.grade || "UNAVAILABLE"}`,
+          `Trigger quality: ${assessments.trigger && assessments.trigger.grade || "UNAVAILABLE"}`,
+          `Current entry quality: ${assessments.current && assessments.current.grade || "UNAVAILABLE"}`,
           `Entry: ${decision.entryAction || (decision.state === "READY" ? `READY ${decision.direction}` : "WAIT")}`,
           `Trigger: ${decision.triggerState || "absent"}`,
           `Distance: ${decision.distance == null ? "unavailable" : `${(decision.distance*100).toFixed(2)}%`}`,
           `Reaction: ${decision.interaction && decision.interaction.trigger || "absent"}; ${decision.interaction && decision.interaction.confirmationRole || "none"}`,
           `Movement away: ${decision.interaction && decision.interaction.movement ? "present" : "absent"}`,
           `Pressure improvement: ${decision.pressure && decision.pressure.improved ? "present" : "absent"}`,
-          `Trigger participation: ${decision.pressure && decision.pressure.triggerParticipation && decision.pressure.triggerParticipation.text || "Unavailable"}`,
+          `Trigger participation: ${decision.pressure && decision.pressure.participationExpectation && decision.pressure.participationExpectation.text || decision.pressure && decision.pressure.triggerParticipation && decision.pressure.triggerParticipation.text || "Unavailable"}`,
           `Broader participation: ${decision.pressure && decision.pressure.broaderParticipation && decision.pressure.broaderParticipation.text || "Unavailable"}`,
           `Adverse-evidence gate: ${decision.adverseGate && decision.adverseGate.blocksDevelopment ? "BLOCKED" : decision.adverseGate && decision.adverseGate.blocksReady ? "LIMITED" : "CLEAR"}`,
           `Absorption: ${decision.absorption && decision.absorption.state || "cleared"}`,
-          `Invalidation: ${tooltipPrice37(decision.invalidation)}`,
-          `Valid for: ${decision.state === "SETUP ARMED" ? `after interaction, ${decision.triggerWindow} relevant candles` : `${decision.validFor} relevant candles`}`,
+          `Original invalidation: ${tooltipPrice37(decision.invalidation)}`,
+          `Current execution invalidation: ${assessments.executionInvalidation && assessments.executionInvalidation.available ? tooltipPrice37(assessments.executionInvalidation.price) : "Unavailable"}`,
+          `Next obstacle: ${obstacle.available ? tooltipPrice37(obstacle.price) : "Unavailable"}`,
+          `Obstacle source: ${obstacle.source || "Unavailable"}`,
+          `Obstacle significance: ${obstacle.significance || "UNAVAILABLE"}`,
+          `Primary target: ${primaryTarget.available ? tooltipPrice37(primaryTarget.price) : "Unavailable"}`,
+          `Target source: ${primaryTarget.source || "Unavailable"}`,
+          `Remaining room: ${primaryTarget.available ? `${tooltipPrice37(primaryTarget.remainingDistance)} · ${primaryTarget.remainingAtr == null ? "Unavailable" : `${primaryTarget.remainingAtr.toFixed(1)}× ${targets.atrTf || decision.tf} ATR`}` : "Unavailable"}`,
+          `Extended target: ${extendedTarget.available ? tooltipPrice37(extendedTarget.price) : "Unavailable"}`,
+          `Extended source: ${extendedTarget.source || "Unavailable"}`,
           `Reason: ${decision.reason}`
         );
         if(decision.previousCandidate) summary.push(`Previous candidate: ${decision.previousCandidate.tf} ${decision.previousCandidate.source} - INVALIDATED; ${decision.previousCandidate.reason}`);
@@ -1842,17 +2004,23 @@
     }
     if(signal.entryDecision){
       const decision = signal.entryDecision;
+      const targets = decision.assessments && decision.assessments.targetFramework || {};
       analysis.push(`Entry state audit:\n${detailBulletList37([
         `State: ${decision.state}; exact reason: ${decision.reason}`,
-        `Bias confidence: ${signal.confidence == null ? "unavailable" : `${Math.round(signal.confidence)}%`}; entry quality: ${decision.entryQuality == null ? "unavailable" : `${decision.entryQuality}%`}`,
+        `Bias confidence: ${signal.confidence == null ? "unavailable" : `${Math.round(signal.confidence)}%`}; setup ${decision.assessments && decision.assessments.setup.grade || "UNAVAILABLE"}; trigger ${decision.assessments && decision.assessments.trigger.grade || "UNAVAILABLE"}; current entry ${decision.assessments && decision.assessments.current.grade || "UNAVAILABLE"}`,
         decision.family ? `Selected: ${decision.family} on ${decision.tf}; ${zoneText37(decision)}` : "No setup candidate selected",
         decision.previousCandidate ? `Previous candidate: ${decision.previousCandidate.family} ${decision.previousCandidate.tf} - INVALIDATED; ${decision.previousCandidate.reason}` : null,
         decision.family ? `Interaction: ${decision.interaction.interacted ? "yes" : "no"}; reaction: ${decision.interaction.trigger}; role: ${decision.interaction.confirmationRole}; movement: ${decision.interaction.movement ? "yes" : "no"}; sustained: ${decision.interaction.sustainedMovement ? "yes" : "no"}` : null,
         decision.family ? `Pressure improvement: ${decision.pressure.improved ? "yes" : "no"}; ready confirmation: ${decision.pressure.confirmed ? "yes" : "no"}; ${decision.pressure.blocker || "no pressure blocker"}` : null,
         decision.family ? `Trigger participation: ${decision.pressure.triggerParticipation.text}; broader participation: ${decision.pressure.broaderParticipation.text}` : null,
         decision.family ? `Adverse gate: ${decision.adverseGate.blocksDevelopment ? "blocks development" : decision.adverseGate.blocksReady ? "blocks READY" : "clear"}; ${decision.adverseGate.reasons.join(" / ") || "no active adverse categories"}` : null,
-        decision.family ? `Invalidation ${tooltipPrice37(decision.invalidation)}; expiry ${decision.triggerWindow} candles or chase beyond ${tooltipPrice37(decision.chaseDistance)}` : null
+        decision.family ? `Original invalidation ${tooltipPrice37(decision.invalidation)}; current execution invalidation ${decision.assessments && decision.assessments.executionInvalidation.available ? tooltipPrice37(decision.assessments.executionInvalidation.price) : "unavailable"}` : null
       ].filter(Boolean))}`);
+      analysis.push(`Target hierarchy:\n${detailBulletList37([
+        targets.obstacle && targets.obstacle.available ? `Next obstacle ${tooltipPrice37(targets.obstacle.price)}; ${targets.obstacle.source}; ${targets.obstacle.significance}` : "Next obstacle unavailable",
+        targets.primary && targets.primary.available ? `Primary target ${tooltipPrice37(targets.primary.price)}; ${targets.primary.source}; ${targets.primary.remainingAtr == null ? "ATR distance unavailable" : `${targets.primary.remainingAtr.toFixed(1)}× ${targets.atrTf || decision.tf} ATR`}` : `Primary target unavailable; ${targets.primary && targets.primary.reason || "No credible 1h-or-higher objective identified"}`,
+        targets.extended && targets.extended.available ? `Extended target ${tooltipPrice37(targets.extended.price)}; ${targets.extended.source}` : "Extended target unavailable"
+      ])}`);
       if(decision.interaction && decision.interaction.evidence) analysis.push(`Reaction and movement evidence:\n${detailBulletList37(decision.interaction.evidence)}`);
       if(decision.pressure && decision.pressure.evidence) analysis.push(`Pressure effectiveness:\n${detailBulletList37(decision.pressure.evidence)}`);
       if(decision.candidateAudit && decision.candidateAudit.length){
@@ -1863,7 +2031,7 @@
     if(structure && structure.smc) analysis.push(`Canonical SMC structure:\n${detailBulletList37([...structure.smc.evidence,...structure.smc.diagnostics])}`);
     const validEvents = (thesis ? thesis.maEvents : signal.maEvents || []).filter(event => event && (event.state === "fresh" || event.state === "aging"));
     if(validEvents.length) analysis.push(`Selected valid MA events:\n${detailBulletList37(validEvents.map(event => `${maEventLabel37(event)} - ${event.type}; ${event.state}; ${event.confirmation}; applied impact ${Number(event.appliedImpact || 0) >= 0 ? "+" : ""}${Number(event.appliedImpact || 0)}`))}`);
-    analysis.push(`Entry quality:\n${detailBulletList37([`Entry quality score: ${entryQuality.score == null ? "unavailable" : `${Math.round(entryQuality.score)}%`}`,entryQuality.text,entryQuality.instruction,...entryQuality.exclusions])}`);
+    analysis.push(`Current entry assessment:\n${detailBulletList37([entryQuality.text,entryQuality.instruction,...entryQuality.exclusions])}`);
     if(entryQuality.levels.lines && entryQuality.levels.lines.length) analysis.push(`Level ranking:\n${detailBulletList37(entryQuality.levels.lines)}`);
     const breakdown = thesis ? thesisAlignmentBreakdown37(signal,thesis) : autoAlignmentBreakdown37(signal);
     if(breakdown.length) analysis.push(`Score breakdown:\n${detailBulletList37(breakdown)}`);
@@ -1878,7 +2046,7 @@
       `Entry states: ${ENTRY_STATES37.join(" -> ")}`,
       `Pressure thresholds: neutral imbalance <= ${(PRESSURE_POLICY37.neutralImbalance*100).toFixed(1)} points; mild < ${(PRESSURE_POLICY37.mildShare*100).toFixed(0)}%; strong >= ${(PRESSURE_POLICY37.strongShare*100).toFixed(0)}%`,
       `Entry decision snapshot: ${signal.entryDecision ? `${signal.entryDecision.state}; ${signal.entryDecision.reason}` : "unavailable"}`,
-      `Bias confidence: ${signal.confidence == null ? "unavailable" : `${Math.round(signal.confidence)}%`}; entry quality: ${entryQuality.score == null ? "unavailable" : `${Math.round(entryQuality.score)}%`}`,
+      `Bias confidence: ${signal.confidence == null ? "unavailable" : `${Math.round(signal.confidence)}%`}; setup quality: ${signal.entryDecision && signal.entryDecision.assessments && signal.entryDecision.assessments.setup.grade || "unavailable"}; trigger quality: ${signal.entryDecision && signal.entryDecision.assessments && signal.entryDecision.assessments.trigger.grade || "unavailable"}; current entry quality: ${signal.entryDecision && signal.entryDecision.assessments && signal.entryDecision.assessments.current.grade || "unavailable"}`,
       `Selected setup: ${signal.entryDecision && signal.entryDecision.family ? setupDisplayName37(signal.entryDecision) : "none"}`,
       `Zone interaction: ${signal.entryDecision && signal.entryDecision.interaction ? signal.entryDecision.interaction.interacted ? "engaged" : "not engaged" : "unavailable"}`,
       `Reaction confirmation: ${signal.entryDecision && signal.entryDecision.interaction ? signal.entryDecision.interaction.confirmationRole : "unavailable"}`,
@@ -2041,6 +2209,10 @@
     const latest = Array.isArray(rows) ? rows.slice(-2) : [];
     return latest.length >= 2 && latest.every(row => side > 0 ? Number(row.close) > level : Number(row.close) < level);
   }
+  function grOrderOwnership37(order,grIds=new Set()){
+    const clientId=String(order && order.clientOrderId || "");
+    return !!clientId && (clientId.startsWith("GR_EXIT_") || grIds.has(clientId));
+  }
   function managementExternalLevels37(position){
     const userLevels = [];
     const exitOrders = [];
@@ -2051,39 +2223,70 @@
         if(num37(price) != null) userLevels.push({id:`user-${index}-${price}`,price:Number(price),source:"User level",family:"user"});
       });
     }catch(_e){}
-    const collectRow = (row,family) => {
-      if(!row || row.dataset.needsReview === "1") return;
-      const input = row.querySelector(".calc-module-level");
-      const price = num37(input && input.value);
-      if(price == null) return;
-      exitOrders.push({id:row.dataset.calcRowId || row.dataset.calcPartialStopRowId || `${family}-${exitOrders.length}`,price,source:"Binance exit order",family,side:position && position.side || null});
-    };
-    try{
-      document.querySelectorAll('#calcModuleExitRows .calc-module-row[data-source="binance-limit"]').forEach(row => collectRow(row,"binance-exit"));
-      document.querySelectorAll('#calcModulePartialStopRows .calc-module-row[data-source="binance-partial-stop"]').forEach(row => collectRow(row,"binance-protection"));
-    }catch(_e){}
-    try{
-      const rows = window.GRAD_CALCULATOR && typeof window.GRAD_CALCULATOR.getOwnedRows === "function" ? window.GRAD_CALCULATOR.getOwnedRows() : [];
-      (Array.isArray(rows) ? rows : []).filter(row => ["exit","protection"].includes(row.section) && ["sent","executed"].includes(row.status)).forEach(row => {
-        const price = num37(row.level);
-        if(price != null) exitOrders.push({id:row.clientOrderId || `gr-${row.section}-${exitOrders.length}`,price:Number(price),source:"Binance exit order",family:row.section === "exit" ? "binance-exit" : "binance-protection",side:position && position.side || null});
-      });
-    }catch(_e){}
+    const symbol = String(position && position.symbol || (typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase();
+    const expectedSide = position && position.side === "SHORT" ? "BUY" : "SELL";
+    const frozenState=state.activeSnapshot && state.activeSnapshot.exitOrderState || state.marketSnapshot && state.marketSnapshot.exitOrderState || exitOrderStateSnapshot37(symbol);
+    const orderStatus = String(frozenState.status || "unavailable").toLowerCase();
+    const ordersUpdatedAt = num37(frozenState.updatedAt);
+    const orderCacheLive = orderStatus === "ok" && ordersUpdatedAt != null && Date.now()-ordersUpdatedAt <= featureConfig.freshness.protectiveOrderStaleMs;
+    const rawOrders = Array.isArray(frozenState.orders) ? frozenState.orders : [];
+    rawOrders.forEach(order => {
+      if(!order || String(order.symbol || "").toUpperCase() !== symbol) return;
+      const type = String(order.type || order.orderType || "").toUpperCase();
+      const status = String(order.status || order.orderStatus || "NEW").toUpperCase();
+      if(type !== "LIMIT" || !["NEW","PENDING","ACCEPTED","PARTIALLY_FILLED"].includes(status)) return;
+      const price = num37(order.price), original = num37(order.origQty ?? order.quantity ?? order.qty), executed = num37(order.executedQty) || 0;
+      const quantity = original == null ? null : Math.max(0,original-executed);
+      const clientOrderId = String(order.clientOrderId || "");
+      exitOrders.push({id:String(order.orderId != null ? `order:${order.orderId}` : clientOrderId || `exit-${exitOrders.length}`),clientOrderId,price,quantity,originalQuantity:original,executedQuantity:executed,source:"Live Binance LIMIT exit",family:"binance-exit",side:String(order.side || "").toUpperCase(),positionSide:String(order.positionSide || "").toUpperCase(),status,isLive:orderCacheLive,updatedAt:ordersUpdatedAt,correctSide:String(order.side || "").toUpperCase() === expectedSide});
+    });
+    const ownedRows = Array.isArray(frozenState.grRows) ? frozenState.grRows : [];
+    const grRows = (Array.isArray(ownedRows) ? ownedRows : []).filter(row => row && row.owner === "GR" && row.section === "exit" && row.status === "sent");
+    const grIds = new Set(grRows.map(row => String(row.clientOrderId || "")).filter(Boolean));
     const uniqueOrders = [];
     const seen = new Set();
     exitOrders.forEach(order => {
-      const key = `${order.family}|${Number(order.price).toPrecision(12)}`;
+      if(order.price == null || !(order.quantity > 0)) return;
+      const key = String(order.id || `${order.family}|${Number(order.price).toPrecision(12)}|${order.quantity}`);
       if(seen.has(key)) return;
       seen.add(key);
       uniqueOrders.push(order);
     });
-    return {userLevels,exitOrders:uniqueOrders};
+    const ladderOrders=uniqueOrders.map(order => {
+      const grOwned=grOrderOwnership37(order,grIds);
+      return {...order,owner:grOwned ? "GR" : "BINANCE",ownershipProven:grOwned};
+    });
+    const allGrOwned=ladderOrders.length>0 && ladderOrders.every(order => order.ownershipProven);
+    const grSource=ladderOrders.length ? (allGrOwned ? "GR" : "BINANCE") : "UNAVAILABLE";
+    return {userLevels,exitOrders:uniqueOrders,grExitOrders:ladderOrders,grSource,ordersUpdatedAt,orderStatus};
+  }
+
+  function targetMarketLevels37(direction,horizonId,external){
+    const levels=[];
+    const add=(price,source,tf,family,extra={})=>{ price=num37(price); if(price!=null) levels.push({price,source,tf,family,...extra}); };
+    ["1m","3m","5m","15m","1h","4h","1d"].forEach(tf => {
+      const pivots=canonicalPivots37(tf,"swing");
+      if(pivots.high) add(pivots.high.price,`${tf} swing resistance`,tf,"structure",{confirmed:true,reactions:1});
+      if(pivots.low) add(pivots.low.price,`${tf} swing support`,tf,"structure",{confirmed:true,reactions:1});
+      signalCanonicalSlots37().slice(2).forEach(slot => {
+        const ma=signalMaSlot37(tf,slot.slotId,true);
+        if(ma.reliable && ma.value!=null) add(ma.value,`${tf} EMA${slot.period}`,tf,"moving averages",{confirmed:ma.evidenceState==="closed-confirmed",reactions:0});
+      });
+    });
+    (external && external.userLevels || []).forEach(level => add(level.price,level.source || "User level",level.tf || "user","user",{deliberateObjective:level.deliberateObjective===true,confirmed:true}));
+    return levels;
+  }
+  function targetFramework37(direction,horizonId,atr,atrTf,external){
+    return targetEngine.evaluateTargets({direction,currentPrice:signalCurrentPrice37(),atr,atrTf,profileId:horizonId,levels:targetMarketLevels37(direction,horizonId,external)});
   }
   function evaluatePositionManagement37(signal,horizonId){
     const snapshot = state.activeSnapshot || state.marketSnapshot;
     const position = signal && signal.position ? {...signal.position} : null;
     const externalLevels = managementExternalLevels37(position);
-    return positionEngine.evaluate({
+    const profile = featureConfig.managementHorizons[horizonId] || featureConfig.managementHorizons.quick;
+    const targetAtr = averageTrueRange37(profile.primaryTf) || averageTrueRange37(profile.triggerTf);
+    const targets = position ? targetFramework37(position.side,horizonId,targetAtr,profile.primaryTf,externalLevels) : null;
+    const management = positionEngine.evaluate({
       symbol:String(snapshot && snapshot.symbol || position && position.symbol || "BTCUSDT"),
       horizon:horizonId,
       createdAt:Date.now(),
@@ -2097,9 +2300,20 @@
       maByTf:snapshot && snapshot.maByTf || {},
       structureByTf:snapshot && snapshot.structureByTf || {},
       dataHealth:snapshot && snapshot.health || null,
+      freshness:snapshot && snapshot.freshness || null,
+      protectiveOrders:snapshot && snapshot.protectiveOrders || null,
+      currentExecutionInvalidation:signal && signal.entryDecision && position && String(signal.entryDecision.direction || "").toUpperCase() === String(position.side || "").toUpperCase() && signal.entryDecision.assessments && signal.entryDecision.assessments.executionInvalidation || null,
       userLevels:externalLevels.userLevels,
-      exitOrders:externalLevels.exitOrders
+      exitOrders:externalLevels.exitOrders,
+      targetFramework:targets,
+      exitEvaluations:[],
+      grExitLadder:null
     });
+    if(position && targets){
+      management.exitEvaluations=targetEngine.evaluateBinanceExits({direction:position.side,currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position.markPrice),positionQty:position.qty,atr:targetAtr,profileId:horizonId,lifecycle:management.lifecycle,targetFramework:targets,orders:externalLevels.exitOrders});
+      management.grExitLadder=targetEngine.evaluateGrLadder({direction:position.side,currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position.markPrice),positionQty:position.qty,atr:targetAtr,profileId:horizonId,lifecycle:management.lifecycle,targetFramework:targets,orders:externalLevels.grExitOrders,source:externalLevels.grSource});
+    }
+    return management;
   }
   function entryPolicy37(horizonId=state.horizon){
     return ENTRY_POLICY37[horizonId] || ENTRY_POLICY37.quick;
@@ -2338,16 +2552,12 @@
   function triggerIdentity37(signal,decision){
     if(!decision || decision.state !== "READY") return null;
     const snapshot = state.activeSnapshot || state.marketSnapshot;
-    const zone = decision.zone || {};
     const activationTime = decision.interaction && (decision.interaction.reactionTime ?? decision.interaction.interactionTime);
     return [
       snapshot && snapshot.symbol || "",
+      decision.horizonId || state.horizon,
       decision.direction || signal && signal.marketDirection || "",
-      decision.family || "",
-      decision.source || "",
-      decision.tf || "",
-      num37(zone.low) == null ? "" : Number(zone.low).toPrecision(12),
-      num37(zone.high) == null ? "" : Number(zone.high).toPrecision(12),
+      decision.setupIdentity || setupIdentity37(decision),
       decision.pressure && decision.pressure.triggerTf || decision.tf || "",
       activationTime ?? decision.breakTime ?? decision.fingerprint ?? ""
     ].join("|");
@@ -2390,35 +2600,112 @@
   function signalToolbarTooltip37(signal,entryQuality,thesis){
     const decision = entryQuality && entryQuality.decision || signal && signal.entryDecision;
     const presentation = signalPresentation37(signal,decision);
+    const snapshot = state.activeSnapshot || state.marketSnapshot;
+    const freshness = snapshot && snapshot.freshness;
+    const ageText = age => Number.isFinite(Number(age)) ? `${Math.round(Number(age)/1000)}s ago` : "Unavailable";
+    const candleText = evidence => evidence ? `Latest closed ${evidence.tf} candle` : "Unavailable";
     if(!signal || signal.loading || signal.dataIncomplete){
-      return [presentation.definition,"","Direction: NO BIAS","Bias confidence: Unavailable",`State: ${presentation.label}`,"Entry: Data incomplete",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`].join("\n");
+      return [presentation.definition,"","Direction: NO BIAS","Bias confidence: Unavailable",`State: ${presentation.label}`,"Entry: Data incomplete",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`].join("\n");
     }
     const bias = signal.marketDirection || "NO BIAS";
     const confidence = signal.confidence == null ? "Unavailable" : `${Math.round(signal.confidence)}%`;
     const lines = [presentation.definition,"",`Direction: ${bias}`,`Bias confidence: ${confidence}`,`Horizon: ${horizonLabel37(state.horizon)}`];
     if(thesis) lines.push(`Selected thesis: ${state.direction} ${thesis.status}${thesis.confidence == null ? "" : ` ${Math.round(thesis.confidence)}%`}`);
     if(!decision || !decision.family){
-      lines.push(`State: ${presentation.label}`,"Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`);
+      lines.push(`State: ${presentation.label}`,"Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`,`Price: ${ageText(freshness && freshness.priceAgeMs)}`);
       return lines.join("\n");
     }
+    const assessments = decision.assessments || {};
+    const history = state.setupHistories.get(decision.setupIdentity) || {};
+    const originStatus = !history.zoneReached ? (decision.distance === 0 ? "TESTING" : "APPROACHING")
+      : decision.state === "INVALIDATED" ? "FAILED"
+        : history.retired ? "RETIRED"
+          : decision.distance === 0 ? "TESTING"
+          : decision.interaction && decision.interaction.reclaim ? "RECLAIMED"
+            : decision.interaction && decision.interaction.rejection ? "REJECTED"
+              : decision.interaction && decision.interaction.hold ? "HELD" : "PASSED";
+    const targets = assessments.targetFramework || {};
+    const target = targets.primary || assessments.target || {};
+    const obstacle = targets.obstacle || {};
+    const extended = targets.extended || {};
+    const currentInvalidation = assessments.executionInvalidation || {};
     lines.push(
       `State: ${presentation.label}`,
       `Setup family: ${decision.family}`,
       `Setup timeframe: ${decision.tf}`,
       `Setup: ${setupDisplayName37(decision)}`,
-      `Setup entry zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
+      `Setup origin zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
+      `Origin-zone status: ${originStatus}`,
+      "",
+      `Entry mode: ${assessments.entryMode === "RETEST" ? "Retest" : assessments.entryMode === "CONTINUATION" ? "Continuation" : "Unavailable"}`,
+      `Setup quality: ${assessments.setup && assessments.setup.grade || "UNAVAILABLE"}`,
+      `Trigger quality: ${assessments.trigger && assessments.trigger.grade || "UNAVAILABLE"}`,
+      `Current entry quality: ${assessments.current && assessments.current.grade || "UNAVAILABLE"}`,
+      "",
+      `Next obstacle: ${obstacle.available ? tooltipPrice37(obstacle.price) : "Unavailable"}`,
+      `Obstacle source: ${obstacle.source || "Unavailable"}`,
+      `Obstacle significance: ${obstacle.significance || "UNAVAILABLE"}`,
+      `Primary target: ${target.available ? tooltipPrice37(target.price) : "Unavailable"}`,
+      `Target source: ${target.source || "Unavailable"}`,
+      `Remaining room: ${target.available ? `${tooltipPrice37(target.remainingDistance)}${target.remainingAtr == null ? "" : ` · ${target.remainingAtr.toFixed(1)}× ${targets.atrTf || decision.tf} ATR`}` : "Unavailable"}`,
+      `Extended target: ${extended.available ? tooltipPrice37(extended.price) : "Unavailable"}`,
+      `Extended source: ${extended.source || "Unavailable"}`,
+      `Original invalidation: ${tooltipPrice37(decision.invalidation)}`,
+      `Current execution invalidation: ${currentInvalidation.available ? tooltipPrice37(currentInvalidation.price) : "Unavailable"}`,
+      `Execution invalidation basis: ${currentInvalidation.basis || "Unavailable"}`,
+      `Remaining reward/risk: ${assessments.remainingRewardRisk == null ? "Unavailable" : assessments.remainingRewardRisk.toFixed(1)}`,
+      `Momentum: ${assessments.momentum && assessments.momentum.label || "Unavailable"}`,
+      `Participation: ${decision.pressure && decision.pressure.participationExpectation && decision.pressure.participationExpectation.text || decision.pressure && decision.pressure.triggerParticipation && decision.pressure.triggerParticipation.text || "Unavailable"}`,
+      `Limitation: ${assessments.limitation || "None"}`,
+      "",
       `Trigger: ${decision.triggerState || "absent"}`,
       `Entry: ${decision.entryAction || (decision.state === "READY" ? `READY ${decision.direction}` : "WAIT")}`,
       `Reason: ${decision.reason}`,
-      `Participation: ${decision.pressure && decision.pressure.triggerParticipation && decision.pressure.triggerParticipation.text || "Unavailable"}`,
-      `Invalidation: ${tooltipPrice37(decision.invalidation)}`
+      `Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`,
+      `Price: ${ageText(freshness && freshness.priceAgeMs)}`,
+      `Trigger evidence: ${candleText(freshness && freshness.triggerClosed)}`,
+      `Management structure: ${candleText(freshness && freshness.managementClosed)}`
     );
+    (freshness && freshness.signalStaleSources || []).forEach(item => lines.push(`Stale input: ${item.source} · ${ageText(item.ageMs)}`));
     return lines.join("\n");
   }
   function candidateDistance37(zone,price){
     if(!zone || price == null) return null;
     if(price >= zone.low && price <= zone.high) return 0;
     return Math.min(Math.abs(price-zone.low),Math.abs(price-zone.high))/Math.max(Math.abs(price),1);
+  }
+  function normalizedZoneKey37(zone,atr){
+    const midpoint = Math.abs((Number(zone && zone.low || 0)+Number(zone && zone.high || 0))/2);
+    const step = Math.max(Math.pow(10,Math.floor(Math.log10(Math.max(midpoint,1e-8)))-4),1e-8);
+    const normalized = value => num37(value) == null ? "" : Math.round(Number(value)/step);
+    return `${normalized(zone && zone.low)}:${normalized(zone && zone.high)}`;
+  }
+  function setupIdentity37(candidate){
+    const snapshot = state.activeSnapshot || state.marketSnapshot;
+    return [
+      snapshot && snapshot.symbol || "",candidate.horizonId || state.horizon,candidate.direction || "",
+      candidate.family || "",candidate.tf || "",candidate.source || "",
+      normalizedZoneKey37(candidate.zone,candidate.volatility && candidate.volatility.atr),
+      candidate.breakTime || ""
+    ].join("|");
+  }
+  function setupHistory37(candidate){
+    const id = candidate.setupIdentity || setupIdentity37(candidate);
+    let history = state.setupHistories.get(id);
+    if(!history){
+      history = {setupIdentity:id,zoneReached:false,firstInteractionTime:null,lastInteractionTime:null,reactionDirection:null,maxFavorableMovement:0,triggerFormationBegan:false,triggerBecameActive:false,retired:false,invalidated:false,replaced:false,lastState:"SETUP ARMED"};
+      state.setupHistories.set(id,history);
+      while(state.setupHistories.size > 256) state.setupHistories.delete(state.setupHistories.keys().next().value);
+    }
+    return history;
+  }
+  function gradeQuality37(score,available=true){
+    if(!available || !Number.isFinite(Number(score))) return "UNAVAILABLE";
+    const grades = featureConfig.signalQuality.grades;
+    if(score >= grades.A) return "A";
+    if(score >= grades.B) return "B";
+    if(score >= grades.C) return "C";
+    return "UNACCEPTABLE";
   }
   function makeEntryCandidate37(spec,horizonId){
     const volatility = volatilityRules37(spec.tf,horizonId);
@@ -2429,17 +2716,23 @@
     const invalidation = spec.invalidation != null ? spec.invalidation : (spec.direction > 0
       ? zone.low-Math.max(volatility.atr*0.35,(zone.high-zone.low)*0.45)
       : zone.high+Math.max(volatility.atr*0.35,(zone.high-zone.low)*0.45));
-    return {
+    const setupRows = state.activeSnapshot && state.activeSnapshot.closedByTf && state.activeSnapshot.closedByTf[spec.tf] || [];
+    const activationRow = setupRows[Math.max(0,setupRows.length-entryPolicy37(horizonId).triggerCandles-3)] || setupRows[0];
+    const candidate = {
       ...spec,horizonId,zone,invalidation,volatility,
       distance:candidateDistance37(zone,price),currentPrice:price,
+      setupActivationTime:spec.breakTime || Number(activationRow && activationRow.time) || null,
       triggerWindow:entryPolicy37(horizonId).triggerCandles,
       fingerprint:`${state.activeSnapshot && state.activeSnapshot.symbol || ""}|${horizonId}|${spec.direction}|${spec.family}|${spec.tf}|${Math.round((rawLow+rawHigh)/2/Math.max(volatility.atr*0.25,1e-8))}`
     };
+    candidate.setupIdentity = setupIdentity37(candidate);
+    return candidate;
   }
   function interactionAndReaction37(candidate){
     const rows = signalRows37(candidate.tf);
-    const policy = entryPolicy37(candidate.horizonId);
-    const start = Math.max(0,rows.length-policy.triggerCandles-3);
+    const history = setupHistory37(candidate);
+    const activation = candidate.breakTime || candidate.setupActivationTime || 0;
+    const start = Math.max(0,rows.findIndex(row => Number(row.time) >= activation));
     let interactionIndex = -1;
     for(let index=start;index<rows.length;index++){
       const row = rows[index];
@@ -2449,12 +2742,15 @@
         break;
       }
     }
-    if(interactionIndex < 0){
+    if(interactionIndex < 0 && !history.zoneReached){
       return {
         interacted:false,reaction:false,confirmedReaction:false,provisionalReaction:false,
         movement:false,sustainedMovement:false,age:null,interactionTime:null,
         trigger:"No interaction",confirmationRole:"none",evidence:["Price has not reached the setup zone"]
       };
+    }
+    if(interactionIndex < 0 && history.zoneReached){
+      interactionIndex = Math.max(0,rows.findIndex(row => Number(row.time) >= Number(history.firstInteractionTime || activation)));
     }
     const intended = candidate.direction;
     const after = rows.slice(interactionIndex);
@@ -2499,10 +2795,18 @@
       : evidence.reclaimed ? "bearish reclaim" : evidence.rejected ? "higher-price rejection" : "resistance hold";
     const latestIndex = rows.length-1;
     const age = latestIndex-interactionIndex;
+    const interactionTime = Number(rows[interactionIndex].time);
+    history.zoneReached = true;
+    history.firstInteractionTime ??= interactionTime;
+    const touchingRows = after.filter(row => Number(row.low) <= candidate.zone.high+candidate.volatility.tolerance && Number(row.high) >= candidate.zone.low-candidate.volatility.tolerance);
+    history.lastInteractionTime = Number((touchingRows.length ? touchingRows[touchingRows.length-1] : rows[interactionIndex]).time);
+    history.reactionDirection = reaction ? (intended > 0 ? "LONG" : "SHORT") : history.reactionDirection;
+    history.maxFavorableMovement = Math.max(Number(history.maxFavorableMovement || 0),Math.max(closedMove,liveMove));
+    if(reaction && movement) history.triggerFormationBegan = true;
     return {
       interacted:true,reaction,confirmedReaction,provisionalReaction,movement,confirmedMovement,sustainedMovement,
       move:Math.max(closedMove,liveMove),closedMove,liveMove,initialThreshold,sustainedThreshold,age,
-      interactionTime:Number(rows[interactionIndex].time),reactionTime:reactionRow ? Number(reactionRow.time) : null,
+      interactionTime:history.firstInteractionTime,reactionTime:reactionRow ? Number(reactionRow.time) : null,
       trigger:reactionType,confirmationRole:confirmedReaction ? "closed" : provisionalReaction ? "forming/provisional" : "none",
       reclaim:evidence.reclaimed,rejection:evidence.rejected,hold:evidence.held,
       evidence:[
@@ -2552,6 +2856,24 @@
     const microBlocked = !!(micro && micro.opposing && micro.material && microEffectiveness && microEffectiveness.adverseEffective && trigger.opposing);
     const triggerParticipation = participationBasis37(triggerSample);
     const broaderParticipation = participationBasis37(primarySample);
+    const triggerRows = signalRows37(triggerSample && triggerSample.tf || policy.triggerTf).filter(row => row.final !== false).slice(-8);
+    const recentVolumes = triggerRows.map(row => num37(row.volume)).filter(value => value != null);
+    const baselineVolumes = recentVolumes.slice(0,Math.max(1,recentVolumes.length-3));
+    const baselineVolume = baselineVolumes.length ? baselineVolumes.reduce((sum,item) => sum+item,0)/baselineVolumes.length : null;
+    const persistence = recentVolumes.length >= 3 && baselineVolume > 0 ? recentVolumes.slice(-3).filter(value => value >= baselineVolume*0.80).length : 0;
+    const setupHistory = setupHistory37(candidate);
+    const interactionRow = setupHistory.firstInteractionTime == null ? null : triggerRows.find(row => Number(row.time) >= Number(setupHistory.firstInteractionTime));
+    const interactionVolumeRatio = baselineVolume > 0 && interactionRow ? Number(interactionRow.volume)/baselineVolume : null;
+    const displacementRows = interactionRow ? triggerRows.filter(row => Number(row.time) >= Number(interactionRow.time)) : triggerRows.slice(-3);
+    const displacementVolume = displacementRows.length ? displacementRows.reduce((sum,row) => sum+Number(row.volume || 0),0)/displacementRows.length : null;
+    const displacementVolumeRatio = baselineVolume > 0 && displacementVolume != null ? displacementVolume/baselineVolume : null;
+    const participationCategory = triggerEffectiveness.adverseEffective ? "Materially contradictory participation"
+      : triggerParticipation.state === "Expanding" && persistence >= 2 ? "Strong expansion"
+      : triggerParticipation.state !== "Weak" && persistence >= 2 ? "Adequate continuation"
+        : triggerParticipation.state === "Weak" && triggerEffectiveness.alignedEffective ? "Low-participation drift"
+          : triggerParticipation.state === "Weak" ? "Weak or fading continuation"
+            : "Adequate continuation";
+    const participationExpectation = {category:participationCategory,persistence,baselineRatio:triggerParticipation.ratio,interactionVolumeRatio,displacementVolumeRatio,text:`${participationCategory}${triggerParticipation.ratio == null ? "" : ` · ${triggerParticipation.ratio.toFixed(2)}× baseline`} · ${persistence}/3 persistent candles${interactionVolumeRatio == null ? "" : ` · interaction ${interactionVolumeRatio.toFixed(2)}×`}${displacementVolumeRatio == null ? "" : ` · displacement ${displacementVolumeRatio.toFixed(2)}×`}`};
     const triggerImproved = trigger.aligned || trigger.state === "neutral" || triggerEffectiveness.losingEffectiveness;
     const primaryNonDestructive = !primaryBlocked && (!primary.opposing || primaryEffectiveness.losingEffectiveness || primary.share < 0.54);
     const improved = !primaryBlocked && !triggerBlocked && !microBlocked && triggerImproved && primaryNonDestructive;
@@ -2572,7 +2894,7 @@
     return {
       confirmed,improved,effectiveOpposition,trigger,primary,micro,triggerEffectiveness,primaryEffectiveness,microEffectiveness,
       participation:triggerParticipation.state.toLowerCase(),participationRatio:triggerParticipation.ratio,
-      triggerParticipation,broaderParticipation,blocker,
+      triggerParticipation,broaderParticipation,participationExpectation,blocker,
       triggerTf:triggerSample && triggerSample.tf,primaryTf:primarySample && primarySample.tf,
       evidence:[
         `Trigger pressure: ${trigger.state}; ${triggerEffectiveness.state} - ${triggerSample && triggerSample.tf} LB${triggerSample && triggerSample.lookback}`,
@@ -2611,12 +2933,86 @@
     const blocksReady = pressure.effectiveOpposition || recoveryAbsent || adverseBody || repeatedAdverseCloses || (active.length >= 2 && !interaction.sustainedMovement);
     return {clear:!blocksReady,blocksDevelopment,blocksReady,categories,active,reasons:active.map(item => item.reason)};
   }
+  function selectExpectedTarget37(candidate){
+    const external = managementExternalLevels37(openPositionSignal37());
+    const framework = targetFramework37(candidate.direction,candidate.horizonId,candidate.volatility && candidate.volatility.atr,candidate.tf,external);
+    return {...framework.primary,nextOpposingLevel:framework.obstacle && framework.obstacle.available ? framework.obstacle : null,obstacle:framework.obstacle,extended:framework.extended,framework};
+  }
+  function currentExecutionInvalidation37(candidate,interaction){
+    const rows = signalRows37(entryPolicy37(candidate.horizonId).triggerTf).filter(row => row.final !== false).slice(-12);
+    const desired = candidate.direction;
+    const pivots = [];
+    for(let i=1;i<rows.length-1;i++){
+      if(desired > 0 && Number(rows[i].low) < Number(rows[i-1].low) && Number(rows[i].low) <= Number(rows[i+1].low)) pivots.push({row:rows[i],price:Number(rows[i].low),basis:`${entryPolicy37(candidate.horizonId).triggerTf} confirmed structural low`});
+      if(desired < 0 && Number(rows[i].high) > Number(rows[i-1].high) && Number(rows[i].high) >= Number(rows[i+1].high)) pivots.push({row:rows[i],price:Number(rows[i].high),basis:`${entryPolicy37(candidate.horizonId).triggerTf} confirmed structural high`});
+    }
+    const price = signalCurrentPrice37();
+    const valid = pivots.reverse().find(pivot => (price-pivot.price)*desired > candidate.volatility.atr*0.12 && Number(pivot.row.time) >= Number(interaction.interactionTime || 0));
+    if(valid) return {available:true,price:valid.price,basis:valid.basis,time:Number(valid.row.time)};
+    if(interaction.interacted && candidateDistance37(candidate.zone,price)*Math.max(Math.abs(price),1) <= candidate.volatility.atr*featureConfig.signalQuality.nearOriginAtr){
+      return {available:true,price:candidate.invalidation,basis:`${candidate.tf} setup reaction boundary`,time:interaction.interactionTime};
+    }
+    return {available:false,price:null,basis:"No confirmed current execution pivot",time:null};
+  }
+  function momentumAssessment37(candidate,interaction){
+    const tf = entryPolicy37(candidate.horizonId).triggerTf;
+    const rows = signalRows37(tf).filter(row => row.final !== false).slice(-4);
+    if(rows.length < 2 || !(candidate.volatility.atr > 0)) return {available:false,score:null,label:"Unavailable",limitation:"Trigger momentum evidence unavailable"};
+    const desired = candidate.direction;
+    const bodies = rows.map(row => (Number(row.close)-Number(row.open))*desired/candidate.volatility.atr);
+    const directional = bodies.filter(value => value > 0).length/rows.length;
+    const bodyQuality = rows.filter(row => {
+      const range = Math.max(Number(row.high)-Number(row.low),1e-8);
+      const closeExtreme = desired > 0 ? (Number(row.close)-Number(row.low))/range : (Number(row.high)-Number(row.close))/range;
+      return bodies[rows.indexOf(row)] > 0 && closeExtreme >= 0.62;
+    }).length/rows.length;
+    const displacement = Math.max(0,interaction.move || 0)/candidate.volatility.atr;
+    const accelerating = bodies.at(-1) > bodies.at(-2);
+    const exhaustion = displacement >= featureConfig.signalQuality.exhaustionAtr && bodies.at(-1) < Math.max(0,bodies.at(-2)*0.45);
+    const score = clamp37(35+directional*25+bodyQuality*20+Math.min(displacement,1.5)*12+(accelerating ? 5 : 0)-(exhaustion ? 30 : 0),0,100);
+    return {available:true,score,label:exhaustion ? "Exhausting" : score >= 72 ? "Healthy" : score >= 52 ? "Controlled" : "Weak",exhaustion,displacement,directional,bodyQuality};
+  }
+  function opportunityAssessments37(candidate,interaction,pressure,gate){
+    const target = selectExpectedTarget37(candidate);
+    const executionInvalidation = currentExecutionInvalidation37(candidate,interaction);
+    const momentum = momentumAssessment37(candidate,interaction);
+    const price = signalCurrentPrice37();
+    const risk = executionInvalidation.available ? Math.abs(price-executionInvalidation.price) : null;
+    const rr = target.available && risk > 0 ? target.remainingDistance/risk : null;
+    const setupScore = clamp37(48+(candidate.stack ? candidate.stack.alignment*30 : 12)+(candidate.priority <= 2 ? 12 : 7)+(candidate.invalidation != null ? 8 : 0),0,100);
+    const triggerScore = clamp37((interaction.confirmedReaction ? 35 : interaction.provisionalReaction ? 20 : 0)+(interaction.movement ? 20 : 0)+(interaction.sustainedMovement ? 18 : 0)+(pressure.improved ? 14 : 0)+(pressure.confirmed ? 13 : 0)-(pressure.effectiveOpposition ? 30 : 0)-(pressure.triggerParticipation.state === "Weak" ? 10 : 0),0,100);
+    let entryScore = 0;
+    if(target.available) entryScore += target.remainingAtr >= featureConfig.signalQuality.preferredTargetAtr ? 28 : target.remainingAtr >= featureConfig.signalQuality.minimumTargetAtr ? 17 : 2;
+    if(momentum.available) entryScore += momentum.score*0.28;
+    if(pressure.triggerParticipation.state === "Expanding") entryScore += 18;
+    else if(pressure.triggerParticipation.state === "Normal") entryScore += 13;
+    else if(pressure.triggerParticipation.state === "Weak") entryScore += 6;
+    if(executionInvalidation.available) entryScore += 16;
+    if(rr != null) entryScore += rr >= featureConfig.signalQuality.preferredRewardRisk ? 18 : rr >= featureConfig.signalQuality.minimumRewardRisk ? 10 : 0;
+    if(gate.blocksReady || pressure.effectiveOpposition) entryScore -= 20;
+    if(momentum.exhaustion) entryScore -= 18;
+    entryScore = clamp37(entryScore,0,100);
+    const unavailable = !target.available || !momentum.available;
+    const unacceptableReasons = [];
+    if(target.available && target.remainingAtr < featureConfig.signalQuality.minimumTargetAtr) unacceptableReasons.push("Nearest opposing target leaves insufficient room");
+    if(rr != null && rr < featureConfig.signalQuality.minimumRewardRisk) unacceptableReasons.push("Remaining reward/risk is below policy minimum");
+    if(momentum.exhaustion && pressure.triggerParticipation.state === "Weak") unacceptableReasons.push("Late displacement is exhausting on weak participation");
+    if(pressure.effectiveOpposition && target.available && target.remainingAtr < featureConfig.signalQuality.preferredTargetAtr) unacceptableReasons.push("Contradictory pressure is material before the next target");
+    if(!unavailable && entryScore < featureConfig.signalQuality.grades.C && !unacceptableReasons.length) unacceptableReasons.push("Combined current opportunity evidence is below the minimum acceptable grade");
+    const currentGrade = unavailable ? "UNAVAILABLE" : unacceptableReasons.length ? "UNACCEPTABLE" : gradeQuality37(entryScore);
+    const distanceFromOrigin = candidateDistance37(candidate.zone,price)*Math.max(Math.abs(price),1);
+    const entryMode = !interaction.interacted ? "UNAVAILABLE" : distanceFromOrigin <= candidate.volatility.atr*featureConfig.signalQuality.nearOriginAtr ? "RETEST" : "CONTINUATION";
+    return {
+      setup:{score:setupScore,grade:gradeQuality37(setupScore)},trigger:{score:triggerScore,grade:gradeQuality37(triggerScore)},
+      current:{score:entryScore,grade:currentGrade,unacceptableReasons,available:!unavailable},entryMode,target,targetFramework:target.framework,executionInvalidation,momentum,remainingRewardRisk:rr,distanceFromOrigin,
+      limitation:unacceptableReasons[0] || (pressure.triggerParticipation.state === "Weak" ? "Participation remains below expected baseline" : !executionInvalidation.available ? executionInvalidation.basis : gate.reasons[0] || "None")
+    };
+  }
   function entryStateFromEvidence37(evidence){
-    const {candidate,interaction,pressure,gate,invalidated,chaseExceeded,timedOut} = evidence;
+    const {candidate,interaction,pressure,gate,invalidated} = evidence;
+    const assessments = evidence.assessments || {current:{grade:"B",unacceptableReasons:[]},entryMode:"RETEST"};
     const long = candidate.direction > 0;
     if(invalidated) return {state:"INVALIDATED",reason:`Invalidated - ${candidate.source} materially failed on closed candles`};
-    if(chaseExceeded) return {state:"EXPIRED",reason:"Entry expired - chase distance exceeded"};
-    if(timedOut) return {state:"EXPIRED",reason:`Entry expired - ${candidate.triggerWindow}-candle trigger window elapsed`};
     if(!interaction.interacted) return {state:"SETUP ARMED",reason:`Waiting for ${candidate.source} interaction`};
     if(!interaction.reaction || !interaction.movement){
       const reason = pressure.effectiveOpposition
@@ -2627,10 +3023,19 @@
     if(gate.blocksDevelopment || !pressure.improved){
       return {state:"ZONE ENGAGED",reason:gate.reasons[0] || pressure.blocker || "Zone engaged - adverse evidence has not cleared"};
     }
-    if(!interaction.confirmedReaction || !interaction.sustainedMovement || !pressure.confirmed || gate.blocksReady){
+    const freshness = state.activeSnapshot && state.activeSnapshot.freshness;
+    const freshnessCurrent = !freshness || freshness.signalStatus === "LIVE";
+    const reliable = freshnessCurrent && interaction.confirmedReaction && interaction.movement && (interaction.confirmedMovement || interaction.sustainedMovement) && pressure.improved && !pressure.effectiveOpposition && !gate.blocksReady;
+    if(reliable && assessments.current.grade === "UNACCEPTABLE") return {state:"EXPIRED",reason:`Current entry is not viable - ${assessments.current.unacceptableReasons[0]}`};
+    const history = setupHistory37(candidate);
+    if(assessments.current.grade === "UNAVAILABLE" && history.triggerFormationBegan && interaction.move >= candidate.volatility.atr*featureConfig.signalQuality.exhaustionAtr && !assessments.executionInvalidation.available){
+      return {state:"BIAS CONFIRMED",reason:"The interacted setup is no longer structurally relevant and no current execution structure is available"};
+    }
+    if(!interaction.confirmedReaction || !interaction.movement || !pressure.improved || gate.blocksReady){
       return {state:"TRIGGER DEVELOPING",reason:pressure.blocker || `${interaction.trigger} is developing; awaiting sustained movement and ${pressure.triggerTf} pressure confirmation`};
     }
-    return {state:"READY",reason:`${interaction.trigger} with sustained movement and ${pressure.triggerTf} pressure confirmation`};
+    if(reliable && ["A","B","C"].includes(assessments.current.grade)) return {state:"READY",reason:`${interaction.trigger} confirmed from the current ${assessments.entryMode.toLowerCase()} context`};
+    return {state:"TRIGGER DEVELOPING",reason:!freshnessCurrent ? `Actionable confirmation unavailable - ${freshness.signalStaleSources[0] && freshness.signalStaleSources[0].source || "decision-critical data"} needs refresh` : assessments.current.grade === "UNAVAILABLE" ? "Current entry evidence is unavailable" : "Reaction is credible but confirmation remains unresolved"};
   }
   function absorptionState37(candidate,interaction,pressure,samples){
     if(!candidate || !interaction.interacted) return {state:"cleared",reason:"No active level interaction"};
@@ -2676,14 +3081,25 @@
     const gateAdjustment = result.adverseGate && result.adverseGate.blocksDevelopment ? -7 : 0;
     return Math.round(clamp37(base+movementAdjustment+pressureAdjustment+gateAdjustment,0,100));
   }
+  function applySetupLifecycleFloor37(history,stateResult){
+    const next = {...stateResult};
+    if(history && history.triggerFormationBegan && ["SETUP ARMED","ZONE ENGAGED"].includes(next.state)){
+      next.state = "TRIGGER DEVELOPING";
+      next.reason = "Trigger formation history is retained; current confirmation remains unresolved";
+    }else if(history && history.zoneReached && next.state === "SETUP ARMED"){
+      next.state = "ZONE ENGAGED";
+      next.reason = "Setup interaction history is retained; the origin zone is no longer an untouched setup area";
+    }
+    return next;
+  }
   function evaluateCandidateState37(candidate,samples,prior=null){
     const priorSide = prior && (num37(prior.side) != null ? Number(prior.side) : prior.direction === "SHORT" ? -1 : prior.direction === "LONG" ? 1 : 0);
-    const samePrior = prior && prior.family === candidate.family && prior.tf === candidate.tf && prior.source === candidate.source && priorSide === candidate.direction;
-    if(samePrior && ["EXPIRED","INVALIDATED"].includes(prior.state) && prior.fingerprint === candidate.fingerprint){
-      return {...candidate,state:prior.state,reason:prior.reason,interaction:prior.interaction,pressure:prior.pressure,absorption:prior.absorption,adverseGate:prior.adverseGate,chase:prior.chase,chaseExceeded:prior.chaseExceeded,timedOut:prior.timedOut,validFor:0,chaseDistance:prior.chaseDistance,entryQuality:prior.entryQuality,triggerState:"absent",entryAction:"WAIT"};
+    const samePrior = prior && prior.setupIdentity === candidate.setupIdentity && priorSide === candidate.direction;
+    if(samePrior && ["EXPIRED","INVALIDATED"].includes(prior.state)){
+      return {...candidate,state:prior.state,reason:prior.reason,interaction:prior.interaction,pressure:prior.pressure,absorption:prior.absorption,adverseGate:prior.adverseGate,assessments:prior.assessments,chase:prior.chase,chaseExceeded:false,timedOut:false,validFor:0,chaseDistance:prior.chaseDistance,entryQuality:prior.entryQuality,triggerState:"absent",entryAction:"WAIT"};
     }
     if(samePrior && ["ZONE ENGAGED","TRIGGER DEVELOPING","READY"].includes(prior.state)){
-      candidate = {...candidate,zone:{...prior.zone},invalidation:prior.invalidation,volatility:{...candidate.volatility,chaseDistance:prior.chaseDistance || candidate.volatility.chaseDistance}};
+      candidate = {...candidate,zone:{...prior.zone},setupActivationTime:prior.setupActivationTime,invalidation:prior.invalidation,volatility:{...candidate.volatility,chaseDistance:prior.chaseDistance || candidate.volatility.chaseDistance}};
     }
     const interaction = interactionAndReaction37(candidate);
     const pressure = candidatePressureConfirmation37(candidate,samples);
@@ -2693,10 +3109,10 @@
     const materialFailure = candidateMaterialFailure37(candidate,closed);
     const invalidated = definedInvalidationFailed || materialFailure.failed;
     const chase = currentPrice == null ? 0 : candidate.direction > 0 ? currentPrice-candidate.zone.high : candidate.zone.low-currentPrice;
-    const chaseExceeded = interaction.interacted && chase > candidate.volatility.chaseDistance;
-    const timedOut = interaction.interacted && interaction.age > candidate.triggerWindow;
     const adverseGate = adverseEvidenceGate37(candidate,interaction,pressure);
-    const stateResult = entryStateFromEvidence37({candidate,interaction,pressure,gate:adverseGate,invalidated,chaseExceeded,timedOut});
+    const assessments = opportunityAssessments37(candidate,interaction,pressure,adverseGate);
+    if(samePrior && prior.assessments && prior.assessments.setup) assessments.setup = {...prior.assessments.setup};
+    let stateResult = entryStateFromEvidence37({candidate,interaction,pressure,gate:adverseGate,invalidated,assessments});
     if(materialFailure.failed) stateResult.reason = `Invalidated - ${materialFailure.reason}`;
     const absorption = absorptionState37(candidate,interaction,pressure,samples);
     if(absorption.state === "confirmed" && stateResult.state === "READY"){
@@ -2704,13 +3120,20 @@
       stateResult.reason = absorption.reason;
     }
     if(absorption.state === "possible" && stateResult.state === "TRIGGER DEVELOPING") stateResult.reason = absorption.reason;
+    const history = setupHistory37(candidate);
+    stateResult = applySetupLifecycleFloor37(history,stateResult);
     const result = {
-      ...candidate,...stateResult,interaction,pressure,absorption,adverseGate,materialFailure,chase,chaseExceeded,timedOut,
+      ...candidate,...stateResult,interaction,pressure,absorption,adverseGate,materialFailure,chase,chaseExceeded:false,timedOut:false,assessments,
       validFor:Math.max(0,candidate.triggerWindow-(interaction.age || 0)),chaseDistance:candidate.volatility.chaseDistance
     };
     result.triggerState = result.state === "READY" ? "confirmed" : result.state === "TRIGGER DEVELOPING" ? "developing" : "absent";
     result.entryAction = result.state === "READY" ? candidate.direction > 0 ? "READY LONG" : "READY SHORT" : "WAIT";
-    result.entryQuality = entryQualityScore37(result);
+    result.entryQuality = assessments.current.score;
+    history.triggerFormationBegan ||= result.state === "TRIGGER DEVELOPING";
+    history.triggerBecameActive ||= result.state === "READY";
+    history.invalidated ||= result.state === "INVALIDATED";
+    history.retired ||= ["EXPIRED","BIAS CONFIRMED"].includes(result.state);
+    history.lastState = result.state;
     return result;
   }
   function emaCandidates37(bias,horizonId){
@@ -2793,6 +3216,9 @@
     const readyInteraction = {...developingInteraction,confirmedReaction:true,sustainedMovement:true};
     const confirmed = {...improving,confirmed:true,blocker:null};
     const ready = entryStateFromEvidence37({candidate,interaction:readyInteraction,pressure:confirmed,gate:clear,invalidated:false,chaseExceeded:false,timedOut:false});
+    const weakButCredible = entryStateFromEvidence37({candidate,interaction:readyInteraction,pressure:{...improving,triggerParticipation:{state:"Weak"}},gate:clear,invalidated:false,assessments:{current:{grade:"C",unacceptableReasons:[]},entryMode:"CONTINUATION"}});
+    const poorCurrentEntry = entryStateFromEvidence37({candidate,interaction:readyInteraction,pressure:confirmed,gate:clear,invalidated:false,assessments:{current:{grade:"UNACCEPTABLE",unacceptableReasons:["Nearest opposing target leaves insufficient room"]},entryMode:"CONTINUATION"}});
+    const farButViable = entryStateFromEvidence37({candidate,interaction:readyInteraction,pressure:confirmed,gate:clear,invalidated:false,chaseExceeded:true,assessments:{current:{grade:"B",unacceptableReasons:[]},entryMode:"CONTINUATION"}});
     const highBias = entryStateFromEvidence37({candidate,interaction:engaged,pressure:opposition,gate:blocked,invalidated:false,chaseExceeded:false,timedOut:false,biasConfidence:82});
     const lowBias = entryStateFromEvidence37({candidate,interaction:engaged,pressure:opposition,gate:blocked,invalidated:false,chaseExceeded:false,timedOut:false,biasConfidence:52});
     const replacement = selectEntryCandidate37([
@@ -2804,7 +3230,13 @@
       mirroredShortWait:observedShort.state === "ZONE ENGAGED" && /buying remains active; no rejection/i.test(observedShort.reason),
       genuineProgression:developing.state === "TRIGGER DEVELOPING" && ready.state === "READY",
       biasCannotPromoteEntry:highBias.state === lowBias.state && highBias.state === "ZONE ENGAGED",
-      failedFastCandidateReplaced:replacement && replacement.source === "EMA100"
+      failedFastCandidateReplaced:replacement && replacement.source === "EMA100",
+      weakParticipationCanActivateReducedQuality:weakButCredible.state === "READY",
+      unacceptableCurrentEntryProducesNoChase:poorCurrentEntry.state === "EXPIRED",
+      originDistanceAloneCannotProduceNoChase:farButViable.state === "READY",
+      qualityGradesAreIndependent:gradeQuality37(86) === "A" && gradeQuality37(70) === "B" && gradeQuality37(55) === "C" && gradeQuality37(30) === "UNACCEPTABLE",
+      standByCannotReturnToWatching:applySetupLifecycleFloor37({zoneReached:true,triggerFormationBegan:false},{state:"SETUP ARMED",reason:"live location"}).state === "ZONE ENGAGED",
+      triggerFormingCannotReturnToWatchingOrStandBy:applySetupLifecycleFloor37({zoneReached:true,triggerFormationBegan:true},{state:"ZONE ENGAGED",reason:"live evidence weakened"}).state === "TRIGGER DEVELOPING"
     };
     return {
       allPassed:Object.values(cases).every(Boolean),cases,
@@ -2838,6 +3270,10 @@
     const identity = triggerIdentity37(baseSignal,readyDecision);
     const sameIdentity = triggerIdentity37(baseSignal,{...readyDecision,reason:"Routine refresh"});
     const newIdentity = triggerIdentity37(baseSignal,{...readyDecision,interaction:{...readyDecision.interaction,reactionTime:300}});
+    const setupIdentity = setupIdentity37({...readyDecision,horizonId:"quick",direction:1,volatility:{atr:100}});
+    const floatingNoiseIdentity = setupIdentity37({...readyDecision,horizonId:"quick",direction:1,zone:{low:99000.000001,high:99100.000001},volatility:{atr:100}});
+    const horizonIdentity = setupIdentity37({...readyDecision,horizonId:"2_3h",direction:1,volatility:{atr:100}});
+    const directionIdentity = setupIdentity37({...readyDecision,horizonId:"quick",direction:-1,volatility:{atr:100}});
     const alertLifecycle = runTriggerAlertSelfTests37(baseSignal,readyDecision);
     const cases = {
       ...stateMappings,
@@ -2851,6 +3287,9 @@
       tooltipDefinitionNotDuplicated:tooltip.split(definition).length-1 === 1,
       triggerIdentityStable:identity === sameIdentity,
       materiallyNewTriggerIdentity:identity !== newIdentity,
+      setupIdentityIgnoresFloatingNoise:setupIdentity === floatingNoiseIdentity,
+      setupIdentityChangesWithHorizon:setupIdentity !== horizonIdentity,
+      setupIdentityChangesWithDirection:setupIdentity !== directionIdentity,
       ...alertLifecycle
     };
     return {passed:Object.values(cases).every(Boolean),cases};
@@ -2925,6 +3364,17 @@
       return invalidated;
     }
     const raw = [...emaCandidates37(bias,horizonId),...structureCandidates37(bias,horizonId),...compressionCandidates37(bias,horizonId)];
+    if(priorWasActive){
+      raw.forEach(candidate => {
+        if(candidate.family === prior.family && candidate.tf === prior.tf && candidate.source === prior.source){
+          candidate.zone = {...prior.zone};
+          candidate.invalidation = prior.invalidation;
+          candidate.setupActivationTime = prior.setupActivationTime;
+          candidate.setupIdentity = prior.setupIdentity;
+          candidate.distance = candidateDistance37(candidate.zone,candidate.currentPrice);
+        }
+      });
+    }
     const priorStillLocated = !priorWasActive || raw.some(candidate => candidate.family === prior.family && candidate.tf === prior.tf && candidate.source === prior.source);
     let previousCandidate = null;
     let evaluationPrior = prior;
@@ -2944,6 +3394,7 @@
     const minimumArmPct = horizonId === "quick" ? 0.0025 : horizonId === "2_3h" ? 0.006 : 0.012;
     const maximumArmPct = horizonId === "quick" ? 0.008 : horizonId === "2_3h" ? 0.02 : 0.04;
     const discarded = unique.filter(candidate => {
+      if(prior && candidate.setupIdentity && candidate.setupIdentity === prior.setupIdentity) return false;
       const absoluteDistance = candidate.distance == null ? Infinity : candidate.distance*Math.max(Math.abs(candidate.currentPrice),1);
       const armingDistance = clamp37(candidate.volatility.atr*maximumArmAtr,Math.abs(candidate.currentPrice || 0)*minimumArmPct,Math.abs(candidate.currentPrice || 0)*maximumArmPct);
       return absoluteDistance > armingDistance;
@@ -2978,6 +3429,14 @@
         ...discarded.map(candidate => ({family:candidate.family,tf:candidate.tf,state:"REMOVED",rankScore:null,zone:zoneText37(candidate),reason:`Outside the volatility-aware arming distance (${maximumArmAtr.toFixed(1)} ATR, capped by horizon)`}))
       ]
     };
+    if(priorWasActive && prior.setupIdentity && prior.setupIdentity !== decision.setupIdentity){
+      const replacedHistory = state.setupHistories.get(prior.setupIdentity);
+      if(replacedHistory){
+        replacedHistory.replaced = true;
+        replacedHistory.retired = true;
+        replacedHistory.lastState = "REPLACED";
+      }
+    }
     state.entryTrackers.set(horizonId,{...decision,zone:{...decision.zone},candidates:[],terminalVersion:terminalStates.includes(decision.state) ? snapshotVersion : null});
     return decision;
   }
@@ -3163,8 +3622,178 @@
     const after = managementFingerprint37(signal && signal.management);
     return {valid:before === after && DIRECTIONS.every(direction => interpretations[direction] === before),before,after,interpretations};
   }
-  function renderToolbarSignal37(){
+  function presentationContextKey37(){
+    const symbol=String((typeof cfg === "function" && cfg() && cfg().symbol) || document.getElementById("market")?.value || "").toUpperCase();
+    const position=openPositionSignal37();
+    const positionKey=position ? [position.side,position.chainId || position.time || position.price || "open"].join(":") : "flat";
+    const account=["account","accountSelect","selectedAccount","market"].map(id=>document.getElementById(id)?.value || "").join(":");
+    return [symbol,account,positionKey,state.horizon,positionEngine.getManagementHorizon() || state.horizon,state.direction].join("|");
+  }
+  function clonePublicationValue37(value){
+    if(value == null) return value;
+    try{ return typeof structuredClone === "function" ? structuredClone(value) : JSON.parse(JSON.stringify(value)); }
+    catch(_e){ return value; }
+  }
+  function publishedForContext37(contextKey,validOnly=false){
+    const published=validOnly ? state.lastValidPublishedSnapshot : state.lastPublishedSnapshot;
+    return published && published.contextKey===contextKey ? published : null;
+  }
+  function publishedWithinSafeWindow37(contextKey,now=Date.now()){
+    const published=publishedForContext37(contextKey,true);
+    if(!published) return null;
+    const orders=published.snapshot && published.snapshot.protectiveOrders;
+    const reference=published.snapshot && published.snapshot.position
+      ? num37(orders && orders.updatedAt)
+      : num37(published.publishedAt);
+    return reference != null && Math.max(0,now-reference)<=featureConfig.freshness.publishedSnapshotSafeMs ? published : null;
+  }
+  function setRefreshState37(next,contextKey,message=""){
+    state.refreshState=next;
+    windowSystem.setRefreshState(next,contextKey,message);
+  }
+  function invalidatePublishedContext37(nextContextKey=null){
+    state.refreshGeneration+=1;
+    state.refreshState="UNAVAILABLE";
+    state.workingSnapshot=null;
+    state.lastPublishedSnapshot=null;
+    state.lastValidPublishedSnapshot=null;
+    windowSystem.invalidateContext(nextContextKey);
+  }
+  function orderRefreshGate37(snapshot,contextKey,now=Date.now()){
+    if(!snapshot || !snapshot.position) return {terminal:true,state:"READY",reason:"No open position requires protective-order aggregation"};
+    const orders=snapshot.protectiveOrders || {};
+    const status=String(orders.status || "unavailable").toLowerCase();
+    const orderAt=num37(orders.updatedAt);
+    const orderAgeMs=orderAt == null ? Infinity : Math.max(0,now-orderAt);
+    if(status==="ok" && orders.sourcesChecked===true){
+      return {terminal:true,state:orderAgeMs>featureConfig.freshness.protectiveOrderStaleMs ? "STALE" : "READY",orderAgeMs};
+    }
+    const prior=publishedWithinSafeWindow37(contextKey,now);
+    if(status==="pending" || status==="loading"){
+      if(prior) return {terminal:false,state:"REFRESHING",prior,reason:"Protective-order request is in flight",orderAgeMs};
+      if(!publishedForContext37(contextKey,true)) return {terminal:false,state:"UNAVAILABLE",reason:"Awaiting the first protective-order snapshot",orderAgeMs};
+      return {terminal:true,state:"STALE",reason:"Last protective-order result exceeded the decision-safe window",orderAgeMs};
+    }
+    if(prior) return {terminal:false,state:"ERROR",prior,reason:"Update delayed · showing last valid result",orderAgeMs};
+    return {terminal:true,state:Number.isFinite(orderAgeMs) ? "STALE" : "UNAVAILABLE",reason:"Protective-order refresh is unavailable",orderAgeMs};
+  }
+  function positionDataState37(management,fallback="UNAVAILABLE"){
+    const freshness=management && management.freshness || {};
+    const stopFreshness=management && management.stopEvaluation && management.stopEvaluation.freshness || {};
+    const stopStatus=String(stopFreshness.stopStatus || freshness.stopStatus || "").toUpperCase();
+    const managementStatus=String(freshness.managementStatus || fallback || "UNAVAILABLE").toUpperCase();
+    return [stopStatus,managementStatus].includes("UNAVAILABLE") ? "UNAVAILABLE"
+      : [stopStatus,managementStatus].includes("STALE") ? "STALE"
+        : managementStatus==="LIVE" && (!stopStatus || stopStatus==="LIVE") ? "LIVE" : managementStatus;
+  }
+  function completeness37(snapshot,management,dependencyGate){
+    const position=!!(snapshot && snapshot.position);
+    if(!position) return {complete:true,sections:{pricePosition:"READY"}};
+    const targets=management && management.targetFramework;
+    const stop=management && management.stopEvaluation;
+    const terminalDependency=dependencyGate && dependencyGate.terminal===true;
+    const sections={
+      pricePosition:(snapshot.currentPrice!=null || management && management.position && management.position.currentPrice!=null) && snapshot.position ? "READY" : "UNAVAILABLE",
+      managementEvidence:management && management.evidence ? "READY" : "UNAVAILABLE",
+      obstacle:targets && targets.obstacle ? (targets.obstacle.available===false ? "UNAVAILABLE" : "READY") : "PENDING",
+      primaryTarget:targets && targets.primary ? (targets.primary.available===false ? "UNAVAILABLE" : "READY") : "PENDING",
+      extendedTarget:targets && targets.extended ? (targets.extended.available===false ? "UNAVAILABLE" : "READY") : "PENDING",
+      protectiveOrders:terminalDependency ? dependencyGate.state : "PENDING",
+      binanceExits:Array.isArray(management && management.exitEvaluations) ? "READY" : "PENDING",
+      grLadder:management && management.grExitLadder ? (management.grExitLadder.available===false ? "UNAVAILABLE" : "READY") : "PENDING",
+      stopProtection:stop && Object.prototype.hasOwnProperty.call(stop,"protection") ? (stop.protection==="UNAVAILABLE" ? "UNAVAILABLE" : "READY") : "PENDING",
+      stopQuality:stop && stop.quality ? (stop.quality.value==="UNAVAILABLE" ? "UNAVAILABLE" : "READY") : "PENDING",
+      technicalInvalidation:stop && stop.invalidation ? (stop.invalidation.selected ? "READY" : "UNAVAILABLE") : "PENDING",
+      recommendation:stop && stop.recommendation ? (String(stop.recommendation.value || "").startsWith("UNAVAILABLE") ? "UNAVAILABLE" : "READY") : "PENDING",
+      volatility:management && management.volatility ? (management.volatility.available===false ? "UNAVAILABLE" : "READY") : "PENDING",
+      lifecycle:management && management.lifecycle ? "READY" : "PENDING",
+      freshness:management && management.freshness && stop && stop.freshness ? positionDataState37(management) : "PENDING"
+    };
+    const complete=Object.values(sections).every(value=>value!=="PENDING");
+    const recommendation=String(stop && stop.recommendation && stop.recommendation.value || "");
+    const coherent=!(positionDataState37(management)==="LIVE" && /REQUIRED DATA STALE/i.test(recommendation));
+    return {complete:complete && coherent,coherent,sections};
+  }
+  function publicationSnapshot37(snapshot){
+    if(!snapshot) return null;
+    return clonePublicationValue37({
+      symbol:snapshot.symbol,horizonId:snapshot.horizonId,createdAt:snapshot.createdAt,version:snapshot.version,signature:snapshot.signature,
+      currentPrice:snapshot.currentPrice,position:snapshot.position,protectiveOrders:snapshot.protectiveOrders,exitOrderState:snapshot.exitOrderState,freshness:snapshot.freshness
+    });
+  }
+  function publishPresentation37(publication){
+    if(publication.generation!==state.refreshGeneration || publication.contextKey!==presentationContextKey37()) return false;
+    state.lastPublishedSnapshot=publication;
+    if(publication.refreshState==="READY") state.lastValidPublishedSnapshot=publication;
+    state.signalSummaryVariants=publication.signalSummaryVariants;
+    if(state.entry){
+      state.entry.dataset.tone=publication.entryTone;
+      state.entry.textContent=publication.signalSummaryVariants.full;
+      state.entry.removeAttribute("title");
+      updateTriggerAlert37(publication.signal,publication.decision);
+    }
+    if(state.exit){
+      state.exit.dataset.tone=publication.exitTone;
+      state.exit.textContent=publication.exitText;
+      state.exit.removeAttribute("title");
+    }
+    renderResponsiveSignalSummary37();
+    if(state.detailsBody){
+      renderSignalDetailsReport37(publication.signalReport);
+      if(state.detailsTitle) state.detailsTitle.textContent="Signal Details";
+      positionToolbarSignalDetails37();
+    }
+    windowSystem.update(publication);
+    setRefreshState37(publication.refreshState,publication.contextKey);
+    state.lastRenderAt=Date.now();
+    return true;
+  }
+  function runRefreshSelfTests37(){
+    const saved={last:state.lastPublishedSnapshot,valid:state.lastValidPublishedSnapshot,generation:state.refreshGeneration};
+    const now=Date.now(),context="BTCUSDT|account-a|LONG:campaign-a|quick|quick|AUTO";
+    const orders={status:"ok",sourcesChecked:true,updatedAt:now-5000,orders:[]};
+    state.lastValidPublishedSnapshot={contextKey:context,publishedAt:now-5000,snapshot:{position:{side:"LONG"},protectiveOrders:orders}};
+    state.lastPublishedSnapshot=state.lastValidPublishedSnapshot;
+    const pending=orderRefreshGate37({position:{side:"LONG"},protectiveOrders:{...orders,status:"pending"}},context,now);
+    const failed=orderRefreshGate37({position:{side:"LONG"},protectiveOrders:{...orders,status:"error"}},context,now);
+    const stale=orderRefreshGate37({position:{side:"LONG"},protectiveOrders:{...orders,status:"pending",updatedAt:now-featureConfig.freshness.publishedSnapshotSafeMs-1}},context,now+featureConfig.freshness.publishedSnapshotSafeMs);
+    const completeSnapshot={currentPrice:100,position:{side:"LONG"},protectiveOrders:orders};
+    const completeManagement={
+      evidence:{supporting:[],conflicting:[]},targetFramework:{obstacle:{available:true},primary:{available:true},extended:{available:false}},
+      exitEvaluations:[],grExitLadder:{available:true},volatility:{available:true},lifecycle:{state:"ESTABLISHED"},freshness:{managementStatus:"LIVE",stopStatus:"LIVE"},
+      stopEvaluation:{protection:"FULLY PROTECTED",quality:{value:"STRUCTURALLY ALIGNED"},invalidation:{selected:{price:90}},recommendation:{value:"KEEP CURRENT STOP"},freshness:{stopStatus:"LIVE",stopStaleSources:[]}}
+    };
+    const completeResult=completeness37(completeSnapshot,completeManagement,{terminal:true,state:"READY"});
+    const pendingResult=completeness37(completeSnapshot,completeManagement,{terminal:false,state:"REFRESHING"});
+    const contradictory=completeness37(completeSnapshot,{...completeManagement,stopEvaluation:{...completeManagement.stopEvaluation,recommendation:{value:"UNAVAILABLE — REQUIRED DATA STALE"}}},{terminal:true,state:"READY"});
+    const cloneSource={stopEvaluation:{recommendation:{value:"KEEP CURRENT STOP"}}},clone=clonePublicationValue37(cloneSource);cloneSource.stopEvaluation.recommendation.value="MUTATED";
+    const cases={
+      completeInitialSnapshotPublishable:completeResult.complete && Object.keys(completeResult.sections).length===15,
+      pendingDependencyNotPublishable:!pendingResult.complete && pendingResult.sections.protectiveOrders==="PENDING",
+      contradictoryLiveSnapshotRejected:!contradictory.complete && contradictory.coherent===false,
+      publishedSnapshotNotMutatedInPlace:clone.stopEvaluation.recommendation.value==="KEEP CURRENT STOP",
+      oppositeLiveExitIncluded:orderMatchesPosition37({side:"SELL",positionSide:"LONG",status:"NEW"},{side:"LONG"}),
+      sameDirectionEntryExcluded:!orderMatchesPosition37({side:"BUY",positionSide:"LONG",status:"NEW"},{side:"LONG"}),
+      wrongPositionSideExcluded:!orderMatchesPosition37({side:"SELL",positionSide:"SHORT",status:"NEW"},{side:"LONG"}),
+      inactiveOrderExcluded:!orderMatchesPosition37({side:"SELL",positionSide:"LONG",status:"FILLED"},{side:"LONG"}),
+      grOwnershipRequiresIdentity:grOrderOwnership37({clientOrderId:"GR_EXIT_7"}) && !grOrderOwnership37({clientOrderId:"manual-7"}),
+      fiveSecondsIsCurrent:orderRefreshGate37({position:{side:"LONG"},protectiveOrders:orders},context,now).state==="READY",
+      pendingRetainsComplete:!pending.terminal && pending.state==="REFRESHING" && pending.prior===state.lastValidPublishedSnapshot,
+      failureRetainsWithinWindow:!failed.terminal && failed.state==="ERROR",
+      staleThresholdStopsRetention:stale.terminal && stale.state==="STALE",
+      noPriorPendingUnavailable:(()=>{state.lastValidPublishedSnapshot=null;return orderRefreshGate37({position:{side:"LONG"},protectiveOrders:{status:"pending",updatedAt:null}},context,now).state==="UNAVAILABLE";})(),
+      symbolChangeInvalidates:!publishedForContext37(context.replace("BTCUSDT","ETHUSDT"),true),
+      accountChangeInvalidates:!publishedForContext37(context.replace("account-a","account-b"),true),
+      positionCloseInvalidates:!publishedForContext37(context.replace("LONG:campaign-a","flat"),true),
+      sideChangeInvalidates:!publishedForContext37(context.replace("LONG:campaign-a","SHORT:campaign-b"),true),
+      lateGenerationRejected:(()=>{state.refreshGeneration=8;return !(7===state.refreshGeneration);})()
+    };
+    state.lastPublishedSnapshot=saved.last;state.lastValidPublishedSnapshot=saved.valid;state.refreshGeneration=saved.generation;
+    return {passed:Object.values(cases).every(Boolean),cases};
+  }
+  function renderToolbarSignal37(contextKey=presentationContextKey37(),generation=state.refreshGeneration){
     if(!ensureToolbarSignalUi37()) return;
+    if(generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return {discarded:true};
     if(state.directionChip){
       state.directionChip.textContent = `DIR: ${state.direction}`;
       state.directionChip.classList.add("is-active");
@@ -3176,8 +3805,25 @@
       if(chip) chip.classList.toggle("is-active",state.horizon === item.id);
     });
     windowSystem.setSignalHorizon(state.horizon);
+    requestAuthoritativeOrders37();
     const bundle = ensureSignalData37(state.horizon);
     const ready = bundle.health.status === "sufficient" || bundle.health.status === "stale";
+    if(!ready){
+      const prior=publishedWithinSafeWindow37(contextKey);
+      if(prior && (bundle.health.status==="loading" || state.dataLoadPromise)){
+        setRefreshState37("REFRESHING",contextKey);
+        state.lastRenderAt=Date.now();
+        return {retained:true,status:"loading"};
+      }
+      if(prior && bundle.health.status==="failed"){
+        setRefreshState37("ERROR",contextKey,"Update delayed · showing last valid result");
+        state.lastRenderAt=Date.now();
+        return {retained:true,status:"failed"};
+      }
+      setRefreshState37("UNAVAILABLE",contextKey);
+      state.lastRenderAt=Date.now();
+      return {retained:false,status:bundle.health.status};
+    }
     state.activeSnapshot = ready ? coherentSignalSnapshot37(bundle.plan,bundle.health) : null;
     if(state.activeSnapshot) state.activeSnapshot.health = bundle.health;
     try{
@@ -3212,48 +3858,51 @@
         ? (signal.fadeDirection || signal.marketDirection)
         : state.direction;
       const entryQuality = evaluateEntryQuality37(signal,thesis,entryDirection);
-      if(state.entry){
-        const decision = signal.entryDecision;
-        if(state.direction === "AUTO" && decision){
-          state.entry.dataset.tone = decision.state === "READY" ? pillTone37(signal.entry)
+      const decision = signal.entryDecision;
+      let entryTone;
+      let signalSummaryVariants;
+      if(state.direction === "AUTO" && decision){
+          entryTone = decision.state === "READY" ? pillTone37(signal.entry)
             : decision.state === "INVALIDATED" || decision.state === "EXPIRED" ? "red"
               : decision.state === "TRIGGER DEVELOPING" || decision.state === "ZONE ENGAGED" ? "orange" : "gray";
-          state.signalSummaryVariants = signalSummaryVariants37(signal,decision);
-        }else{
+          signalSummaryVariants = signalSummaryVariants37(signal,decision);
+      }else{
           const displayValue = thesis && thesis.fadeRisk ? "ENTRY FADE RISK" : thesis ? `THESIS ${thesis.status}` : signal.entry;
-          state.entry.dataset.tone = pillTone37(displayValue);
+          entryTone = pillTone37(displayValue);
           if(thesis && state.direction !== signal.marketDirection){
-            state.signalSummaryVariants = signalSummaryVariants37({marketDirection:state.direction,confidence:thesis.confidence},null);
+            signalSummaryVariants = signalSummaryVariants37({marketDirection:state.direction,confidence:thesis.confidence},null);
           }else{
-            state.signalSummaryVariants = signalSummaryVariants37(signal,decision);
+            signalSummaryVariants = signalSummaryVariants37(signal,decision);
           }
-        }
-        state.entry.textContent = state.signalSummaryVariants.full;
-        state.entry.removeAttribute("title");
-        updateTriggerAlert37(signal,decision);
       }
-      if(state.exit){
-        state.exit.dataset.tone = pillTone37(signal.exit);
-        state.exit.textContent = exitDisplayText37(signal.exit);
-        state.exit.removeAttribute("title");
-      }
-      renderResponsiveSignalSummary37();
       const signalReport = signalDetailsReport37(signal,thesis,entryQuality);
-      if(state.detailsBody){
-        renderSignalDetailsReport37(signalReport);
-        if(state.detailsTitle) state.detailsTitle.textContent = "Signal Details";
-        positionToolbarSignalDetails37();
+      const dependencyGate=orderRefreshGate37(state.activeSnapshot,contextKey);
+      const complete=completeness37(state.activeSnapshot,signal.management,dependencyGate);
+      state.workingSnapshot={
+        generation,contextKey,startedAt:state.refreshStartedAt,snapshot:state.activeSnapshot,signal,signalReport,management:signal.management,sections:complete.sections,
+        dependencyGate:{terminal:dependencyGate.terminal,state:dependencyGate.state,reason:dependencyGate.reason,orderAgeMs:dependencyGate.orderAgeMs,retained:!!dependencyGate.prior}
+      };
+      if(generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return {discarded:true};
+      if(!dependencyGate.terminal){
+        setRefreshState37(dependencyGate.state,contextKey,dependencyGate.state==="ERROR" ? dependencyGate.reason : "");
+        state.lastRenderAt=Date.now();
+        return {retained:!!dependencyGate.prior,status:dependencyGate.state};
       }
-      windowSystem.update({
-        signalReport,
-        management:signal.management,
-        managementDataStatus:bundle.health.managementStatus || bundle.health.status,
-        snapshot:state.activeSnapshot || state.marketSnapshot,
-        horizonLabel:horizonLabel37(state.horizon),
-        signalHorizonId:state.horizon,
+      if(!complete.complete){
+        setRefreshState37("ERROR",contextKey,"Update delayed · incomplete snapshot discarded");
+        state.lastRenderAt=Date.now();
+        return {discarded:true,status:"incomplete",sections:complete.sections};
+      }
+      const dataState=positionDataState37(signal.management,bundle.health.managementStatus || bundle.health.status);
+      const refreshState=dependencyGate.state==="STALE" || dataState==="STALE" ? "STALE" : dependencyGate.state==="UNAVAILABLE" || dataState==="UNAVAILABLE" ? "UNAVAILABLE" : "READY";
+      const publication={
+        generation,contextKey,publishedAt:Date.now(),refreshState,sections:complete.sections,
+        signal,decision,signalSummaryVariants,entryTone,exitTone:pillTone37(signal.exit),exitText:exitDisplayText37(signal.exit),
+        signalReport,management:clonePublicationValue37(signal.management),managementDataStatus:dataState,
+        snapshot:publicationSnapshot37(state.activeSnapshot),horizonLabel:horizonLabel37(state.horizon),signalHorizonId:state.horizon,
         signalTooltip:signalToolbarTooltip37(signal,entryQuality,thesis)
-      });
-      state.lastRenderAt = Date.now();
+      };
+      publishPresentation37(publication);
     }finally{
       state.activeSnapshot = null;
     }
@@ -3262,12 +3911,29 @@
     if(!state.initialized) return;
     const run = () => {
       state.refreshTimer = null;
-      try{
-        renderToolbarSignal37();
-        state.lastError = null;
-      }catch(error){
-        state.lastError = error && error.stack || String(error);
+      const contextKey=presentationContextKey37();
+      const incompatible=!!state.lastPublishedSnapshot && state.lastPublishedSnapshot.contextKey!==contextKey;
+      if(incompatible){
+        invalidatePublishedContext37(contextKey);
+        if(state.entry){ state.entry.textContent="Unavailable";state.entry.dataset.tone="gray"; }
+        if(state.exit){ state.exit.textContent="WAIT";state.exit.dataset.tone="gray"; }
       }
+      const generation=++state.refreshGeneration;
+      const retained=!!publishedWithinSafeWindow37(contextKey);
+      setRefreshState37(retained ? "REFRESHING" : "UNAVAILABLE",contextKey);
+      state.refreshStartedAt=Date.now();
+      const calculate = () => {
+        if(generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return;
+        try{
+          renderToolbarSignal37(contextKey,generation);
+          state.lastError = null;
+        }catch(error){
+          state.lastError = error && error.stack || String(error);
+          if(publishedWithinSafeWindow37(contextKey)) setRefreshState37("ERROR",contextKey,"Update delayed · showing last valid result");
+          else setRefreshState37("UNAVAILABLE",contextKey);
+        }
+      };
+      if(retained && typeof requestAnimationFrame === "function") requestAnimationFrame(calculate); else calculate();
     };
     if(immediate){
       if(state.refreshTimer != null) clearTimeout(state.refreshTimer);
@@ -3294,24 +3960,50 @@
       direction:state.direction,
       managementHorizon:positionEngine.getManagementHorizon() || state.horizon,
       lastError:state.lastError,
-      snapshot:state.marketSnapshot ? {
-        version:state.marketSnapshot.version,
-        createdAt:state.marketSnapshot.createdAt,
-        symbol:state.marketSnapshot.symbol,
-        managementInvariant:state.marketSnapshot.managementValidation && state.marketSnapshot.managementValidation.valid,
-        managementFingerprint:managementFingerprint37(state.marketSnapshot.signal && state.marketSnapshot.signal.management)
+      refreshState:state.refreshState,
+      refreshGeneration:state.refreshGeneration,
+      workingSnapshot:state.workingSnapshot ? {generation:state.workingSnapshot.generation,contextKey:state.workingSnapshot.contextKey,sections:state.workingSnapshot.sections,dependencyGate:state.workingSnapshot.dependencyGate} : null,
+      snapshot:state.lastPublishedSnapshot ? {
+        version:state.lastPublishedSnapshot.snapshot && state.lastPublishedSnapshot.snapshot.version,
+        createdAt:state.lastPublishedSnapshot.snapshot && state.lastPublishedSnapshot.snapshot.createdAt,
+        symbol:state.lastPublishedSnapshot.snapshot && state.lastPublishedSnapshot.snapshot.symbol,
+        freshness:state.lastPublishedSnapshot.snapshot && state.lastPublishedSnapshot.snapshot.freshness,
+        contextKey:state.lastPublishedSnapshot.contextKey,
+        refreshState:state.lastPublishedSnapshot.refreshState,
+        sections:state.lastPublishedSnapshot.sections,
+        managementFingerprint:managementFingerprint37(state.lastPublishedSnapshot.management)
       } : null,
       management:positionEngine._diagnostics(),
+      refresh:windowSystem._diagnostics(),
+      setupHistories:Array.from(state.setupHistories.values()).map(item => ({...item})),
+      targetSelfTests:targetEngine._selfTest(),
+      refreshSelfTests:runRefreshSelfTests37(),
       selfTests:positionEngine._selfTest(),
       entrySelfTests:runEntrySelfTests37(),
       presentationSelfTests:runPresentationSelfTests37(),
       windowPresentationSelfTests:windowSystem._selfTest()
     };
   }
+  function reconcilePresentationContext37(){
+    const contextKey=presentationContextKey37();
+    if(state.lastPublishedSnapshot && state.lastPublishedSnapshot.contextKey!==contextKey){
+      invalidatePublishedContext37(contextKey);
+    }
+    scheduleToolbarSignalRefresh37();
+  }
   function initialize37(){
     if(state.initialized) return api;
     state.initialized = true;
     ensureToolbarSignalUi37();
+    const lifecycleSignal=state.uiAbort && state.uiAbort.signal;
+    if(lifecycleSignal){
+      window.addEventListener("v13:open-position-change",reconcilePresentationContext37,{signal:lifecycleSignal});
+      window.addEventListener("v14:binance-state-change",() => scheduleToolbarSignalRefresh37(),{signal:lifecycleSignal});
+      window.addEventListener("pressure-signal:clear",() => invalidatePublishedContext37(presentationContextKey37()),{signal:lifecycleSignal});
+      document.addEventListener("change",event => {
+        if(["market","account","accountSelect","selectedAccount"].includes(event.target && event.target.id)) reconcilePresentationContext37();
+      },{signal:lifecycleSignal,capture:true});
+    }
     scheduleToolbarSignalRefresh37(true);
     state.lifecycleTimer = setInterval(scheduleToolbarSignalRefresh37,featureConfig.refreshMs);
     if(typeof draw === "function" && !state.drawWrapper){
@@ -3359,13 +4051,21 @@
     state.chips.clear();
     state.marketSnapshot = null;
     state.activeSnapshot = null;
+    state.workingSnapshot = null;
+    state.lastPublishedSnapshot = null;
+    state.lastValidPublishedSnapshot = null;
+    state.refreshGeneration += 1;
+    state.refreshState = "IDLE";
     state.signalSummaryVariants = null;
     state.seenTriggerAlertIds.clear();
     state.seenTriggerAlertOrder.length = 0;
+    state.entryTrackers.clear();
+    state.setupHistories.clear();
   }
   function setManagementHorizon37(next){
     const selected = positionEngine.setManagementHorizon(next);
     state.marketSnapshot = null;
+    invalidatePublishedContext37(presentationContextKey37());
     scheduleToolbarSignalRefresh37(true);
     return selected;
   }
@@ -3386,6 +4086,7 @@
     openPositionManagement:windowSystem.openPosition,
     getSignalCopyContent:windowSystem.getSignalCopy,
     getManagementCopyContent:windowSystem.getPositionCopy,
+    invalidatePublishedSnapshot:() => invalidatePublishedContext37(presentationContextKey37()),
     getDiagnostics:diagnostics37
   });
   Object.defineProperty(window,"PRESSURE_SIGNAL",{value:api,configurable:true});

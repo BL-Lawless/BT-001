@@ -5692,10 +5692,14 @@
     return data || {};
   }
   async function signedOrderWrite(method,params){
-    return signedBinanceWrite(ORDER_WRITE_URL,method,params);
+    const result=await signedBinanceWrite(ORDER_WRITE_URL,method,params);
+    try{ const cache=window.BINANCE_OPEN_ORDERS_CACHE;if(cache&&typeof cache.refresh==="function")cache.refresh({reason:"calculator-order-write",maxAgeMs:0}).catch(()=>{}); }catch(_e){}
+    return result;
   }
   async function signedAlgoOrderWrite(method,params){
-    return signedBinanceWrite(ALGO_ORDER_WRITE_URL,method,params);
+    const result=await signedBinanceWrite(ALGO_ORDER_WRITE_URL,method,params);
+    try{ const cache=window.BINANCE_OPEN_ORDERS_CACHE;if(cache&&typeof cache.refresh==="function")cache.refresh({reason:"calculator-algo-order-write",maxAgeMs:0}).catch(()=>{}); }catch(_e){}
+    return result;
   }
   function applyWriteSuccessToRow(row,response,fallback){
     if(!row) return;

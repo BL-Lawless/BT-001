@@ -12,6 +12,25 @@
     managementLevels:Object.freeze({zoneAtr:0.12,proximityAtr:0.35,confluenceAtr:0.20,exceptionalDistanceAtr:3.0,migrationMinAtr:0.20}),
     volatility:Object.freeze({atrPeriod:14,historyCandles:100,minimumSamples:60,quietPercentile:25,highPercentile:75,extremePercentile:95,toleranceMultipliers:Object.freeze({QUIET:0.80,NORMAL:1.00,HIGH:1.25,EXTREME:1.50})}),
     pressure:Object.freeze({neutralImbalance:0.025,materialShare:0.60,strongShare:0.62,accelerating:0.02,persistentCloses:2}),
+    signalQuality:Object.freeze({grades:Object.freeze({A:80,B:65,C:50}),minimumRewardRisk:1.25,preferredRewardRisk:2,minimumTargetAtr:0.55,preferredTargetAtr:1.25,nearOriginAtr:0.45,exhaustionAtr:2.8}),
+    targetFramework:Object.freeze({
+      eligibleTimeframes:Object.freeze(["1h","4h","1d"]),obstacleTimeframes:Object.freeze(["1m","3m","5m","15m"]),
+      mergeAtr:0.20,nearTargetAtr:0.30,noiseAtr:0.25,majorObstacleAtr:0.75,
+      maximumDistanceAtr:Object.freeze({quick:14,"2_3h":22,"6_8h":32}),
+      concentrationShare:0.60,smallPartialShare:0.25,largeEarlyShare:0.50,coverageTolerance:1e-8
+    }),
+    freshness:Object.freeze({
+      priceStaleMs:8000,
+      positionStaleMs:45000,
+      protectiveOrderStaleMs:45000,
+      publishedSnapshotSafeMs:45000,
+      formingCadenceMultiplier:3,
+      closedEvidenceCadenceMultiplier:3
+    }),
+    stopEvaluation:Object.freeze({
+      buffers:Object.freeze({quick:Object.freeze({minimumAtr:0.20,maximumAtr:0.35,defaultAtr:0.275}),"2_3h":Object.freeze({minimumAtr:0.25,maximumAtr:0.50,defaultAtr:0.375}),"6_8h":Object.freeze({minimumAtr:0.30,maximumAtr:0.60,defaultAtr:0.45})}),
+      tightToleranceAtr:0.10,wideToleranceAtr:0.45,duplicateAtr:0.10,wideGapAtr:1.50,concentrationShare:0.70,liquidationMinimumAtr:0.35,quantityTolerance:1e-8
+    }),
     healthOrder:Object.freeze(["HEALTHY","CAUTION","WEAKENING","AT RISK","INVALIDATED"]),
     pathOrder:Object.freeze(["CLEAR","WARNING","DEVELOPING","CONFIRMED","CLEARED"]),
     actions:Object.freeze(["HOLD","TIGHTEN SL","TAKE PROFIT","TRIM","CLOSE"]),

@@ -5541,8 +5541,10 @@ function buildOpenBoxes(lots,risk,symbol){
       leverage:Number(row.leverage),
       positionInitialMargin:Number(row.positionInitialMargin),
       isolatedMargin:Number(row.isolatedMargin),
+      liquidationPrice:Number(row.liquidationPrice),
       marginAsset:row.marginAsset || quote(symbol),
-      chainId:activeChainId
+      chainId:activeChainId,
+      updatedAt:Date.now()
     });
   }
 
@@ -15060,6 +15062,7 @@ startTradeAuto();
   window.v13OpenAlgoOrders21 = Array.isArray(window.v13OpenAlgoOrders21) ? window.v13OpenAlgoOrders21 : [];
   window.v13OpenOrdersStatus21 = window.v13OpenOrdersStatus21 || "unknown";
   window.v13OpenOrdersTs21 = window.v13OpenOrdersTs21 || 0;
+  window.v13OpenOrdersAttemptTs21 = window.v13OpenOrdersAttemptTs21 || 0;
   window.v13StopSourcesChecked21 = !!window.v13StopSourcesChecked21;
 
   function currentSymbol21(){
@@ -15546,33 +15549,41 @@ startTradeAuto();
     if(rows && Array.isArray(rows.data)) return rows.data;
     return [];
   }
+  let openOrdersRefreshPromise21 = null;
   async function fetchOpenOrders21(key,sec,off){
-    if(typeof signedGet !== "function") return;
+    if(typeof signedGet !== "function") return null;
+    if(openOrdersRefreshPromise21) return openOrdersRefreshPromise21;
     const sym = currentSymbol21();
-    let normalOk = false;
-    let algoOk = false;
-    window.v13OpenOrdersStatus21 = "pending";
-    window.v13StopSourcesChecked21 = false;
-    try{
-      const rows = await signedGet(OPEN_ORDERS_URL21,{symbol:sym},key,sec,off);
-      window.v13OpenOrders21 = unwrapOrders21(rows);
-      normalOk = true;
-    }catch(e){
-      console.warn("PATCH_31 normal openOrders refresh failed",e);
-      window.v13OpenOrders21 = [];
-    }
-    try{
-      const algoRows = await signedGet(OPEN_ALGO_ORDERS_URL21,{symbol:sym},key,sec,off);
-      window.v13OpenAlgoOrders21 = unwrapOrders21(algoRows);
-      algoOk = true;
-    }catch(e){
-      console.warn("PATCH_31 conditional openAlgoOrders refresh failed",e);
-      window.v13OpenAlgoOrders21 = [];
-    }
-    window.v13OpenOrdersTs21 = Date.now();
-    window.v13StopSourcesChecked21 = normalOk && algoOk;
-    window.v13OpenOrdersStatus21 = normalOk && algoOk ? "ok" : (normalOk || algoOk ? "partial" : "error");
-    return {normalOk,algoOk};
+    openOrdersRefreshPromise21 = (async () => {
+      let normalOk = false;
+      let algoOk = false;
+      let nextNormal = null;
+      let nextAlgo = null;
+      window.v13OpenOrdersStatus21 = "pending";
+      window.v13OpenOrdersAttemptTs21 = Date.now();
+      try{
+        const rows = await signedGet(OPEN_ORDERS_URL21,{symbol:sym},key,sec,off);
+        nextNormal = unwrapOrders21(rows);
+        normalOk = true;
+      }catch(e){
+        console.warn("PATCH_31 normal openOrders refresh failed",e);
+      }
+      try{
+        const algoRows = await signedGet(OPEN_ALGO_ORDERS_URL21,{symbol:sym},key,sec,off);
+        nextAlgo = unwrapOrders21(algoRows);
+        algoOk = true;
+      }catch(e){
+        console.warn("PATCH_31 conditional openAlgoOrders refresh failed",e);
+      }
+      if(sym !== currentSymbol21()) return {normalOk:false,algoOk:false,discarded:true,symbol:sym};
+      if(normalOk) window.v13OpenOrders21 = nextNormal;
+      if(algoOk) window.v13OpenAlgoOrders21 = nextAlgo;
+      window.v13StopSourcesChecked21 = normalOk && algoOk;
+      window.v13OpenOrdersStatus21 = normalOk && algoOk ? "ok" : (normalOk || algoOk ? "partial" : "error");
+      if(normalOk && algoOk) window.v13OpenOrdersTs21 = Date.now();
+      return {normalOk,algoOk,symbol:sym,updatedAt:window.v13OpenOrdersTs21};
+    })().finally(() => { openOrdersRefreshPromise21 = null; });
+    return openOrdersRefreshPromise21;
   }
   function orderStateSig21(rows){
     return (Array.isArray(rows) ? rows : [])
@@ -15621,6 +15632,41 @@ startTradeAuto();
   let lastBinanceStateSig21 = null;
   let pendingOpenRisk21 = null;
   let openVisualSyncTimer21 = null;
+  function authoritativeOrderSnapshot21(symbol=currentSymbol21()){
+    const normalized=String(symbol || "").toUpperCase();
+    const clone = row => row && typeof row === "object" ? {...row} : row;
+    return {
+      symbol:normalized,
+      status:String(window.v13OpenOrdersStatus21 || "unknown").toLowerCase(),
+      sourcesChecked:window.v13StopSourcesChecked21 === true,
+      requestInFlight:!!openOrdersRefreshPromise21,
+      updatedAt:Number(window.v13OpenOrdersTs21) || null,
+      attemptedAt:Number(window.v13OpenOrdersAttemptTs21) || null,
+      orders:(Array.isArray(window.v13OpenOrders21) ? window.v13OpenOrders21 : []).filter(row => row && String(row.symbol || "").toUpperCase()===normalized).map(clone),
+      algoOrders:(Array.isArray(window.v13OpenAlgoOrders21) ? window.v13OpenAlgoOrders21 : []).filter(row => row && String(row.symbol || "").toUpperCase()===normalized).map(clone)
+    };
+  }
+  async function requestAuthoritativeOrders21(opt={}){
+    const maxAgeMs=Math.max(0,Number(opt.maxAgeMs == null ? 5000 : opt.maxAgeMs) || 0);
+    const cached=authoritativeOrderSnapshot21();
+    if(cached.status==="ok" && cached.sourcesChecked && cached.updatedAt && Date.now()-cached.updatedAt<=maxAgeMs) return cached;
+    if(openOrdersRefreshPromise21){ await openOrdersRefreshPromise21; return authoritativeOrderSnapshot21(); }
+    if(typeof hasKeys !== "function" || !hasKeys()) return cached;
+    const key=apiKeyEl.value.trim(),sec=apiSecretEl.value.trim();
+    if(!key || !sec) return cached;
+    const off=opt.off != null ? opt.off : (typeof timeOffset === "function" ? await timeOffset() : 0);
+    const previous=binanceStateSig21(lastSig21 || "");
+    const result=await fetchOpenOrders21(key,sec,off);
+    const next=binanceStateSig21(lastSig21 || "");
+    if(opt.publish!==false && result && result.normalOk && result.algoOk && next!==previous) publishBinanceStateChange21(next,previous);
+    return authoritativeOrderSnapshot21();
+  }
+  window.BINANCE_OPEN_ORDERS_CACHE = Object.freeze({
+    version:"BT001_AUTH_OPEN_ORDERS_V1",
+    getSnapshot:authoritativeOrderSnapshot21,
+    refresh:requestAuthoritativeOrders21,
+    diagnostics:() => ({...authoritativeOrderSnapshot21(),orders:authoritativeOrderSnapshot21().orders.length,algoOrders:authoritativeOrderSnapshot21().algoOrders.length})
+  });
   async function applyOpenPositionVisualSync21(risk,auth){
     updateBoxesFromRisk21(risk);
     if(auth && auth.key && auth.sec){
@@ -15646,8 +15692,6 @@ startTradeAuto();
     if(busy21 || typeof hasKeys !== "function" || !hasKeys()) return;
     busy21 = true;
     try{
-      const key = apiKeyEl.value.trim();
-      const sec = apiSecretEl.value.trim();
       const refreshed = typeof window.refreshOpenPosition === "function"
         ? await window.refreshOpenPosition({silent:true})
         : null;
@@ -15658,7 +15702,8 @@ startTradeAuto();
       const openPositionChanged = sig !== lastSig21;
       lastSig21 = sig;
 
-      const orderRead = await fetchOpenOrders21(key,sec,off);
+      const orderSnapshot = await requestAuthoritativeOrders21({reason:"position-order-rest-watcher",maxAgeMs:5000,off,publish:false});
+      const orderRead = {normalOk:orderSnapshot && orderSnapshot.status==="ok",algoOk:orderSnapshot && orderSnapshot.status==="ok" && orderSnapshot.sourcesChecked===true};
       const binanceSig = binanceStateSig21(sig);
       if(!orderRead || !orderRead.normalOk || !orderRead.algoOk){
         if(!openPositionChanged) try{ if(typeof draw === "function") draw(); }catch(e){}
@@ -22430,7 +22475,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     hoverClientY:null,
     hoverInsideChart:false,
     suppressResizeRender:false,
-    expandedRect:null
+    expandedRect:null,
+    crosshair:{active:false,clientX:null,clientY:null,selectedLevel:null,scale:null,listenerBindings:0,updates:0,labelSide:null,labelObserver:null}
   };
   function activeWfTradeKey(){
     try{
@@ -22752,6 +22798,114 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       return;
     }
     renderHover({clientX:x,clientY:y});
+  }
+  function wfCrosshairMoney(value,{signed=false}={}){
+    const amount=Math.round(Math.abs(Number(value) || 0)).toLocaleString("en-US");
+    if(Math.abs(Number(value) || 0)<0.005) return "$0";
+    if(Number(value)<0) return `−$${amount}`;
+    return `${signed ? "+" : ""}$${amount}`;
+  }
+  function wfCrosshairDifferenceText(selected,current){
+    return wfCrosshairMoney(Number(selected)-Number(current),{signed:true});
+  }
+  function wfCrosshairBlockPosition({crosshairX,blockWidth,blockHeight,plotLeft,plotRightEdge,plotTop,plotBottom,lineY,horizontalGap=8,verticalGap=4,rowHeight=18}){
+    const leftEdge=Number(plotLeft);
+    const rightEdge=Math.max(leftEdge,Number(plotRightEdge));
+    const rightX=Number(crosshairX)+horizontalGap;
+    const leftX=Number(crosshairX)-horizontalGap-Number(blockWidth);
+    const side=rightX+Number(blockWidth)<=rightEdge ? "right" : "left";
+    const preferredX=side==="right" ? rightX : leftX;
+    const preferredTop=Number(lineY)-verticalGap-Number(rowHeight);
+    return {
+      side,
+      left:clamp(preferredX,leftEdge,Math.max(leftEdge,rightEdge-Number(blockWidth))),
+      top:clamp(preferredTop,Number(plotTop),Math.max(Number(plotTop),Number(plotBottom)-Number(blockHeight)))
+    };
+  }
+  function hideWfCrosshair({clear=true}={}){
+    const crosshair=wfSyncState.crosshair;
+    crosshair.active=false;
+    crosshair.labelSide=null;
+    if(clear){ crosshair.clientX=null;crosshair.clientY=null;crosshair.selectedLevel=null; }
+    const overlay=q("wfCrosshair");
+    if(overlay) overlay.classList.add("hidden");
+  }
+  function renderWfCrosshair(){
+    const chart=q("wfChart"),win=q("wfWindow"),crosshair=wfSyncState.crosshair,scale=crosshair.scale;
+    const overlay=q("wfCrosshair");
+    if(!visible || !chart || !win || win.classList.contains("is-collapsed") || !overlay || !crosshair.active || !scale || !Number.isFinite(crosshair.selectedLevel)){
+      if(overlay) overlay.classList.add("hidden");
+      return;
+    }
+    const chartRect=chart.getBoundingClientRect();
+    const localX=clamp(Number(crosshair.clientX)-chartRect.left,scale.plotLeft,Math.max(scale.plotLeft,chart.clientWidth-scale.plotRight));
+    const plotY=clamp(scale.valueToY(crosshair.selectedLevel),0,scale.plotHeight);
+    const localY=scale.plotTop+plotY;
+    const current=Number(lastModel && lastModel.selectedNet) || 0;
+    const vertical=overlay.querySelector(".wf-crosshair-v");
+    const horizontal=overlay.querySelector(".wf-crosshair-h");
+    const values=overlay.querySelector(".wf-crosshair-values");
+    const selected=values && values.querySelector(".wf-crosshair-selected");
+    const amount=values && values.querySelector(".wf-crosshair-amount");
+    if(!vertical || !horizontal || !values || !selected || !amount){ overlay.classList.add("hidden");return; }
+    const hairline=`${1/(window.devicePixelRatio || 1)}px`;
+    overlay.style.setProperty("--wf-crosshair-hairline",hairline);
+    vertical.style.left=`${localX}px`;vertical.style.top=`${scale.plotTop}px`;vertical.style.height=`${scale.plotHeight}px`;
+    horizontal.style.left=`${scale.plotLeft}px`;horizontal.style.right=`${scale.plotRight}px`;horizontal.style.top=`${localY}px`;
+    selected.textContent=wfCrosshairMoney(crosshair.selectedLevel,{signed:true});
+    amount.textContent=wfCrosshairDifferenceText(crosshair.selectedLevel,current);
+    values.style.left="0px";values.style.top="0px";values.style.visibility="hidden";
+    overlay.classList.remove("hidden");
+    const blockRect=values.getBoundingClientRect();
+    const placement=wfCrosshairBlockPosition({crosshairX:localX,blockWidth:blockRect.width,blockHeight:blockRect.height,plotLeft:scale.plotLeft,plotRightEdge:chart.clientWidth-scale.plotRight,plotTop:scale.plotTop,plotBottom:scale.plotTop+scale.plotHeight,lineY:localY});
+    values.style.left=`${placement.left}px`;values.style.top=`${placement.top}px`;values.style.visibility="visible";
+    values.dataset.side=placement.side;
+    crosshair.labelSide=placement.side;
+    overlay.dataset.selectedLevel=String(crosshair.selectedLevel);
+    overlay.dataset.currentNet=String(current);
+    overlay.dataset.amountToLevel=String(crosshair.selectedLevel-current);
+    crosshair.updates+=1;
+    if(!overlay.__wfFontMeasureQueued && !overlay.__wfFontMeasureSettled){
+      overlay.__wfFontMeasureQueued=true;
+      requestAnimationFrame(() => {
+        if(q("wfCrosshair")!==overlay) return;
+        overlay.__wfFontMeasureQueued=false;
+        overlay.__wfFontMeasureSettled=true;
+        if(crosshair.active) renderWfCrosshair();
+      });
+    }
+  }
+  function updateWfCrosshairFromPointer(event){
+    const chart=q("wfChart"),win=q("wfWindow"),crosshair=wfSyncState.crosshair,scale=crosshair.scale;
+    if(!visible || !chart || !win || win.classList.contains("is-collapsed") || !scale){ hideWfCrosshair();return; }
+    const rect=chart.getBoundingClientRect();
+    const x=event.clientX-rect.left,y=event.clientY-rect.top;
+    const inside=x>=scale.plotLeft && x<=chart.clientWidth-scale.plotRight && y>=scale.plotTop && y<=scale.plotTop+scale.plotHeight;
+    if(!inside){ hideWfCrosshair();return; }
+    crosshair.active=true;crosshair.clientX=event.clientX;crosshair.clientY=event.clientY;
+    crosshair.selectedLevel=scale.yToValue(y-scale.plotTop);
+    renderWfCrosshair();
+  }
+  function runWfCrosshairSelfTests(){
+    const domainMin=-2000,domainMax=3000,height=250;
+    const valueToY=value=>((domainMax-value)/(domainMax-domainMin))*height;
+    const yToValue=y=>domainMax-(y/height)*(domainMax-domainMin);
+    const probes=[-2000,-500,0,1250,3000];
+    const cases={
+      positiveDifference:wfCrosshairDifferenceText(2000,1500)==="+$500",
+      negativeDifference:wfCrosshairDifferenceText(1000,1500)==="−$500",
+      negativeSelectedPositiveLive:wfCrosshairDifferenceText(-500,1500)==="−$2,000",
+      negativeSelectedMoreNegativeLive:wfCrosshairDifferenceText(-500,-1000)==="+$500",
+      zeroLive:wfCrosshairDifferenceText(500,0)==="+$500",
+      zeroSelected:wfCrosshairDifferenceText(0,500)==="−$500",
+      equality:wfCrosshairDifferenceText(1500,1500)==="$0",
+      signedFormatting:wfCrosshairMoney(1234,{signed:true})==="+$1,234" && wfCrosshairMoney(-1234,{signed:true})==="−$1,234" && wfCrosshairMoney(0,{signed:true})==="$0",
+      axisRoundTrip:probes.every(value=>Math.abs(yToValue(valueToY(value))-value)<1e-8),
+      rightPlacement:(()=>{const p=wfCrosshairBlockPosition({crosshairX:120,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:90});return p.side==="right" && p.left===128;})(),
+      leftFlip:(()=>{const p=wfCrosshairBlockPosition({crosshairX:250,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:90});return p.side==="left" && p.left===180;})(),
+      verticalClamp:(()=>{const top=wfCrosshairBlockPosition({crosshairX:120,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:10});const bottom=wfCrosshairBlockPosition({crosshairX:120,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:170});return top.top===10 && bottom.top===126;})()
+    };
+    return {passed:Object.values(cases).every(Boolean),cases};
   }
   function startLiveRefreshLoop(){
     if(wfSyncState.liveTicker) return;
@@ -23168,10 +23322,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const chart = q("wfChart");
     if(chart && !chart.__wfHoverBound){
       chart.__wfHoverBound = true;
+      wfSyncState.crosshair.listenerBindings+=1;
       chart.addEventListener("pointermove",event => {
         wfSyncState.hoverClientX = event.clientX;
         wfSyncState.hoverClientY = event.clientY;
         wfSyncState.hoverInsideChart = true;
+        updateWfCrosshairFromPointer(event);
         const bar = event.target.closest ? event.target.closest(".wf-bar[data-trade-index]") : null;
         if(!bar){
           hoverTradeIndex = null;
@@ -23185,6 +23341,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       chart.addEventListener("pointerleave",() => {
         wfSyncState.hoverInsideChart = false;
         hoverTradeIndex = null;
+        hideWfCrosshair();
         renderHover();
       },false);
       chart.addEventListener("click",event => {
@@ -23212,6 +23369,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           return;
         }
         saveExpandedRect(win);
+        hideWfCrosshair();
         const headNode = q("wfHead");
         const headerHeight = headNode ? Math.ceil(headNode.getBoundingClientRect().height) + 2 : 28;
         win.style.height = headerHeight + "px";
@@ -23545,6 +23703,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       fitWfResultValues(result);
     }
     if(!model.trades.length && !model.liveTrade){
+      if(wfSyncState.crosshair.labelObserver){ wfSyncState.crosshair.labelObserver.disconnect();wfSyncState.crosshair.labelObserver=null; }
+      wfSyncState.crosshair.scale=null;
+      hideWfCrosshair();
       chart.innerHTML = `<div class="wf-empty">${model.mode === "fast" ? "No closed positions in the selected period." : "No closed trades in the selected period."}</div>`;
       return;
     }
@@ -23580,6 +23741,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       if(!(domain > 0)) return plotHeight / 2;
       return ((domainMax - value) / domain) * plotHeight;
     };
+    const yToValue = y => {
+      const domain=domainMax-domainMin;
+      if(!(domain>0)) return (domainMax+domainMin)/2;
+      return domainMax-(clamp(Number(y) || 0,0,plotHeight)/plotHeight)*domain;
+    };
+    wfSyncState.crosshair.scale={domainMin,domainMax,plotTop,plotLeft,plotRight,plotBottom,plotHeight,valueToY,yToValue};
     const labelTicks = [];
     const zeroY = valueToY(0);
     const majorLines = majorTicks.map(tick => {
@@ -23636,11 +23803,27 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           ${mark}
         </div>`;
     }).join("");
+    if(wfSyncState.crosshair.labelObserver){ wfSyncState.crosshair.labelObserver.disconnect();wfSyncState.crosshair.labelObserver=null; }
     chart.innerHTML = `<div class="wf-plot">
         <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
         <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}</div>
+        <div class="wf-crosshair hidden" id="wfCrosshair" aria-hidden="true">
+          <div class="wf-crosshair-v"></div><div class="wf-crosshair-h"></div>
+          <div class="wf-crosshair-values" data-side="right">
+            <div class="wf-crosshair-label wf-crosshair-selected"></div>
+            <div class="wf-crosshair-label wf-crosshair-amount"></div>
+          </div>
+        </div>
       </div>`;
+    const crosshairValues=chart.querySelector(".wf-crosshair-values");
+    if(crosshairValues && typeof ResizeObserver!=="undefined"){
+      wfSyncState.crosshair.labelObserver=new ResizeObserver(() => {
+        if(wfSyncState.crosshair.active) renderWfCrosshair();
+      });
+      wfSyncState.crosshair.labelObserver.observe(crosshairValues);
+    }
     fitWfDirectionLabels(chart);
+    renderWfCrosshair();
   }
 
   function wfTooltipLines(trade){
@@ -23795,6 +23978,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function hide(){
     visible = false;
     stopLiveRefreshLoop();
+    hideWfCrosshair();
     const win = q("wfWindow");
     if(win) win.classList.add("hidden");
   }
@@ -23805,6 +23989,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(reportWeeksEl && !reportWeeksEl.__bt001WfFastReloadBound){
       reportWeeksEl.__bt001WfFastReloadBound = true;
       reportWeeksEl.addEventListener("change",() => {
+        hideWfCrosshair();
         ensureFastWfData({force:true,silent:true,period:currentPeriodValue()}).catch(error => {
           console.warn(MODULE + " fast WF period reload failed",error);
         });
@@ -23904,7 +24089,23 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",install,{once:true});
   else install();
 
-window.BT001_WATERFALL_WINDOW = {version:MODULE,show,hide,render};
+window.BT001_WATERFALL_WINDOW = {
+  version:MODULE,show,hide,render,
+  _selfTest:runWfCrosshairSelfTests,
+  _diagnostics:() => {
+    const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),values=overlay && overlay.querySelector(".wf-crosshair-values");
+    const valuesRect=values && values.getBoundingClientRect();
+    return {
+      visible,listenerBindings:crosshair.listenerBindings,active:crosshair.active,updates:crosshair.updates,labelSide:crosshair.labelSide,
+      selectedLevel:crosshair.selectedLevel,currentNet:Number(lastModel && lastModel.selectedNet) || 0,
+      amountToLevel:Number.isFinite(crosshair.selectedLevel) ? crosshair.selectedLevel-(Number(lastModel && lastModel.selectedNet) || 0) : null,
+      selectedText:overlay && overlay.querySelector(".wf-crosshair-selected") && overlay.querySelector(".wf-crosshair-selected").textContent || "",
+      amountText:overlay && overlay.querySelector(".wf-crosshair-amount") && overlay.querySelector(".wf-crosshair-amount").textContent || "",
+      labelRect:valuesRect ? {left:valuesRect.left,top:valuesRect.top,right:valuesRect.right,bottom:valuesRect.bottom,width:valuesRect.width,height:valuesRect.height} : null,
+      scale:scale ? {domainMin:scale.domainMin,domainMax:scale.domainMax,plotTop:scale.plotTop,plotLeft:scale.plotLeft,plotRight:scale.plotRight,plotBottom:scale.plotBottom,plotHeight:scale.plotHeight} : null
+    };
+  }
+};
 })();
 
 (() => {
