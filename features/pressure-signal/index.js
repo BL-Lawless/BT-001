@@ -14,6 +14,10 @@
   const positionEngine = build.createPositionEngine(featureConfig,featureFormat);
   const windowSystem = build.createWindowSystem(featureConfig,featureFormat);
   const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
+  const performanceDiagnostics = window.BT001_PERFORMANCE_DIAGNOSTICS ||= {};
+  ["signalLightCalculations","signalFullEvidenceBuilds","signalFormingEvidenceBuilds","smcCacheHits","smcCacheMisses"].forEach(key => {
+    if(!Number.isFinite(Number(performanceDiagnostics[key]))) performanceDiagnostics[key] = 0;
+  });
   const STORAGE_KEY = "bt001_topbar_pressure_signal_horizon";
   const DIRECTION_STORAGE_KEY = "bt001_topbar_pressure_signal_direction";
   const TRIGGER_ALERT_DURATION37 = 30000;
@@ -114,6 +118,8 @@
     orderRefreshObservedAt:0,
     activeSnapshot:null,
     marketSnapshot:null,
+    evidenceByTf:new Map(),
+    smcCache:new Map(),
     snapshotVersion:0,
     entryTrackers:new Map(),
     chips:new Map(),
@@ -137,6 +143,8 @@
     workingSnapshot:null,
     lastPublishedSnapshot:null,
     lastValidPublishedSnapshot:null,
+    lastOptimizationTests:null,
+    displayFingerprint:"",
     refreshStartedAt:null
   };
 
@@ -158,6 +166,8 @@
     state.dataKey = "";
     state.dataStatus = null;
     state.marketSnapshot = null;
+    state.evidenceByTf.clear();
+    state.smcCache.clear();
     state.entryTrackers.clear();
     state.setupHistories.clear();
     stopTriggerAlert37();
@@ -363,6 +373,60 @@
     });
     return {horizonId,managementHorizonId,engine,management,slots,items,timeframes};
   }
+  function signalSmcSettingsSignature37(){
+    try{
+      const settings = window.SMC_FEATURE && typeof window.SMC_FEATURE.getSettings === "function" ? window.SMC_FEATURE.getSettings() : null;
+      const stable=value => {
+        if(Array.isArray(value)) return value.map(stable);
+        if(value && typeof value==="object") return Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])]));
+        return value;
+      };
+      return settings ? JSON.stringify(stable(settings)) : "default";
+    }catch(_e){ return "unavailable"; }
+  }
+  function signalTimeframeRevision37(hub,tf){
+    if(hub && typeof hub.getTimeframeRevisions === "function") return hub.getTimeframeRevisions(tf);
+    const closed = hub && typeof hub.getClosedBuffer === "function" ? hub.getClosedBuffer(tf) || [] : [];
+    const forming = hub && typeof hub.getFormingCandle === "function" ? hub.getFormingCandle(tf) : null;
+    const lastClosed = closed.length ? closed[closed.length-1] : null;
+    return {symbol:String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),tf,closedRevision:`${closed.length}:${lastClosed && lastClosed.time}:${lastClosed && lastClosed.close}`,formingRevision:forming ? `${forming.time}:${forming.close}:${forming.volume}:${forming.takerBuyBase}` : "none"};
+  }
+  function cachedSignalStructure37(tf,closedRows,revision,settingsSignature){
+    const key = [revision.symbol,tf,revision.closedRevision,settingsSignature].join("|");
+    if(state.smcCache.has(key)){
+      performanceDiagnostics.smcCacheHits += 1;
+      return state.smcCache.get(key);
+    }
+    performanceDiagnostics.smcCacheMisses += 1;
+    let snapshot = null;
+    try{
+      snapshot = window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot === "function"
+        ? window.SMC_FEATURE.getStructureSnapshot(closedRows)
+        : null;
+    }catch(_e){ snapshot = null; }
+    state.smcCache.set(key,snapshot);
+    while(state.smcCache.size > 80) state.smcCache.delete(state.smcCache.keys().next().value);
+    return snapshot;
+  }
+  function runSignalEvidenceCacheSelfTests37(){
+    const keys=({symbol="BTCUSDT",tf="1m",depth=320,periods="9-21-55-100-200",closed=4,forming=9,smc="smc-a"}={})=>{
+      const closedKey=[symbol,tf,depth,periods,closed,smc].join("|");
+      return {closedKey,liveKey:[closedKey,forming].join("|"),smcKey:[symbol,tf,closed,smc].join("|")};
+    };
+    const base=keys(),priceOnly=keys(),forming=keys({forming:10}),closed=keys({closed:5,forming:10}),otherTf=keys({tf:"5m"});
+    const cases={
+      priceOnlyReusesAllEvidence:base.closedKey===priceOnly.closedKey&&base.liveKey===priceOnly.liveKey&&base.smcKey===priceOnly.smcKey,
+      formingChangesLiveOnly:base.closedKey===forming.closedKey&&base.smcKey===forming.smcKey&&base.liveKey!==forming.liveKey,
+      closedChangeInvalidatesAffectedTimeframe:base.closedKey!==closed.closedKey&&base.liveKey!==closed.liveKey&&base.smcKey!==closed.smcKey&&base.closedKey!==otherTf.closedKey,
+      maSettingsChangeInvalidates:base.closedKey!==keys({periods:"9-20-50-100-200"}).closedKey,
+      smcSettingsChangeInvalidatesStructure:base.smcKey!==keys({smc:"smc-b"}).smcKey&&base.closedKey!==keys({smc:"smc-b"}).closedKey,
+      symbolChangeInvalidatesAll:base.closedKey!==keys({symbol:"ETHUSDT"}).closedKey,
+      horizonDepthChangeInvalidates:base.closedKey!==keys({depth:640}).closedKey,
+      gapRepairOrHistoryReplacementInvalidates:base.closedKey!==keys({closed:1004}).closedKey,
+      unrelatedTimeframeUsesIndependentKey:base.closedKey!==otherTf.closedKey
+    };
+    return {passed:Object.values(cases).every(Boolean),cases};
+  }
   function signalDataAge37(tf,rows){
     const list = Array.isArray(rows) ? rows : [];
     const latest = list.length ? list[list.length - 1] : null;
@@ -382,8 +446,12 @@
     const diag = window.PUBLIC_MARKET_DATA_HUB && window.PUBLIC_MARKET_DATA_HUB.diag || window.BINANCE_REALTIME_DIAG || {};
     const priceAt = Math.max(Number(diag.latestAggTradeTickTime || 0),Number(diag.lastMarkPriceTickTime || 0));
     const priceAgeMs = priceAt ? Math.max(0,now-priceAt) : Infinity;
-    const positionAt = snapshot.position && num37(snapshot.position.updatedAt);
+    const privateSync = window.BINANCE_PRIVATE_SYNC && typeof window.BINANCE_PRIVATE_SYNC.diagnostics === "function" ? window.BINANCE_PRIVATE_SYNC.diagnostics() : null;
+    const streamStatus = String(privateSync && privateSync.streamStatus || "disconnected").toLowerCase();
+    const coverageSource = String(privateSync && privateSync.coverageSource || "REST").toUpperCase();
+    const positionAt = snapshot.position && (num37(snapshot.position.verifiedAt) ?? num37(privateSync && privateSync.verifiedAt && privateSync.verifiedAt.position) ?? num37(snapshot.position.updatedAt));
     const positionAgeMs = positionAt == null ? (snapshot.position ? Infinity : null) : Math.max(0,now-positionAt);
+    const positionStreamCovered = streamStatus === "live" && coverageSource === "USER_STREAM";
     const signalPolicy = entryPolicy37(plan.horizonId);
     const management = plan.management;
     const formingAt = Math.max(Number(diag.lastKlineTickByTf && diag.lastKlineTickByTf[signalPolicy.triggerTf] || 0),Number(diag.lastChartActivityByTf && diag.lastChartActivityByTf[signalPolicy.triggerTf] || 0));
@@ -398,16 +466,17 @@
     if(formingStale) signalStaleSources.push({source:`${signalPolicy.triggerTf} forming candle`,ageMs:formingAgeMs});
     (snapshot.health && snapshot.health.items || []).filter(entry => entry.signalRequired).forEach(health => { if(health.status !== "sufficient" && !signalStaleSources.some(item => item.source === `${health.tf} closed evidence`)) signalStaleSources.push({source:`${health.tf} closed evidence`,ageMs:health.ageMs}); });
     const managementStaleSources = [];
-    if(snapshot.position && (positionAgeMs == null || positionAgeMs > featureConfig.freshness.positionStaleMs)) managementStaleSources.push({source:"Position/account",ageMs:positionAgeMs});
+    if(snapshot.position && !positionStreamCovered && (positionAgeMs == null || positionAgeMs > featureConfig.freshness.positionStaleMs)) managementStaleSources.push({source:"Position/account",ageMs:positionAgeMs});
     if(priceStale) managementStaleSources.push({source:"Live price",ageMs:priceAgeMs});
     (snapshot.health && snapshot.health.items || []).filter(entry => entry.managementRequired).forEach(health => { if(health.status !== "sufficient") managementStaleSources.push({source:`${health.tf} management evidence`,ageMs:health.ageMs}); });
     const statusFor = list => list.some(entry => entry.ageMs == null || !Number.isFinite(entry.ageMs)) ? "UNAVAILABLE" : list.length ? "STALE" : "LIVE";
-    const orderAt = snapshot.protectiveOrders && num37(snapshot.protectiveOrders.updatedAt);
+    const orderAt = snapshot.protectiveOrders && (num37(snapshot.protectiveOrders.verifiedAt) ?? num37(privateSync && privateSync.verifiedAt && privateSync.verifiedAt.orders) ?? num37(snapshot.protectiveOrders.updatedAt));
     const orderAgeMs = orderAt == null ? Infinity : Math.max(0,now-orderAt);
+    const orderStreamCovered = streamStatus === "live" && String(snapshot.protectiveOrders && snapshot.protectiveOrders.coverageSource || coverageSource).toUpperCase() === "USER_STREAM";
     const stopStaleSources = managementStaleSources.map(item => ({...item}));
     if(snapshot.position && (!snapshot.protectiveOrders || snapshot.protectiveOrders.sourcesChecked !== true || snapshot.protectiveOrders.status !== "ok")) stopStaleSources.push({source:"Protective orders",ageMs:orderAgeMs});
-    else if(snapshot.position && orderAgeMs > featureConfig.freshness.protectiveOrderStaleMs) stopStaleSources.push({source:"Protective orders",ageMs:orderAgeMs});
-    return {checkedAt:now,priceAt,priceAgeMs,positionAt,positionAgeMs,orderAt,orderAgeMs,formingAt,formingAgeMs,triggerClosed,managementClosed,contextClosed,signalStatus:statusFor(signalStaleSources),managementStatus:statusFor(managementStaleSources),stopStatus:statusFor(stopStaleSources),signalStaleSources,managementStaleSources,stopStaleSources};
+    else if(snapshot.position && !orderStreamCovered && orderAgeMs > featureConfig.freshness.protectiveOrderStaleMs) stopStaleSources.push({source:"Protective orders",ageMs:orderAgeMs});
+    return {checkedAt:now,priceAt,priceAgeMs,positionAt,positionAgeMs,orderAt,orderAgeMs,formingAt,formingAgeMs,triggerClosed,managementClosed,contextClosed,streamStatus,coverageSource,positionStreamCovered,orderStreamCovered,stateChangedAt:privateSync && privateSync.stateChangedAt || null,verifiedAt:privateSync && privateSync.verifiedAt || null,signalStatus:statusFor(signalStaleSources),managementStatus:statusFor(managementStaleSources),stopStatus:statusFor(stopStaleSources),signalStaleSources,managementStaleSources,stopStaleSources};
   }
   function inspectSignalData37(plan,hub){
     if(!hub) return {status:"unavailable",managementStatus:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"shared market-data hub unavailable"}))};
@@ -456,6 +525,8 @@
       state.dataStatus = null;
       state.dataLoadGeneration += 1;
       state.marketSnapshot = null;
+      state.evidenceByTf.clear();
+      state.smcCache.clear();
       state.entryTrackers.clear();
       state.setupHistories.clear();
       stopTriggerAlert37();
@@ -489,21 +560,45 @@
     const maByTf = {};
     const structureByTf = {};
     if(!hub) return {symbol:"",horizonId:plan.horizonId,createdAt:Date.now(),rowsByTf,closedByTf,maByTf,structureByTf,health};
+    const smcSettings = signalSmcSettingsSignature37();
+    let fullEvidenceChanged = false;
+    let formingEvidenceChanged = false;
     plan.items.forEach(item => {
-      rowsByTf[item.tf] = (hub.getChartBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
-      closedByTf[item.tf] = (hub.getClosedBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
-      maByTf[item.tf] = {
-        live:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots}),
-        closed:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots})
-      };
-      try{
-        structureByTf[item.tf] = window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot === "function"
-          ? window.SMC_FEATURE.getStructureSnapshot(closedByTf[item.tf])
-          : null;
-      }catch(_e){
-        structureByTf[item.tf] = null;
+      const revision = signalTimeframeRevision37(hub,item.tf);
+      const periods = plan.slots.map(slot => slot.period).join("-");
+      const closedKey = [revision.symbol,item.tf,item.historyTarget,periods,revision.closedRevision,smcSettings].join("|");
+      const liveKey = [closedKey,revision.formingRevision].join("|");
+      const prior = state.evidenceByTf.get(item.tf);
+      let closedRows,closedMa,structure;
+      if(prior && prior.closedKey === closedKey){
+        performanceDiagnostics.smcCacheHits += 1;
+        closedRows = prior.closedRows;
+        closedMa = prior.closedMa;
+        structure = prior.structure;
+      }else{
+        fullEvidenceChanged = true;
+        closedRows = (hub.getClosedBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+        closedMa = hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots});
+        structure = cachedSignalStructure37(item.tf,closedRows,revision,smcSettings);
       }
+      let liveRows,liveMa;
+      if(prior && prior.liveKey === liveKey){
+        liveRows = prior.liveRows;
+        liveMa = prior.liveMa;
+      }else{
+        if(prior && prior.closedKey === closedKey) formingEvidenceChanged = true;
+        liveRows = (hub.getChartBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+        liveMa = hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots});
+      }
+      const cached = {closedKey,liveKey,closedRows,liveRows,closedMa,liveMa,structure,revision};
+      state.evidenceByTf.set(item.tf,cached);
+      rowsByTf[item.tf] = liveRows;
+      closedByTf[item.tf] = closedRows;
+      maByTf[item.tf] = {live:liveMa,closed:closedMa};
+      structureByTf[item.tf] = structure;
     });
+    if(fullEvidenceChanged) performanceDiagnostics.signalFullEvidenceBuilds += 1;
+    else if(formingEvidenceChanged) performanceDiagnostics.signalFormingEvidenceBuilds += 1;
     const snapshot = {
       symbol,
       horizonId:plan.horizonId,
@@ -538,13 +633,11 @@
     const parts = [
       String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),
       plan.horizonId,
-      smcIdentity,
-      currentPrice
+      smcIdentity
     ];
     plan.items.forEach(item => {
-      const rows = hub && typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : [];
-      const last = rows.length ? rows[rows.length - 1] : null;
-      parts.push(item.tf,rows.length,last && last.openTime,last && last.close,last && last.volume,last && last.takerBuyBase,last && last.final);
+      const revision = signalTimeframeRevision37(hub,item.tf);
+      parts.push(item.tf,item.historyTarget,revision.closedRevision,revision.formingRevision);
     });
     parts.push(
       position && position.side,
@@ -564,15 +657,141 @@
   }
   function coherentSignalSnapshot37(plan,health){
     const frozen = signalSnapshotSignature37(plan);
-    if(state.marketSnapshot && state.marketSnapshot.signature === frozen.signature){
-      state.marketSnapshot.health = health;
-      state.marketSnapshot.freshness = buildSourceFreshness37(state.marketSnapshot,plan);
-      return state.marketSnapshot;
-    }
     const snapshot = buildSignalSnapshot37(plan,health,frozen);
     snapshot.signature = frozen.signature;
     state.marketSnapshot = snapshot;
     return snapshot;
+  }
+  function buildUncachedSignalSnapshot37(plan,health,reference){
+    const hub=window.PUBLIC_MARKET_DATA_HUB || null;
+    if(!hub) return null;
+    const rowsByTf={},closedByTf={},maByTf={},structureByTf={};
+    plan.items.forEach(item => {
+      rowsByTf[item.tf]=(hub.getChartBuffer(item.tf)||[]).map(row=>normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      closedByTf[item.tf]=(hub.getClosedBuffer(item.tf)||[]).map(row=>normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      maByTf[item.tf]={
+        live:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots,bypassCache:true}),
+        closed:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots,bypassCache:true})
+      };
+      try{ structureByTf[item.tf]=window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot==="function" ? window.SMC_FEATURE.getStructureSnapshot(closedByTf[item.tf]) : null; }
+      catch(_e){ structureByTf[item.tf]=null; }
+    });
+    return {
+      symbol:reference.symbol,horizonId:plan.horizonId,createdAt:reference.createdAt,version:reference.version,signature:reference.signature,
+      currentPrice:reference.currentPrice,position:reference.position,protectiveOrders:reference.protectiveOrders,exitOrderState:reference.exitOrderState,
+      rowsByTf,closedByTf,maByTf,structureByTf,health,freshness:clonePublicationValue37(reference.freshness)
+    };
+  }
+  function parityOutput37(signal){
+    const decision=signal && signal.entryDecision || {};
+    const management=signal && signal.management || {};
+    const stop=management.stopEvaluation || {};
+    const targets=management.targetFramework || {};
+    const level=entry => entry && (entry.reference ?? entry.price ?? entry.level ?? null);
+    return {
+      marketDirection:signal && signal.marketDirection || null,confidence:num37(signal && signal.confidence),
+      entryDecision:decision.state || null,setupFamily:decision.family || null,setupTimeframe:decision.tf || null,
+      triggerState:decision.interaction && decision.interaction.trigger || decision.trigger || null,
+      targetFramework:{obstacle:level(targets.obstacle),primary:level(targets.primary),extended:level(targets.extended)},
+      positionHealth:management.health || null,action:management.action || null,
+      pathA:management.pathA && management.pathA.state || null,pathB:management.pathB && management.pathB.state || null,
+      stopProtection:stop.protection || null,stopQuality:stop.quality && stop.quality.value || null,
+      stopRecommendation:stop.recommendation && stop.recommendation.value || null
+    };
+  }
+  function parityEvidence37(snapshot){
+    const compact={};
+    Object.keys(snapshot.rowsByTf || {}).sort().forEach(tf => {
+      const rows=snapshot.rowsByTf[tf] || [],closed=snapshot.closedByTf[tf] || [],pair=snapshot.maByTf[tf] || {};
+      compact[tf]={
+        rows:rows.map(row=>[row.time,row.open,row.high,row.low,row.close,row.volume,row.takerBuyBase,row.final]),
+        closed:closed.map(row=>[row.time,row.open,row.high,row.low,row.close,row.volume,row.takerBuyBase,row.final]),
+        liveMa:pair.live && pair.live.valuesBySlot || null,closedMa:pair.closed && pair.closed.valuesBySlot || null,
+        structure:snapshot.structureByTf && snapshot.structureByTf[tf] || null
+      };
+    });
+    const canonical=value => {
+      if(Array.isArray(value)) return value.map(canonical);
+      if(value && typeof value==="object") return Object.fromEntries(Object.keys(value).filter(key=>!["calculatedAt","createdAt","generatedAt"].includes(key)).sort().map(key=>[key,canonical(value[key])]));
+      return Number.isNaN(value) ? "NaN" : value;
+    };
+    return JSON.stringify(canonical(compact));
+  }
+  function cloneStateMap37(map){
+    return new Map(Array.from(map.entries(),([key,value]) => [key,clonePublicationValue37(value)]));
+  }
+  function runOptimizationParityTests37(){
+    const saved={active:state.activeSnapshot,market:state.marketSnapshot,entry:cloneStateMap37(state.entryTrackers),histories:cloneStateMap37(state.setupHistories)};
+    const hub=window.PUBLIC_MARKET_DATA_HUB;
+    const results=[];
+    try{
+      for(const horizonId of HORIZONS.map(item=>item.id)){
+        const plan=signalDataPlan37(horizonId);
+        const health=inspectSignalData37(plan,hub);
+        if(!["sufficient","stale"].includes(health.status)){
+          results.push({horizonId,passed:false,reason:`evidence ${health.status}`});
+          continue;
+        }
+        const reference=buildSignalSnapshot37(plan,health,signalSnapshotSignature37(plan));
+        reference.signature=`parity-${horizonId}`;
+        const legacy=buildUncachedSignalSnapshot37(plan,health,reference);
+        const referenceEvidence=parityEvidence37(reference),legacyEvidence=parityEvidence37(legacy);
+        const evidenceEqual=referenceEvidence===legacyEvidence;
+        let evidenceDiff=null;
+        if(!evidenceEqual){
+          let index=0;while(index<referenceEvidence.length&&index<legacyEvidence.length&&referenceEvidence[index]===legacyEvidence[index]) index+=1;
+          evidenceDiff={index,referenceLength:referenceEvidence.length,legacyLength:legacyEvidence.length,reference:referenceEvidence.slice(Math.max(0,index-80),index+160),legacy:legacyEvidence.slice(Math.max(0,index-80),index+160)};
+        }
+        const price=num37(reference.currentPrice) || 100000;
+        const positions=[
+          {name:"FLAT",value:null},
+          {name:"LONG",value:{symbol:reference.symbol,side:"LONG",qty:0.01,price:price*0.99,markPrice:price,unrealizedPnl:100,realizedPnl:10,margin:500,leverage:20,updatedAt:reference.createdAt}},
+          {name:"SHORT",value:{symbol:reference.symbol,side:"SHORT",qty:0.01,price:price*1.01,markPrice:price,unrealizedPnl:100,realizedPnl:10,margin:500,leverage:20,updatedAt:reference.createdAt}}
+        ];
+        for(const positionCase of positions){
+          for(const candleMode of ["FORMING","CLOSED"]){
+            for(const freshnessMode of ["FRESH","STALE"]){
+              const prepare=(source,engine) => {
+                const snapshot={...source,position:clonePublicationValue37(positionCase.value),freshness:clonePublicationValue37(source.freshness)};
+                if(positionCase.value){
+                  const isLong=positionCase.value.side==="LONG",stopSide=isLong?"SELL":"BUY";
+                  const masterPrice=price*(isLong?0.985:1.015),pslPrice=price*(isLong?0.975:1.025),exitPrice=price*(isLong?1.03:0.97);
+                  snapshot.protectiveOrders={
+                    status:"ok",sourcesChecked:true,updatedAt:reference.createdAt,verifiedAt:reference.createdAt,stateChangedAt:reference.createdAt,
+                    orders:[
+                      {id:"parity-master",kind:"MASTER_SL",side:stopSide,positionSide:positionCase.value.side,triggerPrice:masterPrice,quantity:positionCase.value.qty,reduceOnly:true,status:"NEW",isLive:true},
+                      {id:"parity-psl",kind:"PSL",side:stopSide,positionSide:positionCase.value.side,triggerPrice:pslPrice,quantity:positionCase.value.qty,reduceOnly:true,status:"NEW",isLive:true}
+                    ]
+                  };
+                  snapshot.exitOrderState={status:"ok",updatedAt:reference.createdAt,verifiedAt:reference.createdAt,orders:[{id:"parity-exit",type:"LIMIT",side:stopSide,positionSide:positionCase.value.side,price:exitPrice,quantity:positionCase.value.qty,reduceOnly:true,status:"NEW"}]};
+                }
+                if(candleMode==="CLOSED"){
+                  snapshot.rowsByTf=Object.fromEntries(Object.entries(source.closedByTf).map(([tf,rows])=>[tf,rows]));
+                  snapshot.maByTf=Object.fromEntries(Object.entries(source.maByTf).map(([tf,pair])=>[tf,{closed:pair.closed,live:pair.closed}]));
+                }
+                if(freshnessMode==="STALE") snapshot.freshness={...(snapshot.freshness||{}),signalStatus:"STALE",managementStatus:"STALE",stopStatus:"STALE",signalStaleSources:[{source:"parity stale fixture",ageMs:60000}],managementStaleSources:[{source:"parity stale fixture",ageMs:60000}],stopStaleSources:[{source:"parity stale fixture",ageMs:60000}]};
+                state.entryTrackers=cloneStateMap37(saved.entry);
+                state.setupHistories=cloneStateMap37(saved.histories);
+                state.activeSnapshot=snapshot;
+                return parityOutput37(evaluateToolbarPressureSignal37(horizonId,engine));
+              };
+              const legacyEngine=build.createPositionEngine(featureConfig,featureFormat);
+              const optimizedEngine=build.createPositionEngine(featureConfig,featureFormat);
+              const legacyOutput=prepare(legacy,legacyEngine);
+              const optimizedOutput=prepare(reference,optimizedEngine);
+              legacyEngine.destroy();optimizedEngine.destroy();
+              const outputEqual=JSON.stringify(legacyOutput)===JSON.stringify(optimizedOutput);
+              results.push({horizonId,position:positionCase.name,candleMode,freshnessMode,evidenceEqual,evidenceDiff,outputEqual,passed:evidenceEqual&&outputEqual,legacy:legacyOutput,optimized:optimizedOutput});
+            }
+          }
+        }
+      }
+    }finally{
+      state.activeSnapshot=saved.active;state.marketSnapshot=saved.market;state.entryTrackers=saved.entry;state.setupHistories=saved.histories;
+    }
+    const report={ranAt:Date.now(),passed:results.length>0&&results.every(item=>item.passed),comparisons:results.length,failures:results.filter(item=>!item.passed),results};
+    state.lastOptimizationTests=report;
+    return report;
   }
   function signalRows37(tf){
     try{
@@ -659,6 +878,7 @@
           return chainId && linkChain === chainId;
         }).reduce((sum,link) => sum + (num37(link && (link.netPnl ?? link.realizedPnl ?? link.binanceRealizedPnl)) || 0),0)
         : 0;
+      const privateSync = window.BINANCE_PRIVATE_SYNC && typeof window.BINANCE_PRIVATE_SYNC.diagnostics === "function" ? window.BINANCE_PRIVATE_SYNC.diagnostics() : null;
       return {
         symbol:String(box.symbol || (typeof activeSymbol === "function" ? activeSymbol() : "") || "BTCUSDT"),
         side:String(box.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG",
@@ -674,7 +894,11 @@
         liquidationPrice:num37(box.liquidationPrice),
         chainId,
         time:num37(box.time),
-        updatedAt:num37(box.updatedAt)
+        updatedAt:num37(privateSync && privateSync.stateChangedAt && privateSync.stateChangedAt.position) ?? num37(box.updatedAt),
+        stateChangedAt:num37(privateSync && privateSync.stateChangedAt && privateSync.stateChangedAt.position) ?? num37(box.updatedAt),
+        verifiedAt:num37(privateSync && privateSync.verifiedAt && privateSync.verifiedAt.position),
+        streamStatus:privateSync && privateSync.streamStatus || "disconnected",
+        coverageSource:privateSync && privateSync.coverageSource || "REST"
       };
     }catch(_e){
       return null;
@@ -708,8 +932,10 @@
     try{
       const source=window.BINANCE_OPEN_ORDERS_CACHE;
       if(!source || typeof source.refresh!=="function") return;
-      source.refresh({reason:"position-management",maxAgeMs:5000}).then(snapshot => {
-        const updatedAt=num37(snapshot && snapshot.updatedAt) || 0;
+      const privateSync=window.BINANCE_PRIVATE_SYNC && typeof window.BINANCE_PRIVATE_SYNC.diagnostics==="function" ? window.BINANCE_PRIVATE_SYNC.diagnostics() : null;
+      if(privateSync && !(privateSync.verifiedAt && privateSync.verifiedAt.orders) && ["connecting","disconnected"].includes(String(privateSync.streamStatus || "").toLowerCase())) return;
+      source.refresh({reason:"position-management",maxAgeMs:60000}).then(snapshot => {
+        const updatedAt=num37(snapshot && (snapshot.verifiedAt ?? snapshot.updatedAt)) || 0;
         if(updatedAt<=state.orderRefreshObservedAt) return;
         state.orderRefreshObservedAt=updatedAt;
         scheduleToolbarSignalRefresh37(true);
@@ -747,7 +973,7 @@
         workingType:order.workingType || order.priceProtect || null,status:String(order.status || order.orderStatus || "NEW").toUpperCase(),isLive:classified.isLive === true,updatedAt
       });
     });
-    return {symbol:String(symbol || "").toUpperCase(),createdAt:Date.now(),updatedAt,attemptedAt:num37(authoritative.attemptedAt),status,sourcesChecked,requestInFlight:authoritative.requestInFlight===true,orders};
+    return {symbol:String(symbol || "").toUpperCase(),createdAt:Date.now(),updatedAt,verifiedAt:num37(authoritative.verifiedAt),stateChangedAt:num37(authoritative.stateChangedAt),streamStatus:authoritative.streamStatus || "disconnected",coverageSource:authoritative.coverageSource || "REST",attemptedAt:num37(authoritative.attemptedAt),status,sourcesChecked,requestInFlight:authoritative.requestInFlight===true,orders};
   }
   function exitOrderStateSnapshot37(symbol){
     const normalizedSymbol=String(symbol || "").toUpperCase();
@@ -763,7 +989,7 @@
       const owned=window.GRAD_CALCULATOR && typeof window.GRAD_CALCULATOR.getOwnedRows === "function" ? window.GRAD_CALCULATOR.getOwnedRows() : [];
       grRows=(Array.isArray(owned) ? owned : []).filter(row => row && row.owner==="GR" && row.section==="exit").map(row => ({owner:"GR",section:"exit",status:row.status,clientOrderId:row.clientOrderId || null,localRowId:row.localRowId || null,level:num37(row.level),lot:num37(row.lot)}));
     }catch(_e){}
-    return {symbol:normalizedSymbol,createdAt:Date.now(),updatedAt,attemptedAt:num37(authoritative.attemptedAt),status,sourcesChecked:authoritative.sourcesChecked===true,requestInFlight:authoritative.requestInFlight===true,orders,grRows};
+    return {symbol:normalizedSymbol,createdAt:Date.now(),updatedAt,verifiedAt:num37(authoritative.verifiedAt),stateChangedAt:num37(authoritative.stateChangedAt),streamStatus:authoritative.streamStatus || "disconnected",coverageSource:authoritative.coverageSource || "REST",attemptedAt:num37(authoritative.attemptedAt),status,sourcesChecked:authoritative.sourcesChecked===true,requestInFlight:authoritative.requestInFlight===true,orders,grRows};
   }
   function signalStructure37(tf,scope="swing"){
     const snapshot = state.activeSnapshot && state.activeSnapshot.structureByTf && state.activeSnapshot.structureByTf[tf];
@@ -2098,6 +2324,7 @@
       state.details.style.height = `${Math.min(420,Math.max(180,window.innerHeight-8))}px`;
     }
     windowSystem.focusSignal();
+    if(state.lastPublishedSnapshot && state.lastPublishedSnapshot.signalReport) renderSignalDetailsReport37(state.lastPublishedSnapshot.signalReport);
   }
   function hideToolbarSignalDetails37(){
     if(state.details){
@@ -2279,14 +2506,14 @@
   function targetFramework37(direction,horizonId,atr,atrTf,external){
     return targetEngine.evaluateTargets({direction,currentPrice:signalCurrentPrice37(),atr,atrTf,profileId:horizonId,levels:targetMarketLevels37(direction,horizonId,external)});
   }
-  function evaluatePositionManagement37(signal,horizonId){
+  function evaluatePositionManagement37(signal,horizonId,managementEngine=positionEngine){
     const snapshot = state.activeSnapshot || state.marketSnapshot;
     const position = signal && signal.position ? {...signal.position} : null;
     const externalLevels = managementExternalLevels37(position);
     const profile = featureConfig.managementHorizons[horizonId] || featureConfig.managementHorizons.quick;
     const targetAtr = averageTrueRange37(profile.primaryTf) || averageTrueRange37(profile.triggerTf);
     const targets = position ? targetFramework37(position.side,horizonId,targetAtr,profile.primaryTf,externalLevels) : null;
-    const management = positionEngine.evaluate({
+    const management = managementEngine.evaluate({
       symbol:String(snapshot && snapshot.symbol || position && position.symbol || "BTCUSDT"),
       horizon:horizonId,
       createdAt:Date.now(),
@@ -3440,7 +3667,7 @@
     state.entryTrackers.set(horizonId,{...decision,zone:{...decision.zone},candidates:[],terminalVersion:terminalStates.includes(decision.state) ? snapshotVersion : null});
     return decision;
   }
-  function evaluateToolbarPressureSignal37(horizonId){
+  function evaluateToolbarPressureSignal37(horizonId,managementEngine=positionEngine){
     const engine = horizonEngine37(horizonId);
     const configsForHorizon = engine.pressure;
     const samples = configsForHorizon.map(item => ({...samplePressureSignal37(item.tf,item.lookback,item.maSlot),weight:item.weight,role:item.role}));
@@ -3461,7 +3688,7 @@
         maAudit:maEvaluation.audit,
         dataIncomplete:true
       };
-      incomplete.management = evaluatePositionManagement37(incomplete,horizonId);
+      incomplete.management = evaluatePositionManagement37(incomplete,horizonId,managementEngine);
       incomplete.exit = incomplete.management.exit;
       return incomplete;
     }
@@ -3498,7 +3725,7 @@
     result.independentThesis = result.marketDirection
       ? evaluateDirectionThesis37(result,result.marketDirection,horizonId)
       : null;
-    result.management = evaluatePositionManagement37(result,horizonId);
+    result.management = evaluatePositionManagement37(result,horizonId,managementEngine);
     result.exit = result.management.exit;
     return result;
   }
@@ -3643,7 +3870,7 @@
     if(!published) return null;
     const orders=published.snapshot && published.snapshot.protectiveOrders;
     const reference=published.snapshot && published.snapshot.position
-      ? num37(orders && orders.updatedAt)
+      ? num37(orders && (orders.verifiedAt ?? orders.updatedAt))
       : num37(published.publishedAt);
     return reference != null && Math.max(0,now-reference)<=featureConfig.freshness.publishedSnapshotSafeMs ? published : null;
   }
@@ -3663,10 +3890,11 @@
     if(!snapshot || !snapshot.position) return {terminal:true,state:"READY",reason:"No open position requires protective-order aggregation"};
     const orders=snapshot.protectiveOrders || {};
     const status=String(orders.status || "unavailable").toLowerCase();
-    const orderAt=num37(orders.updatedAt);
+    const orderAt=num37(orders.verifiedAt ?? orders.updatedAt);
     const orderAgeMs=orderAt == null ? Infinity : Math.max(0,now-orderAt);
     if(status==="ok" && orders.sourcesChecked===true){
-      return {terminal:true,state:orderAgeMs>featureConfig.freshness.protectiveOrderStaleMs ? "STALE" : "READY",orderAgeMs};
+      const streamCovered=String(orders.streamStatus || "").toLowerCase()==="live" && String(orders.coverageSource || "").toUpperCase()==="USER_STREAM";
+      return {terminal:true,state:!streamCovered && orderAgeMs>featureConfig.freshness.protectiveOrderStaleMs ? "STALE" : "READY",orderAgeMs,streamCovered};
     }
     const prior=publishedWithinSafeWindow37(contextKey,now);
     if(status==="pending" || status==="loading"){
@@ -3726,19 +3954,22 @@
     state.lastPublishedSnapshot=publication;
     if(publication.refreshState==="READY") state.lastValidPublishedSnapshot=publication;
     state.signalSummaryVariants=publication.signalSummaryVariants;
+    const nextDisplayFingerprint=[publication.entryTone,publication.signalSummaryVariants.full,publication.exitTone,publication.exitText].join("|");
+    const displayChanged=nextDisplayFingerprint!==state.displayFingerprint;
+    state.displayFingerprint=nextDisplayFingerprint;
     if(state.entry){
-      state.entry.dataset.tone=publication.entryTone;
-      state.entry.textContent=publication.signalSummaryVariants.full;
+      if(state.entry.dataset.tone!==publication.entryTone) state.entry.dataset.tone=publication.entryTone;
+      if(state.entry.textContent!==publication.signalSummaryVariants.full) state.entry.textContent=publication.signalSummaryVariants.full;
       state.entry.removeAttribute("title");
       updateTriggerAlert37(publication.signal,publication.decision);
     }
     if(state.exit){
-      state.exit.dataset.tone=publication.exitTone;
-      state.exit.textContent=publication.exitText;
+      if(state.exit.dataset.tone!==publication.exitTone) state.exit.dataset.tone=publication.exitTone;
+      if(state.exit.textContent!==publication.exitText) state.exit.textContent=publication.exitText;
       state.exit.removeAttribute("title");
     }
-    renderResponsiveSignalSummary37();
-    if(state.detailsBody){
+    if(displayChanged) renderResponsiveSignalSummary37();
+    if(state.detailsBody && state.details && state.details.classList.contains("is-open")){
       renderSignalDetailsReport37(publication.signalReport);
       if(state.detailsTitle) state.detailsTitle.textContent="Signal Details";
       positionToolbarSignalDetails37();
@@ -3829,16 +4060,10 @@
     try{
       let signal;
       if(ready){
-        const cached = !!state.activeSnapshot.signal;
-        if(!cached){
-          state.activeSnapshot.signal = evaluateToolbarPressureSignal37(state.horizon);
-          state.activeSnapshot.managementValidation = validateFrozenManagement37(state.activeSnapshot.signal,state.horizon);
-        }
-        signal = state.activeSnapshot.signal;
-        if(cached){
-          signal.management = evaluatePositionManagement37(signal,state.horizon);
-          signal.exit = signal.management.exit;
-        }
+        performanceDiagnostics.signalLightCalculations += 1;
+        signal = evaluateToolbarPressureSignal37(state.horizon);
+        state.activeSnapshot.signal = signal;
+        state.activeSnapshot.managementValidation = validateFrozenManagement37(signal,state.horizon);
       }else{
         signal = loadingSignal37(bundle);
       }
@@ -3981,7 +4206,12 @@
       selfTests:positionEngine._selfTest(),
       entrySelfTests:runEntrySelfTests37(),
       presentationSelfTests:runPresentationSelfTests37(),
-      windowPresentationSelfTests:windowSystem._selfTest()
+      windowPresentationSelfTests:windowSystem._selfTest(),
+      cacheSelfTests:window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB._cacheSelfTest==="function" ? window.PUBLIC_MARKET_DATA_HUB._cacheSelfTest() : null,
+      signalCacheSelfTests:runSignalEvidenceCacheSelfTests37(),
+      privateStreamSelfTests:window.BINANCE_PRIVATE_SYNC && typeof window.BINANCE_PRIVATE_SYNC._selfTest==="function" ? window.BINANCE_PRIVATE_SYNC._selfTest() : null,
+      optimizationParity:state.lastOptimizationTests,
+      performance:{...performanceDiagnostics}
     };
   }
   function reconcilePresentationContext37(){
@@ -4050,13 +4280,17 @@
     state.details = state.detailsBody = state.detailsTitle = null;
     state.chips.clear();
     state.marketSnapshot = null;
+    state.evidenceByTf.clear();
+    state.smcCache.clear();
     state.activeSnapshot = null;
     state.workingSnapshot = null;
     state.lastPublishedSnapshot = null;
     state.lastValidPublishedSnapshot = null;
+    state.lastOptimizationTests = null;
     state.refreshGeneration += 1;
     state.refreshState = "IDLE";
     state.signalSummaryVariants = null;
+    state.displayFingerprint = "";
     state.seenTriggerAlertIds.clear();
     state.seenTriggerAlertOrder.length = 0;
     state.entryTrackers.clear();
@@ -4065,6 +4299,7 @@
   function setManagementHorizon37(next){
     const selected = positionEngine.setManagementHorizon(next);
     state.marketSnapshot = null;
+    state.evidenceByTf.clear();
     invalidatePublishedContext37(presentationContextKey37());
     scheduleToolbarSignalRefresh37(true);
     return selected;
@@ -4087,6 +4322,7 @@
     getSignalCopyContent:windowSystem.getSignalCopy,
     getManagementCopyContent:windowSystem.getPositionCopy,
     invalidatePublishedSnapshot:() => invalidatePublishedContext37(presentationContextKey37()),
+    runOptimizationTests:runOptimizationParityTests37,
     getDiagnostics:diagnostics37
   });
   Object.defineProperty(window,"PRESSURE_SIGNAL",{value:api,configurable:true});

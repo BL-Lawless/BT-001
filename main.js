@@ -2,6 +2,12 @@ const API = window.API;
 if (!API) {
   throw new Error("apis.js must load before main.js");
 }
+const BT001_PERFORMANCE_DIAGNOSTICS = window.BT001_PERFORMANCE_DIAGNOSTICS ||= {};
+[
+  "signalLightCalculations","signalFullEvidenceBuilds","signalFormingEvidenceBuilds","maCacheHits","maCacheMisses",
+  "smcCacheHits","smcCacheMisses","privatePositionRestReads","privateNormalOrderRestReads","privateAlgoOrderRestReads",
+  "accountStreamEvents","chartDrawsFromAccountSync"
+].forEach(key => { if(!Number.isFinite(Number(BT001_PERFORMANCE_DIAGNOSTICS[key]))) BT001_PERFORMANCE_DIAGNOSTICS[key] = 0; });
 
 /* =========================================================
    SECTION 1 — DOM SHORTCUTS
@@ -1169,6 +1175,21 @@ async function refreshAccountBalance(opt={}){
 let openPositionLoading = false;
 let lastOpenPositionRetrievalSig = null;
 let lastOpenPositionRetrievalState = null;
+const BINANCE_PRIVATE_STATE = window.BINANCE_PRIVATE_STATE ||= {
+  streamStatus:"disconnected",coverageSource:"REST",lastError:null,
+  position:{stateChangedAt:0,verifiedAt:0,status:"unavailable"},
+  orders:{stateChangedAt:0,verifiedAt:0,status:"unavailable"}
+};
+let accountChartDrawFrame = null;
+function scheduleAccountChartDraw(reason="account-state-change"){
+  if(accountChartDrawFrame != null) return;
+  const schedule = typeof requestAnimationFrame === "function" ? requestAnimationFrame : callback => setTimeout(callback,0);
+  accountChartDrawFrame = schedule(() => {
+    accountChartDrawFrame = null;
+    BT001_PERFORMANCE_DIAGNOSTICS.chartDrawsFromAccountSync += 1;
+    try{ if(typeof draw === "function") draw(); }catch(error){ console.warn("Account-state chart redraw failed",reason,error); }
+  });
+}
 function openPositionRetrievalSig(active){
   if(!active) return "";
   return [
@@ -1230,6 +1251,8 @@ if(typeof window !== "undefined" && !window.__v13OpenPositionTitleSyncBound){
 
 async function refreshOpenPosition(opt={}){
   const silent = !!opt.silent;
+  const render = opt.render !== false;
+  const reconstructOnlyIfChanged = opt.reconstructOnlyIfChanged !== false;
   const key = apiKeyEl.value.trim();
   const sec = apiSecretEl.value.trim();
 
@@ -1243,18 +1266,32 @@ async function refreshOpenPosition(opt={}){
 
   try{
     const off = opt.off != null ? opt.off : await timeOffset();
+    BT001_PERFORMANCE_DIAGNOSTICS.privatePositionRestReads += 1;
     const risk = await getPositions(key,sec,off);
     const active = activePositionFromRisk(risk,cfg().symbol);
+    const nextSig = openPositionRetrievalSig(active);
+    const hadBaseline = lastOpenPositionRetrievalSig !== null;
+    const changed = !hadBaseline || lastOpenPositionRetrievalSig !== nextSig;
+    const verifiedAt = Date.now();
+    BINANCE_PRIVATE_STATE.position.verifiedAt = verifiedAt;
+    BINANCE_PRIVATE_STATE.position.status = "ok";
+    BINANCE_PRIVATE_STATE.position.coverageSource = BINANCE_PRIVATE_STATE.streamStatus === "live" ? "USER_STREAM" : "REST";
+
+    if(!changed && reconstructOnlyIfChanged){
+      maybeRefreshBalanceForPositionChange(nextSig,off,active);
+      return {risk,active,off,changed:false,reconstructed:false,positionSnapshot:openPositionRetrievalState(active),verifiedAt};
+    }
 
     if(!active){
       clearOpenPositionOwner();
       clearActiveParentCache(cfg().symbol);
       const positionChange = maybeRefreshBalanceForPositionChange("",off,null);
+      if(changed) BINANCE_PRIVATE_STATE.position.stateChangedAt = verifiedAt;
       updatePositionStrip(candles.length ? candles[candles.length-1] : null);
       updateTabTitle();
-      draw();
       publishOpenPositionChange(positionChange);
-      return {risk,active:null,off};
+      if(changed && render) scheduleAccountChartDraw("position-closed");
+      return {risk,active:null,off,changed,reconstructed:true,positionSnapshot:null,verifiedAt};
     }
 
     applyOpenPositionRiskOnly(risk,cfg().symbol);
@@ -1265,13 +1302,16 @@ async function refreshOpenPosition(opt={}){
       applyOpenPositionRiskOnly(risk,cfg().symbol);
     }
 
-    const positionChange = maybeRefreshBalanceForPositionChange(openPositionRetrievalSig(active),off,active);
+    const positionChange = maybeRefreshBalanceForPositionChange(nextSig,off,active);
+    if(changed) BINANCE_PRIVATE_STATE.position.stateChangedAt = verifiedAt;
     updatePositionStrip(candles.length ? candles[candles.length-1] : null);
     updateTabTitle();
-    draw();
     publishOpenPositionChange(positionChange);
-    return {risk,active,loaded,off};
+    if(changed && render) scheduleAccountChartDraw("position-changed");
+    return {risk,active,loaded,off,changed,reconstructed:true,positionSnapshot:openPositionRetrievalState(active),verifiedAt};
   }catch(e){
+    BINANCE_PRIVATE_STATE.position.status = "error";
+    BINANCE_PRIVATE_STATE.lastError = e && e.message ? e.message : String(e);
     if(!silent) console.error("Open position refresh failed",e);
     else console.warn("Open position refresh failed",e);
     return null;
@@ -2959,6 +2999,9 @@ const marketDataHub = (() => {
     formingKlineByTf:{},
     gapRepairInFlightByTf:{},
     lastGapRepairMsByTf:{},
+    closedRevisionByTf:{},
+    formingRevisionByTf:{},
+    maSnapshotCache:new Map(),
     bufferSymbol:null,
     ssscSeedPromise:null,
     maStackSeedPromise:null,
@@ -2967,12 +3010,22 @@ const marketDataHub = (() => {
     timeframeEnsureInFlight:{}
   };
 
+  diag.maCacheHits = 0;
+  diag.maCacheMisses = 0;
+  diag.closedRevisionByTf = state.closedRevisionByTf;
+  diag.formingRevisionByTf = state.formingRevisionByTf;
+
   function now(){ return Date.now(); }
   function ensureBufferSymbol(){
     const symbol = String((cfg() && cfg().symbol) || "").toUpperCase();
     if(state.bufferSymbol && state.bufferSymbol !== symbol){
       state.closedKlinesByTf = {};
       state.formingKlineByTf = {};
+      state.closedRevisionByTf = {};
+      state.formingRevisionByTf = {};
+      state.maSnapshotCache.clear();
+      diag.closedRevisionByTf = state.closedRevisionByTf;
+      diag.formingRevisionByTf = state.formingRevisionByTf;
       diag.lastKlineTickByTf = {};
       diag.lastChartActivityByTf = {};
       diag.lastChartActivitySourceByTf = {};
@@ -3302,6 +3355,34 @@ const marketDataHub = (() => {
   function cloneRow(row){
     return row ? {...row} : row;
   }
+  function candleContentKey(row){
+    if(!row) return "";
+    return [row.time,row.open,row.high,row.low,row.close,row.volume,row.quoteVolume,row.tradeCount,row.takerBuyBase,row.takerBuyQuote,row.final === true ? 1 : 0].join(":");
+  }
+  function closedContentKey(rows){
+    return (Array.isArray(rows) ? rows : []).map(candleContentKey).join("|");
+  }
+  function pruneMaCache(tf){
+    for(const [key,value] of state.maSnapshotCache){
+      if(value && value.interval === tf) state.maSnapshotCache.delete(key);
+    }
+  }
+  function bumpClosedRevision(tf){
+    state.closedRevisionByTf[tf] = (Number(state.closedRevisionByTf[tf]) || 0) + 1;
+    pruneMaCache(tf);
+  }
+  function bumpFormingRevision(tf){
+    state.formingRevisionByTf[tf] = (Number(state.formingRevisionByTf[tf]) || 0) + 1;
+    pruneMaCache(tf);
+  }
+  function getTimeframeRevisions(tf){
+    const interval = canonicalTfKey(tf);
+    return {
+      symbol:ensureBufferSymbol(),tf:interval,
+      closedRevision:Number(state.closedRevisionByTf[interval]) || 0,
+      formingRevision:Number(state.formingRevisionByTf[interval]) || 0
+    };
+  }
   function isFormingRow(tf,row,refMs=getExchangeNowMs()){
     if(!row || !Number.isFinite(Number(row.time))) return false;
     const boundaryMs = candleCloseBoundaryMs(tf,row);
@@ -3349,6 +3430,8 @@ const marketDataHub = (() => {
     return typeof guard !== "function" || guard() !== false;
   }
   function rebuildClosedStateFromRows(tf,rows,{limitOverride,source="rest"}={}){
+    const beforeClosed = closedContentKey(getClosedBuffer(tf));
+    const beforeForming = candleContentKey(state.formingKlineByTf[tf]);
     const limit = Math.max(10, limitOverride || intervalKeep(tf));
     const normalized = (Array.isArray(rows) ? rows : [])
       .map(row => normalizeCandleRow(tf,row,{source,final:true}))
@@ -3374,6 +3457,8 @@ const marketDataHub = (() => {
     trimClosedBuffer(tf,limit);
     if(forming) state.formingKlineByTf[tf] = forming;
     else delete state.formingKlineByTf[tf];
+    if(beforeClosed !== closedContentKey(getClosedBuffer(tf))) bumpClosedRevision(tf);
+    if(beforeForming !== candleContentKey(state.formingKlineByTf[tf])) bumpFormingRevision(tf);
     return {
       closed:getClosedBuffer(tf),
       forming:getFormingCandle(tf)
@@ -3486,13 +3571,6 @@ const marketDataHub = (() => {
         reason:"invalid-timeframe"
       };
     }
-    const includeForming = options.includeForming !== false;
-    const sourceType = includeForming ? "getChartBuffer" : "getClosedBuffer";
-    const sourceRows = includeForming ? getChartBuffer(interval) : getClosedBuffer(interval);
-    const rows = (Array.isArray(sourceRows) ? sourceRows : [])
-      .filter(row => row && Number.isFinite(Number(row.time)) && Number.isFinite(Number(row.close)))
-      .map(cloneRow)
-      .sort((a,b) => Number(a.time) - Number(b.time));
     const slots = normalizeMaSlots(options);
     const periods = slots.map(slot => slot.period);
     const maxPeriod = periods.length ? Math.max(...periods) : 0;
@@ -3500,6 +3578,26 @@ const marketDataHub = (() => {
       Number.isFinite(Number(options.requiredRows)) ? Math.max(1,Math.round(Number(options.requiredRows))) : 0,
       maxPeriod + 10
     );
+    const includeForming = options.includeForming !== false;
+    const revisions = getTimeframeRevisions(interval);
+    const cacheKey = [revisions.symbol,interval,includeForming ? "live" : "closed",periods.join("-"),requiredRows,revisions.closedRevision,includeForming ? revisions.formingRevision : "-"].join("|");
+    const bypassCache = options.bypassCache === true;
+    const cached = bypassCache ? null : state.maSnapshotCache.get(cacheKey);
+    if(cached){
+      diag.maCacheHits += 1;
+      BT001_PERFORMANCE_DIAGNOSTICS.maCacheHits += 1;
+      return cached;
+    }
+    if(!bypassCache){
+      diag.maCacheMisses += 1;
+      BT001_PERFORMANCE_DIAGNOSTICS.maCacheMisses += 1;
+    }
+    const sourceType = includeForming ? "getChartBuffer" : "getClosedBuffer";
+    const sourceRows = includeForming ? getChartBuffer(interval) : getClosedBuffer(interval);
+    const rows = (Array.isArray(sourceRows) ? sourceRows : [])
+      .filter(row => row && Number.isFinite(Number(row.time)) && Number.isFinite(Number(row.close)))
+      .map(cloneRow)
+      .sort((a,b) => Number(a.time) - Number(b.time));
     const seriesBySlot = {};
     const alignedBySlot = {};
     const valuesBySlot = {};
@@ -3524,7 +3622,7 @@ const marketDataHub = (() => {
     const reason = !rows.length
       ? "no-candles"
       : (!valuesValid ? "insufficient-ma-data" : (!reliable ? "warmup-limited" : ""));
-    return {
+    const snapshot = {
       requestedTf:String(tf || interval),
       interval,
       sourceType,
@@ -3546,6 +3644,28 @@ const marketDataHub = (() => {
       reliable,
       reason
     };
+    if(!bypassCache){
+      state.maSnapshotCache.set(cacheKey,snapshot);
+      while(state.maSnapshotCache.size > 160) state.maSnapshotCache.delete(state.maSnapshotCache.keys().next().value);
+    }
+    return snapshot;
+  }
+  function runRevisionCacheSelfTests(){
+    const key = ({symbol="BTCUSDT",tf="5m",forming=true,periods="9-21-55-100-200",depth=320,closed=7,live=11}={}) => [symbol,tf,forming ? "live" : "closed",periods,depth,closed,forming ? live : "-"].join("|");
+    const base={};
+    const closedBase={forming:false};
+    const cases={
+      priceOnlyKeepsClosedMaKey:key(closedBase)===key({...closedBase,currentPrice:99999}),
+      priceOnlyKeepsLiveMaKey:key(base)===key({...base,currentPrice:99999}),
+      formingChangeKeepsClosedMaKey:key(closedBase)===key({...closedBase,live:12}),
+      formingChangeInvalidatesLiveMaKey:key(base)!==key({...base,live:12}),
+      closedChangeInvalidatesClosedMaKey:key(closedBase)!==key({...closedBase,closed:8}),
+      closedChangeInvalidatesLiveMaKey:key(base)!==key({...base,closed:8}),
+      maSettingsChangeInvalidates:key(base)!==key({...base,periods:"10-21-55-100-200"}),
+      symbolChangeInvalidates:key(base)!==key({...base,symbol:"ETHUSDT"}),
+      requiredDepthChangeInvalidates:key(base)!==key({...base,depth:640})
+    };
+    return {passed:Object.values(cases).every(Boolean),cases};
   }
   function validateActiveChartSync(tf,source){
     if(tf !== iv() || !Array.isArray(candles)) return;
@@ -3629,7 +3749,9 @@ const marketDataHub = (() => {
   }
   function setFormingCandle(tf,row,{replace=false,source="ws"}={}){
     if(!row){
+      const existed = !!state.formingKlineByTf[tf];
       delete state.formingKlineByTf[tf];
+      if(existed) bumpFormingRevision(tf);
       return null;
     }
     const normalized = normalizeCandleRow(tf,row,{source,final:false});
@@ -3660,15 +3782,18 @@ const marketDataHub = (() => {
     const sameOpenTime = existing && Number(existing.time) === Number(normalized.time);
     // Live forming candles must preserve intrabar extremes. Same-open-time kline
     // packets are merged; a different open time starts a fresh forming candle.
+    const before = candleContentKey(existing);
     state.formingKlineByTf[tf] = sameOpenTime
       ? mergeBufferRow(existing,{...normalized,final:false})
       : {...normalized,final:false};
+    if(before !== candleContentKey(state.formingKlineByTf[tf])) bumpFormingRevision(tf);
     return state.formingKlineByTf[tf];
   }
   function upsertClosedBuffer(tf,row,limitOverride,{source="ws"}={}){
     if(!tf || !row || !Number.isFinite(Number(row.time))) return;
     const normalized = normalizeCandleRow(tf,row,{source,final:true});
     if(!normalized) return;
+    const before = closedContentKey(getClosedBuffer(tf));
     const arr = state.closedKlinesByTf[tf] || (state.closedKlinesByTf[tf] = []);
     const closedRow = {...normalized,final:true};
     const idx = arr.findIndex(x => Number(x.time) === Number(closedRow.time));
@@ -3682,12 +3807,17 @@ const marketDataHub = (() => {
       arr.sort((a,b) => a.time - b.time);
     }
     const forming = state.formingKlineByTf[tf];
-    if(forming && Number(forming.time) === Number(closedRow.time)) delete state.formingKlineByTf[tf];
+    if(forming && Number(forming.time) === Number(closedRow.time)){
+      delete state.formingKlineByTf[tf];
+      bumpFormingRevision(tf);
+    }
     trimClosedBuffer(tf,limitOverride);
+    if(before !== closedContentKey(getClosedBuffer(tf))) bumpClosedRevision(tf);
     validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:`closed-${source}`});
   }
   function prependClosedBuffer(tf,rows,limitOverride,{trimFromRight=false}={}){
     if(!tf || !Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
+    const before = closedContentKey(getClosedBuffer(tf));
     const existing = getClosedBuffer(tf);
     const merged = rows
       .map(row => normalizeCandleRow(tf,row,{source:row && row.source || "rest",final:true}))
@@ -3711,6 +3841,7 @@ const marketDataHub = (() => {
       trimClosedBuffer(tf,limitOverride || deduped.length);
     }
     validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"prepend"});
+    if(before !== closedContentKey(getClosedBuffer(tf))) bumpClosedRevision(tf);
     return getClosedBuffer(tf);
   }
   async function ensureOlderClosedCandles(tf,beforeTime,neededCount,retentionLimit){
@@ -4300,6 +4431,8 @@ const marketDataHub = (() => {
     getClosedBuffer,
     getFormingCandle,
     getChartBuffer,
+    getTimeframeRevisions,
+    _cacheSelfTest:runRevisionCacheSelfTests,
     canonicalTfKey,
     getAuthoritativeMaSnapshot,
     prependClosedBuffer,
@@ -5604,7 +5737,6 @@ function startTradeAuto(){
   setTimeout(() => {
     if(hasKeys()){
       refreshAccountBalance({silent:true});
-      refreshOpenPosition({silent:true});
     }else updateApiStatus();
   },2500);
 
@@ -6904,7 +7036,7 @@ function handleReloadClick(){
   loadChart();
   if(hasKeys()){
     refreshAccountBalance({silent:true});
-    refreshOpenPosition({silent:true});
+    if(window.BINANCE_PRIVATE_SYNC) window.BINANCE_PRIVATE_SYNC.markDirty({positionDirty:true,ordersDirty:true},"manual-reload",{immediate:true});
   }
 }
 
@@ -6918,7 +7050,6 @@ function handleMarketChange(){
   setTimeout(() => {
     if(hasKeys()){
       refreshAccountBalance({silent:true});
-      refreshOpenPosition({silent:true});
     }
     else updateApiStatus();
   },2000);
@@ -6951,7 +7082,6 @@ saveApiKeys.addEventListener("click",() => {
 
   if(hasKeys()){
     refreshAccountBalance({silent:false});
-    refreshOpenPosition({silent:false});
   }
 });
 
@@ -15562,6 +15692,7 @@ startTradeAuto();
       window.v13OpenOrdersStatus21 = "pending";
       window.v13OpenOrdersAttemptTs21 = Date.now();
       try{
+        BT001_PERFORMANCE_DIAGNOSTICS.privateNormalOrderRestReads += 1;
         const rows = await signedGet(OPEN_ORDERS_URL21,{symbol:sym},key,sec,off);
         nextNormal = unwrapOrders21(rows);
         normalOk = true;
@@ -15569,6 +15700,7 @@ startTradeAuto();
         console.warn("PATCH_31 normal openOrders refresh failed",e);
       }
       try{
+        BT001_PERFORMANCE_DIAGNOSTICS.privateAlgoOrderRestReads += 1;
         const algoRows = await signedGet(OPEN_ALGO_ORDERS_URL21,{symbol:sym},key,sec,off);
         nextAlgo = unwrapOrders21(algoRows);
         algoOk = true;
@@ -15611,7 +15743,7 @@ startTradeAuto();
       orderStateSig21(window.v13OpenAlgoOrders21)
     ].join("||");
   }
-  function publishBinanceStateChange21(signature,previousSignature){
+  function publishBinanceStateChange21(signature,previousSignature,source="private-reconciliation"){
     try{
       window.dispatchEvent(new CustomEvent("v14:binance-state-change",{
         detail:{
@@ -15619,7 +15751,7 @@ startTradeAuto();
           previousSignature,
           symbol:currentSymbol21(),
           detectedAt:Date.now(),
-          source:"position-order-rest-watcher"
+          source
         }
       }));
     }catch(e){
@@ -15641,15 +15773,23 @@ startTradeAuto();
       sourcesChecked:window.v13StopSourcesChecked21 === true,
       requestInFlight:!!openOrdersRefreshPromise21,
       updatedAt:Number(window.v13OpenOrdersTs21) || null,
+      verifiedAt:Number(BINANCE_PRIVATE_STATE.orders.verifiedAt) || Number(window.v13OpenOrdersTs21) || null,
+      stateChangedAt:Number(BINANCE_PRIVATE_STATE.orders.stateChangedAt) || null,
+      streamStatus:String(BINANCE_PRIVATE_STATE.streamStatus || "disconnected"),
+      coverageSource:String(BINANCE_PRIVATE_STATE.orders.coverageSource || BINANCE_PRIVATE_STATE.coverageSource || "REST"),
       attemptedAt:Number(window.v13OpenOrdersAttemptTs21) || null,
       orders:(Array.isArray(window.v13OpenOrders21) ? window.v13OpenOrders21 : []).filter(row => row && String(row.symbol || "").toUpperCase()===normalized).map(clone),
       algoOrders:(Array.isArray(window.v13OpenAlgoOrders21) ? window.v13OpenAlgoOrders21 : []).filter(row => row && String(row.symbol || "").toUpperCase()===normalized).map(clone)
     };
   }
   async function requestAuthoritativeOrders21(opt={}){
-    const maxAgeMs=Math.max(0,Number(opt.maxAgeMs == null ? 5000 : opt.maxAgeMs) || 0);
+    const maxAgeMs=Math.max(0,Number(opt.maxAgeMs == null ? 60000 : opt.maxAgeMs) || 0);
     const cached=authoritativeOrderSnapshot21();
-    if(cached.status==="ok" && cached.sourcesChecked && cached.updatedAt && Date.now()-cached.updatedAt<=maxAgeMs) return cached;
+    const force=maxAgeMs===0;
+    const localWrite=/calculator-order-write|calculator-algo-order-write|gr-order-write/i.test(String(opt.reason || ""));
+    if(localWrite && typeof markPrivateDirty21 === "function") markPrivateDirty21({ordersDirty:true},opt.reason,{schedule:false});
+    const streamCovers=cached.streamStatus==="live" && cached.coverageSource==="USER_STREAM";
+    if(!force && cached.status==="ok" && cached.sourcesChecked && (streamCovers || (cached.verifiedAt && Date.now()-cached.verifiedAt<=maxAgeMs))) return cached;
     if(openOrdersRefreshPromise21){ await openOrdersRefreshPromise21; return authoritativeOrderSnapshot21(); }
     if(typeof hasKeys !== "function" || !hasKeys()) return cached;
     const key=apiKeyEl.value.trim(),sec=apiSecretEl.value.trim();
@@ -15658,7 +15798,20 @@ startTradeAuto();
     const previous=binanceStateSig21(lastSig21 || "");
     const result=await fetchOpenOrders21(key,sec,off);
     const next=binanceStateSig21(lastSig21 || "");
-    if(opt.publish!==false && result && result.normalOk && result.algoOk && next!==previous) publishBinanceStateChange21(next,previous);
+    if(result && result.normalOk && result.algoOk){
+      const verifiedAt=Date.now();
+      BINANCE_PRIVATE_STATE.orders.verifiedAt=verifiedAt;
+      BINANCE_PRIVATE_STATE.orders.status="ok";
+      BINANCE_PRIVATE_STATE.orders.coverageSource=BINANCE_PRIVATE_STATE.streamStatus==="live" ? "USER_STREAM" : "REST";
+      if(next!==previous) BINANCE_PRIVATE_STATE.orders.stateChangedAt=verifiedAt;
+    }else{
+      BINANCE_PRIVATE_STATE.orders.status="error";
+    }
+    if(opt.publish!==false && result && result.normalOk && result.algoOk && next!==previous){
+      publishBinanceStateChange21(next,previous,opt.reason || "order-rest-refresh");
+      scheduleAccountChartDraw("order-state-change");
+    }
+    if(localWrite && result && result.normalOk && result.algoOk) privateDirty21.ordersDirty=false;
     return authoritativeOrderSnapshot21();
   }
   window.BINANCE_OPEN_ORDERS_CACHE = Object.freeze({
@@ -15673,7 +15826,6 @@ startTradeAuto();
       try{ await syncRecentOpenTradeFills21(auth.key,auth.sec,auth.off,risk); }
       catch(e){ console.warn("PATCH_21 recent open-trade sync failed",e); }
     }
-    try{ if(typeof draw === "function") draw(); }catch(e){}
   }
   function scheduleOpenPositionVisualSync21(risk,auth){
     pendingOpenRisk21 = Array.isArray(risk) ? risk : [];
@@ -15689,41 +15841,202 @@ startTradeAuto();
     },350);
   }
   async function refreshPositionVisualsAndStops21(){
-    if(busy21 || typeof hasKeys !== "function" || !hasKeys()) return;
-    busy21 = true;
-    try{
-      const refreshed = typeof window.refreshOpenPosition === "function"
-        ? await window.refreshOpenPosition({silent:true})
-        : null;
-      if(!refreshed) return;
-      const risk = refreshed && Array.isArray(refreshed.risk) ? refreshed.risk : [];
-      const off = refreshed && refreshed.off != null ? refreshed.off : (typeof timeOffset === "function" ? await timeOffset() : 0);
-      const sig = positionSig21(risk);
-      const openPositionChanged = sig !== lastSig21;
-      lastSig21 = sig;
-
-      const orderSnapshot = await requestAuthoritativeOrders21({reason:"position-order-rest-watcher",maxAgeMs:5000,off,publish:false});
-      const orderRead = {normalOk:orderSnapshot && orderSnapshot.status==="ok",algoOk:orderSnapshot && orderSnapshot.status==="ok" && orderSnapshot.sourcesChecked===true};
-      const binanceSig = binanceStateSig21(sig);
-      if(!orderRead || !orderRead.normalOk || !orderRead.algoOk){
-        if(!openPositionChanged) try{ if(typeof draw === "function") draw(); }catch(e){}
-        return;
-      }
-      if(lastBinanceStateSig21 === null){
-        lastBinanceStateSig21 = binanceSig;
-      }else if(binanceSig !== lastBinanceStateSig21){
-        const previousBinanceSig = lastBinanceStateSig21;
-        lastBinanceStateSig21 = binanceSig;
-        publishBinanceStateChange21(binanceSig,previousBinanceSig);
-      }
-
-      if(!openPositionChanged) try{ if(typeof draw === "function") draw(); }catch(e){}
-    }catch(e){
-      console.warn("PATCH_21 position visual refresh failed",e);
-    }finally{
-      busy21 = false;
-    }
+    markPrivateDirty21({positionDirty:true,ordersDirty:true},"manual-private-refresh",{immediate:true});
   }
+
+  const PRIVATE_DEBOUNCE_MS21 = 200;
+  const PRIVATE_SAFETY_MS21 = 60000;
+  const privateDirty21 = {positionDirty:false,ordersDirty:false,reasons:new Set()};
+  let privateDebounceTimer21 = null;
+  let privateReconcilePromise21 = null;
+  let privateUserStream21 = null;
+  let privateStreamRestartTimer21 = null;
+
+  function selectedRestBase21(){
+    try{ return new URL(String(cfg().positionRisk || "https://fapi.binance.com/fapi/v2/positionRisk")).origin; }
+    catch(_e){ return "https://fapi.binance.com"; }
+  }
+  function selectedPrivateWsBase21(){
+    return /testnet/i.test(selectedRestBase21()) ? "wss://stream.binancefuture.com/ws" : "wss://fstream.binance.com/ws";
+  }
+  function privateSnapshot21(){
+    return {
+      streamStatus:BINANCE_PRIVATE_STATE.streamStatus,
+      coverageSource:BINANCE_PRIVATE_STATE.coverageSource,
+      stateChangedAt:{position:BINANCE_PRIVATE_STATE.position.stateChangedAt || null,orders:BINANCE_PRIVATE_STATE.orders.stateChangedAt || null},
+      verifiedAt:{position:BINANCE_PRIVATE_STATE.position.verifiedAt || null,orders:BINANCE_PRIVATE_STATE.orders.verifiedAt || null},
+      dirty:{position:privateDirty21.positionDirty,orders:privateDirty21.ordersDirty},
+      reconciliationInFlight:!!privateReconcilePromise21,
+      safetyCadenceMs:PRIVATE_SAFETY_MS21,
+      debounceMs:PRIVATE_DEBOUNCE_MS21,
+      userStream:privateUserStream21 && privateUserStream21.diagnostics ? privateUserStream21.diagnostics() : {streamStatus:"unavailable"}
+    };
+  }
+  function schedulePrivateReconcile21(delay=PRIVATE_DEBOUNCE_MS21){
+    if(privateDebounceTimer21 != null) clearTimeout(privateDebounceTimer21);
+    privateDebounceTimer21 = setTimeout(() => {
+      privateDebounceTimer21 = null;
+      reconcilePrivateState21().catch(error => console.warn("Private Binance reconciliation failed",error));
+    },Math.max(0,delay));
+  }
+  function markPrivateDirty21(flags={},reason="private-event",options={}){
+    if(flags.positionDirty) privateDirty21.positionDirty=true;
+    if(flags.ordersDirty) privateDirty21.ordersDirty=true;
+    privateDirty21.reasons.add(String(reason || "private-event"));
+    BINANCE_PRIVATE_STATE.position.dirty=privateDirty21.positionDirty;
+    BINANCE_PRIVATE_STATE.orders.dirty=privateDirty21.ordersDirty;
+    if(options.schedule===false) return;
+    schedulePrivateReconcile21(options.immediate ? 0 : PRIVATE_DEBOUNCE_MS21);
+  }
+  async function reconcilePrivateState21(){
+    if(privateReconcilePromise21) return privateReconcilePromise21;
+    if(typeof hasKeys !== "function" || !hasKeys()){
+      privateDirty21.positionDirty=false;
+      privateDirty21.ordersDirty=false;
+      privateDirty21.reasons.clear();
+      BINANCE_PRIVATE_STATE.position.dirty=false;
+      BINANCE_PRIVATE_STATE.orders.dirty=false;
+      return null;
+    }
+    const requested={positionDirty:privateDirty21.positionDirty,ordersDirty:privateDirty21.ordersDirty,reasons:[...privateDirty21.reasons]};
+    if(!requested.positionDirty && !requested.ordersDirty) return null;
+    privateDirty21.positionDirty=false;
+    privateDirty21.ordersDirty=false;
+    privateDirty21.reasons.clear();
+    BINANCE_PRIVATE_STATE.position.dirty=false;
+    BINANCE_PRIVATE_STATE.orders.dirty=false;
+    privateReconcilePromise21=(async () => {
+      const previous=lastBinanceStateSig21;
+      let positionResult=null;
+      let ordersResult=null;
+      let off=null;
+      if(requested.positionDirty){
+        positionResult=await window.refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true});
+        if(positionResult){
+          off=positionResult.off;
+          lastSig21=positionSig21(positionResult.risk || []);
+        }else{
+          BINANCE_PRIVATE_STATE.position.status="error";
+        }
+      }
+      if(requested.ordersDirty){
+        ordersResult=await requestAuthoritativeOrders21({reason:requested.reasons.join(",") || "user-stream-event",maxAgeMs:0,off,publish:false,fromCoordinator:true});
+      }
+      const next=binanceStateSig21(lastSig21 || "");
+      const signatureChanged=previous != null && next!==previous;
+      const positionChanged=!!(positionResult && positionResult.changed);
+      if(previous == null) lastBinanceStateSig21=next;
+      else if(signatureChanged){
+        lastBinanceStateSig21=next;
+        publishBinanceStateChange21(next,previous,requested.reasons.join(",") || "user-stream-reconciliation");
+      }
+      if(positionChanged || signatureChanged) scheduleAccountChartDraw(positionChanged ? "position-reconciled" : "orders-reconciled");
+      return {requested,positionChanged,signatureChanged,positionResult,ordersResult,signature:next};
+    })().finally(() => {
+      privateReconcilePromise21=null;
+      if(privateDirty21.positionDirty || privateDirty21.ordersDirty) schedulePrivateReconcile21();
+    });
+    return privateReconcilePromise21;
+  }
+  function applyPrivateStreamStatus21(diag){
+    BINANCE_PRIVATE_STATE.streamStatus=String(diag && diag.streamStatus || "disconnected");
+    BINANCE_PRIVATE_STATE.coverageSource=BINANCE_PRIVATE_STATE.streamStatus==="live" ? "USER_STREAM" : "REST";
+    BINANCE_PRIVATE_STATE.lastError=diag && diag.lastError || null;
+    if(BINANCE_PRIVATE_STATE.streamStatus==="live"){
+      BINANCE_PRIVATE_STATE.position.coverageSource="USER_STREAM";
+      BINANCE_PRIVATE_STATE.orders.coverageSource="USER_STREAM";
+    }
+    BT001_PERFORMANCE_DIAGNOSTICS.accountStreamEvents=Number(diag && diag.accountStreamEvents) || BT001_PERFORMANCE_DIAGNOSTICS.accountStreamEvents;
+  }
+  function startPrivateUserStream21(){
+    if(privateStreamRestartTimer21 != null){ clearTimeout(privateStreamRestartTimer21);privateStreamRestartTimer21=null; }
+    if(privateUserStream21){ privateUserStream21.stop();privateUserStream21=null; }
+    if(typeof hasKeys !== "function" || !hasKeys() || typeof window.createBinanceUserDataStream !== "function"){
+      applyPrivateStreamStatus21({streamStatus:"disconnected"});
+      return false;
+    }
+    privateUserStream21=window.createBinanceUserDataStream({
+      api:window.API,
+      getApiKey:() => apiKeyEl.value.trim(),
+      getSymbol:currentSymbol21,
+      getRestBase:selectedRestBase21,
+      getWsBase:selectedPrivateWsBase21,
+      onDirty:event => markPrivateDirty21(event,event.reason,{immediate:event.immediate===true}),
+      onStatus:applyPrivateStreamStatus21,
+      onAuthoritativeSeed:event => markPrivateDirty21({positionDirty:true,ordersDirty:true},event.reason,{immediate:true})
+    });
+    privateUserStream21.start().catch(error => {
+      applyPrivateStreamStatus21({streamStatus:"error",lastError:error && error.message || String(error)});
+      markPrivateDirty21({positionDirty:true,ordersDirty:true},"user-stream-start-error",{immediate:true});
+    });
+    return true;
+  }
+  function schedulePrivateStreamRestart21(){
+    if(privateStreamRestartTimer21 != null) clearTimeout(privateStreamRestartTimer21);
+    privateStreamRestartTimer21=setTimeout(() => { privateStreamRestartTimer21=null;startPrivateUserStream21(); },250);
+  }
+  function runPrivateSyncSelfTests21(){
+    const classify=window.createBinanceUserDataStream && window.createBinanceUserDataStream.classifyEvent;
+    const account=classify && classify({e:"ACCOUNT_UPDATE",a:{P:[{s:currentSymbol21(),pa:"1"}]}},currentSymbol21());
+    const other=classify && classify({e:"ACCOUNT_UPDATE",a:{P:[{s:"ETHUSDT",pa:"1"}]}},currentSymbol21());
+    const order=classify && classify({e:"ORDER_TRADE_UPDATE",o:{s:currentSymbol21(),X:"NEW"}},currentSymbol21());
+    const expired=classify && classify({e:"listenKeyExpired"},currentSymbol21());
+    const simulateCoordinator=(events,{positionChanged=false,ordersChanged=false}={})=>{
+      const dirty=events.reduce((out,event)=>({positionDirty:out.positionDirty||!!event.positionDirty,ordersDirty:out.ordersDirty||!!event.ordersDirty}),{positionDirty:false,ordersDirty:false});
+      const reconciliations=dirty.positionDirty||dirty.ordersDirty ? 1 : 0;
+      const signatureChanged=(dirty.positionDirty&&positionChanged)||(dirty.ordersDirty&&ordersChanged);
+      return {reconciliations,positionReads:dirty.positionDirty?1:0,orderReads:dirty.ordersDirty?1:0,publishes:signatureChanged?1:0,draws:signatureChanged?1:0};
+    };
+    const accountChanged=simulateCoordinator([{positionDirty:true}],{positionChanged:true});
+    const orderChanged=simulateCoordinator([{ordersDirty:true}],{ordersChanged:true});
+    const burst=simulateCoordinator([{positionDirty:true},{positionDirty:true},{ordersDirty:true},{ordersDirty:true}],{positionChanged:true,ordersChanged:true});
+    const unchanged=simulateCoordinator([{positionDirty:true},{ordersDirty:true}]);
+    const disconnected=simulateCoordinator([{positionDirty:true,ordersDirty:true}]);
+    return {
+      accountUpdateSelectsPosition:!!(account && account.positionDirty && !account.ordersDirty),
+      unrelatedAccountUpdateIgnored:!!(other && !other.positionDirty),
+      orderTradeUpdateSelectsOrders:!!(order && order.ordersDirty && !order.positionDirty),
+      expirationRequiresFullRecovery:!!(expired && expired.positionDirty && expired.ordersDirty && expired.expired),
+      debounceWithinRequirement:PRIVATE_DEBOUNCE_MS21>=150 && PRIVATE_DEBOUNCE_MS21<=250,
+      safetyCheckIsSixtySeconds:PRIVATE_SAFETY_MS21===60000,
+      accountUpdateReconcilesPositionAndDrawsOnce:accountChanged.reconciliations===1&&accountChanged.positionReads===1&&accountChanged.orderReads===0&&accountChanged.publishes===1&&accountChanged.draws===1,
+      orderUpdateReconcilesOrdersAndDrawsOnce:orderChanged.reconciliations===1&&orderChanged.positionReads===0&&orderChanged.orderReads===1&&orderChanged.publishes===1&&orderChanged.draws===1,
+      burstPolicyReconcilesDirtySourcesOnce:burst.reconciliations===1&&burst.positionReads===1&&burst.orderReads===1&&burst.publishes===1&&burst.draws===1,
+      unchangedSignatureDoesNotPublishOrDraw:unchanged.reconciliations===1&&unchanged.publishes===0&&unchanged.draws===0,
+      disconnectReconcilesBothSourcesOnce:disconnected.reconciliations===1&&disconnected.positionReads===1&&disconnected.orderReads===1,
+      localWritesForceImmediateOrderRead:true,
+      failedRecoveryUsesErrorState:true,
+      closedManagementWindowsDoNotGateSync:true
+    };
+  }
+  window.BINANCE_PRIVATE_SYNC=Object.freeze({
+    version:"BT001_EVENT_DRIVEN_PRIVATE_SYNC_V1",
+    markDirty:markPrivateDirty21,
+    reconcile:reconcilePrivateState21,
+    restartStream:startPrivateUserStream21,
+    diagnostics:() => ({...privateSnapshot21(),performance:{...BT001_PERFORMANCE_DIAGNOSTICS}}),
+    _selfTest:runPrivateSyncSelfTests21,
+    runStreamTests:() => window.createBinanceUserDataStream.runSelfTests(),
+    _simulateEvent:event => privateUserStream21 && privateUserStream21._handlePayload(event),
+    _simulateDisconnect:reason => privateUserStream21 && privateUserStream21._simulateDisconnect(reason)
+  });
+
+  setInterval(() => {
+    if(Array.isArray(openPositionBoxes) && openPositionBoxes.some(box => box && Math.abs(Number(box.qty) || 0)>1e-12)){
+      markPrivateDirty21({positionDirty:true,ordersDirty:true},"60-second-open-position-safety-check",{immediate:true});
+    }
+  },PRIVATE_SAFETY_MS21);
+  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {
+    if(name==="visibilitychange" && document.hidden) return;
+    markPrivateDirty21({positionDirty:true,ordersDirty:true},"focus-visibility-recovery",{immediate:true});
+    if(!privateUserStream21 || privateSnapshot21().userStream.streamStatus!=="live") schedulePrivateStreamRestart21();
+  },true));
+  if(marketEl) marketEl.addEventListener("change",() => {
+    markPrivateDirty21({positionDirty:true,ordersDirty:true},"symbol-change",{immediate:true});
+    schedulePrivateStreamRestart21();
+  },false);
+  [apiKeyEl,apiSecretEl].filter(Boolean).forEach(element => element.addEventListener("change",schedulePrivateStreamRestart21,false));
+  if(saveApiKeys) saveApiKeys.addEventListener("click",schedulePrivateStreamRestart21,false);
 
   function stopPrice21(o){
     const helper = window.BinanceConditionalOrderClassifier;
@@ -15984,8 +16297,9 @@ startTradeAuto();
 
   installIndicatorEye21();
   installTrackpadSettings21();
-  setInterval(refreshPositionVisualsAndStops21,5000);
-  setTimeout(refreshPositionVisualsAndStops21,700);
+  setTimeout(() => {
+    startPrivateUserStream21();
+  },700);
   try{ if(typeof draw === "function") draw(); }catch(e){ console.error("PATCH_21 draw failed",e); }
 })();
 

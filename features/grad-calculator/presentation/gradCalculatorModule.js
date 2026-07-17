@@ -803,7 +803,17 @@
     }catch(_e){}
     return data;
   }
-  async function livePosition(){
+  function sharedLivePosition(){
+    const list = typeof openPositionBoxes !== "undefined" && Array.isArray(openPositionBoxes) ? openPositionBoxes : [];
+    const boxes = list.filter(box => box && (!box.symbol || box.symbol === currentSymbol()) && Math.abs(number(box.qty) || 0) > 0);
+    if(!boxes.length) return null;
+    const first=boxes[0],qty=boxes.reduce((sum,box)=>sum+Math.abs(number(box.qty)||0),0);
+    const weightedEntry=qty ? boxes.reduce((sum,box)=>sum+Math.abs(number(box.qty)||0)*(number(box.entryPrice ?? box.price)||0),0)/qty : null;
+    const side=String(first.side || first.positionSide || "").toUpperCase()==="SHORT" ? "SHORT" : "LONG";
+    return {side,qty,entry:weightedEntry,current:currentPrice(),positionSide:String(first.positionSide||"BOTH").toUpperCase()};
+  }
+  async function livePosition({preferShared=false}={}){
+    if(preferShared) return sharedLivePosition();
     if(typeof hasKeys!=="function" || !hasKeys()) return null;
     const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
     const list=typeof getPositions==="function" ? await getPositions(key,secret,offset) : [];
@@ -820,9 +830,9 @@
     state.positionBasis[section]=positionFingerprint(position);
     state.stale[section]=false;
   }
-  async function refreshPositionAwareness(section,{quiet=false}={}){
+  async function refreshPositionAwareness(section,{quiet=false,preferShared=false}={}){
     if(section==="entry")return null;
-    const current=await livePosition();
+    const current=await livePosition({preferShared});
     state.livePosition=current;
     const basis=state.positionBasis[section];
     state.stale[section]=!!basis&&positionFingerprint(current)!==basis;
@@ -1295,7 +1305,20 @@
     }));
   }
   function installPositionWatcher(){
-    window.setInterval(async()=>{for(const section of ["protection","exit"]){if(!state.positionBasis[section])continue;try{await refreshPositionAwareness(section,{quiet:true});}catch(_e){state.stale[section]=true;calculate();}}},15000);
+    let timer=null;
+    const refresh=()=>{
+      if(timer!=null)window.clearTimeout(timer);
+      timer=window.setTimeout(async()=>{
+        timer=null;
+        for(const section of ["protection","exit"]){
+          if(!state.positionBasis[section])continue;
+          try{await refreshPositionAwareness(section,{quiet:true,preferShared:true});}
+          catch(_e){state.stale[section]=true;calculate();}
+        }
+      },200);
+    };
+    window.addEventListener("v13:open-position-change",refresh,false);
+    window.addEventListener("v14:binance-state-change",refresh,false);
   }
   function setWindowCollapsed(win,collapsed){
     const button=q("gradCalcCollapse"),body=win.querySelector(".grad-calc-body"),stage=win.querySelector(".grad-calc-tab-stage"),head=q("gradCalcHead");

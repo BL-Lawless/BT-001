@@ -427,10 +427,11 @@
     function renderToolbarTooltip(kind){
       const tips = ensureToolbarTooltips();
       const tip = tips[kind];
+      if(!tip || !tip.classList.contains("is-open")) return;
       const content = kind === "signal" ? state.signalTooltip : state.positionTooltip;
       const flow = tip && tip.querySelector(".pressure-tooltip-flow");
       if(flow) flow.replaceChildren(...tooltipContentBlocks(content || ""));
-      if(tip && tip.classList.contains("is-open")) positionToolbarTooltip(kind);
+      positionToolbarTooltip(kind);
     }
     function positionToolbarTooltip(kind){
       layoutToolbarTooltip(kind);
@@ -477,12 +478,11 @@
       const tip = kind === "signal" ? state.signalTip : state.positionTip;
       const content = kind === "signal" ? state.signalTooltip : state.positionTooltip;
       if(!tip || !content || !toolbarControlAvailable(toolbarControl(kind))) return;
-      renderToolbarTooltip(kind);
       hideTooltips(kind);
       clearTooltipBridge(kind);
       tip.classList.add("is-open");
       tip.setAttribute("aria-hidden","false");
-      positionToolbarTooltip(kind);
+      renderToolbarTooltip(kind);
     }
     function hideTooltips(exceptKind=null){
       ["signal","position"].forEach(kind => {
@@ -1023,7 +1023,7 @@
     }
 
     function renderPosition(){
-      if(!state.positionBody || !state.management || !state.snapshot) return;
+      if(!state.positionBody || !state.positionWindow || !state.positionWindow.classList.contains("is-open") || !state.management || !state.snapshot) return;
       const preserved = windowState(state.positionWindow);
       const report = positionReport(state.management,state.snapshot);
       state.positionBody.replaceChildren();
@@ -1064,7 +1064,7 @@
         ].join("\n");
       }
       const signalWindow = document.getElementById("pressureSignalDetails");
-      if(signalWindow){
+      if(signalWindow && signalWindow.classList.contains("is-open")){
         signalWindow.querySelectorAll("pre").forEach(pre => renderPriceText(pre,pre.textContent));
       }
       renderPosition();
@@ -1127,6 +1127,7 @@
       hideTooltips();
       win.classList.add("is-open");
       win.setAttribute("aria-hidden","false");
+      renderPosition();
       bringToFront(win);
       requestAnimationFrame(() => clampToViewport(win));
       const indicator = document.getElementById("pressureSignalExit");
