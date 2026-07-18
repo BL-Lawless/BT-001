@@ -5874,6 +5874,26 @@ function timeX(t,vis,mapX,slot){
   return mapX(idx) + f * slot;
 }
 
+/* Authoritative continuous chart-time mapping for timestamp-based custom layers.
+   It is the same interpolation used by timeX(), with edge extrapolation so a
+   source cell that only partly intersects the plot can still be clipped. */
+function chartTimestampToX(t,vis,mapX,slot){
+  if(!vis.length || !Number.isFinite(Number(t))) return null;
+  const value = Number(t);
+  const lastI = vis.length - 1;
+  const sec = Math.max(1,ivSec());
+  if(value <= vis[0].time) return mapX(0) + ((value-vis[0].time)/sec)*slot;
+  if(value >= vis[lastI].time) return mapX(lastI) + ((value-vis[lastI].time)/sec)*slot;
+  let lo=0,hi=lastI,idx=0;
+  while(lo<=hi){
+    const mid=Math.floor((lo+hi)/2);
+    if(vis[mid].time<=value){idx=mid;lo=mid+1;}else hi=mid-1;
+  }
+  const next=Math.min(idx+1,lastI);
+  const span=Math.max(1,vis[next].time-vis[idx].time);
+  return mapX(idx)+((value-vis[idx].time)/span)*slot;
+}
+
 function clipped(l,vis,mapX,mapY,slot){
   if(!linkOverlap(l,vis)) return null;
 
@@ -11605,6 +11625,28 @@ startTradeAuto();
     ctx.strokeStyle = '#d9dce1'; ctx.beginPath(); ctx.moveTo(px(left),px(volTop)+0.5); ctx.lineTo(px(w-right),px(volTop)+0.5); ctx.stroke();
 
     ctx.save(); ctx.beginPath(); ctx.rect(left,top,chartW,priceH); ctx.clip();
+    try{
+      if(window.BT001HeatmapFeature){
+        const firstTime=Number(vis[0].time),sec=Math.max(1,ivSec());
+        window.BT001HeatmapFeature.draw(ctx,{
+          left,top,width:chartW,height:priceH,minPrice:minP,maxPrice:maxP,
+          visibleStartTime:firstTime-sec/2,
+          visibleEndTime:firstTime+(total-.5)*sec,
+          timeToX:t=>chartTimestampToX(t,vis,mapX,slot),
+          priceToY:mapY,
+          canvas:{
+            cssWidth:canvas.clientWidth,cssHeight:canvas.clientHeight,
+            backingWidth:canvas.width,backingHeight:canvas.height,
+            display:getComputedStyle(canvas).display,visibility:getComputedStyle(canvas).visibility,
+            plot:{left,top,width:chartW,height:priceH},
+            insertionPoint:"shared main canvas · after grid · before candles",
+            pointerInteraction:"no separate heatmap event target"
+          }
+        });
+      }
+    }catch(_heatmapError){
+      try{window.BT001HeatmapState&&window.BT001HeatmapState.reportRender({renderFailure:true,errorMessage:_heatmapError&&_heatmapError.message?String(_heatmapError.message):"Heatmap renderer failed before draw",zeroDrawReason:"Heatmap renderer failed before draw",drawnCellCount:0});}catch(_ignoredHeatmapDiagnostic){}
+    }
     for(let i=0;i<vis.length;i++){
       const c = vis[i], x = mapX(i), bull = c.close >= c.open;
       const body = bull ? css('--candle-up-body') : css('--candle-down-body');
@@ -11640,6 +11682,12 @@ startTradeAuto();
     tradeOverlays(vis,mapX,mapY,slot,clip);
     /* PATCH_37F: single current-price dashed line is owned by drawCountdown(). */
     ctx.restore();
+
+    try{
+      if(window.BT001HeatmapFeature){
+        window.BT001HeatmapFeature.drawDecorations(ctx,{left,top,width:chartW,height:priceH});
+      }
+    }catch(_heatmapDecorationError){}
 
     /* PATCH_37C: current price is drawn only in the shared right-axis price/countdown box. */
 
