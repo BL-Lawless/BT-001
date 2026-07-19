@@ -5,18 +5,22 @@
 
   build.createWindowSystem = function createWindowSystem(config,format){
     const state = {
-      signalReport:null,management:null,managementDataStatus:null,snapshot:null,signalCopy:"",positionCopy:"",
+      signalReport:null,management:null,managementDataStatus:null,snapshot:null,signalCopy:"",positionCopy:"",displayedSignal:null,
       signalHorizonId:null,
       signalWindow:null,positionWindow:null,positionBody:null,positionTitle:null,
       signalTooltip:"",positionTooltip:"",signalTip:null,positionTip:null,
       overlay:null,activeWindow:null,signalBound:false,positionBound:false,viewportBound:false,
       signalTooltipBound:false,positionTooltipBound:false,tooltipScrollBound:false,tooltipGeometryBound:false,tooltipLayoutFrame:null,
+      signalReportFactory:null,signalTooltipFactory:null,signalTooltipPublication:null,
+      publicationFingerprint:"",signalReportFingerprint:"",signalTooltipFingerprint:"",positionTooltipFingerprint:"",positionReportFingerprint:"",
+      renderedTooltipFingerprints:{signal:"",position:""},renderedPositionFingerprint:"",positionViewState:null,
       tooltipHover:{
         signal:{buttonHovered:false,tooltipHovered:false,bridgeTimer:null},
         position:{buttonHovered:false,tooltipHovered:false,bridgeTimer:null}
       },
       geometry:new WeakMap(),resizeObservers:[],mutationObservers:[],listeners:[]
-      ,updating:false,refreshState:"IDLE",refreshMessage:"",contextKey:null
+      ,updating:false,refreshState:"IDLE",refreshMessage:"",contextKey:null,
+      signalConsistency:{buttonGeneration:null,tooltipGeneration:null,detailsGeneration:null,reportGeneration:null,directionMismatch:0,stateMismatch:0,confidenceMismatch:0,setupIdentityMismatch:0,stalePayloadDiscarded:0,fallbackPrevented:0}
     };
     const TOOLTIP_BRIDGE_DELAY = 110;
     const TOOLTIP_VERTICAL_GAP = 3;
@@ -25,6 +29,15 @@
     const TOOLTIP_COLUMN_GAP = 12;
     const TOOLTIP_PREFERRED_COLUMN_WIDTH = 338;
     const TOOLTIP_MIN_COLUMN_WIDTH = 240;
+    const perf = () => window.BT001_UI_PERFORMANCE || null;
+    const timed = (name,work,fingerprint=null) => {
+      const diagnostics=perf();
+      return diagnostics && typeof diagnostics.measure === "function" ? diagnostics.measure(name,work,fingerprint) : work();
+    };
+    const counted = (name,fingerprint=null) => {
+      const diagnostics=perf();
+      if(diagnostics && typeof diagnostics.count === "function") diagnostics.count(name,fingerprint);
+    };
 
     const listen = (target,type,handler,options=false) => {
       if(!target) return;
@@ -337,24 +350,22 @@
       const preferredColumnWidth=Math.min(TOOLTIP_PREFERRED_COLUMN_WIDTH,Math.max(180,naturalOuter-chromeX));
       const contentCapacity=Math.max(8,availableHeight-chromeY);
       const maxColumns=Math.max(1,Math.min(blocks.length,Math.floor((usableWidth-chromeX+TOOLTIP_COLUMN_GAP)/(TOOLTIP_MIN_COLUMN_WIDTH+TOOLTIP_COLUMN_GAP)) || 1));
-      let chosen=null;
-      let fallback=null;
-
-      for(let columns=1;columns<=maxColumns;columns+=1){
+      const measureColumns=columns => {
         const perColumn=Math.max(1,Math.floor((usableWidth-chromeX-TOOLTIP_COLUMN_GAP*(columns-1))/columns));
         const columnWidth=Math.min(preferredColumnWidth,perColumn);
-        if(columns>1 && columnWidth<TOOLTIP_MIN_COLUMN_WIDTH) continue;
         tip.style.width=`${Math.min(usableWidth,chromeX+columnWidth*columns+TOOLTIP_COLUMN_GAP*(columns-1))}px`;
         tip.style.maxWidth="none";
         flow.style.width=`${columnWidth}px`;
         blocks.forEach(block => { block.style.width=`${columnWidth}px`; });
         const heights=blocks.map(block => block.getBoundingClientRect().height);
         const partition=linearTooltipPartitions(heights,columns);
-        const candidate={columns,columnWidth,partition,heights,outerWidth:Math.min(usableWidth,chromeX+columnWidth*columns+TOOLTIP_COLUMN_GAP*(columns-1))};
-        fallback=candidate;
-        if(partition.maxHeight<=contentCapacity+0.5){ chosen=candidate;break; }
-      }
-      chosen ||= fallback;
+        return {columns,columnWidth,partition,heights,outerWidth:Math.min(usableWidth,chromeX+columnWidth*columns+TOOLTIP_COLUMN_GAP*(columns-1))};
+      };
+      const singleColumn=measureColumns(1);
+      const totalHeight=singleColumn.partition.columnHeights[0] || 0;
+      const desiredColumns=Math.max(1,Math.min(maxColumns,Math.ceil(totalHeight/Math.max(1,contentCapacity))));
+      let chosen=desiredColumns===1 ? singleColumn : measureColumns(desiredColumns);
+      if(chosen.partition.maxHeight>contentCapacity+0.5 && desiredColumns<maxColumns) chosen=measureColumns(maxColumns);
       if(!chosen) return;
       const scrolling=chosen.partition.maxHeight>contentCapacity+0.5;
       const columns=chosen.partition.groups.map(([start,end],index) => {
@@ -395,7 +406,7 @@
       if(scrolling) tip.scrollTop=Math.min(priorScrollTop,Math.max(0,tip.scrollHeight-tip.clientHeight));
     }
 
-    function createToolbarTooltip(id,label){
+    function createToolbarTooltip(id,label,kind){
       const tip = document.createElement("div");
       tip.id = id;
       tip.className = "pressure-toolbar-tooltip";
@@ -406,32 +417,97 @@
       flow.className="pressure-tooltip-flow";
       tip.appendChild(flow);
       document.body.appendChild(tip);
-      const kind = id === "pressureSignalToolbarTip" ? "signal" : "position";
-      listen(tip,"pointerenter",() => {
+      tip.addEventListener("pointerenter",() => {
         const hover = state.tooltipHover[kind];
         hover.tooltipHovered = true;
         clearTooltipBridge(kind);
       });
-      listen(tip,"pointerleave",() => {
+      tip.addEventListener("pointerleave",() => {
         state.tooltipHover[kind].tooltipHovered = false;
         scheduleTooltipBridgeHide(kind);
       });
-      listen(tip,"wheel",event => event.stopPropagation(),{passive:true});
+      tip.addEventListener("wheel",event => event.stopPropagation(),{passive:true});
       return tip;
     }
-    function ensureToolbarTooltips(){
-      if(!state.signalTip || !state.signalTip.isConnected) state.signalTip = createToolbarTooltip("pressureSignalToolbarTip","Signal summary");
-      if(!state.positionTip || !state.positionTip.isConnected) state.positionTip = createToolbarTooltip("pressurePositionToolbarTip","Position management summary");
-      return {signal:state.signalTip,position:state.positionTip};
+    function ensureToolbarTooltip(kind){
+      const key=kind === "signal" ? "signalTip" : "positionTip";
+      if(!state[key] || !state[key].isConnected){
+        state[key]=createToolbarTooltip(kind === "signal" ? "pressureSignalToolbarTip" : "pressurePositionToolbarTip",kind === "signal" ? "Signal summary" : "Position management summary",kind);
+      }
+      return state[key];
+    }
+    function signalMetaMatches(left,right){
+      if(!left || !right) return false;
+      return Number(left.generation)===Number(right.generation) && left.signalIdentity===right.signalIdentity
+        && left.direction===right.direction && (left.confidence==null ? null : Number(left.confidence))===(right.confidence==null ? null : Number(right.confidence))
+        && left.visibleState===right.visibleState && (left.setupIdentity || null)===(right.setupIdentity || null)
+        && left.horizonId===right.horizonId;
+    }
+    function buttonMatchesDisplayedSignal(displayed){
+      const button=toolbarControl("signal");
+      if(!displayed || !button) return !!displayed;
+      const checks={
+        direction:button.dataset.signalDirection===displayed.direction,
+        confidence:(button.dataset.signalConfidence==="" ? null : Number(button.dataset.signalConfidence))===(displayed.confidence==null ? null : Number(displayed.confidence)),
+        state:button.dataset.signalState===displayed.visibleState,
+        setup:(button.dataset.signalSetupIdentity || null)===(displayed.setupIdentity || null),
+        generation:Number(button.dataset.signalGeneration)===Number(displayed.generation),
+        identity:button.dataset.signalIdentity===displayed.signalIdentity
+      };
+      state.signalConsistency.buttonGeneration=Number(button.dataset.signalGeneration) || null;
+      if(!checks.direction) state.signalConsistency.directionMismatch+=1;
+      if(!checks.confidence) state.signalConsistency.confidenceMismatch+=1;
+      if(!checks.state) state.signalConsistency.stateMismatch+=1;
+      if(!checks.setup) state.signalConsistency.setupIdentityMismatch+=1;
+      return Object.values(checks).every(Boolean);
+    }
+    function acceptSignalPayload(payload,kind){
+      const meta=payload && payload.publication;
+      const valid=signalMetaMatches(meta,state.displayedSignal) && buttonMatchesDisplayedSignal(state.displayedSignal);
+      if(valid){
+        const generation=Number(meta.generation);
+        if(kind==="tooltip") state.signalConsistency.tooltipGeneration=generation;
+        else if(kind==="details") state.signalConsistency.detailsGeneration=generation;
+        else state.signalConsistency.reportGeneration=generation;
+      }
+      return valid;
+    }
+    function recordSignalDetailsPublication(displayed,report){
+      if(!signalMetaMatches(displayed,state.displayedSignal) || !acceptSignalPayload(report,"details")) return false;
+      state.signalReport=report;
+      state.signalConsistency.reportGeneration=Number(report.publication.generation);
+      return true;
+    }
+    function ensureSignalTooltipText(){
+      if(state.signalTooltip && acceptSignalPayload({publication:state.signalTooltipPublication},"tooltip")) return state.signalTooltip;
+      if(state.signalTooltip){ state.signalConsistency.stalePayloadDiscarded+=1;state.signalTooltip="";state.signalTooltipPublication=null; }
+      let payload=null;
+      try{ payload=typeof state.signalTooltipFactory === "function" ? timed("signal.tooltip-content",state.signalTooltipFactory,state.signalTooltipFingerprint) : null; }catch(_error){ payload=null; }
+      if(payload && typeof payload.text==="string" && acceptSignalPayload(payload,"tooltip")){
+        state.signalTooltip=payload.text;
+        state.signalTooltipPublication=payload.publication;
+        return state.signalTooltip;
+      }
+      state.signalConsistency.fallbackPrevented+=1;
+      state.signalTooltipPublication=state.displayedSignal;
+      state.signalTooltip="Signal details unavailable";
+      return state.signalTooltip;
+    }
+    function ensurePositionTooltipText(){
+      if(!state.positionTooltip) state.positionTooltip=timed("action.tooltip-content",() => positionTooltipText(state.management,state.managementDataStatus),state.positionTooltipFingerprint);
+      return state.positionTooltip || "";
     }
     function renderToolbarTooltip(kind){
-      const tips = ensureToolbarTooltips();
-      const tip = tips[kind];
+      const tip = kind === "signal" ? state.signalTip : state.positionTip;
       if(!tip || !tip.classList.contains("is-open")) return;
-      const content = kind === "signal" ? state.signalTooltip : state.positionTooltip;
+      const content = kind === "signal" ? ensureSignalTooltipText() : ensurePositionTooltipText();
+      const fingerprint=kind === "signal" ? state.signalTooltipFingerprint : state.positionTooltipFingerprint;
+      if(state.renderedTooltipFingerprints[kind]===fingerprint) return;
       const flow = tip && tip.querySelector(".pressure-tooltip-flow");
-      if(flow) flow.replaceChildren(...tooltipContentBlocks(content || ""));
-      positionToolbarTooltip(kind);
+      if(flow) timed(`${kind === "signal" ? "signal" : "action"}.tooltip-dom-rebuild`,() => flow.replaceChildren(...tooltipContentBlocks(content || "")),fingerprint);
+      state.renderedTooltipFingerprints[kind]=fingerprint;
+      counted("tooltip.dom-rebuild",kind+"|"+fingerprint);
+      timed(`${kind === "signal" ? "signal" : "action"}.tooltip-layout`,() => positionToolbarTooltip(kind),fingerprint);
     }
     function positionToolbarTooltip(kind){
       layoutToolbarTooltip(kind);
@@ -461,8 +537,10 @@
       }
       const tip = kind === "signal" ? state.signalTip : state.positionTip;
       if(!tip) return;
-      tip.classList.remove("is-open");
-      tip.setAttribute("aria-hidden","true");
+      tip.remove();
+      if(kind === "signal") state.signalTip=null;
+      else state.positionTip=null;
+      state.renderedTooltipFingerprints[kind]="";
     }
     function scheduleTooltipBridgeHide(kind){
       const hover = state.tooltipHover[kind];
@@ -475,11 +553,12 @@
       },TOOLTIP_BRIDGE_DELAY);
     }
     function showToolbarTooltip(kind){
-      const tip = kind === "signal" ? state.signalTip : state.positionTip;
-      const content = kind === "signal" ? state.signalTooltip : state.positionTooltip;
-      if(!tip || !content || !toolbarControlAvailable(toolbarControl(kind))) return;
+      if(!toolbarControlAvailable(toolbarControl(kind))) return;
       hideTooltips(kind);
       clearTooltipBridge(kind);
+      const tip=ensureToolbarTooltip(kind);
+      const content = kind === "signal" ? ensureSignalTooltipText() : ensurePositionTooltipText();
+      if(!content) return;
       tip.classList.add("is-open");
       tip.setAttribute("aria-hidden","false");
       renderToolbarTooltip(kind);
@@ -504,8 +583,7 @@
       const flag = kind === "signal" ? "signalTooltipBound" : "positionTooltipBound";
       if(state[flag]) return;
       state[flag] = true;
-      const tip = kind === "signal" ? state.signalTip : state.positionTip;
-      control.setAttribute("aria-describedby",tip.id);
+      control.setAttribute("aria-describedby",kind === "signal" ? "pressureSignalToolbarTip" : "pressurePositionToolbarTip");
       listen(control,"pointerenter",() => {
         state.tooltipHover[kind].buttonHovered = true;
         clearTooltipBridge(kind);
@@ -763,7 +841,7 @@
         header.insertBefore(collapse,close || null);
         header.insertBefore(copy,collapse);
       }
-      listen(copy,"click",event => { event.stopPropagation(); copyText(state.signalCopy,copy); });
+      listen(copy,"click",event => { event.stopPropagation(); copyText(signalCopy(),copy); });
       const persist = () => save(config.storage.signalWindow,windowState(win));
       makeDraggable(win,header,persist);
       makeResizable(win,persist);
@@ -840,7 +918,7 @@
       state.positionWindow = win;
       state.positionBody = body;
       state.positionTitle = title;
-      listen(copy,"click",event => { event.stopPropagation(); copyText(state.positionCopy,copy); });
+      listen(copy,"click",event => { event.stopPropagation(); copyText(positionCopy(),copy); });
       listen(collapse,"click",event => {
         event.stopPropagation();
         windowState(win);
@@ -869,9 +947,7 @@
     }
 
     function bindToolbar(){
-      ensureToolbarTooltips();
       enhanceSignalWindow();
-      createPositionWindow();
       const signalIndicator = document.getElementById("pressureSignalEntry");
       const indicator = document.getElementById("pressureSignalExit");
       bindToolbarTooltip(signalIndicator,"signal");
@@ -1024,14 +1100,17 @@
 
     function renderPosition(){
       if(!state.positionBody || !state.positionWindow || !state.positionWindow.classList.contains("is-open") || !state.management || !state.snapshot) return;
-      const preserved = windowState(state.positionWindow);
-      const report = positionReport(state.management,state.snapshot);
+      if(state.renderedPositionFingerprint===state.positionReportFingerprint) return;
+      const preserved = state.positionViewState || windowState(state.positionWindow);
+      const report = timed("position.report-generation",() => positionReport(state.management,state.snapshot),state.positionReportFingerprint);
       state.positionBody.replaceChildren();
+      counted("position.window-rebuild",state.positionReportFingerprint);
       const pre = document.createElement("pre");
       pre.className = "pressure-position-summary";
       renderPriceText(pre,report.summary);
       state.positionBody.append(pre,reportSection("Analysis",report.analysis,preserved && preserved.sections.analysis),reportSection("Diagnostics",report.diagnostics,preserved && preserved.sections.diagnostics));
       if(preserved) state.positionBody.scrollTop = preserved.scrollTop;
+      state.positionViewState=null;
       state.positionWindow.querySelectorAll("[data-management-horizon]").forEach(button => button.classList.toggle("is-active",button.dataset.managementHorizon === state.management.horizonId));
       state.positionCopy = [
         "POSITION MANAGEMENT",
@@ -1041,28 +1120,35 @@
         "",
         report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics
       ].join("\n");
+      state.renderedPositionFingerprint=state.positionReportFingerprint;
     }
 
     function update(payload){
-      state.signalReport = payload.signalReport || state.signalReport;
+      state.displayedSignal=payload.displayedSignal || null;
+      state.signalConsistency.tooltipGeneration=null;
+      state.signalConsistency.detailsGeneration=null;
+      state.signalConsistency.reportGeneration=null;
+      state.publicationFingerprint=payload.publicationFingerprint || String(payload.publishedAt || Date.now());
+      state.signalReportFingerprint=payload.signalReportFingerprint || state.publicationFingerprint;
+      state.signalTooltipFingerprint=payload.signalTooltipFingerprint || state.publicationFingerprint;
+      state.positionTooltipFingerprint=payload.positionTooltipFingerprint || state.publicationFingerprint;
+      state.positionReportFingerprint=payload.positionReportFingerprint || state.publicationFingerprint;
+      state.signalReport = payload.signalReport || null;
+      state.signalReportFactory = payload.signalReportFactory || null;
       state.management = payload.management || state.management;
       if(Object.prototype.hasOwnProperty.call(payload,"managementDataStatus")) state.managementDataStatus = payload.managementDataStatus;
       state.snapshot = payload.snapshot || state.snapshot;
       setSignalHorizon(payload.signalHorizonId || state.signalHorizonId);
-      state.signalTooltip = payload.signalTooltip || state.signalTooltip;
-      state.positionTooltip = positionTooltipText(state.management,state.managementDataStatus);
+      state.signalTooltip = payload.signalTooltip || "";
+      state.signalTooltipPublication = payload.signalTooltipPublication || null;
+      state.signalTooltipFactory = payload.signalTooltipFactory || null;
+      state.positionTooltip = payload.positionTooltip || "";
       bindToolbar();
+      buttonMatchesDisplayedSignal(state.displayedSignal);
       renderToolbarTooltip("signal");
       renderToolbarTooltip("position");
-      if(state.signalReport && state.snapshot){
-        state.signalCopy = [
-          "SIGNAL DETAILS",
-          `Symbol: ${state.snapshot.symbol}`,
-          `Horizon: ${payload.horizonLabel}`,
-          `Snapshot: ${format.time(state.snapshot.createdAt)}`,
-          "",state.signalReport.summary,"","Analysis",state.signalReport.analysis,"","Diagnostics",state.signalReport.diagnostics
-        ].join("\n");
-      }
+      state.signalCopy="";
+      state.positionCopy="";
       const signalWindow = document.getElementById("pressureSignalDetails");
       if(signalWindow && signalWindow.classList.contains("is-open")){
         signalWindow.querySelectorAll("pre").forEach(pre => renderPriceText(pre,pre.textContent));
@@ -1104,14 +1190,18 @@
       setUpdatingVisual(false);
       state.refreshState="UNAVAILABLE";state.refreshMessage="";
       state.contextKey=nextContextKey;
-      state.signalReport=null;state.management=null;state.snapshot=null;state.signalCopy="";state.positionCopy="";
-      state.signalTooltip="Direction: NO BIAS\nState: NO SETUP\nEntry: Unavailable\nData status: UNAVAILABLE";
+      state.signalReport=null;state.management=null;state.snapshot=null;state.signalCopy="";state.positionCopy="";state.displayedSignal=null;
+      state.signalReportFactory=null;state.signalTooltipFactory=null;
+      state.signalTooltipPublication=null;
+      state.signalConsistency.buttonGeneration=null;state.signalConsistency.tooltipGeneration=null;state.signalConsistency.detailsGeneration=null;state.signalConsistency.reportGeneration=null;
+      state.renderedPositionFingerprint="";
+      state.signalTooltip="Signal details unavailable";
       state.positionTooltip="Action: WAIT\nPosition health: Unavailable\nExit warning: Unavailable\nData status: UNAVAILABLE";
       if(state.signalWindow){
         state.signalWindow.querySelectorAll("pre").forEach(pre => { pre.textContent="Unavailable"; });
       }
       if(state.positionBody) state.positionBody.replaceChildren();
-      renderToolbarTooltip("signal");renderToolbarTooltip("position");
+      hideTooltips();
     }
 
     function openSignal(){
@@ -1136,11 +1226,14 @@
     }
     function closePosition(){
       const win = createPositionWindow();
+      state.positionViewState=windowState(win);
       win.classList.remove("is-open");
       win.setAttribute("aria-hidden","true");
       const indicator = document.getElementById("pressureSignalExit");
       if(indicator) indicator.setAttribute("aria-expanded","false");
       save(config.storage.positionWindow,windowState(win));
+      if(state.positionBody) state.positionBody.replaceChildren();
+      state.renderedPositionFingerprint="";
     }
     function destroy(){
       hideTooltips();
@@ -1247,6 +1340,32 @@
       const rect=tip.getBoundingClientRect();
       return {open:tip.classList.contains("is-open"),ariaHidden:tip.getAttribute("aria-hidden"),columns:Number(tip.dataset.columns || 0),maxColumns:Number(tip.dataset.maxColumns || 0),scrolling:tip.dataset.scrolling==="true",availableHeight:Number(tip.dataset.availableHeight || 0),columnHeights:String(tip.dataset.columnHeights || "").split(",").filter(Boolean).map(Number),rect:{left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height},scrollHeight:tip.scrollHeight,clientHeight:tip.clientHeight};
     };
-    return {update,beginUpdate,completeUpdate,setRefreshState,invalidateContext,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,getSignalCopy:() => state.signalCopy,getPositionCopy:() => state.positionCopy,destroy,_selfTest:runPresentationSelfTests,_diagnostics:() => ({updating:state.updating,refreshState:state.refreshState,refreshMessage:state.refreshMessage,contextKey:state.contextKey,hasSignal:!!state.signalReport,hasManagement:!!state.management,tooltips:{signal:tooltipDiagnostics(state.signalTip),position:tooltipDiagnostics(state.positionTip)}})};
+    function ensureSignalReport(){
+      if(state.signalReport && acceptSignalPayload(state.signalReport,"report")) return state.signalReport;
+      if(state.signalReport){ state.signalConsistency.stalePayloadDiscarded+=1;state.signalReport=null; }
+      let report=null;
+      try{ report=typeof state.signalReportFactory === "function" ? timed("signal.report-generation",state.signalReportFactory,state.signalReportFingerprint) : null; }catch(_error){ report=null; }
+      if(report && acceptSignalPayload(report,"report")){
+        state.signalReport=report;
+        return report;
+      }
+      state.signalConsistency.fallbackPrevented+=1;
+      return null;
+    }
+    function signalCopy(){
+      const report=ensureSignalReport();
+      const displayed=state.displayedSignal;
+      if(!report || !displayed || !state.snapshot) return "Signal details unavailable";
+      if(!state.signalCopy) state.signalCopy=["SIGNAL DETAILS",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Setup family: ${displayed.setupFamily || "None"}`,`Setup timeframe: ${displayed.setupTimeframe || "None"}`,`Entry: ${displayed.entryVerdict}`,`Publication generation: ${displayed.generation}`,"",`Symbol: ${state.snapshot.symbol}`,`Horizon: ${state.signalHorizonId || "-"}`,`Snapshot: ${format.time(state.snapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
+      return state.signalCopy;
+    }
+    function positionCopy(){
+      if(!state.positionCopy && state.management && state.snapshot){
+        const report=timed("position.report-generation",() => positionReport(state.management,state.snapshot),state.positionReportFingerprint);
+        state.positionCopy=["POSITION MANAGEMENT",`Symbol: ${state.snapshot.symbol}`,`Position: ${state.management.position ? `${state.management.position.side} ${format.quantity(state.management.position.qty)}` : "None"}`,`Snapshot: ${format.time(state.snapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
+      }
+      return state.positionCopy;
+    }
+    return {update,beginUpdate,completeUpdate,setRefreshState,invalidateContext,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,recordSignalDetailsPublication,isSignalTooltipOpen:() => !!(state.signalTip && state.signalTip.classList.contains("is-open")),isPositionTooltipOpen:() => !!(state.positionTip && state.positionTip.classList.contains("is-open")),isPositionWindowOpen:() => !!(state.positionWindow && state.positionWindow.classList.contains("is-open")),ensureSignalReport,getSignalCopy:signalCopy,getPositionCopy:positionCopy,destroy,_selfTest:runPresentationSelfTests,_diagnostics:() => ({updating:state.updating,refreshState:state.refreshState,refreshMessage:state.refreshMessage,contextKey:state.contextKey,hasSignal:!!(state.signalReport || state.signalReportFactory),hasManagement:!!state.management,signalConsistency:{...state.signalConsistency},displayedSignal:state.displayedSignal ? {generation:state.displayedSignal.generation,signalIdentity:state.displayedSignal.signalIdentity,direction:state.displayedSignal.direction,confidence:state.displayedSignal.confidence,visibleState:state.displayedSignal.visibleState,setupIdentity:state.displayedSignal.setupIdentity,horizonId:state.displayedSignal.horizonId} : null,tooltips:{signal:tooltipDiagnostics(state.signalTip),position:tooltipDiagnostics(state.positionTip)},renderedTooltipFingerprints:{...state.renderedTooltipFingerprints},positionWindowRebuildFingerprint:state.renderedPositionFingerprint})};
   };
 })();

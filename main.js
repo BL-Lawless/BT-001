@@ -152,6 +152,44 @@ const SET3 = STORE + "ema_toggle_3";
 const SET4 = STORE + "ema_toggle_4";
 const SET5 = STORE + "ema_toggle_5";
 
+const UI_PERF = window.BT001_UI_PERFORMANCE ||= (() => {
+  const state = {enabled:window.BT001_PERF_DEBUG===true,startedAt:Date.now(),counters:Object.create(null),durations:Object.create(null),lastFingerprints:Object.create(null),duplicates:Object.create(null),sizes:Object.create(null)};
+  const now = () => typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+  function count(name,fingerprint=null){
+    if(!state.enabled) return;
+    state.counters[name]=(state.counters[name] || 0)+1;
+    if(fingerprint != null){
+      const value=String(fingerprint);
+      if(state.lastFingerprints[name]===value) state.duplicates[name]=(state.duplicates[name] || 0)+1;
+      state.lastFingerprints[name]=value;
+    }
+  }
+  function record(name,duration,fingerprint=null){
+    if(!state.enabled) return;
+    count(name,fingerprint);
+    const bucket=state.durations[name] ||= {total:0,max:0,over16:0,over50:0,samples:[]};
+    const value=Math.max(0,Number(duration) || 0);
+    bucket.total+=value;bucket.max=Math.max(bucket.max,value);
+    if(value>16) bucket.over16+=1;
+    if(value>50) bucket.over50+=1;
+    bucket.samples.push(value);
+    if(bucket.samples.length>120) bucket.samples.shift();
+  }
+  function measure(name,work,fingerprint=null){
+    if(!state.enabled) return work();
+    const started=now();
+    try{return work();}finally{record(name,now()-started,fingerprint);}
+  }
+  function size(name,value){ if(state.enabled) state.sizes[name]=Math.max(0,Number(value) || 0); }
+  function reset(){state.startedAt=Date.now();state.counters=Object.create(null);state.durations=Object.create(null);state.lastFingerprints=Object.create(null);state.duplicates=Object.create(null);state.sizes=Object.create(null);}
+  function snapshot(){
+    const elapsedMinutes=Math.max((Date.now()-state.startedAt)/60000,1/60000);
+    const durations=Object.fromEntries(Object.entries(state.durations).map(([key,value])=>[key,{calls:state.counters[key] || 0,averageMs:value.total/Math.max(1,state.counters[key] || 0),maxMs:value.max,over16:value.over16,over50:value.over50}]));
+    return {enabled:state.enabled,startedAt:state.startedAt,elapsedMinutes,counters:{...state.counters},callsPerMinute:Object.fromEntries(Object.entries(state.counters).map(([key,value])=>[key,value/elapsedMinutes])),duplicates:{...state.duplicates},lastFingerprints:{...state.lastFingerprints},durations,sizes:{...state.sizes},heap:performance && performance.memory ? {usedJSHeapSize:performance.memory.usedJSHeapSize,totalJSHeapSize:performance.memory.totalJSHeapSize,jsHeapSizeLimit:performance.memory.jsHeapSizeLimit} : null};
+  }
+  return {setEnabled(value){state.enabled=value===true;return state.enabled;},isEnabled:()=>state.enabled,count,record,measure,size,reset,snapshot};
+})();
+
 
 /* =========================================================
    SECTION 3 — STATE
@@ -160,6 +198,8 @@ const SET5 = STORE + "ema_toggle_5";
 let candles = [];
 let chartLoadGeneration = 0;
 let queuedChartLoadOptions = null;
+let chartViewRevision = 0;
+const chartViewLastAction = {revision:0,reason:"initial",at:Date.now()};
 let vwap = [];
 let maSeriesBySlot = {1:[],2:[],3:[],4:[],5:[]};
 
@@ -2677,20 +2717,52 @@ function range(){
   };
 }
 
-function resetView(){
+function markChartViewAction(reason){
+  chartViewRevision += 1;
+  chartViewLastAction.revision=chartViewRevision;
+  chartViewLastAction.reason=String(reason || "view-change");
+  chartViewLastAction.at=Date.now();
+  if(UI_PERF.isEnabled()) window.BT001_CHART_VIEW_DIAGNOSTICS = {
+      revision:chartViewRevision,lastAction:{...chartViewLastAction},loadGeneration:chartLoadGeneration,
+      manualY:!!manualY,yMin:Number.isFinite(Number(yMin)) ? Number(yMin) : null,yMax:Number.isFinite(Number(yMax)) ? Number(yMax) : null,
+      visibleCount:Number(visibleCount) || 0,rightOffset:Number(rightOffset) || 0
+    };
+  return chartViewRevision;
+}
+
+function resolveTimeframeViewState({userChanged,keepVisible,targetRight,latest,tradesOff}){
+  const source=userChanged && latest ? latest : null;
+  const right=source ? (tradesOff ? Math.min(0,Number(source.rightOffset) || 0) : Number(source.rightOffset) || 0) : targetRight;
+  const keepLatestManual=!!(source && source.manualY && validRange(source.yMin,source.yMax));
+  return {visibleCount:(source ? source.visibleCount : keepVisible) || DEF_VISIBLE,rightOffset:right,manualY:keepLatestManual,yMin:keepLatestManual ? source.yMin : null,yMax:keepLatestManual ? source.yMax : null};
+}
+window.BT001_CHART_VIEW_STATE = Object.freeze({
+  snapshot:() => ({revision:chartViewRevision,lastAction:{...chartViewLastAction},loadGeneration:chartLoadGeneration,manualY,yMin,yMax,visibleCount,rightOffset}),
+  _selfTest:() => {
+    const unchanged=resolveTimeframeViewState({userChanged:false,keepVisible:80,targetRight:-5,latest:{manualY:true,yMin:90,yMax:110},tradesOff:false});
+    const resetDuringLoad=resolveTimeframeViewState({userChanged:true,keepVisible:80,targetRight:-5,latest:{visibleCount:70,rightOffset:-9,manualY:false,yMin:null,yMax:null},tradesOff:false});
+    const scaleDuringLoad=resolveTimeframeViewState({userChanged:true,keepVisible:80,targetRight:-5,latest:{visibleCount:72,rightOffset:3,manualY:true,yMin:95,yMax:105},tradesOff:false});
+    const cases={priorManualYNotCarried:unchanged.manualY===false&&unchanged.rightOffset===-5,resetDuringLoadWins:resetDuringLoad.manualY===false&&resetDuringLoad.rightOffset===-9,latestManualScaleWins:scaleDuringLoad.manualY===true&&scaleDuringLoad.yMin===95&&scaleDuringLoad.yMax===105,tradeOffPolicyClampsFuture:resolveTimeframeViewState({userChanged:true,keepVisible:80,targetRight:0,latest:{visibleCount:60,rightOffset:4,manualY:false},tradesOff:true}).rightOffset===0};
+    return {passed:Object.values(cases).every(Boolean),cases};
+  }
+});
+
+function resetView(options={}){
   visibleCount = Math.min(DEF_VISIBLE, Math.max(1, candles.length || DEF_VISIBLE));
   rightOffset = 0;
   manualY = false;
   yMin = null;
   yMax = null;
   clampView();
+  if(!options.silentRevision) markChartViewAction(options.reason || "reset-view");
   draw();
 }
 
-function resetYAuto(){
+function resetYAuto(reason="reset-y-auto"){
   manualY = false;
   yMin = null;
   yMax = null;
+  markChartViewAction(reason);
   draw();
 }
 
@@ -2778,6 +2850,7 @@ function scaleY(delta){
   yMin = c - r/2;
   yMax = c + r/2;
 
+  markChartViewAction("manual-y-scale");
   draw();
 }
 
@@ -4600,14 +4673,12 @@ async function loadChart(opt={}){
     requestedInterval === iv() &&
     requestedSymbol === cfg().symbol;
   const preserveView = !!opt.preserveView;
+  const viewRevisionAtStart = chartViewRevision;
   const keepVisible = preserveView ? visibleCount : DEF_VISIBLE;
   const keepRight = preserveView ? rightOffset : 0;
   const keepLoaded = preserveView
     ? Math.max(Array.isArray(candles) ? candles.length : 0, keepVisible || 0)
     : 0;
-  const keepManual = preserveView && manualY;
-  const keepMin = keepManual ? yMin : null;
-  const keepMax = keepManual ? yMax : null;
   const tradesOff = !(tglResults && tglResults.checked);
   const targetRight = preserveView && tradesOff ? Math.min(0, Number(keepRight) || 0) : keepRight;
 
@@ -4622,6 +4693,15 @@ async function loadChart(opt={}){
   try{
     const nextCandles = await fetchInitial(requestedInterval,keepLoaded || undefined,guard);
     if(!guard()) return;
+    const supersedingView = {
+      revision:chartViewRevision,
+      visibleCount,
+      rightOffset,
+      manualY:manualY && validRange(yMin,yMax),
+      yMin,
+      yMax
+    };
+    const userViewChangedDuringLoad = supersedingView.revision !== viewRevisionAtStart;
     lastMarkPrice = null;
     dailyState = null;
     candles = Array.isArray(nextCandles) ? nextCandles : marketDataHub.getChartBuffer(requestedInterval);
@@ -4639,12 +4719,15 @@ async function loadChart(opt={}){
       yMax = null;
     }
     if(preserveView){
-      visibleCount = keepVisible || visibleCount;
-      rightOffset = targetRight;
-      if(keepManual && validRange(keepMin,keepMax)){
+      const resolvedView=resolveTimeframeViewState({userChanged:userViewChangedDuringLoad,keepVisible,targetRight,latest:supersedingView,tradesOff});
+      visibleCount = resolvedView.visibleCount || visibleCount;
+      rightOffset = resolvedView.rightOffset;
+      // A prior timeframe's manual Y range is intentionally not carried into a
+      // new timeframe. Only a newer manual Y action made during this load wins.
+      if(resolvedView.manualY){
         manualY = true;
-        yMin = keepMin;
-        yMax = keepMax;
+        yMin = resolvedView.yMin;
+        yMax = resolvedView.yMax;
       }else{
         manualY = false;
         yMin = null;
@@ -4659,7 +4742,7 @@ async function loadChart(opt={}){
     markLiveUpdate();
 
     if(opt.focus) applyFocus(opt.focus);
-    else if(!preserveView) resetView();
+    else if(!preserveView) resetView({reason:"timeframe-load-reset"});
     else clampView();
 
     if(candles.length) metrics(candles[candles.length-1]);
@@ -6878,6 +6961,7 @@ function pan(delta){
   olderFetchTargetVisible = 0;
   rightOffset += delta;
   clampView();
+  markChartViewAction("horizontal-pan");
   draw();
 }
 
@@ -6920,6 +7004,7 @@ function zoomAt(mx,dy){
   rightOffset = candles.length - newEnd;
 
   clampView();
+  markChartViewAction("horizontal-zoom");
   draw();
 }
 
@@ -6997,6 +7082,7 @@ canvas.addEventListener("mousemove",e => {
     yMax = c + rg/2;
     manualY = true;
 
+    markChartViewAction("manual-y-drag");
     draw();
     return;
   }
@@ -7026,6 +7112,7 @@ canvas.addEventListener("mousemove",e => {
       }
 
       clampView();
+      markChartViewAction(dragManualY ? "chart-pan-with-manual-y" : "chart-pan");
     }
   }
 
@@ -7042,10 +7129,29 @@ canvas.addEventListener("mouseleave",() => {
   draw();
 });
 
-canvas.addEventListener("dblclick",e => {
-  if(rightAxis(e.offsetX)) resetYAuto();
-  else resetView();
-});
+function resetChartFromDoubleClick(e){
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if(rightAxis(e.offsetX)){
+    resetYAuto("double-click-y-reset");
+    return;
+  }
+  manualY = false;
+  yMin = null;
+  yMax = null;
+  if(candles.length){
+    const maxFut = Math.max(0,Math.floor(visibleCount * MAX_FUTURE_RATIO));
+    rightOffset = -Math.min(maxFut,Math.floor(visibleCount / 2));
+    clampView();
+  }
+  markChartViewAction("double-click-reset");
+  draw();
+}
+
+if(!window.__bt001ChartResetHandlerInstalled){
+  window.__bt001ChartResetHandlerInstalled = true;
+  canvas.addEventListener("dblclick",resetChartFromDoubleClick,true);
+}
 
 
 /* =========================================================
@@ -7905,21 +8011,25 @@ startTradeAuto();
       rightOffset = -Math.min(maxFut, Math.floor(visibleCount/2));
       clampView();
     }
+    markChartViewAction("end-key-reset");
     draw();
   }
 
   // PATCH_15: End key = double-click chart reset behavior.
-  window.addEventListener('keydown',e => {
+  if(!window.__bt001ChartEndHandlerInstalled){
+    window.__bt001ChartEndHandlerInstalled=true;
+    window.addEventListener('keydown',e => {
     if(e.key !== 'End') return;
     const tag = (document.activeElement && document.activeElement.tagName || '').toUpperCase();
     if(tag === 'INPUT' || tag === 'TEXTAREA') return;
     e.preventDefault();
     centerLastAndResetY15();
-  },true);
+    },true);
+  }
 
   // Also enforce the same behavior on chart double-click, after older handlers.
   try{
-    canvas.addEventListener('dblclick',e => {
+    if(!window.__bt001ChartResetHandlerInstalled) canvas.addEventListener('dblclick',e => {
       if(typeof rightAxis === 'function' && rightAxis(e.offsetX)) return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -7930,7 +8040,9 @@ startTradeAuto();
   // Preserve viewport around toggle redraws; the toggle only changes overlays.
   function restoreViewAfterToggle15(){
     const keep = {rightOffset,visibleCount,manualY,yMin,yMax};
+    const revision = chartViewRevision;
     requestAnimationFrame(() => {
+      if(revision !== chartViewRevision) return;
       rightOffset = keep.rightOffset;
       visibleCount = keep.visibleCount;
       manualY = keep.manualY;
@@ -13835,7 +13947,7 @@ startTradeAuto();
 
   // Double-click chart area: center last candle and reset vertical scale. Right axis still only resets Y.
   try{
-    canvas.addEventListener('dblclick',e => {
+    if(!window.__bt001ChartResetHandlerInstalled) canvas.addEventListener('dblclick',e => {
       e.preventDefault();
       e.stopImmediatePropagation();
       if(typeof rightAxis === 'function' && rightAxis(e.offsetX)){
@@ -14647,11 +14759,12 @@ startTradeAuto();
       rightOffset = -Math.min(maxFut, Math.floor(visibleCount/2));
       clampView();
     }
+    markChartViewAction("end-key-reset");
     draw();
   }
 
   // PATCH_15: End key = double-click chart reset behavior.
-  window.addEventListener('keydown',e => {
+  if(!window.__bt001ChartEndHandlerInstalled) window.addEventListener('keydown',e => {
     if(e.key !== 'End') return;
     const tag = (document.activeElement && document.activeElement.tagName || '').toUpperCase();
     if(tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -14661,7 +14774,7 @@ startTradeAuto();
 
   // Also enforce the same behavior on chart double-click, after older handlers.
   try{
-    canvas.addEventListener('dblclick',e => {
+    if(!window.__bt001ChartResetHandlerInstalled) canvas.addEventListener('dblclick',e => {
       if(typeof rightAxis === 'function' && rightAxis(e.offsetX)) return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -14672,7 +14785,9 @@ startTradeAuto();
   // Preserve viewport around toggle redraws; the toggle only changes overlays.
   function restoreViewAfterToggle15(){
     const keep = {rightOffset,visibleCount,manualY,yMin,yMax};
+    const revision = chartViewRevision;
     requestAnimationFrame(() => {
+      if(revision !== chartViewRevision) return;
       rightOffset = keep.rightOffset;
       visibleCount = keep.visibleCount;
       manualY = keep.manualY;
@@ -21742,6 +21857,9 @@ If there is NO open position, use this Section 2 instead:
   "use strict";
   const MODULE = "V13_CANDLE_CLOSE_COUNTDOWN";
   let timer = null;
+  let overlay = null;
+  let priceNode = null;
+  let timeNode = null;
 
   function exchangeNow(){
     const ex = Number(window.__countdownExchangeMs);
@@ -21779,6 +21897,43 @@ If there is NO open position, use this Section 2 instead:
     return formatLeft(closeMs - exchangeNow(),tfSec);
   }
 
+  function ensureOverlay(){
+    const parent=canvas && canvas.parentElement;
+    if(!parent) return null;
+    if(overlay && overlay.isConnected) return overlay;
+    overlay=document.createElement("div");
+    overlay.className="candle-countdown-overlay";
+    overlay.setAttribute("aria-hidden","true");
+    priceNode=document.createElement("span");
+    priceNode.className="candle-countdown-price";
+    timeNode=document.createElement("span");
+    timeNode.className="candle-countdown-time";
+    overlay.append(priceNode,timeNode);
+    parent.appendChild(overlay);
+    return overlay;
+  }
+
+  function updateCountdownOverlay(){
+    if(!canvas || !Array.isArray(candles) || !candles.length) return;
+    const lineState=currentPriceLineState || null;
+    const latest=candles[candles.length-1];
+    const price=Number(lineState && Number.isFinite(lineState.price) ? lineState.price : latest && latest.close);
+    const priceY=Number(lineState && lineState.priceY);
+    if(!Number.isFinite(price) || !Number.isFinite(priceY)) return;
+    const node=ensureOverlay();
+    if(!node) return;
+    const right=typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84;
+    const chartRight=Number.isFinite(Number(lineState && lineState.chartRight)) ? Number(lineState.chartRight) : canvas.clientWidth-right;
+    const priceText=typeof ip === "function" ? ip(price) : String(price);
+    const timeText=countdownText();
+    if(priceNode.textContent!==priceText) priceNode.textContent=priceText;
+    if(timeNode.textContent!==timeText) timeNode.textContent=timeText;
+    node.style.left=`${chartRight+4}px`;
+    node.style.width=`${Math.max(32,right-8)}px`;
+    node.style.top=`${Math.max(0,priceY-17.5)}px`;
+    UI_PERF.count("countdown.light-update",timeText);
+  }
+
   function drawCountdown(){
     if(!ctx || !canvas || !Array.isArray(candles) || !candles.length) return;
     const state = currentPriceLineState || null;
@@ -21790,67 +21945,42 @@ If there is NO open position, use this Section 2 instead:
     const chartRight = Number.isFinite(Number(state && state.chartRight)) ? Number(state.chartRight) : canvas.clientWidth - right;
     const left = Number.isFinite(Number(state && state.left)) ? Number(state.left) : (typeof LEFT_PAD === "number" ? LEFT_PAD : 14);
     if(!Number.isFinite(priceY)) return;
-    const priceText = typeof ip === "function" ? ip(price) : String(price);
-    const timeText = countdownText();
     ctx.save();
-    const padX = 6;
-    const gap = 4;
-    const priceFont = "bold 12px Arial";
-    const timerFont = "bold 12px Arial";
-    ctx.font = priceFont;
-    const priceW = ctx.measureText(priceText).width;
-    ctx.font = timerFont;
-    const timerW = ctx.measureText(timeText).width;
-    const boxW = Math.min(right - 8,Math.max(priceW,timerW) + padX * 2 + 6);
-    const boxH = 35;
-    const x = chartRight + Math.max(3,Math.floor((right - boxW) / 2));
-    const centerY = priceY;
-    const y = centerY - boxH / 2;
-    const boxLeft = x;
     ctx.strokeStyle = "#8a8f98";
     ctx.lineWidth = typeof hairline === "function" ? hairline() : 1;
     ctx.setLineDash([5,5]);
     ctx.beginPath();
     ctx.moveTo(px(left),px(priceY));
-    ctx.lineTo(px(boxLeft),px(priceY));
+    ctx.lineTo(px(chartRight),px(priceY));
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = "rgba(255,255,255,.98)";
-    ctx.strokeStyle = "#c7cdd6";
-    ctx.lineWidth = 1;
-    ctx.fillRect(x,y,boxW,boxH);
-    ctx.strokeRect(x,y,boxW,boxH);
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    ctx.font = priceFont;
-    ctx.fillStyle = "#1f2937";
-    ctx.fillText(priceText,x + boxW / 2,y + 4);
-    ctx.font = timerFont;
-    ctx.fillStyle = "#4b5563";
-    ctx.fillText(timeText,x + boxW / 2,y + 4 + 11 + gap);
     ctx.restore();
+    updateCountdownOverlay();
   }
 
   if(typeof draw === "function" && !window.__candleCountdownDrawWrapped){
     const prevDraw = draw;
     window.__candleCountdownDrawWrapped = true;
     draw = window.draw = function(){
-      const result = prevDraw.apply(this,arguments);
-      try{ drawCountdown(); }catch(e){ console.error(MODULE + " draw failed",e); }
-      return result;
+      const args=arguments;
+      return UI_PERF.measure("chart.global-draw",() => {
+        const result = prevDraw.apply(this,args);
+        try{ drawCountdown(); }catch(e){ console.error(MODULE + " draw failed",e); }
+        return result;
+      });
     };
   }
 
   function start(){
     if(timer) return;
     timer = setInterval(() => {
-      try{ if(typeof draw === "function") draw(); }catch(_e){}
+      try{ updateCountdownOverlay(); }catch(_e){}
     },1000);
   }
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",start,{once:true});
   else start();
-  window.CANDLE_CLOSE_COUNTDOWN = {version:MODULE,countdownText,draw:drawCountdown};
+  window.CANDLE_CLOSE_COUNTDOWN = {version:MODULE,countdownText,draw:drawCountdown,update:updateCountdownOverlay,diagnostics:() => ({timerActive:timer != null,overlayConnected:!!(overlay && overlay.isConnected)})};
 })();
 
 (() => {

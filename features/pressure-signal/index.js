@@ -15,7 +15,7 @@
   const windowSystem = build.createWindowSystem(featureConfig,featureFormat);
   const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
   const performanceDiagnostics = window.BT001_PERFORMANCE_DIAGNOSTICS ||= {};
-  ["signalLightCalculations","signalFullEvidenceBuilds","signalFormingEvidenceBuilds","smcCacheHits","smcCacheMisses"].forEach(key => {
+  ["signalLightCalculations","signalFullCalculations","signalSkippedDuplicateRefreshes","signalFullEvidenceBuilds","signalFormingEvidenceBuilds","smcCacheHits","smcCacheMisses","structuredCloneCount","structuredCloneMs","signalPublicationMismatches","signalStalePayloadsDiscarded","signalFallbacksPrevented"].forEach(key => {
     if(!Number.isFinite(Number(performanceDiagnostics[key]))) performanceDiagnostics[key] = 0;
   });
   const STORAGE_KEY = "bt001_topbar_pressure_signal_horizon";
@@ -125,8 +125,6 @@
     chips:new Map(),
     initialized:false,
     lifecycleTimer:null,
-    previousDraw:null,
-    drawWrapper:null,
     resizeObservers:[],
     signalSummaryVariants:null,
     summaryFrame:null,
@@ -145,7 +143,19 @@
     lastValidPublishedSnapshot:null,
     lastOptimizationTests:null,
     displayFingerprint:"",
-    refreshStartedAt:null
+    refreshStartedAt:null,
+    lastAnalyticalFingerprint:"",
+    scheduledFrozen:null,
+    lastRefreshReason:"initial"
+  };
+  const uiPerf = () => window.BT001_UI_PERFORMANCE || null;
+  const timed37 = (name,work,fingerprint=null) => {
+    const diagnostics=uiPerf();
+    return diagnostics && typeof diagnostics.measure === "function" ? diagnostics.measure(name,work,fingerprint) : work();
+  };
+  const counted37 = (name,fingerprint=null) => {
+    const diagnostics=uiPerf();
+    if(diagnostics && typeof diagnostics.count === "function") diagnostics.count(name,fingerprint);
   };
 
   function num37(value){
@@ -640,6 +650,7 @@
       parts.push(item.tf,item.historyTarget,revision.closedRevision,revision.formingRevision);
     });
     parts.push(
+      currentPrice,
       position && position.side,
       position && position.qty,
       position && position.price,
@@ -655,8 +666,24 @@
     parts.push(exitOrderState.updatedAt,exitOrderState.status,JSON.stringify(exitOrderState.orders.map(order => [order.orderId,order.clientOrderId,order.status,order.price,order.origQty,order.executedQty])),JSON.stringify(exitOrderState.grRows.map(row => [row.clientOrderId,row.localRowId,row.status,row.level,row.lot])));
     return {signature:parts.join("|"),currentPrice,position,protectiveOrders:protectionOrders,exitOrderState};
   }
-  function coherentSignalSnapshot37(plan,health){
-    const frozen = signalSnapshotSignature37(plan);
+  function analyticalInputRevision37(){
+    const plan=signalDataPlan37(state.horizon);
+    const frozen=signalSnapshotSignature37(plan);
+    const now=Date.now();
+    const diag=window.PUBLIC_MARKET_DATA_HUB && window.PUBLIC_MARKET_DATA_HUB.diag || window.BINANCE_REALTIME_DIAG || {};
+    const triggerTf=plan.engine && plan.engine.pressure && plan.engine.pressure[0] && plan.engine.pressure[0].tf;
+    const priceAt=Math.max(Number(diag.lastKlineTickByTf && diag.lastKlineTickByTf[triggerTf] || 0),Number(diag.lastChartActivityByTf && diag.lastChartActivityByTf[triggerTf] || 0),Number(typeof lastWs !== "undefined" ? lastWs : 0));
+    const freshnessRevision=`price-stale:${!priceAt || now-priceAt>featureConfig.freshness.priceStaleMs}`;
+    const fingerprint=[presentationContextKey37(),state.direction,state.horizon,plan.managementHorizonId,signalCanonicalSlots37().map(slot=>slot.period).join("-"),signalSmcSettingsSignature37(),freshnessRevision,frozen.signature].join("|");
+    return {fingerprint,plan,frozen};
+  }
+  function shouldRunAnalyticalRefresh37(previous,next){ return !previous || previous!==next; }
+  function runSchedulingSelfTests37(){
+    const cases={identicalRevisionSkipped:!shouldRunAnalyticalRefresh37("revision-a","revision-a"),formingRevisionRuns:shouldRunAnalyticalRefresh37("forming-1","forming-2"),positionRevisionRuns:shouldRunAnalyticalRefresh37("position-1","position-2"),initialRuns:shouldRunAnalyticalRefresh37("","revision-a")};
+    return {passed:Object.values(cases).every(Boolean),cases};
+  }
+  function coherentSignalSnapshot37(plan,health,preparedFrozen=null){
+    const frozen = preparedFrozen || signalSnapshotSignature37(plan);
     const snapshot = buildSignalSnapshot37(plan,health,frozen);
     snapshot.signature = frozen.signature;
     state.marketSnapshot = snapshot;
@@ -2121,9 +2148,10 @@
       `Applied MA-event impact: ${signed(audit.appliedImpact)}`
     ];
   }
-  function signalDetailsReport37(signal,thesis,entryQuality){
-    const mode = state.direction;
-    const horizon = horizonLabel37(state.horizon);
+  function signalDetailsReport37(signal,thesis,entryQuality,displayed){
+    if(!displayed) return {summary:"Signal details unavailable",analysis:"",diagnostics:"",publication:null};
+    const mode = displayed.mode;
+    const horizon = displayed.horizonLabel;
     const autoBias = entryDisplayText37(signal.entry);
     const targetDirection = mode === "AUTO"
       ? (signal.fadeDirection || ((autoBias === "LONG" || autoBias === "SHORT") ? signal.marketDirection : null))
@@ -2132,18 +2160,18 @@
       ? {...signal,maEvents:thesis.maEvents,maImpact:thesis.maImpact,maAudit:thesis.maAudit,structuralContext:thesis.structuralContext}
       : signal;
     const evidence = targetDirection ? directionEvidence37(evidenceSignal,targetDirection) : null;
-    const summary = [`${mode} - ${horizon}`];
+    const summary = [...displayedSignalHeader37(displayed),"",`${mode} - ${horizon}`];
 
     if(signal.loading){
-      summary.push("","Market bias: WAIT","Entry: Data incomplete","",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(Date.now())}`);
+      summary.push("","Market bias: WAIT","Entry: Data incomplete","",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(displayed.publishedAt)}`);
     }else{
       summary.push(
         "",
-        `Bias: ${signal.marketDirection || "NEUTRAL"}`,
-        `Bias confidence: ${signal.confidence == null ? "Unavailable" : `${Math.round(signal.confidence)}%`}`
+        `Bias: ${displayed.direction}`,
+        `Bias confidence: ${displayed.confidenceText}`
       );
       if(mode !== "AUTO") summary.push(`${mode === "LONG" ? "Long" : "Short"} thesis: ${thesis ? thesis.status : "MIXED"}`);
-      const decision = entryQuality.decision;
+      const decision = displayed.decision;
       if(decision){
         const assessments = decision.assessments || {};
         const targets = assessments.targetFramework || {};
@@ -2154,7 +2182,7 @@
           `Setup: ${setupDisplayName37(decision)}`,
           `Family: ${decision.family}`,
           `Setup origin zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
-          `State: ${decision.state}`,
+          `State: ${displayed.visibleState}`,
           `Entry mode: ${assessments.entryMode || "UNAVAILABLE"}`,
           `Setup quality: ${assessments.setup && assessments.setup.grade || "UNAVAILABLE"}`,
           `Trigger quality: ${assessments.trigger && assessments.trigger.grade || "UNAVAILABLE"}`,
@@ -2181,9 +2209,9 @@
           `Extended source: ${extendedTarget.source || "Unavailable"}`,
           `Reason: ${decision.reason}`
         );
-        if(decision.previousCandidate) summary.push(`Previous candidate: ${decision.previousCandidate.tf} ${decision.previousCandidate.source} - INVALIDATED; ${decision.previousCandidate.reason}`);
+        if(historicalSetupMatches37(decision.previousCandidate,displayed)) summary.push(`Historical setup: ${decision.previousCandidate.tf} ${decision.previousCandidate.source} - INVALIDATED; ${decision.previousCandidate.reason}`);
       }else{
-        summary.push("Setup: None","State: BIAS CONFIRMED","Entry: WAIT",`Reason: ${entryQuality.instruction}`);
+        summary.push("Setup: None",`State: ${displayed.visibleState}`,"Entry: WAIT",`Reason: ${entryQuality.instruction}`);
       }
 
       if(mode === "AUTO" && !targetDirection){
@@ -2214,15 +2242,15 @@
         const principal = levels.slice().sort((a,b) => a.distance-b.distance).slice(0,3);
         if(principal.length) summary.push("","Nearest relevant levels:",...principal.map(level => `- ${conciseLevelText37(level)}`));
       }
-      summary.push("",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(state.activeSnapshot && state.activeSnapshot.createdAt)}`);
+      summary.push("",`Data: ${compactDataStatus37(signal.dataHealth)}`,`Updated: ${formatSignalTime37(displayed.publishedAt)}`);
     }
 
     const analysis = [];
     const samples = signal.samples || [];
     if(samples.length) analysis.push(`Pressure and participation:\n${detailBulletList37(samples.map(sample => sample.available ? tooltipPressureLine37(sample) : `${sample.tf} unavailable`))}`);
     if(signal.bias){
-      analysis.push(`Authoritative bias:\n${detailBulletList37([
-        `Selected bias: ${signal.bias.direction || "NEUTRAL"} ${signal.confidence == null ? "" : `${Math.round(signal.confidence)}%`}`.trim(),
+      analysis.push(`Market context (separate from active signal):\n${detailBulletList37([
+        `Automatic context bias: ${signal.bias.direction || "NEUTRAL"}`,
         `Bias source: ${signal.bias.source}; combined score ${signal.bias.score.toFixed(3)}`,
         `MA stack score ${signal.bias.stackScore.toFixed(3)}; pressure score ${signal.bias.pressureScore.toFixed(3)}; structure score ${signal.bias.structureScore.toFixed(3)}`,
         ...signal.bias.stacks.map(stack => `${stack.tf}: ${stack.state}, ${stack.phase}; order ${stack.orderCount}/4, slopes ${stack.slopeCount}/5, stability ${Math.round(stack.stability*100)}%`)
@@ -2282,7 +2310,7 @@
       `Trigger confirmation role: ${signal.entryDecision && signal.entryDecision.interaction ? signal.entryDecision.interaction.confirmationRole : "unavailable"}`
     ];
     if(invalidEvents.length) diagnostics.push(`Stale / invalidated events:\n${detailBulletList37(invalidEvents.map(event => event.state === "unknown" ? event.reason : `${maEventLabel37(event)} - ${event.state}: ${event.invalidationReason || event.stateReason || "reason unavailable"}`))}`);
-    return {summary:summary.join("\n"),analysis:analysis.join("\n\n"),diagnostics:diagnostics.join("\n\n")};
+    return {summary:summary.join("\n"),analysis:analysis.join("\n\n"),diagnostics:diagnostics.join("\n\n"),publication:displayedSignalMeta37(displayed)};
   }
   function renderSignalDetailsReport37(report){
     if(!state.detailsBody) return;
@@ -2294,6 +2322,10 @@
     summary.className = "pressure-signal-details-summary";
     summary.textContent = report.summary;
     state.detailsBody.appendChild(summary);
+    if(report.summary==="Signal details unavailable"){
+      state.detailsBody.scrollTop=preservedScrollTop;
+      return;
+    }
     [["analysis","Analysis",report.analysis,openAnalysis],["diagnostics","Diagnostics",report.diagnostics,openDiagnostics]].forEach(([key,label,content,wasOpen]) => {
       const section = document.createElement("details");
       section.className = "pressure-signal-details-section";
@@ -2308,6 +2340,36 @@
       state.detailsBody.appendChild(section);
     });
     state.detailsBody.scrollTop = preservedScrollTop;
+  }
+  function unavailableSignalReport37(){
+    return {summary:"Signal details unavailable",analysis:"",diagnostics:"",publication:null};
+  }
+  function ensurePublicationSignalReport37(publication){
+    const displayed=publication && publication.displayedSignal;
+    if(!publication || !displayed) return unavailableSignalReport37();
+    if(!buttonMatchesDisplayedSignal37(displayed)){
+      performanceDiagnostics.signalPublicationMismatches+=1;
+      performanceDiagnostics.signalFallbacksPrevented+=1;
+      return unavailableSignalReport37();
+    }
+    if(publication.signalReport && displayedSignalMatches37(publication.signalReport.publication,displayed)) return publication.signalReport;
+    if(publication.signalReport){
+      performanceDiagnostics.signalPublicationMismatches+=1;
+      performanceDiagnostics.signalStalePayloadsDiscarded+=1;
+      publication.signalReport=null;
+    }
+    let report=null;
+    try{
+      report=typeof publication.signalReportFactory==="function"
+        ? timed37("signal.report-generation",publication.signalReportFactory,publication.signalReportFingerprint)
+        : null;
+    }catch(_error){ report=null; }
+    if(report && displayedSignalMatches37(report.publication,displayed)){
+      publication.signalReport=report;
+      return report;
+    }
+    performanceDiagnostics.signalFallbacksPrevented+=1;
+    return unavailableSignalReport37();
   }
   function positionToolbarSignalDetails37(){
     if(!state.details || !state.details.classList.contains("is-open")) return;
@@ -2324,7 +2386,12 @@
       state.details.style.height = `${Math.min(420,Math.max(180,window.innerHeight-8))}px`;
     }
     windowSystem.focusSignal();
-    if(state.lastPublishedSnapshot && state.lastPublishedSnapshot.signalReport) renderSignalDetailsReport37(state.lastPublishedSnapshot.signalReport);
+    const publication=state.lastPublishedSnapshot;
+    if(publication){
+      const report=ensurePublicationSignalReport37(publication);
+      renderSignalDetailsReport37(report);
+      windowSystem.recordSignalDetailsPublication(publication.displayedSignal,report);
+    }
   }
   function hideToolbarSignalDetails37(){
     if(state.details){
@@ -2512,8 +2579,8 @@
     const externalLevels = managementExternalLevels37(position);
     const profile = featureConfig.managementHorizons[horizonId] || featureConfig.managementHorizons.quick;
     const targetAtr = averageTrueRange37(profile.primaryTf) || averageTrueRange37(profile.triggerTf);
-    const targets = position ? targetFramework37(position.side,horizonId,targetAtr,profile.primaryTf,externalLevels) : null;
-    const management = managementEngine.evaluate({
+    const targets = position ? timed37("position.target-evaluation",() => targetFramework37(position.side,horizonId,targetAtr,profile.primaryTf,externalLevels)) : null;
+    const management = timed37("position.management-calculation",() => managementEngine.evaluate({
       symbol:String(snapshot && snapshot.symbol || position && position.symbol || "BTCUSDT"),
       horizon:horizonId,
       createdAt:Date.now(),
@@ -2535,10 +2602,12 @@
       targetFramework:targets,
       exitEvaluations:[],
       grExitLadder:null
-    });
+    }));
     if(position && targets){
-      management.exitEvaluations=targetEngine.evaluateBinanceExits({direction:position.side,currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position.markPrice),positionQty:position.qty,atr:targetAtr,profileId:horizonId,lifecycle:management.lifecycle,targetFramework:targets,orders:externalLevels.exitOrders});
-      management.grExitLadder=targetEngine.evaluateGrLadder({direction:position.side,currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position.markPrice),positionQty:position.qty,atr:targetAtr,profileId:horizonId,lifecycle:management.lifecycle,targetFramework:targets,orders:externalLevels.grExitOrders,source:externalLevels.grSource});
+      timed37("position.exit-ladder-evaluation",() => {
+        management.exitEvaluations=targetEngine.evaluateBinanceExits({direction:position.side,currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position.markPrice),positionQty:position.qty,atr:targetAtr,profileId:horizonId,lifecycle:management.lifecycle,targetFramework:targets,orders:externalLevels.exitOrders});
+        management.grExitLadder=targetEngine.evaluateGrLadder({direction:position.side,currentPrice:num37(snapshot && snapshot.currentPrice) ?? signalCurrentPrice37(position.markPrice),positionQty:position.qty,atr:targetAtr,profileId:horizonId,lifecycle:management.lifecycle,targetFramework:targets,orders:externalLevels.grExitOrders,source:externalLevels.grSource});
+      });
     }
     return management;
   }
@@ -2752,6 +2821,113 @@
       minimal:full
     };
   }
+  function normalizeDisplayedDirection37(value){
+    if(value === 1) return "LONG";
+    if(value === -1) return "SHORT";
+    const normalized=String(value || "").toUpperCase();
+    return normalized === "LONG" || normalized === "SHORT" ? normalized : "NO BIAS";
+  }
+  function displayedDecisionDirection37(decision){
+    return normalizeDisplayedDirection37(decision && (decision.direction ?? decision.side));
+  }
+  function displayedSignalMeta37(displayed){
+    if(!displayed) return null;
+    return {
+      generation:displayed.generation,
+      signalIdentity:displayed.signalIdentity,
+      direction:displayed.direction,
+      confidence:displayed.confidence,
+      confidenceText:displayed.confidenceText,
+      visibleState:displayed.visibleState,
+      setupIdentity:displayed.setupIdentity,
+      horizonId:displayed.horizonId
+    };
+  }
+  function displayedSignalMatches37(left,right){
+    if(!left || !right) return false;
+    const a=displayedSignalMeta37(left),b=displayedSignalMeta37(right);
+    return a.generation===b.generation && a.signalIdentity===b.signalIdentity && a.direction===b.direction
+      && a.confidence===b.confidence && a.visibleState===b.visibleState
+      && (a.setupIdentity || null)===(b.setupIdentity || null) && a.horizonId===b.horizonId;
+  }
+  function buttonMatchesDisplayedSignal37(displayed){
+    if(!displayed || !state.entry) return false;
+    const button=state.entry.dataset;
+    const matches=button.signalDirection===displayed.direction
+      && (button.signalConfidence==="" ? null : Number(button.signalConfidence))===(displayed.confidence==null ? null : displayed.confidence)
+      && button.signalState===displayed.visibleState && (button.signalSetupIdentity || null)===(displayed.setupIdentity || null)
+      && Number(button.signalGeneration)===displayed.generation && button.signalIdentity===displayed.signalIdentity;
+    if(window.BT001_SIGNAL_DEBUG_ASSERTIONS===true) console.assert(matches,"Displayed Signal publication mismatch",displayedSignalMeta37(displayed));
+    return matches;
+  }
+  function displayedSignalHeader37(displayed){
+    if(!displayed) return ["Signal details unavailable"];
+    return [
+      "ACTIVE SIGNAL",
+      `Direction: ${displayed.direction}`,
+      `Bias confidence: ${displayed.confidenceText}`,
+      `State: ${displayed.visibleState}`,
+      `Setup identity: ${displayed.setupIdentity || "None"}`,
+      `Setup family: ${displayed.setupFamily || "None"}`,
+      `Setup timeframe: ${displayed.setupTimeframe || "None"}`,
+      `Entry: ${displayed.entryVerdict}`,
+      `Publication generation: ${displayed.generation}`
+    ];
+  }
+  function historicalSetupMatches37(candidate,displayed){
+    return !!candidate && !!displayed && (!candidate.direction || displayedDecisionDirection37(candidate)===displayed.direction);
+  }
+  function displayedSignalTone37(direction,visibleState){
+    if(visibleState==="TRIGGER ACTIVE") return direction==="LONG" ? "green" : direction==="SHORT" ? "red" : "gray";
+    if(visibleState==="TRIGGER FORMING" || visibleState==="STAND BY") return "orange";
+    if(visibleState==="NO CHASE" || visibleState==="SETUP FAILED") return "red";
+    return "gray";
+  }
+  function buildDisplayedSignalPublication37({generation,publishedAt,mode,horizonId,signal,thesis,entryQuality}){
+    const manualMismatch=mode!=="AUTO" && thesis && normalizeDisplayedDirection37(mode)!==normalizeDisplayedDirection37(signal && signal.marketDirection);
+    const displaySignal=manualMismatch ? {marketDirection:mode,confidence:thesis.confidence} : signal;
+    const direction=normalizeDisplayedDirection37(displaySignal && displaySignal.marketDirection);
+    const candidate=manualMismatch ? null : signal && signal.entryDecision;
+    const candidateDirection=displayedDecisionDirection37(candidate);
+    const activeSetupState=!!candidate && ["SETUP ARMED","ZONE ENGAGED","TRIGGER DEVELOPING","READY","EXPIRED","INVALIDATED"].includes(candidate.state);
+    const decision=candidate && activeSetupState && direction!=="NO BIAS" && candidateDirection===direction ? candidate : null;
+    const presentation=signalPresentation37({marketDirection:direction==="NO BIAS" ? null : direction},decision);
+    const confidenceValue=direction==="NO BIAS" ? null : num37(displaySignal && displaySignal.confidence);
+    const confidence=confidenceValue==null ? null : Math.round(confidenceValue);
+    const confidenceText=confidence==null ? "Unavailable" : `${confidence}%`;
+    const setupIdentity=decision && decision.family ? (decision.setupIdentity || setupIdentity37(decision)) : null;
+    const assessments=decision && decision.assessments || {};
+    const targets=assessments.targetFramework || {};
+    const obstacle=targets.obstacle || {};
+    const history=decision ? state.setupHistories.get(setupIdentity) || {} : {};
+    const originStatus=!decision ? null : !history.zoneReached ? (decision.distance===0 ? "TESTING" : "APPROACHING")
+      : decision.state==="INVALIDATED" ? "FAILED" : history.retired ? "RETIRED" : decision.distance===0 ? "TESTING"
+        : decision.interaction && decision.interaction.reclaim ? "RECLAIMED" : decision.interaction && decision.interaction.rejection ? "REJECTED"
+          : decision.interaction && decision.interaction.hold ? "HELD" : "PASSED";
+    const setupZone=decision && decision.zone ? {low:decision.zone.low,high:decision.zone.high} : null;
+    const entryVerdict=decision ? (decision.entryAction || (decision.state==="READY" ? `READY ${direction}` : "WAIT")) : "WAIT";
+    const summarySignal={marketDirection:direction==="NO BIAS" ? null : direction,confidence};
+    const summaryVariants=Object.freeze(signalSummaryVariants37(summarySignal,decision));
+    const signalIdentity=[generation,horizonId,direction,confidence==null ? "na" : confidence,presentation.label,setupIdentity || "none"].join("|");
+    return Object.freeze({
+      generation,publishedAt,signalIdentity,direction,confidence,confidenceText,visibleState:presentation.label,
+      definition:presentation.definition,setupIdentity,setupFamily:decision && decision.family || null,
+      setupTimeframe:decision && decision.tf || null,setupOrigin:decision ? setupDisplayName37(decision) : null,originStatus,
+      setupZone,entryMode:assessments.entryMode || null,setupQuality:assessments.setup && assessments.setup.grade || null,
+      triggerQuality:assessments.trigger && assessments.trigger.grade || null,currentEntryQuality:assessments.current && assessments.current.grade || null,
+      entryVerdict,triggerState:decision && decision.triggerState || "absent",
+      triggerEvidence:Object.freeze([...(decision && decision.interaction && decision.interaction.evidence || [])]),
+      invalidation:decision && decision.invalidation != null ? decision.invalidation : null,
+      targets:Object.freeze({...targets}),obstacles:Object.freeze({...obstacle}),
+      participation:decision && decision.pressure && (decision.pressure.participationExpectation || decision.pressure.triggerParticipation) || null,
+      pressureEvidence:Object.freeze([...(decision && decision.pressure && decision.pressure.evidence || [])]),
+      dataStatus:signal && signal.dataHealth && signal.dataHealth.status || "unavailable",horizonId,horizonLabel:horizonLabel37(horizonId),mode,
+      activeReasons:Object.freeze([decision && decision.reason || entryQuality && entryQuality.instruction].filter(Boolean)),
+      missingConditions:Object.freeze([...(entryQuality && entryQuality.exclusions || [])]),
+      limitations:Object.freeze([assessments.limitation].filter(Boolean)),
+      decision,summaryVariants,entryTone:displayedSignalTone37(direction,presentation.label)
+    });
+  }
   function topSignalText37(signal,decision){
     return signalSummaryVariants37(signal,decision).full;
   }
@@ -2824,45 +3000,35 @@
       if(state.activeTriggerAlertId === identity) stopTriggerAlert37(false);
     },TRIGGER_ALERT_DURATION37);
   }
-  function signalToolbarTooltip37(signal,entryQuality,thesis){
-    const decision = entryQuality && entryQuality.decision || signal && signal.entryDecision;
-    const presentation = signalPresentation37(signal,decision);
+  function signalToolbarTooltip37(signal,entryQuality,thesis,displayed){
+    if(!displayed) return "Signal details unavailable";
+    const decision = displayed.decision;
+    const presentation = {label:displayed.visibleState,definition:displayed.definition};
     const snapshot = state.activeSnapshot || state.marketSnapshot;
     const freshness = snapshot && snapshot.freshness;
     const ageText = age => Number.isFinite(Number(age)) ? `${Math.round(Number(age)/1000)}s ago` : "Unavailable";
     const candleText = evidence => evidence ? `Latest closed ${evidence.tf} candle` : "Unavailable";
     if(!signal || signal.loading || signal.dataIncomplete){
-      return [presentation.definition,"","Direction: NO BIAS","Bias confidence: Unavailable",`State: ${presentation.label}`,"Entry: Data incomplete",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`].join("\n");
+      return [presentation.definition,"",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${presentation.label}`,`Setup identity: ${displayed.setupIdentity || "None"}`,"Entry: Data incomplete",`Publication generation: ${displayed.generation}`,`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`].join("\n");
     }
-    const bias = signal.marketDirection || "NO BIAS";
-    const confidence = signal.confidence == null ? "Unavailable" : `${Math.round(signal.confidence)}%`;
-    const lines = [presentation.definition,"",`Direction: ${bias}`,`Bias confidence: ${confidence}`,`Horizon: ${horizonLabel37(state.horizon)}`];
-    if(thesis) lines.push(`Selected thesis: ${state.direction} ${thesis.status}${thesis.confidence == null ? "" : ` ${Math.round(thesis.confidence)}%`}`);
+    const lines = [presentation.definition,"",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Horizon: ${displayed.horizonLabel}`,`Publication generation: ${displayed.generation}`];
+    if(thesis) lines.push(`Selected thesis: ${displayed.direction} ${thesis.status}${displayed.confidence == null ? "" : ` ${displayed.confidenceText}`}`);
     if(!decision || !decision.family){
-      lines.push(`State: ${presentation.label}`,"Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`,`Price: ${ageText(freshness && freshness.priceAgeMs)}`);
+      lines.push("Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`,`Price: ${ageText(freshness && freshness.priceAgeMs)}`);
       return lines.join("\n");
     }
     const assessments = decision.assessments || {};
-    const history = state.setupHistories.get(decision.setupIdentity) || {};
-    const originStatus = !history.zoneReached ? (decision.distance === 0 ? "TESTING" : "APPROACHING")
-      : decision.state === "INVALIDATED" ? "FAILED"
-        : history.retired ? "RETIRED"
-          : decision.distance === 0 ? "TESTING"
-          : decision.interaction && decision.interaction.reclaim ? "RECLAIMED"
-            : decision.interaction && decision.interaction.rejection ? "REJECTED"
-              : decision.interaction && decision.interaction.hold ? "HELD" : "PASSED";
     const targets = assessments.targetFramework || {};
     const target = targets.primary || assessments.target || {};
     const obstacle = targets.obstacle || {};
     const extended = targets.extended || {};
     const currentInvalidation = assessments.executionInvalidation || {};
     lines.push(
-      `State: ${presentation.label}`,
       `Setup family: ${decision.family}`,
       `Setup timeframe: ${decision.tf}`,
       `Setup: ${setupDisplayName37(decision)}`,
       `Setup origin zone: ${tooltipPrice37(decision.zone.low)}-${tooltipPrice37(decision.zone.high)}`,
-      `Origin-zone status: ${originStatus}`,
+      `Origin-zone status: ${displayed.originStatus || "Unavailable"}`,
       "",
       `Entry mode: ${assessments.entryMode === "RETEST" ? "Retest" : assessments.entryMode === "CONTINUATION" ? "Continuation" : "Unavailable"}`,
       `Setup quality: ${assessments.setup && assessments.setup.grade || "UNAVAILABLE"}`,
@@ -3472,6 +3638,46 @@
       mirroredScenario:{bias:"SHORT",setup:"5m EMA100 resistance test",pressure:"56% buying / 44% selling",state:observedShort.state,entry:"WAIT",trigger:"absent",reason:observedShort.reason}
     };
   }
+  function runDisplayedSignalInvariantSelfTests37(){
+    const entryQuality={instruction:"Waiting for a valid same-direction setup",exclusions:["Closed reaction required"],levels:{entryCandidates:[],candidates:[],lines:[]}};
+    const decision=(direction,stateName,identity) => ({
+      state:stateName,direction,family:"EMA9/21 bounce",source:"EMA9/EMA21",tf:stateName==="READY" ? "5m" : "15m",setupIdentity:identity,
+      zone:{low:99000,high:99100},interaction:{evidence:["Closed reaction"],trigger:"Closed reaction",confirmationRole:"trigger",movement:true},
+      pressure:{evidence:["Pressure improved"],triggerParticipation:{text:"Normal"}},assessments:{entryMode:"RETEST",setup:{grade:"B"},trigger:{grade:"B"},current:{grade:"B"},targetFramework:{}},
+      entryAction:stateName==="READY" ? `READY ${direction}` : "WAIT",triggerState:stateName==="READY" ? "confirmed" : "forming",reason:"Fixture reason",invalidation:98500
+    });
+    const make=(generation,mode,signal,thesis=null) => buildDisplayedSignalPublication37({generation,publishedAt:1700000000000+generation,mode,horizonId:"quick",signal,thesis,entryQuality:{...entryQuality,decision:signal.entryDecision},entryTone:"gray"});
+    const tooltip=(displayed,signal,thesis=null) => signalToolbarTooltip37({...signal,marketDirection:displayed.direction==="NO BIAS" ? null : displayed.direction,confidence:displayed.confidence,entryDecision:displayed.decision},{...entryQuality,decision:displayed.decision},thesis,displayed);
+    const shortDeveloping=decision("SHORT","TRIGGER DEVELOPING","short-15m-1");
+    const longDeveloping=decision("LONG","TRIGGER DEVELOPING","long-15m-1");
+    const shortReady=decision("SHORT","READY","short-5m-2");
+    const longNoSetup=make(1,"LONG",{marketDirection:"SHORT",confidence:72,entryDecision:shortDeveloping,dataHealth:{status:"sufficient"}},{status:"SUPPORTIVE",confidence:64});
+    const shortNoSetup=make(2,"SHORT",{marketDirection:"LONG",confidence:64,entryDecision:longDeveloping,dataHealth:{status:"sufficient"}},{status:"SUPPORTIVE",confidence:72});
+    const longForming=make(3,"AUTO",{marketDirection:"LONG",confidence:64,entryDecision:longDeveloping,dataHealth:{status:"sufficient"}});
+    const shortActive=make(4,"AUTO",{marketDirection:"SHORT",confidence:72,entryDecision:shortReady,dataHealth:{status:"sufficient"}});
+    const noBias=make(5,"AUTO",{marketDirection:null,confidence:null,entryDecision:longDeveloping,dataHealth:{status:"sufficient"}});
+    const longNoSetupTip=tooltip(longNoSetup,{dataHealth:{status:"sufficient"}},{status:"SUPPORTIVE",confidence:64});
+    const shortNoSetupTip=tooltip(shortNoSetup,{dataHealth:{status:"sufficient"}},{status:"SUPPORTIVE",confidence:72});
+    const longFormingTip=tooltip(longForming,{dataHealth:{status:"sufficient"}});
+    const shortActiveTip=tooltip(shortActive,{dataHealth:{status:"sufficient"}});
+    const noBiasTip=tooltip(noBias,{dataHealth:{status:"sufficient"}});
+    const nextShort=make(6,"AUTO",{marketDirection:"SHORT",confidence:70,entryDecision:null,dataHealth:{status:"sufficient"}});
+    const cases={
+      A_LONG_NO_SETUP:longNoSetup.summaryVariants.full==="LONG 64% \u00b7 NO SETUP" && longNoSetup.entryTone==="gray" && /Direction: LONG/.test(longNoSetupTip) && /Bias confidence: 64%/.test(longNoSetupTip) && /State: NO SETUP/.test(longNoSetupTip) && !/Direction: SHORT|Setup family:/.test(longNoSetupTip),
+      B_SHORT_NO_SETUP:shortNoSetup.summaryVariants.full==="SHORT 72% \u00b7 NO SETUP" && shortNoSetup.entryTone==="gray" && /Direction: SHORT/.test(shortNoSetupTip) && /Bias confidence: 72%/.test(shortNoSetupTip) && /State: NO SETUP/.test(shortNoSetupTip) && !/Direction: LONG|Setup family:/.test(shortNoSetupTip),
+      C_LONG_TRIGGER_FORMING:longForming.entryTone==="orange" && /Direction: LONG/.test(longFormingTip) && /Bias confidence: 64%/.test(longFormingTip) && /State: TRIGGER FORMING/.test(longFormingTip) && longFormingTip.includes("Setup identity: long-15m-1"),
+      D_SHORT_TRIGGER_ACTIVE:shortActive.entryTone==="red" && /Direction: SHORT/.test(shortActiveTip) && /Bias confidence: 72%/.test(shortActiveTip) && /State: TRIGGER ACTIVE/.test(shortActiveTip) && shortActiveTip.includes("Setup identity: short-5m-2"),
+      E_NO_BIAS:/Direction: NO BIAS/.test(noBiasTip) && /State: NO SETUP \u00b7 NO BIAS/.test(noBiasTip) && !/Setup family:|Direction: LONG|Direction: SHORT/.test(noBiasTip),
+      F_DIRECTION_REVERSAL:longForming.generation!==nextShort.generation && longForming.signalIdentity!==nextShort.signalIdentity && nextShort.direction==="SHORT",
+      G_NO_SETUP_TRANSITION:nextShort.setupIdentity===null && nextShort.visibleState==="NO SETUP" && !tooltip(nextShort,{dataHealth:{status:"sufficient"}}).includes("long-15m-1"),
+      H_TOOLTIP_ALREADY_OPEN:!displayedSignalMatches37(longForming,nextShort) && tooltip(nextShort,{dataHealth:{status:"sufficient"}}).includes("Publication generation: 6"),
+      I_DETAILS_WINDOW_PARITY:displayedSignalHeader37(shortActive).join("\n").includes("Direction: SHORT\nBias confidence: 72%\nState: TRIGGER ACTIVE\nSetup identity: short-5m-2"),
+      J_COPY_AFTER_UPDATE:displayedSignalHeader37(nextShort).join("\n").includes("Publication generation: 6") && !displayedSignalHeader37(nextShort).join("\n").includes("long-15m-1"),
+      K_STALE_CACHED_TOOLTIP:!displayedSignalMatches37(displayedSignalMeta37(longForming),nextShort),
+      L_OPPOSITE_HISTORY_BLOCKED:!historicalSetupMatches37({direction:"LONG",tf:"15m"},nextShort) && historicalSetupMatches37({direction:"SHORT",tf:"15m"},nextShort)
+    };
+    return {passed:Object.values(cases).every(Boolean),cases,reproduction:{button:shortNoSetup.summaryVariants.full,tooltip:shortNoSetupTip}};
+  }
   function runPresentationSelfTests37(){
     const expected = {
       "SETUP ARMED":"WATCHING",
@@ -3491,7 +3697,8 @@
       zone:{low:99000,high:99100},pressure:{triggerTf:"3m",triggerParticipation:{text:"Normal"}},
       interaction:{interactionTime:100,reactionTime:200},invalidation:98500,entryAction:"READY LONG",reason:"Confirmed"
     };
-    const tooltip = signalToolbarTooltip37({...baseSignal,entryDecision:readyDecision},{decision:readyDecision},null);
+    const displayed=buildDisplayedSignalPublication37({generation:1,publishedAt:1,mode:"AUTO",horizonId:"quick",signal:{...baseSignal,entryDecision:readyDecision},thesis:null,entryQuality:{decision:readyDecision,instruction:"Confirmed",exclusions:[]},entryTone:"green"});
+    const tooltip = signalToolbarTooltip37({...baseSignal,entryDecision:readyDecision},{decision:readyDecision},null,displayed);
     const definition = SIGNAL_PRESENTATION37.READY.definition;
     const approvedVariants = signalSummaryVariants37(baseSignal,{state:"TRIGGER DEVELOPING"});
     const identity = triggerIdentity37(baseSignal,readyDecision);
@@ -3519,7 +3726,9 @@
       setupIdentityChangesWithDirection:setupIdentity !== directionIdentity,
       ...alertLifecycle
     };
-    return {passed:Object.values(cases).every(Boolean),cases};
+    const atomicConsistency=runDisplayedSignalInvariantSelfTests37();
+    cases.atomicConsistency=atomicConsistency.passed;
+    return {passed:Object.values(cases).every(Boolean),cases,atomicConsistency};
   }
   function runTriggerAlertSelfTests37(signal,readyDecision){
     const saved = {
@@ -3858,8 +4067,17 @@
   }
   function clonePublicationValue37(value){
     if(value == null) return value;
+    const diagnostics=uiPerf();
+    const instrument=!!(diagnostics && diagnostics.isEnabled && diagnostics.isEnabled());
+    const started=instrument ? (typeof performance!=="undefined" && performance.now ? performance.now() : Date.now()) : 0;
     try{ return typeof structuredClone === "function" ? structuredClone(value) : JSON.parse(JSON.stringify(value)); }
     catch(_e){ return value; }
+    finally{
+      if(instrument){
+        performanceDiagnostics.structuredCloneCount+=1;
+        performanceDiagnostics.structuredCloneMs+=(typeof performance!=="undefined" && performance.now ? performance.now() : Date.now())-started;
+      }
+    }
   }
   function publishedForContext37(contextKey,validOnly=false){
     const published=validOnly ? state.lastValidPublishedSnapshot : state.lastPublishedSnapshot;
@@ -3884,6 +4102,8 @@
     state.workingSnapshot=null;
     state.lastPublishedSnapshot=null;
     state.lastValidPublishedSnapshot=null;
+    state.lastAnalyticalFingerprint="";
+    state.scheduledFrozen=null;
     windowSystem.invalidateContext(nextContextKey);
   }
   function orderRefreshGate37(snapshot,contextKey,now=Date.now()){
@@ -3951,17 +4171,29 @@
   }
   function publishPresentation37(publication){
     if(publication.generation!==state.refreshGeneration || publication.contextKey!==presentationContextKey37()) return false;
+    const displayed=publication.displayedSignal;
+    if(!displayed || displayed.generation!==publication.generation){
+      performanceDiagnostics.signalPublicationMismatches+=1;
+      return false;
+    }
     state.lastPublishedSnapshot=publication;
     if(publication.refreshState==="READY") state.lastValidPublishedSnapshot=publication;
-    state.signalSummaryVariants=publication.signalSummaryVariants;
-    const nextDisplayFingerprint=[publication.entryTone,publication.signalSummaryVariants.full,publication.exitTone,publication.exitText].join("|");
+    state.signalSummaryVariants=displayed.summaryVariants;
+    const nextDisplayFingerprint=[displayed.signalIdentity,displayed.entryTone,displayed.summaryVariants.full,publication.exitTone,publication.exitText].join("|");
     const displayChanged=nextDisplayFingerprint!==state.displayFingerprint;
     state.displayFingerprint=nextDisplayFingerprint;
     if(state.entry){
-      if(state.entry.dataset.tone!==publication.entryTone) state.entry.dataset.tone=publication.entryTone;
-      if(state.entry.textContent!==publication.signalSummaryVariants.full) state.entry.textContent=publication.signalSummaryVariants.full;
+      if(state.entry.dataset.tone!==displayed.entryTone) state.entry.dataset.tone=displayed.entryTone;
+      if(state.entry.textContent!==displayed.summaryVariants.full) state.entry.textContent=displayed.summaryVariants.full;
+      state.entry.dataset.signalGeneration=String(displayed.generation);
+      state.entry.dataset.signalIdentity=displayed.signalIdentity;
+      state.entry.dataset.signalDirection=displayed.direction;
+      state.entry.dataset.signalConfidence=displayed.confidence==null ? "" : String(displayed.confidence);
+      state.entry.dataset.signalState=displayed.visibleState;
+      state.entry.dataset.signalSetupIdentity=displayed.setupIdentity || "";
       state.entry.removeAttribute("title");
-      updateTriggerAlert37(publication.signal,publication.decision);
+      updateTriggerAlert37(publication.signal,displayed.decision);
+      buttonMatchesDisplayedSignal37(displayed);
     }
     if(state.exit){
       if(state.exit.dataset.tone!==publication.exitTone) state.exit.dataset.tone=publication.exitTone;
@@ -3969,14 +4201,17 @@
       state.exit.removeAttribute("title");
     }
     if(displayChanged) renderResponsiveSignalSummary37();
+    windowSystem.update(publication);
     if(state.detailsBody && state.details && state.details.classList.contains("is-open")){
-      renderSignalDetailsReport37(publication.signalReport);
+      const report=ensurePublicationSignalReport37(publication);
+      renderSignalDetailsReport37(report);
+      windowSystem.recordSignalDetailsPublication(displayed,report);
       if(state.detailsTitle) state.detailsTitle.textContent="Signal Details";
       positionToolbarSignalDetails37();
     }
-    windowSystem.update(publication);
     setRefreshState37(publication.refreshState,publication.contextKey);
     state.lastRenderAt=Date.now();
+    state.workingSnapshot=null;
     return true;
   }
   function runRefreshSelfTests37(){
@@ -4022,7 +4257,7 @@
     state.lastPublishedSnapshot=saved.last;state.lastValidPublishedSnapshot=saved.valid;state.refreshGeneration=saved.generation;
     return {passed:Object.values(cases).every(Boolean),cases};
   }
-  function renderToolbarSignal37(contextKey=presentationContextKey37(),generation=state.refreshGeneration){
+  function renderToolbarSignal37(contextKey=presentationContextKey37(),generation=state.refreshGeneration,preparedRevision=null){
     if(!ensureToolbarSignalUi37()) return;
     if(generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return {discarded:true};
     if(state.directionChip){
@@ -4055,13 +4290,13 @@
       state.lastRenderAt=Date.now();
       return {retained:false,status:bundle.health.status};
     }
-    state.activeSnapshot = ready ? coherentSignalSnapshot37(bundle.plan,bundle.health) : null;
+    state.activeSnapshot = ready ? timed37("signal.snapshot-collection",() => coherentSignalSnapshot37(bundle.plan,bundle.health,preparedRevision && preparedRevision.frozen),preparedRevision && preparedRevision.fingerprint) : null;
     if(state.activeSnapshot) state.activeSnapshot.health = bundle.health;
     try{
       let signal;
       if(ready){
         performanceDiagnostics.signalLightCalculations += 1;
-        signal = evaluateToolbarPressureSignal37(state.horizon);
+        signal = timed37("signal.calculation",() => evaluateToolbarPressureSignal37(state.horizon),preparedRevision && preparedRevision.fingerprint);
         state.activeSnapshot.signal = signal;
         state.activeSnapshot.managementValidation = validateFrozenManagement37(signal,state.horizon);
       }else{
@@ -4083,28 +4318,10 @@
         ? (signal.fadeDirection || signal.marketDirection)
         : state.direction;
       const entryQuality = evaluateEntryQuality37(signal,thesis,entryDirection);
-      const decision = signal.entryDecision;
-      let entryTone;
-      let signalSummaryVariants;
-      if(state.direction === "AUTO" && decision){
-          entryTone = decision.state === "READY" ? pillTone37(signal.entry)
-            : decision.state === "INVALIDATED" || decision.state === "EXPIRED" ? "red"
-              : decision.state === "TRIGGER DEVELOPING" || decision.state === "ZONE ENGAGED" ? "orange" : "gray";
-          signalSummaryVariants = signalSummaryVariants37(signal,decision);
-      }else{
-          const displayValue = thesis && thesis.fadeRisk ? "ENTRY FADE RISK" : thesis ? `THESIS ${thesis.status}` : signal.entry;
-          entryTone = pillTone37(displayValue);
-          if(thesis && state.direction !== signal.marketDirection){
-            signalSummaryVariants = signalSummaryVariants37({marketDirection:state.direction,confidence:thesis.confidence},null);
-          }else{
-            signalSummaryVariants = signalSummaryVariants37(signal,decision);
-          }
-      }
-      const signalReport = signalDetailsReport37(signal,thesis,entryQuality);
       const dependencyGate=orderRefreshGate37(state.activeSnapshot,contextKey);
       const complete=completeness37(state.activeSnapshot,signal.management,dependencyGate);
       state.workingSnapshot={
-        generation,contextKey,startedAt:state.refreshStartedAt,snapshot:state.activeSnapshot,signal,signalReport,management:signal.management,sections:complete.sections,
+        generation,contextKey,startedAt:state.refreshStartedAt,snapshot:state.activeSnapshot,signal,management:signal.management,sections:complete.sections,
         dependencyGate:{terminal:dependencyGate.terminal,state:dependencyGate.state,reason:dependencyGate.reason,orderAgeMs:dependencyGate.orderAgeMs,retained:!!dependencyGate.prior}
       };
       if(generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return {discarded:true};
@@ -4120,19 +4337,33 @@
       }
       const dataState=positionDataState37(signal.management,bundle.health.managementStatus || bundle.health.status);
       const refreshState=dependencyGate.state==="STALE" || dataState==="STALE" ? "STALE" : dependencyGate.state==="UNAVAILABLE" || dataState==="UNAVAILABLE" ? "UNAVAILABLE" : "READY";
+      const reportSnapshot=state.activeSnapshot;
+      const withReportSnapshot=work => () => {
+        const prior=state.activeSnapshot;
+        state.activeSnapshot=reportSnapshot;
+        try{return work();}finally{state.activeSnapshot=prior;}
+      };
+      const publishedAt=Date.now();
+      const displayedSignal=buildDisplayedSignalPublication37({generation,publishedAt,mode:state.direction,horizonId:state.horizon,signal,thesis,entryQuality});
+      const presentationSignal={...signal,marketDirection:displayedSignal.direction==="NO BIAS" ? null : displayedSignal.direction,confidence:displayedSignal.confidence,fadeDirection:displayedSignal.direction==="NO BIAS" ? null : displayedSignal.direction,entryDecision:displayedSignal.decision};
+      const presentationEntryQuality={...entryQuality,decision:displayedSignal.decision};
+      const publicationFingerprint=[reportSnapshot.signature,displayedSignal.signalIdentity,managementFingerprint37(signal.management)].join("|");
       const publication={
-        generation,contextKey,publishedAt:Date.now(),refreshState,sections:complete.sections,
-        signal,decision,signalSummaryVariants,entryTone,exitTone:pillTone37(signal.exit),exitText:exitDisplayText37(signal.exit),
-        signalReport,management:clonePublicationValue37(signal.management),managementDataStatus:dataState,
+        generation,contextKey,publishedAt,refreshState,sections:complete.sections,displayedSignal,
+        __reportSnapshot:reportSnapshot,
+        signal,decision:displayedSignal.decision,signalSummaryVariants:displayedSignal.summaryVariants,entryTone:displayedSignal.entryTone,exitTone:pillTone37(signal.exit),exitText:exitDisplayText37(signal.exit),
+        signalReport:null,signalReportFactory:withReportSnapshot(() => signalDetailsReport37(presentationSignal,thesis,presentationEntryQuality,displayedSignal)),management:signal.management,managementDataStatus:dataState,
         snapshot:publicationSnapshot37(state.activeSnapshot),horizonLabel:horizonLabel37(state.horizon),signalHorizonId:state.horizon,
-        signalTooltip:signalToolbarTooltip37(signal,entryQuality,thesis)
+        signalTooltip:"",signalTooltipFactory:withReportSnapshot(() => ({text:signalToolbarTooltip37(presentationSignal,presentationEntryQuality,thesis,displayedSignal),publication:displayedSignalMeta37(displayedSignal)})),
+        publicationFingerprint,signalReportFingerprint:publicationFingerprint,signalTooltipFingerprint:publicationFingerprint,
+        positionTooltipFingerprint:publicationFingerprint,positionReportFingerprint:publicationFingerprint
       };
       publishPresentation37(publication);
     }finally{
       state.activeSnapshot = null;
     }
   }
-  function scheduleToolbarSignalRefresh37(immediate){
+  function scheduleToolbarSignalRefresh37(immediate=false,reason="source-check"){
     if(!state.initialized) return;
     const run = () => {
       state.refreshTimer = null;
@@ -4143,6 +4374,16 @@
         if(state.entry){ state.entry.textContent="Unavailable";state.entry.dataset.tone="gray"; }
         if(state.exit){ state.exit.textContent="WAIT";state.exit.dataset.tone="gray"; }
       }
+      const revision=timed37("signal.snapshot-fingerprint",analyticalInputRevision37);
+      if(!shouldRunAnalyticalRefresh37(state.lastAnalyticalFingerprint,revision.fingerprint)){
+        performanceDiagnostics.signalSkippedDuplicateRefreshes+=1;
+        counted37("signal.heavy-refresh-skipped",revision.fingerprint);
+        state.lastRefreshReason=`${reason}:unchanged`;
+        return;
+      }
+      state.lastAnalyticalFingerprint=revision.fingerprint;
+      state.scheduledFrozen=revision.frozen;
+      state.lastRefreshReason=reason;
       const generation=++state.refreshGeneration;
       const retained=!!publishedWithinSafeWindow37(contextKey);
       setRefreshState37(retained ? "REFRESHING" : "UNAVAILABLE",contextKey);
@@ -4150,7 +4391,8 @@
       const calculate = () => {
         if(generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return;
         try{
-          renderToolbarSignal37(contextKey,generation);
+          performanceDiagnostics.signalFullCalculations+=1;
+          timed37("signal.heavy-refresh",() => renderToolbarSignal37(contextKey,generation,revision),revision.fingerprint);
           state.lastError = null;
         }catch(error){
           state.lastError = error && error.stack || String(error);
@@ -4174,6 +4416,15 @@
   }
 
   function diagnostics37(){
+    const perfDiagnostics=uiPerf();
+    if(perfDiagnostics && typeof perfDiagnostics.size === "function"){
+      perfDiagnostics.size("signal.evidence-timeframes",state.evidenceByTf.size);
+      perfDiagnostics.size("signal.smc-cache",state.smcCache.size);
+      perfDiagnostics.size("signal.setup-histories",state.setupHistories.size);
+      perfDiagnostics.size("signal.entry-trackers",state.entryTrackers.size);
+      perfDiagnostics.size("signal.full-snapshots",new Set([state.marketSnapshot,state.workingSnapshot && state.workingSnapshot.snapshot,state.lastPublishedSnapshot && state.lastPublishedSnapshot.__reportSnapshot,state.lastValidPublishedSnapshot && state.lastValidPublishedSnapshot.__reportSnapshot].filter(Boolean)).size);
+      perfDiagnostics.size("dom.nodes",document.getElementsByTagName("*").length);
+    }
     return {
       module:MODULE,
       initialized:state.initialized,
@@ -4187,6 +4438,8 @@
       lastError:state.lastError,
       refreshState:state.refreshState,
       refreshGeneration:state.refreshGeneration,
+      analyticalFingerprint:state.lastAnalyticalFingerprint,
+      lastRefreshReason:state.lastRefreshReason,
       workingSnapshot:state.workingSnapshot ? {generation:state.workingSnapshot.generation,contextKey:state.workingSnapshot.contextKey,sections:state.workingSnapshot.sections,dependencyGate:state.workingSnapshot.dependencyGate} : null,
       snapshot:state.lastPublishedSnapshot ? {
         version:state.lastPublishedSnapshot.snapshot && state.lastPublishedSnapshot.snapshot.version,
@@ -4209,9 +4462,10 @@
       windowPresentationSelfTests:windowSystem._selfTest(),
       cacheSelfTests:window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB._cacheSelfTest==="function" ? window.PUBLIC_MARKET_DATA_HUB._cacheSelfTest() : null,
       signalCacheSelfTests:runSignalEvidenceCacheSelfTests37(),
+      schedulingSelfTests:runSchedulingSelfTests37(),
       privateStreamSelfTests:window.BINANCE_PRIVATE_SYNC && typeof window.BINANCE_PRIVATE_SYNC._selfTest==="function" ? window.BINANCE_PRIVATE_SYNC._selfTest() : null,
       optimizationParity:state.lastOptimizationTests,
-      performance:{...performanceDiagnostics}
+      performance:{...performanceDiagnostics,ui:uiPerf() && uiPerf().snapshot ? uiPerf().snapshot() : null}
     };
   }
   function reconcilePresentationContext37(){
@@ -4219,7 +4473,7 @@
     if(state.lastPublishedSnapshot && state.lastPublishedSnapshot.contextKey!==contextKey){
       invalidatePublishedContext37(contextKey);
     }
-    scheduleToolbarSignalRefresh37();
+    scheduleToolbarSignalRefresh37(false,"context-reconcile");
   }
   function initialize37(){
     if(state.initialized) return api;
@@ -4228,23 +4482,14 @@
     const lifecycleSignal=state.uiAbort && state.uiAbort.signal;
     if(lifecycleSignal){
       window.addEventListener("v13:open-position-change",reconcilePresentationContext37,{signal:lifecycleSignal});
-      window.addEventListener("v14:binance-state-change",() => scheduleToolbarSignalRefresh37(),{signal:lifecycleSignal});
+      window.addEventListener("v14:binance-state-change",() => scheduleToolbarSignalRefresh37(false,"binance-state"),{signal:lifecycleSignal});
       window.addEventListener("pressure-signal:clear",() => invalidatePublishedContext37(presentationContextKey37()),{signal:lifecycleSignal});
       document.addEventListener("change",event => {
         if(["market","account","accountSelect","selectedAccount"].includes(event.target && event.target.id)) reconcilePresentationContext37();
       },{signal:lifecycleSignal,capture:true});
     }
-    scheduleToolbarSignalRefresh37(true);
-    state.lifecycleTimer = setInterval(scheduleToolbarSignalRefresh37,featureConfig.refreshMs);
-    if(typeof draw === "function" && !state.drawWrapper){
-      state.previousDraw = draw;
-      state.drawWrapper = function(){
-        const result = state.previousDraw.apply(this,arguments);
-        scheduleToolbarSignalRefresh37();
-        return result;
-      };
-      draw = window.draw = state.drawWrapper;
-    }
+    scheduleToolbarSignalRefresh37(true,"initialization");
+    state.lifecycleTimer = setInterval(() => scheduleToolbarSignalRefresh37(false,"revision-check"),featureConfig.refreshMs);
     return api;
   }
   function destroy37(){
@@ -4268,11 +4513,6 @@
     state.resizeObservers.splice(0).forEach(observer => observer.disconnect());
     windowSystem.destroy();
     positionEngine.destroy();
-    if(state.drawWrapper && typeof draw === "function" && draw === state.drawWrapper){
-      draw = window.draw = state.previousDraw;
-    }
-    state.previousDraw = null;
-    state.drawWrapper = null;
     document.getElementById("pressureSignalToolbar")?.remove();
     document.getElementById("pressureSignalDetails")?.remove();
     document.getElementById("pressureSignalManagementTip")?.remove();
@@ -4287,6 +4527,8 @@
     state.lastPublishedSnapshot = null;
     state.lastValidPublishedSnapshot = null;
     state.lastOptimizationTests = null;
+    state.lastAnalyticalFingerprint = "";
+    state.scheduledFrozen = null;
     state.refreshGeneration += 1;
     state.refreshState = "IDLE";
     state.signalSummaryVariants = null;

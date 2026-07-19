@@ -4,6 +4,10 @@
   const build = window.__PRESSURE_SIGNAL_FEATURE_BUILD__ ||= {};
 
   build.createPositionEngine = function createPositionEngine(config,format){
+    const timed=(name,work) => {
+      const diagnostics=window.BT001_UI_PERFORMANCE;
+      return diagnostics && typeof diagnostics.measure === "function" ? diagnostics.measure(name,work) : work();
+    };
     const campaigns = new Map();
     const recordedAnchors = new Map();
     let selectedHorizon = null;
@@ -134,6 +138,15 @@
       const now = Number(facts.createdAt || Date.now());
       const existing = campaigns.get(key);
       if(!existing || existing.closedAt){
+        campaigns.forEach((campaign,campaignKey) => {
+          if(campaignKey!==key && campaign.symbol===facts.symbol && !campaign.closedAt) campaign.closedAt=now;
+          if(campaign.closedAt && now-campaign.closedAt>60*60*1000) campaigns.delete(campaignKey);
+        });
+        while(campaigns.size>=32){
+          const removable=[...campaigns.entries()].filter(([,campaign])=>campaign.closedAt).sort((a,b)=>Number(a[1].closedAt)-Number(b[1].closedAt))[0] || campaigns.entries().next().value;
+          if(!removable) break;
+          campaigns.delete(removable[0]);
+        }
         const created = {
           key,symbol:facts.symbol,side:position.side,startedAt:now,
           epoch:1,epochStartedAt:now,epochBasis:{qty:Math.abs(position.qty),entry:position.price,margin,leverage:numeric(position.leverage)},
@@ -170,6 +183,7 @@
         existing.peakAt = roi == null ? null : now;
         existing.progress = {startedAt:now,startPrice:currentPrice,lastBasisKey:"",failedAttempts:0,state:"RESET"};
         existing.healthHistory.push({state:existing.health,at:now,reason:`ROI epoch ${existing.epoch} started after position basis changed`});
+        if(existing.healthHistory.length>64) existing.healthHistory.splice(0,existing.healthHistory.length-64);
       }else{
         existing.currentRoi = roi;
         if(roi != null && (existing.peakRoi == null || roi > existing.peakRoi)){
@@ -581,6 +595,7 @@
       const order = config.healthOrder;
       if(proposed === "INVALIDATED"){
         if(tracker.health !== proposed) tracker.healthHistory.push({state:proposed,at:now,reason});
+        if(tracker.healthHistory.length>64) tracker.healthHistory.splice(0,tracker.healthHistory.length-64);
         tracker.health = proposed;
         return proposed;
       }
@@ -595,6 +610,7 @@
       if(tracker.pendingCount >= required){
         tracker.health = proposed;
         tracker.healthHistory.push({state:proposed,at:now,reason});
+        if(tracker.healthHistory.length>64) tracker.healthHistory.splice(0,tracker.healthHistory.length-64);
         tracker.pendingHealth = null;
         tracker.pendingCount = 0;
       }
@@ -825,10 +841,17 @@
     function evaluate(facts){
       const position = facts && facts.position;
       if(!position){
+        const now=Number(facts && facts.createdAt || Date.now());
         const prefix = `${facts && facts.symbol || ""}|`;
         campaigns.forEach((campaign,key) => {
-          if(key.startsWith(prefix) && !campaign.closedAt) campaign.closedAt = Number(facts && facts.createdAt || Date.now());
+          if(key.startsWith(prefix) && !campaign.closedAt) campaign.closedAt = now;
         });
+        campaigns.forEach((campaign,key) => { if(campaign.closedAt && now-campaign.closedAt>60*60*1000) campaigns.delete(key); });
+        while(campaigns.size>32){
+          const removable=[...campaigns.entries()].filter(([,campaign])=>campaign.closedAt).sort((a,b)=>Number(a[1].closedAt)-Number(b[1].closedAt))[0] || campaigns.entries().next().value;
+          if(!removable) break;
+          campaigns.delete(removable[0]);
+        }
         return {
           health:"NO POSITION",action:"WAIT",state:"WAIT",exit:"EXIT WAIT",primaryReason:"No open position is available to manage",
           reasons:["No open position is available to manage"],risks:[],threats:[],tooltipReasons:["No open position is available to manage"],
@@ -890,7 +913,7 @@
       const health = stabilizeHealth(tracker,proposedHealth,signature,healthReason,now);
       const takeProfit = takeProfitAssessment(facts,horizon,tracker,families,atr);
       const conditions = currentConditions(facts,horizon,levelMap,lifecycle,stall,volatility);
-      const stopEvaluation = evaluateStops(facts,horizonId,horizon,defence,lifecycle,conditions,levelMap,structureResult,volatility);
+      const stopEvaluation = timed("position.stop-evaluation",() => evaluateStops(facts,horizonId,horizon,defence,lifecycle,conditions,levelMap,structureResult,volatility));
 
       let action = "HOLD";
       if(health === "INVALIDATED") action = "CLOSE";
@@ -962,6 +985,7 @@
       if(!positionKey || !anchor || numeric(anchor.level) == null) return false;
       const level = Number(anchor.level);
       recordedAnchors.set(String(positionKey),{...anchor,level,invalidation:numeric(anchor.invalidation) ?? level,recordedAt:Date.now()});
+      while(recordedAnchors.size>64) recordedAnchors.delete(recordedAnchors.keys().next().value);
       return true;
     }
 
