@@ -19,25 +19,79 @@
     if(!panel){panel=document.createElement("div");panel.className="v24-settings-panel";panel.dataset.tab=TAB_KEY;const inner=document.createElement("div");inner.className="v24-settings-panel-grid";panel.appendChild(inner);panelsRoot.appendChild(panel);}
     return {grid,panel,panelGrid:panel.querySelector(".v24-settings-panel-grid")};
   }
-  function alignOverlayGroup(){
-    const group=$("chartOverlayControlGroup"),canvas=$("chart"),wrap=canvas&&canvas.parentElement;if(!group||!wrap)return;
-    try{
-      const wrapRect=wrap.getBoundingClientRect();
-      const stackButtons=[...document.querySelectorAll(".v33-ma-stack-box")].filter(node=>{const rect=node.getBoundingClientRect();return rect.width>0&&rect.height>0;});
-      const rightmost=stackButtons.reduce((best,node)=>!best||node.getBoundingClientRect().right>best.getBoundingClientRect().right?node:best,null);
-      const stackRight=rightmost?rightmost.getBoundingClientRect().right-wrapRect.left:null;
-      group.style.right=(stackRight==null?92:Math.max(8,wrapRect.width-stackRight))+"px";
-    }catch(_error){}
+  const CONTROL_ORDER=["liq","otf","orders"];
+  let layoutFrame=0,layoutDiscoveryObserver=null,stackObserver=null,layoutResizeObserver=null,observedStackMetric=null,observedWrap=null,dprQuery=null;
+  function ensureOverlayGroup(){
+    const canvas=$("chart"),wrap=canvas&&canvas.parentElement;
+    if(!wrap||!wrap.classList.contains("chart-wrap"))return null;
+    let group=$("chartOverlayControlGroup");
+    if(!group){group=document.createElement("div");group.id="chartOverlayControlGroup";group.className="chart-overlay-control-group";wrap.appendChild(group);}
+    return group;
   }
+  function orderOverlayControls(group){
+    const desired=CONTROL_ORDER.map(role=>group.querySelector(`[data-chart-control="${role}"]`)).filter(Boolean);
+    const current=Array.from(group.children).filter(control=>CONTROL_ORDER.includes(control.dataset.chartControl));
+    if(current.length===desired.length&&current.every((control,index)=>control===desired[index]))return;
+    desired.forEach(control=>group.appendChild(control));
+  }
+  function installLayoutObservers(){
+    const group=ensureOverlayGroup(),canvas=$("chart"),wrap=canvas&&canvas.parentElement,metric=$("v33MAStackMetric");
+    if(!group||!wrap)return;
+    if(typeof ResizeObserver==="function"){
+      if(!layoutResizeObserver)layoutResizeObserver=new ResizeObserver(scheduleOverlayAlignment);
+      if(observedWrap!==wrap){if(observedWrap)layoutResizeObserver.unobserve(observedWrap);observedWrap=wrap;layoutResizeObserver.observe(wrap);}
+      if(metric&&observedStackMetric!==metric){if(observedStackMetric)layoutResizeObserver.unobserve(observedStackMetric);observedStackMetric=metric;layoutResizeObserver.observe(metric);}
+    }
+    if(metric&&stackObserver&&stackObserver.__target!==metric){stackObserver.disconnect();stackObserver=null;}
+    if(metric&&observedStackMetric!==metric)observedStackMetric=metric;
+    if(metric&&!stackObserver&&typeof MutationObserver==="function"){
+      stackObserver=new MutationObserver(scheduleOverlayAlignment);stackObserver.__target=metric;stackObserver.observe(metric,{childList:true,subtree:true,attributes:true,attributeFilter:["style","class"]});
+    }
+    if(!layoutDiscoveryObserver&&typeof MutationObserver==="function"&&document.body){
+      layoutDiscoveryObserver=new MutationObserver(scheduleOverlayAlignment);layoutDiscoveryObserver.observe(document.body,{childList:true,subtree:true});
+    }
+  }
+  function watchDevicePixelRatio(){
+    if(typeof window.matchMedia!=="function")return;
+    if(dprQuery){if(typeof dprQuery.removeEventListener==="function")dprQuery.removeEventListener("change",watchDevicePixelRatio);else if(typeof dprQuery.removeListener==="function")dprQuery.removeListener(watchDevicePixelRatio);}
+    dprQuery=window.matchMedia(`(resolution: ${window.devicePixelRatio||1}dppx)`);
+    if(typeof dprQuery.addEventListener==="function")dprQuery.addEventListener("change",watchDevicePixelRatio);else if(typeof dprQuery.addListener==="function")dprQuery.addListener(watchDevicePixelRatio);
+    scheduleOverlayAlignment();
+  }
+  function alignOverlayGroup(){
+    layoutFrame=0;
+    const group=ensureOverlayGroup(),canvas=$("chart"),wrap=canvas&&canvas.parentElement,target=document.querySelector('.v33-ma-stack-box[data-tf="1D"]');
+    if(!group||!wrap)return false;
+    orderOverlayControls(group);installLayoutObservers();
+    if(!target){group.classList.remove("is-aligned");return false;}
+    try{
+      const wrapRect=wrap.getBoundingClientRect(),targetRect=target.getBoundingClientRect();
+      if(!(targetRect.width>0)||!(targetRect.height>0)){group.classList.remove("is-aligned");return false;}
+      group.style.right=Math.max(0,wrapRect.right-targetRect.right)+"px";
+      group.classList.add("is-aligned");
+      return true;
+    }catch(_error){group.classList.remove("is-aligned");return false;}
+  }
+  function scheduleOverlayAlignment(){
+    if(layoutFrame)return;
+    layoutFrame=requestAnimationFrame(alignOverlayGroup);
+  }
+  function registerOverlayControl(control,role){
+    const group=ensureOverlayGroup();
+    if(!control||!group||!CONTROL_ORDER.includes(role))return false;
+    control.dataset.chartControl=role;
+    group.appendChild(control);orderOverlayControls(group);scheduleOverlayAlignment();return true;
+  }
+  window.BT001ChartOverlayControls=Object.freeze({register:registerOverlayControl,align:alignOverlayGroup,schedule:scheduleOverlayAlignment,group:ensureOverlayGroup,order:CONTROL_ORDER.slice()});
   let overlayObserver=null;
   function overlayToggle(){
     let button=$("heatmapOverlayToggle");if(button)return button;
     const canvas=$("chart"),wrap=canvas&&canvas.parentElement,orders=$("calcModuleOrdersToggle"),otf=$("calcModuleOtfToggle");if(!wrap||!wrap.classList.contains("chart-wrap")||!orders||!otf)return null;
-    let group=$("chartOverlayControlGroup");if(!group){group=document.createElement("div");group.id="chartOverlayControlGroup";group.className="chart-overlay-control-group";wrap.insertBefore(group,orders);}
-    button=document.createElement("button");button.id="heatmapOverlayToggle";button.type="button";button.className="calc-module-orders-toggle heatmap-overlay-toggle is-off";button.textContent="Heatmap";button.title="Show or hide liquidation heatmap";button.setAttribute("aria-label","Heatmap visibility");button.setAttribute("aria-pressed","false");
-    group.appendChild(otf);group.appendChild(button);group.appendChild(orders);
+    const group=ensureOverlayGroup();if(!group)return null;
+    button=document.createElement("button");button.id="heatmapOverlayToggle";button.type="button";button.className="calc-module-orders-toggle heatmap-overlay-toggle is-off";button.textContent="LIQ";button.title="Show or hide liquidation heatmap";button.setAttribute("aria-label","Liquidation heatmap visibility");button.setAttribute("aria-pressed","false");
+    registerOverlayControl(button,"liq");registerOverlayControl(otf,"otf");registerOverlayControl(orders,"orders");
     button.addEventListener("click",()=>{const state=window.BT001HeatmapState.snapshot();window.BT001HeatmapState.setPreference("enabled",!state.prefs.enabled);});
-    if(overlayObserver){overlayObserver.disconnect();overlayObserver=null;}requestAnimationFrame(alignOverlayGroup);setTimeout(alignOverlayGroup,300);return button;
+    if(overlayObserver){overlayObserver.disconnect();overlayObserver=null;}scheduleOverlayAlignment();return button;
   }
   function watchOverlayToggle(){
     if(overlayToggle()||overlayObserver||typeof MutationObserver!=="function"||!document.body)return;
@@ -90,8 +144,8 @@
     const toggle=$("heatmapOverlayToggle");if(toggle){toggle.classList.toggle("is-on",prefs.enabled);toggle.classList.toggle("is-off",!prefs.enabled);toggle.setAttribute("aria-pressed",prefs.enabled?"true":"false");}
     const exactStatus=(state.loading||state.status==="UPDATE_FAILED"||state.status==="READY")&&state.diagnostics.currentStage?state.diagnostics.currentStage:statusText(state.status);
     text("heatmapDisplayed",state.displayedDuration||"--");text("heatmapStatus",exactStatus);text("heatmapOpacityOut",`${prefs.opacity}%`);text("heatmapStrengthOut",`${prefs.strength}%`);text("heatmapClippingOut",`${prefs.maxClipping}%`);text("heatmapLastUpdate",date(state.lastSuccessfulUpdate));text("heatmapDatasetStart",metadata?sourceDate(metadata.datasetStart):"--");text("heatmapDatasetEnd",metadata?sourceDate(metadata.datasetEnd):"--");text("heatmapInterval",metadata?(metadata.sourceInterval||`${metadata.chartIntervalSeconds}s`):"--");text("heatmapPriceStep",metadata?String(metadata.tickSize):"--");
-    renderDiagnostics(state);const refresh=$("heatmapSettingsRefresh"),retry=$("heatmapRetryDataset");if(refresh)refresh.disabled=state.loading;if(retry){retry.disabled=state.loading;retry.classList.toggle("hidden",!state.recovery.retryEligible);retry.textContent=state.recovery.hasNormalizedCandidate?"Retry rendering":state.recovery.hasParsedCandidate?"Retry validation":state.recovery.hasRawPayload?"Retry parsing":"Retry dataset retrieval";}alignOverlayGroup();try{if(typeof window.draw==="function")window.draw();}catch(_error){}
+    renderDiagnostics(state);const refresh=$("heatmapSettingsRefresh"),retry=$("heatmapRetryDataset");if(refresh)refresh.disabled=state.loading;if(retry){retry.disabled=state.loading;retry.classList.toggle("hidden",!state.recovery.retryEligible);retry.textContent=state.recovery.hasNormalizedCandidate?"Retry rendering":state.recovery.hasParsedCandidate?"Retry validation":state.recovery.hasRawPayload?"Retry parsing":"Retry dataset retrieval";}scheduleOverlayAlignment();try{if(typeof window.draw==="function")window.draw();}catch(_error){}
   }
-  function init(){watchOverlayToggle();settings();window.BT001HeatmapState.subscribe(render);window.BT001HeatmapAuth.subscribe(renderAuth);window.addEventListener("resize",alignOverlayGroup);window.addEventListener("heatmap:diagnostics",event=>renderDiagnostics(event.detail));}
+  function init(){watchOverlayToggle();settings();installLayoutObservers();watchDevicePixelRatio();scheduleOverlayAlignment();window.BT001HeatmapState.subscribe(render);window.BT001HeatmapAuth.subscribe(renderAuth);window.addEventListener("resize",scheduleOverlayAlignment);if(document.fonts&&document.fonts.ready){document.fonts.ready.then(scheduleOverlayAlignment).catch(()=>{});if(typeof document.fonts.addEventListener==="function")document.fonts.addEventListener("loadingdone",scheduleOverlayAlignment);}window.addEventListener("heatmap:diagnostics",event=>renderDiagnostics(event.detail));}
   window.BT001HeatmapUI=Object.freeze({init,statusText,settings,activateHeatmapTab,manualRefresh,retryDatasetRetrieval});
 })();

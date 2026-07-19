@@ -50,15 +50,24 @@ function fixture(duration="3D"){
 
 module.exports=(async()=>{
   const uiSource=fs.readFileSync(path.join(root,"ui.module.js"),"utf8");
+  const calculatorSource=fs.readFileSync(path.join(root,"..","calculator","presentation","calculatorModule.js"),"utf8");
   const styleSource=fs.readFileSync(path.join(root,"..","..","style.css"),"utf8");
   assert(uiSource.includes('tab.dataset.tab=TAB_KEY'),"Heatmap Settings tab must be registered");
   assert(uiSource.includes('panel.dataset.tab=TAB_KEY'),"Heatmap Settings panel must be registered");
   assert.equal((uiSource.match(/addEventListener\("click",manualRefresh\)/g)||[]).length,1,"Refresh must exist only in Settings");
   assert(uiSource.includes('button.id="heatmapOverlayToggle"'),"standard chart overlay toggle must be installed");
-  assert(uiSource.includes("group.appendChild(otf);group.appendChild(button);group.appendChild(orders)"),"Heatmap toggle must be grouped after OTF and before Orders");
+  assert(uiSource.includes('const CONTROL_ORDER=["liq","otf","orders"]'),"shared group order must be LIQ, OTF, Orders");
+  assert(uiSource.includes('button.textContent="LIQ"'),"chart heatmap control must use the LIQ label");
+  assert(uiSource.includes("window.BT001ChartOverlayControls"),"one shared overlay-control manager must own alignment");
+  assert(uiSource.includes(".v33-ma-stack-box[data-tf=\"1D\"]"),"Orders group must align to the authoritative 1D MA Stack box");
+  assert(uiSource.includes("watchDevicePixelRatio"),"control alignment must react to device-pixel-ratio changes");
+  assert(!/setTimeout\([^)]*alignOverlayGroup/.test(uiSource),"control alignment must not use a delayed corrective timer");
+  assert(calculatorSource.includes('controls.register(otfBtn,"otf")')&&calculatorSource.includes('controls.register(btn,"orders")'),"OTF and Orders must join the shared control group");
+  assert(!calculatorSource.includes("btn.style.right")&&!calculatorSource.includes("otfBtn.style.right"),"OTF and Orders must not keep independent calculated offsets");
   assert(!uiSource.includes("heatmapCompact"),"dedicated compact chart controls must be removed");
   assert(!uiSource.includes("openHeatmapSettings"),"chart-level Settings shortcut must be removed");
-  assert(styleSource.includes(".chart-overlay-control-group > .calc-module-orders-toggle{position:static !important"),"grouped controls must use flex flow, not separate absolute placement");
+  assert(styleSource.includes(".chart-overlay-control-group > .calc-module-orders-toggle{position:static"),"grouped controls must use flex flow, not separate absolute placement");
+  assert(styleSource.includes('.chart-overlay-control-group > [data-chart-control="orders"]{order:3}'),"Orders must be the rightmost grouped control");
   assert(!/\.heatmap-overlay-toggle\s*\{[^}]*position\s*:\s*absolute/i.test(styleSource),"Heatmap toggle must not be absolutely positioned");
   assert(!uiSource.includes("setInterval"),"UI must not install automatic refresh");
   let fetchCount=0;

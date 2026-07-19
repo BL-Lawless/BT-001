@@ -760,8 +760,12 @@ button:hover{filter:brightness(1.04)}
   pointer-events:auto;
 }
 
-.chart-overlay-control-group{position:absolute;top:8px;right:92px;z-index:18;display:flex;align-items:center;gap:6px;pointer-events:auto}
-.chart-overlay-control-group > .calc-module-orders-toggle{position:static !important;inset:auto !important;margin:0;white-space:nowrap}
+.chart-overlay-control-group{position:absolute;top:8px;right:92px;z-index:18;display:flex;align-items:center;gap:6px;visibility:hidden;pointer-events:auto}
+.chart-overlay-control-group.is-aligned{visibility:visible}
+.chart-overlay-control-group > .calc-module-orders-toggle{position:static;inset:auto;margin:0;white-space:nowrap}
+.chart-overlay-control-group > [data-chart-control="liq"]{order:1}
+.chart-overlay-control-group > [data-chart-control="otf"]{order:2}
+.chart-overlay-control-group > [data-chart-control="orders"]{order:3}
 .heatmap-settings-card{grid-column:1 / -1}
 .heatmap-settings-grid{display:grid;grid-template-columns:minmax(150px,1fr) minmax(190px,1fr);gap:9px 14px;align-items:center;margin-top:10px;font-size:12px}
 .heatmap-settings-grid label{display:flex;align-items:center;gap:7px;min-width:0}
@@ -2004,10 +2008,7 @@ button:hover{filter:brightness(1.04)}
 }
 @keyframes bt001SendSuccessBlink{from{filter:brightness(1)}to{filter:brightness(1.08);background:#dcfce7}}
 .calc-module-orders-toggle{
-  position:absolute;
-  top:8px;
-  right:92px;
-  z-index:18;
+  position:static;
   height:22px;
   padding:0 8px;
   border:1px solid #d9dce1;
@@ -2723,11 +2724,14 @@ button:hover{filter:brightness(1.04)}
 }
 .wf-crosshair-values{
   position:absolute;
-  z-index:1;
+  z-index:2;
+  top:4px;
+  left:0;
+  right:0;
   display:flex;
   flex-direction:column;
-  gap:8px;
-  min-width:max-content;
+  align-items:center;
+  gap:0;
   color:#111;
   font:400 14px/18px Arial,Helvetica,sans-serif;
   letter-spacing:normal;
@@ -2735,14 +2739,14 @@ button:hover{filter:brightness(1.04)}
   font-variant-numeric:tabular-nums;
   white-space:nowrap;
 }
+.wf-crosshair-values.hidden{display:none}
 .wf-crosshair-label{
-  position:relative;
   height:18px;
+  line-height:18px;
   padding:0;
   font-weight:400;
+  text-align:center;
 }
-.wf-crosshair-values[data-side="right"] .wf-crosshair-label{text-align:left}
-.wf-crosshair-values[data-side="left"] .wf-crosshair-label{text-align:right}
 .wf-crosshair-amount{color:#111;font-weight:400}
 .wf-bars{
   position:absolute;
@@ -2875,6 +2879,7 @@ button:hover{filter:brightness(1.04)}
   font-size:12px;
 }
 .wf-result{
+  position:relative;
   border:none;
   background:#f7f8fa;
   display:flex;
@@ -2886,7 +2891,7 @@ button:hover{filter:brightness(1.04)}
   align-items:center;
   justify-content:center;
   gap:0;
-  padding:8px;
+  padding:44px 8px 8px;
   text-align:center;
   overflow:hidden;
 }

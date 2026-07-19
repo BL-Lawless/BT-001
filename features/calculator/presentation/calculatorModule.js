@@ -1257,27 +1257,8 @@
     return btn;
   }
   function alignOrdersOtfButtons(){
-    const btn = q("calcModuleOrdersToggle");
-    const otfBtn = q("calcModuleOtfToggle");
-    const wrap = canvas && canvas.parentElement;
-    if(!btn || !otfBtn || !wrap) return;
-    try{
-      const wrapRect = wrap.getBoundingClientRect();
-      const stackButtons = [...document.querySelectorAll(".v33-ma-stack-box")].filter(node => {
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      });
-      const rightmostStack = stackButtons.reduce((best,node) =>
-        !best || node.getBoundingClientRect().right > best.getBoundingClientRect().right ? node : best
-      ,null);
-      const stackRight = rightmostStack ? rightmostStack.getBoundingClientRect().right - wrapRect.left : null;
-      const ordersRight = stackRight == null
-        ? (typeof RIGHT_AXIS === "number" ? RIGHT_AXIS : 84) + 8
-        : Math.max(8,wrapRect.width - stackRight);
-      btn.style.right = ordersRight + "px";
-      otfBtn.style.width = btn.offsetWidth + "px";
-      otfBtn.style.right = (ordersRight + btn.offsetWidth + 6) + "px";
-    }catch(_e){}
+    const controls=window.BT001ChartOverlayControls;
+    if(controls&&typeof controls.schedule==="function")controls.schedule();
   }
   function ensureOrdersToggle(){
     if(!canvas || !canvas.parentNode) return null;
@@ -1313,6 +1294,15 @@
       otfBtn.title = "On-the-fly chart order adjustment";
       otfBtn.setAttribute("aria-label","OTF");
       wrap.appendChild(otfBtn);
+    }
+    const controls=window.BT001ChartOverlayControls;
+    if(controls&&typeof controls.register==="function"){
+      controls.register(otfBtn,"otf");
+      controls.register(btn,"orders");
+    }else{
+      let group=q("chartOverlayControlGroup");
+      if(!group){group=document.createElement("div");group.id="chartOverlayControlGroup";group.className="chart-overlay-control-group";wrap.appendChild(group);}
+      otfBtn.dataset.chartControl="otf";btn.dataset.chartControl="orders";group.append(otfBtn,btn);
     }
     alignOrdersOtfButtons();
     otfBtn.onclick = toggleOtfEnabled;

@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const MODULE = "GR_COMMIT_V11";
+  const MODULE = "GR_COMMIT_V15";
   const OWNER = "GR";
   const STORE_KEY = "bt001_gr_commit_v5_orders";
   const EXPRESS_KEY = "bt001_gr_commit_v5_express_mode";
@@ -43,9 +43,16 @@
   const q = id => document.getElementById(id);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : null;
   const domain = () => window.GradCalculatorDomain;
-  const fmtPrice = value => number(value) == null ? "-" : Math.round(number(value)).toLocaleString("en-US");
-  const fmtLevelInput = value => number(value) == null ? "" : String(Math.round(number(value)));
-  const fmtStep = value => number(value) == null ? "" : number(value).toFixed(1);
+  const GR_PRICE_DECIMALS = 0;
+  const GR_PRICE_INCREMENT = 1;
+  const fmtPrice = value => {
+    const normalized=normalizeGrPrice(value);
+    return normalized==null?"-":Number(normalized).toLocaleString("en-US",{minimumFractionDigits:GR_PRICE_DECIMALS,maximumFractionDigits:GR_PRICE_DECIMALS});
+  };
+  const fmtGridLevelInput = value => normalizeGrPrice(value) || "";
+  const fmtSectionLevel = (_section,value) => fmtGridLevelInput(value);
+  const normalizeGrStep = value => number(value) == null ? null : String(Math.max(0,Math.round(number(value))));
+  const fmtStep = value => normalizeGrStep(value) || "";
   const fmtLot = value => number(value) == null ? "0.000" : Math.max(0,number(value)).toFixed(3);
   const fmtMoney = value => number(value) == null ? "-" : (number(value) > 0 ? "+" : number(value) < 0 ? "-" : "") + "$" + Math.abs(number(value)).toFixed(2);
   const moneyColor = value => number(value) == null || number(value) === 0 ? "#111" : number(value) > 0 ? "#047857" : "#f6465d";
@@ -63,14 +70,6 @@
   const setStatus = text => { const node=q("gradCalcStatus"); if(node) node.textContent=text || ""; };
   const statusText = () => String(q("gradCalcStatus")?.textContent || "");
   const rows = section => state.rows[section];
-  const sortedRows = section => rows(section).slice().sort((a,b)=>{
-    const price=currentPrice(),aLevel=number(a.level),bLevel=number(b.level);
-    if(price!=null&&aLevel!=null&&bLevel!=null){
-      const distance=Math.abs(aLevel-price)-Math.abs(bLevel-price);
-      if(Math.abs(distance)>1e-9)return distance;
-    }
-    return (aLevel??Infinity)-(bLevel??Infinity);
-  });
   const validRows = section => rows(section).filter(row => number(row.level) > 0 && number(row.lot) >= .001);
   const weighted = section => domain().weightedAverage(validRows(section));
   const referenceEntry = () => weighted("entry").average || number(state.livePosition && state.livePosition.entry);
@@ -120,12 +119,29 @@
       return true;
     }
   };
-  const normalizeLevelComparable = value => {
+  const symbolSettings = () => {
     const helper = window.BT001SymbolTradingSettings;
-    const settings = helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
-    return helper && typeof helper.normalizePrice === "function"
-      ? helper.normalizePrice(value,settings)
-      : (number(value) == null ? null : Number(number(value).toFixed(8)).toFixed(8));
+    return helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
+  };
+  const priceTick = () => {
+    const tick=number(symbolSettings()&&symbolSettings().tickSize);
+    return Math.max(GR_PRICE_INCREMENT,tick&&tick>0?tick:GR_PRICE_INCREMENT);
+  };
+  const normalizeGrPrice = value => {
+    const parsed=number(value);
+    if(parsed==null)return null;
+    const helper=window.BT001SymbolTradingSettings,settings=symbolSettings(),tick=priceTick();
+    const filterNormalized=helper&&typeof helper.normalizePrice==="function"
+      ? helper.normalizePrice(parsed,{...(settings||{}),tickSize:String(tick)})
+      : (Math.round(parsed/tick)*tick).toFixed(GR_PRICE_DECIMALS);
+    const filtered=number(filterNormalized);
+    return filtered==null?null:filtered.toFixed(GR_PRICE_DECIMALS);
+  };
+  const normalizeLevelComparable = normalizeGrPrice;
+  const serializeGrPrice = value => {
+    const normalized=normalizeGrPrice(value);
+    if(normalized==null||number(normalized)<=0||!/^(?:0|[1-9]\d*)$/.test(normalized))throw new Error("GR price is not a valid whole-number Binance price.");
+    return normalized;
   };
   const normalizeQtyComparable = value => {
     const helper = window.BT001SymbolTradingSettings;
@@ -133,10 +149,6 @@
     return helper && typeof helper.normalizeQty === "function"
       ? helper.normalizeQty(value,settings)
       : (number(value) == null ? null : Number(number(value).toFixed(3)).toFixed(3));
-  };
-  const symbolSettings = () => {
-    const helper = window.BT001SymbolTradingSettings;
-    return helper && typeof helper.getCached === "function" ? helper.getCached(currentSymbol()) : null;
   };
   const qtyStep = () => {
     const step = number(symbolSettings() && symbolSettings().stepSize);
@@ -162,6 +174,62 @@
   };
   const sameLevelValue = (a,b) => normalizeLevelComparable(a) != null && normalizeLevelComparable(a) === normalizeLevelComparable(b);
   const sameQtyValue = (a,b) => normalizeQtyComparable(a) != null && normalizeQtyComparable(a) === normalizeQtyComparable(b);
+  const normalizedPriceValue = value => number(normalizeLevelComparable(value));
+  function gridRows(section){
+    return rows(section).filter(row=>row.status!=="executed");
+  }
+  function displayGridRows(section){
+    return gridRows(section).concat(rows(section).filter(row=>row.status==="executed"));
+  }
+  function updatePriceStatus(row){
+    if(row.binanceOrderId){
+      const original=row.exchangeLevel!=null?row.exchangeLevel:row.stopPrice!=null?row.stopPrice:row.price!=null?row.price:row.level;
+      row.status=Number.isInteger(number(original))&&sameLevelValue(row.level,original)&&sameQtyValue(row.lot,row.originalLot!=null?row.originalLot:row.lot)?"sent":"modified";
+    }else row.status="local";
+  }
+  function applyGridLevels(section,list,levels){
+    list.forEach((row,index)=>{const next=fmtSectionLevel(section,levels[index]);if(!sameLevelValue(row.level,next)){row.level=next;updatePriceStatus(row);}});
+  }
+  function normalizedOrderedLevels(levels,sign){
+    const normalized=(levels||[]).map(normalizedPriceValue),tick=priceTick(),direction=sign<0?-1:1;
+    if(normalized.some(level=>level==null||level<=0))return null;
+    const tolerance=Math.max(1e-12,tick*1e-9,Math.max(...normalized.map(Math.abs))*Number.EPSILON*16);
+    return normalized.slice(1).every((level,index)=>(level-normalized[index])*direction+tolerance>=tick)?normalized:null;
+  }
+  function syncGridGenerator(section,list=gridRows(section)){
+    if(!list.length)return;
+    const generator=state.generators[section];
+    generator.start=normalizeGrPrice(list[0].level);generator.end=normalizeGrPrice(list[list.length-1].level);generator.count=list.length;
+    generator.step=normalizeGrStep(list.length>1?Math.abs(number(generator.end)-number(generator.start))/(list.length-1):0);
+    generator.lot=list.reduce((sum,row)=>sum+(number(row.lot)||0),0);generator.lastEdited="end";
+    writeGenerator(section);
+  }
+  function commitGridPreview(section,message){
+    renderSection(section);calculate();persistRows();redraw();
+    if(message)setStatus(message);
+  }
+  function dragGridPivot(section,row,level){
+    const list=gridRows(section),index=list.indexOf(row),snapped=normalizedPriceValue(level);
+    if(index<0||snapped==null||snapped<=0)return false;
+    if(index===0||index===list.length-1)return redistributeFromBoundaries(section,index===0?"start":"end",snapped);
+    const result=domain().redistributeAroundPivot({levels:list.map(item=>number(item.level)),index,value:snapped,sign:generatorDirection(section),minSpacing:priceTick(),normalize:normalizedPriceValue});
+    if(!result.valid)return false;
+    if(state.drag)state.drag.pivotPrice=result.pivotValue;
+    applyGridLevels(section,list,result.levels);syncGridGenerator(section,list);
+    commitGridPreview(section,"GR "+sectionTitle(section)+" grid preview updated. Click Send to apply live changes.");return true;
+  }
+  function resetGridToLinearFromCurrent(section){
+    const list=gridRows(section),generator=state.generators[section],start=normalizedPriceValue(generator.start),step=Math.abs(number(normalizeGrStep(generator.step))||0),sign=generatorDirection(section);
+    if(!list.length||start==null||start<=0)return false;
+    const levels=normalizedOrderedLevels(list.map((_row,index)=>start+sign*step*index),sign);
+    if(!levels)return false;
+    applyGridLevels(section,list,levels);syncGridGenerator(section,list);commitGridPreview(section,"GR "+sectionTitle(section)+" returned to a uniform linear grid.");return true;
+  }
+  function initializeImportedGrid(section){
+    const sign=generatorDirection(section),active=rows(section).filter(row=>row.status!=="executed").sort((a,b)=>(number(a.level)-number(b.level))*sign),executed=rows(section).filter(row=>row.status==="executed");
+    state.rows[section]=active.concat(executed);
+    syncGridGenerator(section,active);
+  }
   const totalMargin = () => validRows("entry").reduce((sum,row) => sum + (number(rowMargin(row).value) || 0),0);
   const clientIdOf = order => String(order && (order.clientOrderId || order.clientAlgoId || "") || "");
   const trackedOrderMeta = order => {
@@ -308,9 +376,10 @@
       side:data.side || null,
       orderType:data.orderType || null,
       role:data.role || (section==="protection"?"psl":section),
-      level:fmtLevelInput(data.level),
-      price:data.price!=null?fmtLevelInput(data.price):(section==="protection"?null:fmtLevelInput(data.level)),
-      stopPrice:data.stopPrice!=null?fmtLevelInput(data.stopPrice):(section==="protection"?fmtLevelInput(data.level):null),
+      exchangeLevel:data.exchangeLevel!=null?String(data.exchangeLevel):String(data.stopPrice!=null?data.stopPrice:data.price!=null?data.price:data.level),
+      level:fmtSectionLevel(section,data.level),
+      price:data.price!=null?fmtSectionLevel(section,data.price):(section==="protection"?null:fmtSectionLevel(section,data.level)),
+      stopPrice:data.stopPrice!=null?fmtSectionLevel(section,data.stopPrice):(section==="protection"?fmtSectionLevel(section,data.level):null),
       lot:fmtLot(data.lot),
       originalLot:data.originalLot!=null?fmtLot(data.originalLot):null,
       status:data.status || "local"
@@ -318,7 +387,9 @@
   }
 
   function rowModel(section,data={}){
-    return orderMetadata(section,data);
+    const row=orderMetadata(section,data);
+    if(row.binanceOrderId&&row.status!=="executed")updatePriceStatus(row);
+    return row;
   }
   function clearSection(section){
     state.rows[section]=[];
@@ -373,9 +444,9 @@
         : "";
     return `<div class="grad-calc-generator">
       ${section==="entry" ? `<label>Direction<select id="${prefix}Direction"><option>LONG</option><option>SHORT</option></select></label>` : ""}
-      <label>Start level<input id="${prefix}Start" type="number" min="0" step="10"></label>
-      <label>End level<input id="${prefix}End" type="number" min="0" step="10"></label>
-      <label>Step<span class="grad-step-control"><input id="${prefix}Step" type="text" inputmode="decimal"><span class="grad-step-buttons"><button id="${prefix}StepUp" type="button">▲</button><button id="${prefix}StepDown" type="button">▼</button></span></span></label>
+      <label>Start level<input id="${prefix}Start" type="number" min="0" step="${priceTick()}"></label>
+      <label>End level<input id="${prefix}End" type="number" min="0" step="${priceTick()}"></label>
+      <label>Step<span class="grad-step-control"><input id="${prefix}Step" type="text" inputmode="numeric" data-step="1"><span class="grad-step-buttons"><button id="${prefix}StepUp" type="button">▲</button><button id="${prefix}StepDown" type="button">▼</button></span></span></label>
       <label>Total lot<input id="${prefix}Lot" type="number" min="0.001" step="0.001" value="0.000"></label>
       <label>Count<input id="${prefix}Count" type="number" min="1" step="1" value="${section==="protection" ? 2 : 3}"></label>
       ${reconcileMarkup}
@@ -485,7 +556,7 @@
     q("gradPreflightRows").innerHTML=`<tr class="calc-module-send-section"><td colspan="9">GR ${sectionTitle(section)}</td></tr>`+rowsList.map(row=>{
       const action=section==="exit"&&context.exitFullRecreate?"Recreate":row&&row.binanceOrderId?"Modify":"Create";
       const type=section==="protection"?"STOP_MARKET":"LIMIT";
-      return `<tr class="is-error"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row&&row.binanceOrderId?fmtLevelInput(row.price||row.stopPrice||row.level):"-"}</td><td>${fmtLevelInput(row&&row.level)}</td><td>${row&&row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row&&row.lot)}</td><td>Failed</td><td class="calc-module-send-response">${message||"Send failed."}</td></tr>`;
+      return `<tr class="is-error"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row&&row.binanceOrderId?fmtSectionLevel(section,row.price||row.stopPrice||row.level):"-"}</td><td>${fmtSectionLevel(section,row&&row.level)}</td><td>${row&&row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row&&row.lot)}</td><td>Failed</td><td class="calc-module-send-response">${message||"Send failed."}</td></tr>`;
     }).join("");
     q("gradPreflightConfirm").parentElement.style.display="none";
     modal.classList.remove("hidden");
@@ -520,17 +591,17 @@
     const container=q(`grad${section}Rows`);
     if(!container) return;
     container.innerHTML="";
-    const displayRows=sortedRows(section);
+    const displayRows=displayGridRows(section);
     displayRows.forEach((model,index)=>{
       const node=document.createElement("div");
       node.className="grad-calc-row";
       Object.assign(node.dataset,{owner:OWNER,module:OWNER,section,localRowId:model.localRowId,status:model.status});
       if(model.binanceOrderId!=null) node.dataset.binanceOrderId=String(model.binanceOrderId);
-      node.innerHTML=`<span class="grad-calc-index">${index+1}</span><input class="grad-calc-level" type="number" min="0" step="10" value="${fmtLevelInput(model.level)}"><input class="grad-calc-lot" type="number" min="0.001" step="0.001" value="${fmtLot(model.lot)}"><span class="grad-calc-value">-</span><button class="grad-calc-remove" type="button">x</button>`;
+      node.innerHTML=`<span class="grad-calc-index">${index+1}</span><input class="grad-calc-level" type="number" min="0" step="${priceTick()}" value="${fmtSectionLevel(section,model.level)}"><input class="grad-calc-lot" type="number" min="0.001" step="0.001" value="${fmtLot(model.lot)}"><span class="grad-calc-value">-</span><button class="grad-calc-remove" type="button">x</button>`;
       const level=node.querySelector(".grad-calc-level"), lot=node.querySelector(".grad-calc-lot");
       if(section==="entry"&&model.status==="executed"){node.classList.add("is-executed");level.disabled=true;lot.disabled=true;node.querySelector(".grad-calc-remove").disabled=true;}
       const sync=()=>{
-        model.level=fmtLevelInput(level.value);
+        model.level=fmtSectionLevel(section,level.value);
         model.lot=fmtLot(lot.value);
         level.value=model.level;lot.value=model.lot;
         if(model.binanceOrderId){
@@ -553,7 +624,7 @@
   function updateRowValues(section){
     const total=validRows(section).reduce((sum,row)=>sum+(number(row.lot)||0),0);
     const exceedsPosition=section!=="entry"&&state.livePosition&&total>state.livePosition.qty+1e-9;
-    const displayRows=sortedRows(section);
+    const displayRows=displayGridRows(section);
     q(`grad${section}Rows`)?.querySelectorAll(".grad-calc-row").forEach((node,index)=>{
       const row=displayRows[index];
       const value=section==="entry" ? rowMargin(row) : rowPl(section,row);
@@ -705,6 +776,7 @@
     return {kind,position,items,actions,currentTotal,targetQty,excess:normalizeQtyDown(currentTotal - targetQty) || 0,finalTotal,already:false};
   }
   function renderReconcilePreview(plan){
+    const section=plan.kind==="RP"?"protection":"exit";
     state.reconcile = {...plan,executing:false,fingerprint:positionFingerprint(plan.position)};
     ensureReconcilePreview().classList.remove("hidden");
     q("gradReconcileTitle").textContent = plan.kind === "RP" ? "Reconcile Protection Preview" : "Reconcile Exits Preview";
@@ -715,7 +787,7 @@
       ? (plan.kind === "RP" ? "Protection already reconciled." : "Exits already reconciled.")
       : "Live lot: " + fmtLot(plan.targetQty) + " | Current total: " + fmtLot(plan.currentTotal) + " | Excess: " + fmtLot(plan.excess) + " | Final total: " + fmtLot(plan.finalTotal);
     q("gradReconcileMessage").classList.toggle("is-stale",!!plan.already);
-    q("gradReconcileRows").innerHTML = `<tr class="calc-module-send-section"><td colspan="9">${plan.kind === "RP" ? "GR Reconcile Protection" : "GR Reconcile Exits"}</td></tr>` + plan.actions.map(entry => `<tr class="${entry.action !== "Keep" ? "is-writable" : ""}"><td>${entry.action}</td><td>${entry.item.type}</td><td>${entry.item.side}</td><td>${fmtLevelInput(entry.item.level)}</td><td>${fmtLevelInput(entry.item.level)}</td><td>${fmtLot(entry.item.qty)}</td><td>${fmtLot(entry.action === "Cancel" ? 0 : entry.newQty)}</td><td>${entry.action === "Keep" ? "Ready" : "Planned"}</td><td class="calc-module-send-response">${entry.item.key || entry.item.type}</td></tr>`).join("");
+    q("gradReconcileRows").innerHTML = `<tr class="calc-module-send-section"><td colspan="9">${plan.kind === "RP" ? "GR Reconcile Protection" : "GR Reconcile Exits"}</td></tr>` + plan.actions.map(entry => `<tr class="${entry.action !== "Keep" ? "is-writable" : ""}"><td>${entry.action}</td><td>${entry.item.type}</td><td>${entry.item.side}</td><td>${fmtSectionLevel(section,entry.item.level)}</td><td>${fmtSectionLevel(section,entry.item.level)}</td><td>${fmtLot(entry.item.qty)}</td><td>${fmtLot(entry.action === "Cancel" ? 0 : entry.newQty)}</td><td>${entry.action === "Keep" ? "Ready" : "Planned"}</td><td class="calc-module-send-response">${entry.item.key || entry.item.type}</td></tr>`).join("");
   }
   async function openReconcile(kind){
     try{
@@ -738,54 +810,51 @@
   }
   function readGenerator(section){
     const prefix=`grad${section}`, generator=state.generators[section];
-    generator.start=q(prefix+"Start").value;generator.end=q(prefix+"End").value;generator.step=q(prefix+"Step").value;generator.lot=q(prefix+"Lot").value;generator.count=q(prefix+"Count").value;
+    const start=q(prefix+"Start").value,end=q(prefix+"End").value,step=q(prefix+"Step").value;
+    generator.start=normalizeGrPrice(start)??start;generator.end=normalizeGrPrice(end)??end;generator.step=normalizeGrStep(step)??step;generator.lot=q(prefix+"Lot").value;generator.count=q(prefix+"Count").value;
     if(section==="entry") state.direction=q(prefix+"Direction").value==="SHORT" ? "SHORT" : "LONG";
     return generator;
   }
   function writeGenerator(section){
     const prefix=`grad${section}`, generator=state.generators[section];
-    q(prefix+"Start").value=fmtLevelInput(generator.start);q(prefix+"End").value=fmtLevelInput(generator.end);q(prefix+"Step").value=fmtStep(generator.step);q(prefix+"Lot").value=fmtLot(generator.lot);q(prefix+"Count").value=String(Math.max(1,Math.floor(number(generator.count)||1)));
+    q(prefix+"Start").value=fmtSectionLevel(section,generator.start);q(prefix+"End").value=fmtSectionLevel(section,generator.end);q(prefix+"Step").value=fmtStep(generator.step);q(prefix+"Lot").value=fmtLot(generator.lot);q(prefix+"Count").value=String(Math.max(1,Math.floor(number(generator.count)||1)));
   }
   function generate(section){
-    const generator=readGenerator(section), start=number(generator.start),totalLot=Math.max(0,number(generator.lot)||0),maxCount=section==="exit"?Math.floor(totalLot/.001+1e-9):Infinity;
+    const generator=readGenerator(section), start=normalizedPriceValue(generator.start),totalLot=Math.max(0,number(generator.lot)||0),maxCount=section==="exit"?Math.floor(totalLot/.001+1e-9):Infinity;
     let count=Math.max(1,Math.floor(number(generator.count)||1));
     if(section==="exit"&&maxCount<1){setStatus("Exit generation blocked: total lot must be at least 0.001.");return;}
     if(section==="exit"&&count>maxCount){count=maxCount;generator.count=count;q("gradexitCount").value=String(count);setStatus("Exit count limited to "+count+" for total lot "+fmtLot(totalLot)+".");}
     const sign=generatorDirection(section);
     if(start==null || start<=0) return;
-    let step=Math.abs(number(generator.step)||0);
-    const end=number(generator.end);
+    let step=Math.abs(number(normalizeGrStep(generator.step))||0);
+    const end=normalizedPriceValue(generator.end);
     if(generator.lastEdited!=="step" && end!=null && count>1) step=Math.abs(end-start)/(count-1);
-    const levels=Array.from({length:count},(_,index)=>start+sign*step*index);
-    generator.step=step;generator.end=levels[levels.length-1];generator.count=count;
+    const levels=normalizedOrderedLevels(Array.from({length:count},(_,index)=>start+sign*step*index),sign);
+    if(!levels){setStatus(sectionTitle(section)+" grid cannot preserve one price increment between levels.");return;}
+    generator.step=normalizeGrStep(step);generator.end=normalizeGrPrice(levels[levels.length-1]);generator.count=count;
     const lots=domain().distributeLots(totalLot,count);
     state.rows[section]=levels.map((level,index)=>rowModel(section,{level,lot:lots[index]}));
     state.loadedMode[section]=false;
-    writeGenerator(section);renderSection(section);calculate();persistRows();
+    syncGridGenerator(section,gridRows(section));
+    renderSection(section);calculate();persistRows();
   }
   function syncGeneratorFromRows(section){
-    const list=sortedRows(section).filter(row=>row.status!=="executed");
-    if(!list.length) return;
-    const generator=state.generators[section];
-    generator.start=number(list[0].level);generator.end=number(list[list.length-1].level);generator.count=list.length;
-    generator.step=list.length>1 ? Math.abs(number(generator.end)-number(generator.start))/(list.length-1) : 0;
-    generator.lot=list.reduce((sum,row)=>sum+(number(row.lot)||0),0);
-    generator.lastEdited="end";
-    writeGenerator(section);
+    syncGridGenerator(section);
   }
   function redistributeFromBoundaries(section,boundary,level){
-    const list=sortedRows(section).filter(row=>row.status!=="executed"),generator=state.generators[section],start=boundary==="start"?number(level):number(generator.start),end=boundary==="end"?number(level):number(generator.end);
+    const list=gridRows(section),generator=state.generators[section],start=boundary==="start"?normalizedPriceValue(level):normalizedPriceValue(generator.start),end=boundary==="end"?normalizedPriceValue(level):normalizedPriceValue(generator.end);
     if(list.length<2||start==null||end==null||start<=0||end<=0)return false;
     const sign=generatorDirection(section);
     if((end-start)*sign<0)return false;
-    const step=Math.abs(end-start)/(list.length-1);
-    list.forEach((row,index)=>{row.level=fmtLevelInput(start+sign*step*index);row.status=row.binanceOrderId?"modified":"local";});
-    generator.start=start;generator.end=end;generator.step=step;generator.count=list.length;generator.lastEdited="end";
-    writeGenerator(section);renderSection(section);calculate();persistRows();
+    const step=Math.abs(end-start)/(list.length-1),levels=normalizedOrderedLevels(list.map((_row,index)=>start+sign*step*index),sign);
+    if(!levels)return false;
+    applyGridLevels(section,list,levels);
+    generator.start=normalizeGrPrice(start);generator.end=normalizeGrPrice(end);generator.step=normalizeGrStep(step);generator.count=list.length;generator.lastEdited="end";
+    writeGenerator(section);renderSection(section);calculate();persistRows();redraw();
     return true;
   }
   function redistributeLotsOnly(section,total){
-    const list=sortedRows(section).filter(row=>row.status!=="executed"),lots=domain().distributeLots(total,list.length);
+    const list=gridRows(section),lots=domain().distributeLots(total,list.length);
     list.forEach((row,index)=>{row.lot=fmtLot(lots[index]);row.status=row.binanceOrderId?"modified":"local";});
     renderSection(section);calculate();persistRows();
   }
@@ -862,7 +931,12 @@
     const imported=ordersList.map(order=>fromBinanceOrder(section,order));
     state.rows[section]=imported;
     state.loadedMode[section]=true;
-    renderSection(section);syncGeneratorFromRows(section);calculate();
+    if(section==="entry"){
+      const side=String(imported.find(row=>row.side)?.side||"").toUpperCase();
+      if(side==="BUY"||side==="SELL"){state.direction=side==="SELL"?"SHORT":"LONG";const direction=q("gradentryDirection");if(direction)direction.value=state.direction;}
+    }
+    initializeImportedGrid(section);
+    renderSection(section);calculate();
     persistRows();
   }
   async function readSection(section){
@@ -884,7 +958,22 @@
       setStatus(sectionTitle(section)+" Read complete.");
     }catch(error){setStatus(error.message||String(error));}
   }
+  function normalizeSectionPriceState(section){
+    rows(section).forEach(row=>{
+      const level=normalizeGrPrice(row.level);
+      if(level!=null){row.level=level;updatePriceStatus(row);}
+      if(row.price!=null)row.price=normalizeGrPrice(row.price);
+      if(row.stopPrice!=null)row.stopPrice=normalizeGrPrice(row.stopPrice);
+    });
+    const generator=state.generators[section];
+    if(generator){
+      generator.start=normalizeGrPrice(generator.start)??generator.start;
+      generator.end=normalizeGrPrice(generator.end)??generator.end;
+      generator.step=normalizeGrStep(generator.step)??generator.step;
+    }
+  }
   function validateSection(section){
+    normalizeSectionPriceState(section);
     const allRows=rows(section).filter(row=>row.status!=="executed"),list=validRows(section).filter(row=>row.status!=="executed"),errors=[];
     if(!list.length) errors.push("No valid rows.");
     if(section==="entry"){
@@ -899,13 +988,19 @@
       if(state.livePosition&&total>state.livePosition.qty+1e-9) errors.push("Total lots exceed live position size.");
     }
     allRows.forEach(row=>{
-      const level=number(row.level),lot=number(row.lot);
-      if(level==null||level<=0||Math.abs(level-Math.round(level))>1e-9)errors.push("Price level must be a positive whole number.");
+      const level=number(row.level),lot=number(row.lot),normalized=normalizeGrPrice(row.level);
+      if(level==null||level<=0||normalized==null||String(row.level)!==normalized)errors.push("Price level must be a canonical whole-number symbol price.");
       if(lot==null||lot<.001)errors.push("Lot below Binance minimum.");
       else if(Math.abs(lot*1000-Math.round(lot*1000))>1e-7)errors.push("Lot must follow the 0.001 increment.");
     });
     const ids=allRows.map(clientIdOf).filter(Boolean);
     if(new Set(ids).size!==ids.length)errors.push("Duplicate GR clientOrderIds detected.");
+    const ordered=gridRows(section),sign=generatorDirection(section),tick=priceTick();
+    const orderTolerance=Math.max(1e-12,tick*1e-9,...ordered.map(row=>Math.abs(number(row.level)||0)*Number.EPSILON*16));
+    ordered.slice(1).forEach((row,index)=>{if((number(row.level)-number(ordered[index].level))*sign+orderTolerance<tick)errors.push(sectionTitle(section)+" levels must remain ordered with at least one tick between prices.");});
+    if(ordered.length&&(!sameLevelValue(ordered[0].level,state.generators[section].start)||!sameLevelValue(ordered[ordered.length-1].level,state.generators[section].end)))errors.push(sectionTitle(section)+" Start and End do not match the displayed grid endpoints.");
+    const prices=allRows.map(row=>normalizeLevelComparable(row.level)).filter(value=>value!=null);
+    if(new Set(prices).size!==prices.length)errors.push("Duplicate GR price levels detected.");
     return [...new Set(errors)];
   }
   function actionableRows(section){
@@ -933,7 +1028,7 @@
     const side=section==="entry"?(state.direction==="LONG"?"BUY":"SELL"):(state.livePosition&&state.livePosition.side==="SHORT"?"BUY":"SELL");
     q("gradPreflightRows").innerHTML=`<tr class="calc-module-send-section"><td colspan="9">GR ${sectionTitle(section)}</td></tr>`+list.map(row=>{
       const action=section==="exit"&&exitFullRecreate?"Recreate":row.binanceOrderId?"Modify":"Create",type=section==="protection"?"STOP_MARKET":"LIMIT";
-      return `<tr class="is-writable"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row.binanceOrderId?fmtLevelInput(row.price||row.stopPrice||row.level):"-"}</td><td>${fmtLevelInput(row.level)}</td><td>${row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row.lot)}</td><td>Ready</td><td class="calc-module-send-response">${sectionTitle(section)} order</td></tr>`;
+      return `<tr class="is-writable"><td>${action}</td><td>${type}</td><td>${side}</td><td>${row.binanceOrderId?fmtSectionLevel(section,row.price||row.stopPrice||row.level):"-"}</td><td>${fmtSectionLevel(section,row.level)}</td><td>${row.binanceOrderId?fmtLot(row.originalLot||row.lot):"-"}</td><td>${fmtLot(row.lot)}</td><td>Ready</td><td class="calc-module-send-response">${sectionTitle(section)} order</td></tr>`;
     }).join("");
     q("gradPreflightConfirm").parentElement.style.display=state.preflight.valid?"flex":"none";
     q("gradPreflightConfirm").disabled=!state.preflight.valid;
@@ -956,12 +1051,13 @@
     }
     for(let index=0;index<list.length;index++){
       const row=list[index],clientId=freshClientId(clientPrefix(section),row,section);
+      row.level=serializeGrPrice(row.level);
       let sentSide=null,sentType=null;
       if(section==="protection"){
         const side=state.livePosition.side==="SHORT"?"BUY":"SELL";
         sentSide=side;sentType="STOP_MARKET";
         if(row.status==="modified"&&row.binanceOrderId!=null)await signedWrite(ALGO_URL,"DELETE",{symbol:currentSymbol(),algoId:String(row.binanceOrderId)});
-        const payload={symbol:currentSymbol(),side,algoType:"CONDITIONAL",type:"STOP_MARKET",quantity:String(number(row.lot)),triggerPrice:String(number(row.level)),workingType:"CONTRACT_PRICE",clientAlgoId:clientId};
+        const payload={symbol:currentSymbol(),side,algoType:"CONDITIONAL",type:"STOP_MARKET",quantity:String(number(row.lot)),triggerPrice:serializeGrPrice(row.level),workingType:"CONTRACT_PRICE",clientAlgoId:clientId};
         if(["LONG","SHORT"].includes(state.livePosition.positionSide))payload.positionSide=state.livePosition.positionSide;else payload.reduceOnly="true";
         delete payload.closePosition;
         const response=await signedWrite(ALGO_URL,"POST",payload);row.binanceOrderId=response.algoId||response.orderId||null;row.clientOrderId=response.clientAlgoId||clientId;
@@ -980,7 +1076,7 @@
       }else{
         const direction=section==="entry"?state.direction:state.livePosition.side,side=direction==="LONG"?(section==="entry"?"BUY":"SELL"):(section==="entry"?"SELL":"BUY");
         sentSide=side;sentType="LIMIT";
-        const payload={symbol:currentSymbol(),side,type:"LIMIT",timeInForce:"GTC",quantity:String(number(row.lot)),price:String(number(row.level)),newClientOrderId:clientId};
+        const payload={symbol:currentSymbol(),side,type:"LIMIT",timeInForce:"GTC",quantity:String(number(row.lot)),price:serializeGrPrice(row.level),newClientOrderId:clientId};
         if(section==="exit"){if(["LONG","SHORT"].includes(state.livePosition.positionSide))payload.positionSide=state.livePosition.positionSide;else payload.reduceOnly="true";}
         let response;
         if(row.status==="modified"&&row.binanceOrderId!=null){delete payload.newClientOrderId;payload.orderId=String(row.binanceOrderId);response=await signedWrite(ORDER_URL,"PUT",payload);}else response=await signedWrite(ORDER_URL,"POST",payload);
@@ -999,7 +1095,7 @@
           });
         }
       }
-      Object.assign(row,{owner:OWNER,module:OWNER,section,clientOrderId:row.clientOrderId||clientId,symbol:currentSymbol(),side:sentSide,orderType:sentType,price:section==="protection"?null:fmtLevelInput(row.level),stopPrice:section==="protection"?fmtLevelInput(row.level):null,originalLot:fmtLot(row.lot),status:"sent"});
+      Object.assign(row,{owner:OWNER,module:OWNER,section,clientOrderId:row.clientOrderId||clientId,symbol:currentSymbol(),side:sentSide,orderType:sentType,exchangeLevel:serializeGrPrice(row.level),price:section==="protection"?null:fmtSectionLevel(section,row.level),stopPrice:section==="protection"?fmtSectionLevel(section,row.level):null,originalLot:fmtLot(row.lot),status:"sent"});
       persistRows();
     }
   }
@@ -1083,7 +1179,7 @@
         algoType:"CONDITIONAL",
         type:"STOP_MARKET",
         quantity:String(qty),
-        triggerPrice:String(number(item.level)),
+        triggerPrice:serializeGrPrice(item.level),
         workingType:String(item.workingType || "CONTRACT_PRICE")
       };
       if(clientAlgoId) payload.clientAlgoId = clientAlgoId;
@@ -1109,11 +1205,11 @@
       side:item.side,
       type:String(item.type || "STOP_MARKET").toUpperCase(),
       quantity:String(qty),
-      stopPrice:String(number(item.level))
+      stopPrice:serializeGrPrice(item.level)
     };
     if(payload.type === "STOP" || payload.type === "TAKE_PROFIT"){
       if(!(number(item.price) > 0)) throw new Error("Protection STOP order is missing its price.");
-      payload.price = String(number(item.price));
+      payload.price = serializeGrPrice(item.price);
       payload.timeInForce = item.timeInForce || "GTC";
     }
     if(["LONG","SHORT"].includes(position.positionSide)) payload.positionSide = position.positionSide;
@@ -1141,7 +1237,7 @@
       side:item.side,
       type:"LIMIT",
       quantity:String(qty),
-      price:String(number(item.level)),
+      price:serializeGrPrice(item.level),
       timeInForce:item.timeInForce || "GTC"
     };
     if(item.order && item.order.orderId != null) payload.orderId = String(item.order.orderId);
@@ -1220,14 +1316,14 @@
     const s=typeof currentPriceLineState!=="undefined"?currentPriceLineState||{}:{},top=number(s.top)??8,height=number(s.priceH)??lastAreaH,min=number(s.minP)??lastYMin,max=number(s.maxP)??lastYMax;
     if(!(height>0)||min==null||max==null||!(max>min))return;
     const right=canvas.clientWidth-(typeof RIGHT_AXIS==="number"?RIGHT_AXIS:84),items=[],drawnBoxes=[],shiftLeft=ordersVisible()?150:0;
-    sections.forEach(section=>{if(state.visible[section])sortedRows(section).forEach((row,index)=>{if(number(row.level)>0&&number(row.lot)>=.001)items.push({section,row,index});});});
+    sections.forEach(section=>{if(state.visible[section])displayGridRows(section).forEach((row,index)=>{if(number(row.level)>0&&number(row.lot)>=.001)items.push({section,row,index});});});
     ctx.save();ctx.font="11px Arial";ctx.textBaseline="middle";
     const prepared=items.map(item=>{
       const level=number(item.row.level),y=top+((max-level)/(max-min))*height;
       if(y<top||y>top+height)return null;
       const value=item.section==="entry"?null:rowPl(item.section,item.row);
       const text=item.section==="entry"?rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot):rowLabel(item.section,item.index)+" | "+fmtLot(item.row.lot)+" | "+fmtMoney(value);
-      const w=Math.ceil(ctx.measureText(text).width)+12,color=item.section==="entry"?"#374151":item.section==="protection"?moneyColor(value):"#047857",sectionRows=sortedRows(item.section).filter(row=>row.status!=="executed"&&number(row.level)>0&&number(row.lot)>=.001),boundary=item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);
+      const w=Math.ceil(ctx.measureText(text).width)+12,color=item.section==="entry"?"#374151":item.section==="protection"?moneyColor(value):"#047857",sectionRows=gridRows(item.section).filter(row=>number(row.level)>0&&number(row.lot)>=.001),boundary=item.row.status!=="executed"&&(item.row===sectionRows[0]?"start":item.row===sectionRows[sectionRows.length-1]?"end":null);
       return {item,y,value,text,w,color,boundary,x:Math.max(8,right-w-12-shiftLeft)};
     }).filter(Boolean);
     prepared.forEach(entry=>{
@@ -1257,10 +1353,52 @@
   }
   function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);scheduleTopLayerLabels();return result;};}
   function hit(clientX,clientY){if(typeof canvas==="undefined"||!canvas)return null;const rect=canvas.getBoundingClientRect(),x=clientX-rect.left,y=clientY-rect.top;return state.overlayBoxes.find(box=>x>=box.x1&&x<=box.x2&&y>=box.y1&&y<=box.y2)||null;}
-  function installDrag(){if(typeof canvas==="undefined"||!canvas||canvas.__gradV4Drag)return;canvas.__gradV4Drag=true;canvas.addEventListener("mousedown",event=>{const box=hit(event.clientX,event.clientY);if(!box||!box.boundary)return;state.drag=box;event.preventDefault();event.stopImmediatePropagation();},true);window.addEventListener("mousemove",event=>{if(!state.drag)return;const level=priceFromY(event.clientY);if(level==null||level<=0)return;redistributeFromBoundaries(state.drag.section,state.drag.boundary,level);event.preventDefault();},true);window.addEventListener("mouseup",event=>{if(!state.drag)return;state.drag=null;event.preventDefault();},true);}
+  function dragSnapshot(box,pointerId){
+    const list=gridRows(box.section);
+    return {section:box.section,row:box.row,rowIndex:list.indexOf(box.row),pointerId,pivotPrice:number(box.row.level),originalRows:rows(box.section).map(row=>({localRowId:row.localRowId,level:row.level,status:row.status})),originalGenerator:{...state.generators[box.section]}};
+  }
+  function restoreDragPreview(drag){
+    if(!drag)return;
+    drag.originalRows.forEach(saved=>{const row=rows(drag.section).find(item=>item.localRowId===saved.localRowId);if(row)Object.assign(row,saved);});
+    state.generators[drag.section]={...drag.originalGenerator};
+    writeGenerator(drag.section);renderSection(drag.section);calculate();persistRows();redraw();
+  }
+  function cancelActiveGridDrag(){
+    const drag=state.drag;if(!drag)return false;state.drag=null;restoreDragPreview(drag);try{canvas.releasePointerCapture(drag.pointerId);}catch(_e){}if(canvas)canvas.style.cursor="";return true;
+  }
+  function installDrag(){
+    if(typeof canvas==="undefined"||!canvas||canvas.__gradV4Drag)return;
+    canvas.__gradV4Drag=true;
+    canvas.addEventListener("pointerdown",event=>{
+      const box=hit(event.clientX,event.clientY),draggable=box&&box.status!=="executed";
+      if(!draggable)return;
+      state.drag=dragSnapshot(box,event.pointerId);
+      try{canvas.setPointerCapture(event.pointerId);}catch(_e){}
+      event.preventDefault();event.stopImmediatePropagation();
+    },true);
+    canvas.addEventListener("pointermove",event=>{
+      if(!state.drag){const box=hit(event.clientX,event.clientY);canvas.style.cursor=box&&box.status!=="executed"?"ns-resize":"";return;}
+      if(event.pointerId!==state.drag.pointerId)return;
+      const level=priceFromY(event.clientY);if(level==null||level<=0)return;
+      dragGridPivot(state.drag.section,state.drag.row,level);
+      event.preventDefault();event.stopImmediatePropagation();
+    },true);
+    const finish=(event,cancelled=false)=>{
+      if(!state.drag||event.pointerId!==state.drag.pointerId)return;
+      const drag=state.drag;state.drag=null;
+      if(cancelled)restoreDragPreview(drag);
+      try{canvas.releasePointerCapture(event.pointerId);}catch(_e){}
+      canvas.style.cursor="";event.preventDefault();event.stopImmediatePropagation();
+    };
+    canvas.addEventListener("pointerup",event=>finish(event,false),true);
+    canvas.addEventListener("pointercancel",event=>finish(event,true),true);
+    canvas.addEventListener("pointerleave",()=>{if(!state.drag)canvas.style.cursor="";},true);
+    document.addEventListener("keydown",event=>{if(event.key!=="Escape"||!state.drag)return;cancelActiveGridDrag();event.preventDefault();},true);
+  }
   function bindGenerator(section){
     const prefix=`grad${section}`;
     ["Start","End","Lot","Count"].forEach(name=>q(prefix+name).addEventListener("input",()=>{
+      cancelActiveGridDrag();
       const generator=state.generators[section];
       if(name==="End")generator.lastEdited="end";
       readGenerator(section);
@@ -1274,17 +1412,26 @@
         setStatus(sectionTitle(section)+" loaded-order mode: count remains derived from loaded rows.");
         return;
       }
+      if(section==="entry"&&(name==="Start"||name==="End")&&gridRows("entry").length>1){
+        const boundary=name.toLowerCase(),value=number(q(prefix+name).value),updated=redistributeFromBoundaries("entry",boundary,value);
+        if(!updated)setStatus("GR Entry boundary is outside the valid ordered range.");
+        return;
+      }
+      if(section==="entry"&&name==="Count")state.loadedMode.entry=false;
       if((section==="exit"||section==="protection")&&name==="Count")state.loadedMode[section]=false;
       if(name==="Start"||name==="End")state.loadedMode[section]=false;
       if(number(q(prefix+"Start").value)>0)generate(section);
     },false));
+    ["Start","End"].forEach(name=>q(prefix+name).addEventListener("blur",()=>{readGenerator(section);q(prefix+name).value=fmtSectionLevel(section,state.generators[section][name.toLowerCase()]);},false));
     const step=q(prefix+"Step");
-    step.addEventListener("input",()=>{state.generators[section].step=step.value;state.generators[section].lastEdited="step";},false);
-    const commitStep=()=>{const value=number(step.value);if(value==null||value<0){step.value=state.generators[section].step===""?"":fmtStep(state.generators[section].step);return;}state.loadedMode[section]=false;state.generators[section].step=value;state.generators[section].lastEdited="step";step.value=fmtStep(value);readGenerator(section);if(number(q(prefix+"Start").value)>0)generate(section);};
+    step.addEventListener("input",()=>{cancelActiveGridDrag();state.generators[section].step=step.value;state.generators[section].lastEdited="step";},false);
+    const commitStep=()=>{cancelActiveGridDrag();const value=normalizeGrStep(step.value);if(value==null){step.value=state.generators[section].step===""?"":fmtStep(state.generators[section].step);return;}state.loadedMode[section]=false;state.generators[section].step=value;state.generators[section].lastEdited="step";step.value=value;readGenerator(section);if(number(q(prefix+"Start").value)>0){const rebuilt=gridRows(section).length?resetGridToLinearFromCurrent(section):(generate(section),true);if(!rebuilt&&gridRows(section).length)setStatus(sectionTitle(section)+" Step cannot preserve one price increment between levels.");}};
     step.addEventListener("blur",commitStep,false);step.addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();step.blur();}},false);
-    const nudgeStep=delta=>{const base=number(step.value)??number(state.generators[section].step)??0;step.value=(Math.max(0,base+delta)).toFixed(1);commitStep();};
-    q(prefix+"StepUp").onclick=()=>nudgeStep(.1);q(prefix+"StepDown").onclick=()=>nudgeStep(-.1);
-    if(section==="entry")q(prefix+"Direction").addEventListener("change",()=>{readGenerator(section);generate(section);},false);
+    const stepIncrement=()=>Math.max(GR_PRICE_INCREMENT,number(step.dataset.step)||GR_PRICE_INCREMENT);
+    const nudgeStep=delta=>{if(step.disabled)return false;const base=number(step.value)??number(state.generators[section].step)??0;step.value=normalizeGrStep(base+delta);commitStep();return true;};
+    q(prefix+"StepUp").onclick=()=>nudgeStep(stepIncrement());q(prefix+"StepDown").onclick=()=>nudgeStep(-stepIncrement());
+    if(!step.__gradWheelBound){step.__gradWheelBound=true;step.addEventListener("wheel",event=>{if(step.disabled)return;if(nudgeStep(event.deltaY<0?stepIncrement():-stepIncrement())){event.preventDefault();event.stopPropagation();}},{passive:false});}
+    if(section==="entry")q(prefix+"Direction").addEventListener("change",()=>{cancelActiveGridDrag();readGenerator(section);generate(section);},false);
   }
   function installWindowDrag(win){const head=q("gradCalcHead");let drag=null;head.addEventListener("pointerdown",event=>{if(event.target.closest("button"))return;const rect=win.getBoundingClientRect();drag={x:event.clientX,y:event.clientY,left:rect.left,top:rect.top};head.setPointerCapture(event.pointerId);});head.addEventListener("pointermove",event=>{if(!drag)return;win.style.left=Math.max(0,drag.left+event.clientX-drag.x)+"px";win.style.top=Math.max(0,drag.top+event.clientY-drag.y)+"px";});head.addEventListener("pointerup",event=>{drag=null;try{head.releasePointerCapture(event.pointerId);}catch(_e){}});}
   function installWindowResize(win){
@@ -1364,7 +1511,7 @@
     q("gradCalcHead").addEventListener("pointerdown",()=>{window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}},false);
     q("gradCalcClearAll").onclick=clearAll;q("gradCalcCollapse").onclick=()=>setWindowCollapsed(win,!win.classList.contains("is-collapsed"));q("gradCalcClose").onclick=()=>{win.classList.add("hidden");open.classList.remove("is-on");};open.onclick=()=>{const hidden=win.classList.toggle("hidden");open.classList.toggle("is-on",!hidden);arrangeMetricButtons();window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}};
     installWindowDrag(win);installWindowResize(win);installDrawHook();installDrag();installPositionWatcher();setActive("entry");calculate();
-    window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:executeSectionDirect,setVisible:showSection,drawOverlayNow:drawLabels,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row})));}};
+    window.GRAD_CALCULATOR={version:MODULE,owner:OWNER,state,open(){win.classList.remove("hidden");open.classList.add("is-on");window.__bt001LastOverlayModule="gr";try{draw();}catch(_e){}},hide(){win.classList.add("hidden");open.classList.remove("is-on");},clear:clearAll,readSection,sendSection:executeSectionDirect,setVisible:showSection,drawOverlayNow:drawLabels,getOwnedRows(){return sections.flatMap(section=>rows(section).map(row=>({...row})));},getGrid(section="entry"){return {section:sections.includes(section)?section:"entry",levels:gridRows(sections.includes(section)?section:"entry").map(row=>({localRowId:row.localRowId,level:row.level,lot:row.lot,status:row.status,binanceOrderId:row.binanceOrderId||null}))};},getEntryGrid(){return this.getGrid("entry");},_selfTest(){return domain()._selfTest();}};
   }
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",bind,{once:true});else bind();
 })();

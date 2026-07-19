@@ -22968,7 +22968,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     hoverInsideChart:false,
     suppressResizeRender:false,
     expandedRect:null,
-    crosshair:{active:false,clientX:null,clientY:null,selectedLevel:null,scale:null,listenerBindings:0,updates:0,labelSide:null,labelObserver:null}
+    crosshair:{active:false,clientX:null,clientY:null,selectedLevel:null,scale:null,listenerBindings:0,updates:0,closedPartialKey:""}
   };
   function activeWfTradeKey(){
     try{
@@ -23242,6 +23242,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       wfSyncState.liveRefreshTimer = null;
       if(!visible) return;
       const live = livePreviewTrade();
+      const closedPartialKey=live ? [live.parentTradeId,String(num(live.realizedPartials)||0)].join(":") : "flat:0";
+      if(closedPartialKey!==wfSyncState.crosshair.closedPartialKey){
+        wfSyncState.crosshair.closedPartialKey=closedPartialKey;
+        if(wfSyncState.crosshair.active)renderWfCrosshair(live);
+      }
       const nextKey = wfLiveRefreshSignature(live);
       if(nextKey === wfSyncState.liveRefreshKey) return;
       wfSyncState.liveRefreshKey = nextKey;
@@ -23300,72 +23305,49 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function wfCrosshairDifferenceText(selected,current){
     return wfCrosshairMoney(Number(selected)-Number(current),{signed:true});
   }
-  function wfCrosshairBlockPosition({crosshairX,blockWidth,blockHeight,plotLeft,plotRightEdge,plotTop,plotBottom,lineY,horizontalGap=8,verticalGap=4,rowHeight=18}){
-    const leftEdge=Number(plotLeft);
-    const rightEdge=Math.max(leftEdge,Number(plotRightEdge));
-    const rightX=Number(crosshairX)+horizontalGap;
-    const leftX=Number(crosshairX)-horizontalGap-Number(blockWidth);
-    const side=rightX+Number(blockWidth)<=rightEdge ? "right" : "left";
-    const preferredX=side==="right" ? rightX : leftX;
-    const preferredTop=Number(lineY)-verticalGap-Number(rowHeight);
-    return {
-      side,
-      left:clamp(preferredX,leftEdge,Math.max(leftEdge,rightEdge-Number(blockWidth))),
-      top:clamp(preferredTop,Number(plotTop),Math.max(Number(plotTop),Number(plotBottom)-Number(blockHeight)))
-    };
+  function wfCurrentCampaignClosedPartialPL(liveTrade){
+    const live=arguments.length?liveTrade:livePreviewTrade();
+    return live&&live.parentTradeId ? (num(live.realizedPartials)||0) : 0;
   }
   function hideWfCrosshair({clear=true}={}){
     const crosshair=wfSyncState.crosshair;
     crosshair.active=false;
-    crosshair.labelSide=null;
     if(clear){ crosshair.clientX=null;crosshair.clientY=null;crosshair.selectedLevel=null; }
     const overlay=q("wfCrosshair");
+    const values=q("wfCrosshairValues");
     if(overlay) overlay.classList.add("hidden");
+    if(values) values.classList.add("hidden");
   }
-  function renderWfCrosshair(){
+  function renderWfCrosshair(liveTrade){
     const chart=q("wfChart"),win=q("wfWindow"),crosshair=wfSyncState.crosshair,scale=crosshair.scale;
-    const overlay=q("wfCrosshair");
-    if(!visible || !chart || !win || win.classList.contains("is-collapsed") || !overlay || !crosshair.active || !scale || !Number.isFinite(crosshair.selectedLevel)){
+    const overlay=q("wfCrosshair"),values=q("wfCrosshairValues");
+    if(!visible || !chart || !win || win.classList.contains("is-collapsed") || !overlay || !values || !crosshair.active || !scale || !Number.isFinite(crosshair.selectedLevel)){
       if(overlay) overlay.classList.add("hidden");
+      if(values) values.classList.add("hidden");
       return;
     }
     const chartRect=chart.getBoundingClientRect();
     const localX=clamp(Number(crosshair.clientX)-chartRect.left,scale.plotLeft,Math.max(scale.plotLeft,chart.clientWidth-scale.plotRight));
     const plotY=clamp(scale.valueToY(crosshair.selectedLevel),0,scale.plotHeight);
     const localY=scale.plotTop+plotY;
-    const current=Number(lastModel && lastModel.selectedNet) || 0;
+    const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(arguments.length?liveTrade:livePreviewTrade());
     const vertical=overlay.querySelector(".wf-crosshair-v");
     const horizontal=overlay.querySelector(".wf-crosshair-h");
-    const values=overlay.querySelector(".wf-crosshair-values");
     const selected=values && values.querySelector(".wf-crosshair-selected");
     const amount=values && values.querySelector(".wf-crosshair-amount");
-    if(!vertical || !horizontal || !values || !selected || !amount){ overlay.classList.add("hidden");return; }
+    if(!vertical || !horizontal || !selected || !amount){ overlay.classList.add("hidden");values.classList.add("hidden");return; }
     const hairline=`${1/(window.devicePixelRatio || 1)}px`;
     overlay.style.setProperty("--wf-crosshair-hairline",hairline);
     vertical.style.left=`${localX}px`;vertical.style.top=`${scale.plotTop}px`;vertical.style.height=`${scale.plotHeight}px`;
     horizontal.style.left=`${scale.plotLeft}px`;horizontal.style.right=`${scale.plotRight}px`;horizontal.style.top=`${localY}px`;
     selected.textContent=wfCrosshairMoney(crosshair.selectedLevel,{signed:true});
-    amount.textContent=wfCrosshairDifferenceText(crosshair.selectedLevel,current);
-    values.style.left="0px";values.style.top="0px";values.style.visibility="hidden";
+    amount.textContent=wfCrosshairDifferenceText(crosshair.selectedLevel,currentCampaignClosedPartials);
     overlay.classList.remove("hidden");
-    const blockRect=values.getBoundingClientRect();
-    const placement=wfCrosshairBlockPosition({crosshairX:localX,blockWidth:blockRect.width,blockHeight:blockRect.height,plotLeft:scale.plotLeft,plotRightEdge:chart.clientWidth-scale.plotRight,plotTop:scale.plotTop,plotBottom:scale.plotTop+scale.plotHeight,lineY:localY});
-    values.style.left=`${placement.left}px`;values.style.top=`${placement.top}px`;values.style.visibility="visible";
-    values.dataset.side=placement.side;
-    crosshair.labelSide=placement.side;
+    values.classList.remove("hidden");
     overlay.dataset.selectedLevel=String(crosshair.selectedLevel);
-    overlay.dataset.currentNet=String(current);
-    overlay.dataset.amountToLevel=String(crosshair.selectedLevel-current);
+    values.dataset.currentCampaignClosedPartials=String(currentCampaignClosedPartials);
+    values.dataset.amountToLevel=String(crosshair.selectedLevel-currentCampaignClosedPartials);
     crosshair.updates+=1;
-    if(!overlay.__wfFontMeasureQueued && !overlay.__wfFontMeasureSettled){
-      overlay.__wfFontMeasureQueued=true;
-      requestAnimationFrame(() => {
-        if(q("wfCrosshair")!==overlay) return;
-        overlay.__wfFontMeasureQueued=false;
-        overlay.__wfFontMeasureSettled=true;
-        if(crosshair.active) renderWfCrosshair();
-      });
-    }
   }
   function updateWfCrosshairFromPointer(event){
     const chart=q("wfChart"),win=q("wfWindow"),crosshair=wfSyncState.crosshair,scale=crosshair.scale;
@@ -23393,9 +23375,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       equality:wfCrosshairDifferenceText(1500,1500)==="$0",
       signedFormatting:wfCrosshairMoney(1234,{signed:true})==="+$1,234" && wfCrosshairMoney(-1234,{signed:true})==="−$1,234" && wfCrosshairMoney(0,{signed:true})==="$0",
       axisRoundTrip:probes.every(value=>Math.abs(yToValue(valueToY(value))-value)<1e-8),
-      rightPlacement:(()=>{const p=wfCrosshairBlockPosition({crosshairX:120,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:90});return p.side==="right" && p.left===128;})(),
-      leftFlip:(()=>{const p=wfCrosshairBlockPosition({crosshairX:250,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:90});return p.side==="left" && p.left===180;})(),
-      verticalClamp:(()=>{const top=wfCrosshairBlockPosition({crosshairX:120,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:10});const bottom=wfCrosshairBlockPosition({crosshairX:120,blockWidth:62,blockHeight:44,plotLeft:48,plotRightEdge:290,plotTop:10,plotBottom:170,lineY:170});return top.top===10 && bottom.top===126;})()
+      currentCampaignPartials:wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:900})===43,
+      floatingExcluded:wfCrosshairDifferenceText(55,wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-800}))==="+$12",
+      flatCampaignReset:wfCurrentCampaignClosedPartialPL(null)===0
     };
     return {passed:Object.values(cases).every(Boolean),cases};
   }
@@ -24173,7 +24155,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         `Current Net P/L: ${money(hwm.current)}`,
         `Distance from closed HWM: ${money(hwm.delta)}`
       ].join("\n");
-      result.innerHTML = `<div class="wf-result-metric">
+      result.innerHTML = `<div class="wf-crosshair-values hidden" id="wfCrosshairValues" aria-hidden="true">
+          <div class="wf-crosshair-label wf-crosshair-selected"></div>
+          <div class="wf-crosshair-label wf-crosshair-amount"></div>
+        </div>
+        <div class="wf-result-metric">
           <div class="wf-result-label">Net P/L</div>
           <div class="wf-result-value ${resultClass}" data-result-kind="net" title="${wfAttr(netTitle)}">${wfEscape(netExact)}</div>
         </div>
@@ -24195,7 +24181,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       fitWfResultValues(result);
     }
     if(!model.trades.length && !model.liveTrade){
-      if(wfSyncState.crosshair.labelObserver){ wfSyncState.crosshair.labelObserver.disconnect();wfSyncState.crosshair.labelObserver=null; }
       wfSyncState.crosshair.scale=null;
       hideWfCrosshair();
       chart.innerHTML = `<div class="wf-empty">${model.mode === "fast" ? "No closed positions in the selected period." : "No closed trades in the selected period."}</div>`;
@@ -24295,25 +24280,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
           ${mark}
         </div>`;
     }).join("");
-    if(wfSyncState.crosshair.labelObserver){ wfSyncState.crosshair.labelObserver.disconnect();wfSyncState.crosshair.labelObserver=null; }
     chart.innerHTML = `<div class="wf-plot">
         <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
         <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}</div>
         <div class="wf-crosshair hidden" id="wfCrosshair" aria-hidden="true">
           <div class="wf-crosshair-v"></div><div class="wf-crosshair-h"></div>
-          <div class="wf-crosshair-values" data-side="right">
-            <div class="wf-crosshair-label wf-crosshair-selected"></div>
-            <div class="wf-crosshair-label wf-crosshair-amount"></div>
-          </div>
         </div>
       </div>`;
-    const crosshairValues=chart.querySelector(".wf-crosshair-values");
-    if(crosshairValues && typeof ResizeObserver!=="undefined"){
-      wfSyncState.crosshair.labelObserver=new ResizeObserver(() => {
-        if(wfSyncState.crosshair.active) renderWfCrosshair();
-      });
-      wfSyncState.crosshair.labelObserver.observe(crosshairValues);
-    }
     fitWfDirectionLabels(chart);
     renderWfCrosshair();
   }
@@ -24585,14 +24558,14 @@ window.BT001_WATERFALL_WINDOW = {
   version:MODULE,show,hide,render,
   _selfTest:runWfCrosshairSelfTests,
   _diagnostics:() => {
-    const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),values=overlay && overlay.querySelector(".wf-crosshair-values");
+    const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),values=q("wfCrosshairValues"),closedPartials=wfCurrentCampaignClosedPartialPL();
     const valuesRect=values && values.getBoundingClientRect();
     return {
-      visible,listenerBindings:crosshair.listenerBindings,active:crosshair.active,updates:crosshair.updates,labelSide:crosshair.labelSide,
-      selectedLevel:crosshair.selectedLevel,currentNet:Number(lastModel && lastModel.selectedNet) || 0,
-      amountToLevel:Number.isFinite(crosshair.selectedLevel) ? crosshair.selectedLevel-(Number(lastModel && lastModel.selectedNet) || 0) : null,
-      selectedText:overlay && overlay.querySelector(".wf-crosshair-selected") && overlay.querySelector(".wf-crosshair-selected").textContent || "",
-      amountText:overlay && overlay.querySelector(".wf-crosshair-amount") && overlay.querySelector(".wf-crosshair-amount").textContent || "",
+      visible,listenerBindings:crosshair.listenerBindings,active:crosshair.active,updates:crosshair.updates,
+      selectedLevel:crosshair.selectedLevel,currentCampaignClosedPartials:closedPartials,
+      amountToLevel:Number.isFinite(crosshair.selectedLevel) ? crosshair.selectedLevel-closedPartials : null,
+      selectedText:values && values.querySelector(".wf-crosshair-selected") && values.querySelector(".wf-crosshair-selected").textContent || "",
+      amountText:values && values.querySelector(".wf-crosshair-amount") && values.querySelector(".wf-crosshair-amount").textContent || "",
       labelRect:valuesRect ? {left:valuesRect.left,top:valuesRect.top,right:valuesRect.right,bottom:valuesRect.bottom,width:valuesRect.width,height:valuesRect.height} : null,
       scale:scale ? {domainMin:scale.domainMin,domainMax:scale.domainMax,plotTop:scale.plotTop,plotLeft:scale.plotLeft,plotRight:scale.plotRight,plotBottom:scale.plotBottom,plotHeight:scale.plotHeight} : null
     };
