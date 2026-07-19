@@ -884,8 +884,20 @@
   async function livePosition({preferShared=false}={}){
     if(preferShared) return sharedLivePosition();
     if(typeof hasKeys!=="function" || !hasKeys()) return null;
+    const sharedOwner=window.BT001_SHARED_POSITION;
+    const expected=sharedOwner&&typeof sharedOwner.captureExpectation==="function"?sharedOwner.captureExpectation():null;
     const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
     const list=typeof getPositions==="function" ? await getPositions(key,secret,offset) : [];
+    if(sharedOwner&&typeof sharedOwner.ingestRestRisk==="function"){
+      const result=sharedOwner.ingestRestRisk(list,{source:"gr-positionRisk",symbol:currentSymbol(),expected,observedAt:Date.now(),allowAdvance:true,ignoreStreamAuthority:!window.BINANCE_PRIVATE_STATE||window.BINANCE_PRIVATE_STATE.streamStatus!=="live"});
+      const shared=result&&result.snapshot&&result.snapshot.position;
+      if(shared&&shared.symbol===currentSymbol()){
+        const position={side:shared.side,qty:shared.qty,entry:shared.avg,current:currentPrice(),positionSide:String(shared.positionSide||"BOTH").toUpperCase(),revision:result.snapshot.revision};
+        if(positionGroupTracker){try{positionGroupTracker.syncPosition(currentSymbol(),position);}catch(_e){}}
+        return position;
+      }
+      if(result&&result.mismatch)return null;
+    }
     const found=(list||[]).find(row=>row&&row.symbol===currentSymbol()&&Math.abs(number(row.positionAmt)||0)>0);
     if(!found) return null;
     const position = {side:number(found.positionAmt)<0||String(found.positionSide).toUpperCase()==="SHORT"?"SHORT":"LONG",qty:Math.abs(number(found.positionAmt)),entry:number(found.entryPrice),current:currentPrice(),positionSide:String(found.positionSide||"BOTH").toUpperCase()};
@@ -1453,7 +1465,16 @@
   }
   function installPositionWatcher(){
     let timer=null;
-    const refresh=()=>{
+    const applySharedPosition=()=>{
+      const current=sharedLivePosition();
+      state.livePosition=current;
+      for(const section of ["protection","exit"]){
+        const basis=state.positionBasis[section];
+        state.stale[section]=!!basis&&positionFingerprint(current)!==basis;
+      }
+      calculate();
+    };
+    const refreshOrders=()=>{
       if(timer!=null)window.clearTimeout(timer);
       timer=window.setTimeout(async()=>{
         timer=null;
@@ -1464,8 +1485,8 @@
         }
       },200);
     };
-    window.addEventListener("v13:open-position-change",refresh,false);
-    window.addEventListener("v14:binance-state-change",refresh,false);
+    window.addEventListener("v13:open-position-change",applySharedPosition,false);
+    window.addEventListener("v14:binance-state-change",refreshOrders,false);
   }
   function setWindowCollapsed(win,collapsed){
     const button=q("gradCalcCollapse"),body=win.querySelector(".grad-calc-body"),stage=win.querySelector(".grad-calc-tab-stage"),head=q("gradCalcHead");

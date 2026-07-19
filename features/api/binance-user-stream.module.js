@@ -29,17 +29,19 @@
     const getApiKey = options.getApiKey || (() => "");
     const getSymbol = options.getSymbol || (() => "");
     const getRestBase = options.getRestBase || (() => "https://fapi.binance.com");
-    const getWsBase = options.getWsBase || (() => "wss://fstream.binance.com/ws");
+    const getWsBase = options.getWsBase || (() => "wss://fstream.binance.com/private/ws");
     const onDirty = typeof options.onDirty === "function" ? options.onDirty : () => {};
     const onStatus = typeof options.onStatus === "function" ? options.onStatus : () => {};
     const onAuthoritativeSeed = typeof options.onAuthoritativeSeed === "function" ? options.onAuthoritativeSeed : () => {};
+    const onPositionFact = typeof options.onPositionFact === "function" ? options.onPositionFact : () => {};
     const reportPerformance = options.reportPerformance !== false;
     const timers = options.timers || window;
     const now = typeof options.now === "function" ? options.now : Date.now;
     const state = {
       desired:false,status:"disconnected",coverageSource:"REST",apiKey:null,listenKey:null,socket:null,
       generation:0,reconnectAttempt:0,reconnectTimer:null,keepaliveTimer:null,lastEventAt:0,
-      connectedAt:0,disconnectedAt:0,lastError:null,accountStreamEvents:0,starts:0,keepalives:0,reconnects:0
+      connectedAt:0,disconnectedAt:0,lastError:null,accountStreamEvents:0,starts:0,keepalives:0,reconnects:0,
+      lastAccountUpdateEventTime:0,lastAccountUpdateReceiveTime:0,lastPositionFactAt:0,restEndpoint:"",wsEndpoint:""
     };
 
     function diagnostics(){
@@ -47,7 +49,10 @@
         module:MODULE,status:state.status,streamStatus:state.status,coverageSource:state.coverageSource,
         connectedAt:state.connectedAt,disconnectedAt:state.disconnectedAt,lastEventAt:state.lastEventAt,
         lastError:state.lastError,accountStreamEvents:state.accountStreamEvents,starts:state.starts,
-        keepalives:state.keepalives,reconnects:state.reconnects,listenKeyActive:!!state.listenKey
+        keepalives:state.keepalives,reconnects:state.reconnects,listenKeyActive:!!state.listenKey,
+        lastAccountUpdateEventTime:state.lastAccountUpdateEventTime,lastAccountUpdateReceiveTime:state.lastAccountUpdateReceiveTime,
+        lastPositionFactAt:state.lastPositionFactAt,restEndpoint:state.restEndpoint,wsEndpoint:state.wsEndpoint,
+        transport:"Binance USD-M listenKey private user stream"
       };
     }
     function publishStatus(next,error=null){
@@ -70,13 +75,14 @@
       }catch(_e){}
     }
     function streamUrl(listenKey){
-      return String(getWsBase() || "wss://fstream.binance.com/ws").replace(/\/+$/,"") + "/" + encodeURIComponent(listenKey);
+      return String(getWsBase() || "wss://fstream.binance.com/private/ws").replace(/\/+$/,"") + "/" + encodeURIComponent(listenKey);
     }
     async function requestListenKey(method,apiKey){
       const key = String(apiKey || state.apiKey || getApiKey() || "").trim();
       if(!key) throw new Error("Binance API key unavailable");
       const base = String(getRestBase() || "https://fapi.binance.com").replace(/\/+$/,"");
-      return api.requestJson(base + "/fapi/v1/listenKey",{method,headers:{"X-MBX-APIKEY":key},cache:"no-store"});
+      state.restEndpoint=base+"/fapi/v1/listenKey";
+      return api.requestJson(state.restEndpoint,{method,headers:{"X-MBX-APIKEY":key},cache:"no-store"});
     }
     function scheduleKeepalive(token){
       clearTimer("keepaliveTimer");
@@ -116,8 +122,17 @@
       }
       const classified = classifyEvent(event,getSymbol());
       if(!classified.event) return;
-      state.lastEventAt = now();
+      const receivedAt=now();
+      state.lastEventAt = receivedAt;
       state.accountStreamEvents += 1;
+      if(classified.positionDirty&&classified.event.e==="ACCOUNT_UPDATE"){
+        state.lastAccountUpdateEventTime=Number(classified.event.E||classified.event.T)||0;
+        state.lastAccountUpdateReceiveTime=receivedAt;
+        try{
+          onPositionFact({event:classified.event,eventTime:state.lastAccountUpdateEventTime,receivedAt,symbol:normalizeSymbol(getSymbol())});
+          state.lastPositionFactAt=now();
+        }catch(error){state.lastError=String(error&&error.message||error);}
+      }
       if(reportPerformance && window.BT001_PERFORMANCE_DIAGNOSTICS) window.BT001_PERFORMANCE_DIAGNOSTICS.accountStreamEvents = state.accountStreamEvents;
       if(classified.positionDirty || classified.ordersDirty){
         onDirty({...classified,reason:classified.event.e === "ACCOUNT_UPDATE" ? "account-update" : classified.event.e === "ORDER_TRADE_UPDATE" ? "order-trade-update" : "listen-key-expired"});
@@ -141,6 +156,7 @@
         if(!response || !response.listenKey) throw new Error("Binance listen key was not returned");
         state.listenKey = response.listenKey;
         state.starts += 1;
+        state.wsEndpoint=String(getWsBase()||"wss://fstream.binance.com/private/ws").replace(/\/+$/,"")+"/{listenKey}";
         state.socket = api.connectWebSocket(streamUrl(state.listenKey),{
           reconnect:false,
           onOpen:() => {
@@ -199,11 +215,12 @@
     const dirty=[];
     const statuses=[];
     const seeds=[];
+    const positionFacts=[];
     const api={
       async requestJson(url,options){requests.push({url,method:options.method});return {listenKey:"test-listen-key"};},
       connectWebSocket(_url,options){socketOptions=options;return {disconnect(){}};}
     };
-    const stream=createBinanceUserDataStream({api,getApiKey:()=>"test-key",getSymbol:()=>"BTCUSDT",onDirty:event=>dirty.push(event),onStatus:status=>statuses.push(status),onAuthoritativeSeed:event=>seeds.push(event),timers,reportPerformance:false,now:(()=>{let t=1000;return()=>++t;})()});
+    const stream=createBinanceUserDataStream({api,getApiKey:()=>"test-key",getSymbol:()=>"BTCUSDT",onDirty:event=>dirty.push(event),onStatus:status=>statuses.push(status),onAuthoritativeSeed:event=>seeds.push(event),onPositionFact:event=>positionFacts.push(event),timers,reportPerformance:false,now:(()=>{let t=1000;return()=>++t;})()});
     await stream.start();
     socketOptions.onOpen();
     const keepaliveWasScheduled=scheduled.some(item=>!item.cancelled&&item.delay===KEEPALIVE_MS);
@@ -216,13 +233,15 @@
     const cases={
       initialListenKeyRestSeedOnce:requests.filter(item=>item.method==="POST").length===1 && seeds.length===1,
       accountUpdateMarksOnlyPosition:dirty.some(item=>item.reason==="account-update"&&item.positionDirty&&!item.ordersDirty),
+      accountUpdatePublishesFactSynchronously:positionFacts.length===1&&positionFacts[0].event&&positionFacts[0].event.e==="ACCOUNT_UPDATE",
       orderUpdateMarksOnlyOrders:dirty.some(item=>item.reason==="order-trade-update"&&item.ordersDirty&&!item.positionDirty),
       unrelatedSymbolIgnored:dirty.filter(item=>item.reason==="order-trade-update").length===1,
       disconnectMarksBothForRecovery:dirty.some(item=>item.reason==="user-stream-disconnect"&&item.positionDirty&&item.ordersDirty&&item.immediate),
       disconnectSchedulesReconnect:reconnectWasScheduled,
       liveCoveragePublished:statuses.some(item=>item.streamStatus==="live"&&item.coverageSource==="USER_STREAM"),
       keepaliveScheduledBeforeExpiry:keepaliveWasScheduled,
-      listenKeyClosedOnStop:requests.some(item=>item.method==="DELETE")
+      listenKeyClosedOnStop:requests.some(item=>item.method==="DELETE"),
+      privateEndpointDiagnostics:stream.diagnostics().restEndpoint.endsWith("/fapi/v1/listenKey")&&stream.diagnostics().wsEndpoint.includes("/private/ws/{listenKey}")
     };
     return {passed:Object.values(cases).every(Boolean),cases};
   };

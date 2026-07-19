@@ -823,12 +823,10 @@
   function scheduleOpenPositionReconcile(detail){
     pendingOpenPositionChange = detail || null;
     clearTimeout(openPositionReconcileTimer);
-    openPositionReconcileTimer = setTimeout(() => {
-      openPositionReconcileTimer = null;
-      const next = pendingOpenPositionChange;
-      pendingOpenPositionChange = null;
-      reconcileOpenPositionRow(next);
-    },250);
+    openPositionReconcileTimer = null;
+    const next = pendingOpenPositionChange;
+    pendingOpenPositionChange = null;
+    reconcileOpenPositionRow(next);
   }
   function markBinanceRowNeedsReview(row,reason){
     if(!row) return;
@@ -2338,10 +2336,18 @@
   }
   async function signedPosition(){
     if(typeof hasKeys !== "function" || !hasKeys()) return null;
+    const sharedOwner=window.BT001_SHARED_POSITION;
+    const expected=sharedOwner&&typeof sharedOwner.captureExpectation==="function"?sharedOwner.captureExpectation():null;
     const key = apiKeyEl.value.trim();
     const sec = apiSecretEl.value.trim();
     const off = typeof timeOffset === "function" ? await timeOffset() : 0;
     const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
+    if(sharedOwner&&typeof sharedOwner.ingestRestRisk==="function"){
+      const sharedResult=sharedOwner.ingestRestRisk(risk,{source:"calculator-positionRisk",symbol:currentSymbol(),expected,observedAt:Date.now(),allowAdvance:true,ignoreStreamAuthority:!window.BINANCE_PRIVATE_STATE||window.BINANCE_PRIVATE_STATE.streamStatus!=="live"});
+      const shared=sharedResult&&sharedResult.snapshot&&sharedResult.snapshot.position;
+      if(shared&&shared.symbol===currentSymbol())return {side:shared.side,qty:shared.qty,entry:shared.avg,source:"sharedPositionFact",positionSide:shared.positionSide||null,revision:sharedResult.snapshot.revision};
+      if(sharedResult&&sharedResult.mismatch)return null;
+    }
     const row = (risk || []).find(r => r && r.symbol === currentSymbol() && Math.abs(Number(r.positionAmt)) > 1e-12);
     if(!row) return null;
     const qty = Math.abs(Number(row.positionAmt));

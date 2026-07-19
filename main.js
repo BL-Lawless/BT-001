@@ -1215,6 +1215,9 @@ async function refreshAccountBalance(opt={}){
 let openPositionLoading = false;
 let lastOpenPositionRetrievalSig = null;
 let lastOpenPositionRetrievalState = null;
+let positionVerificationRetryTimer = null;
+let openPositionReconstructionGeneration = -1;
+let openPositionReconstructionInFlight = -1;
 const BINANCE_PRIVATE_STATE = window.BINANCE_PRIVATE_STATE ||= {
   streamStatus:"disconnected",coverageSource:"REST",lastError:null,
   position:{stateChangedAt:0,verifiedAt:0,status:"unavailable"},
@@ -1250,33 +1253,41 @@ function openPositionRetrievalState(active){
   };
 }
 
-function maybeRefreshBalanceForPositionChange(nextSig,off,active){
-  const prevSig = lastOpenPositionRetrievalSig;
-  const previous = lastOpenPositionRetrievalState;
-  const current = openPositionRetrievalState(active);
-  lastOpenPositionRetrievalSig = nextSig;
-  lastOpenPositionRetrievalState = current;
-  if(prevSig === null) return null;
-  if(prevSig !== nextSig){
-    refreshAccountBalance({silent:true,off}).catch(e => console.warn("Balance refresh after position change failed",e));
-    return {
-      previous,
-      current,
-      sizeChanged:(Math.abs(Number(previous && previous.qty) || 0)).toFixed(8) !== (Math.abs(Number(current && current.qty) || 0)).toFixed(8),
-      sideChanged:String(previous && previous.side || "") !== String(current && current.side || ""),
-      averageEntryChanged:Number(previous && previous.avg || 0).toFixed(8) !== Number(current && current.avg || 0).toFixed(8),
-      opened:!previous && !!current,
-      closed:!!previous && !current
-    };
-  }
-  return null;
+function sharedPositionRiskRows(position){
+  if(!position)return [];
+  if(position.riskRow)return [{...position.riskRow,symbol:position.symbol,positionAmt:String(position.side==="SHORT"?-Math.abs(position.qty):Math.abs(position.qty)),entryPrice:String(position.avg),positionSide:position.positionSide||"BOTH"}];
+  return [{symbol:position.symbol,positionAmt:String(position.side==="SHORT"?-Math.abs(position.qty):Math.abs(position.qty)),entryPrice:String(position.avg),positionSide:position.positionSide||"BOTH"}];
 }
+
+const SHARED_POSITION_OWNER = window.createSharedPositionFactOwner({
+  getSymbol:()=>cfg().symbol,
+  onApply:payload=>{
+    const snapshot=payload.snapshot,current=payload.current,risk=payload.risk&&payload.risk.length?payload.risk:sharedPositionRiskRows(current);
+    applyOpenPositionRiskOnly(risk,snapshot.symbol);
+    lastOpenPositionRetrievalSig=snapshot.signature;
+    lastOpenPositionRetrievalState=current?openPositionRetrievalState({symbol:current.symbol,side:current.side,qty:current.qty,avg:current.avg}):null;
+    BINANCE_PRIVATE_STATE.position.stateChangedAt=snapshot.sharedUiAppliedAt;
+    BINANCE_PRIVATE_STATE.position.sharedUiAppliedAt=snapshot.sharedUiAppliedAt;
+    BINANCE_PRIVATE_STATE.position.streamRevision=snapshot.streamRevision;
+    BINANCE_PRIVATE_STATE.position.signature=snapshot.signature;
+    BINANCE_PRIVATE_STATE.position.coverageSource=snapshot.coverageSource;
+    updatePositionStrip(candles.length?candles[candles.length-1]:null);
+    updateTabTitle();
+    if(payload.previous)refreshAccountBalance({silent:true}).catch(error=>console.warn("Balance refresh after shared position change failed",error));
+  },
+  onPublish:detail=>{
+    BINANCE_PRIVATE_STATE.position.positionChangePublishedAt=detail.publishedAt;
+    publishOpenPositionChange(detail);
+  },
+  onDraw:detail=>scheduleAccountChartDraw(detail.closed?"position-closed":"position-changed")
+});
+window.BT001_SHARED_POSITION=SHARED_POSITION_OWNER;
 
 function publishOpenPositionChange(change){
   if(!change) return;
   try{
     window.dispatchEvent(new CustomEvent("v13:open-position-change",{
-      detail:{...change,at:Date.now(),source:"refreshOpenPosition"}
+      detail:{...change,at:Date.now(),source:change.source||"shared-position-owner"}
     }));
   }catch(e){
     console.warn("Open position change event failed",e);
@@ -1289,9 +1300,17 @@ if(typeof window !== "undefined" && !window.__v13OpenPositionTitleSyncBound){
   },false);
 }
 
+function schedulePositionVerificationRetry(attempt=0){
+  if(attempt>=3||positionVerificationRetryTimer!=null)return;
+  const delay=[200,500,1000][attempt]||1000;
+  positionVerificationRetryTimer=setTimeout(()=>{
+    positionVerificationRetryTimer=null;
+    refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true,verificationAttempt:attempt+1}).catch(()=>{});
+  },delay);
+}
+
 async function refreshOpenPosition(opt={}){
   const silent = !!opt.silent;
-  const render = opt.render !== false;
   const reconstructOnlyIfChanged = opt.reconstructOnlyIfChanged !== false;
   const key = apiKeyEl.value.trim();
   const sec = apiSecretEl.value.trim();
@@ -1305,50 +1324,59 @@ async function refreshOpenPosition(opt={}){
   openPositionLoading = true;
 
   try{
+    const expectedPosition=SHARED_POSITION_OWNER.captureExpectation();
     const off = opt.off != null ? opt.off : await timeOffset();
     BT001_PERFORMANCE_DIAGNOSTICS.privatePositionRestReads += 1;
     const risk = await getPositions(key,sec,off);
     const active = activePositionFromRisk(risk,cfg().symbol);
     const nextSig = openPositionRetrievalSig(active);
-    const hadBaseline = lastOpenPositionRetrievalSig !== null;
-    const changed = !hadBaseline || lastOpenPositionRetrievalSig !== nextSig;
     const verifiedAt = Date.now();
-    BINANCE_PRIVATE_STATE.position.verifiedAt = verifiedAt;
+    const verifyAgainstStream=BINANCE_PRIVATE_STATE.streamStatus==="live"&&opt.allowRestAdvance!==true;
+    const sharedResult=SHARED_POSITION_OWNER.ingestRestRisk(risk,{source:opt.source||"positionRisk",symbol:cfg().symbol,expected:expectedPosition,observedAt:verifiedAt,verifyAgainstStream,ignoreStreamAuthority:BINANCE_PRIVATE_STATE.streamStatus!=="live",allowAdvance:opt.allowRestAdvance===true});
+    if(sharedResult.mismatch){
+      BINANCE_PRIVATE_STATE.position.status="mismatch";
+      BINANCE_PRIVATE_STATE.position.restObservedSignature=sharedResult.snapshot.restObservedSignature;
+      BINANCE_PRIVATE_STATE.position.restMismatchCount=sharedResult.snapshot.restMismatchCount;
+      BINANCE_PRIVATE_STATE.position.lastRestMismatchAt=sharedResult.snapshot.lastRestMismatchAt;
+      schedulePositionVerificationRetry(Number(opt.verificationAttempt)||0);
+      return {risk,active,off,changed:false,reconstructed:false,mismatch:true,positionSnapshot:sharedResult.snapshot.position,verifiedAt};
+    }
+    const changed=!!sharedResult.changed;
+    BINANCE_PRIVATE_STATE.position.verifiedAt = sharedResult.snapshot.verifiedAt||verifiedAt;
     BINANCE_PRIVATE_STATE.position.status = "ok";
-    BINANCE_PRIVATE_STATE.position.coverageSource = BINANCE_PRIVATE_STATE.streamStatus === "live" ? "USER_STREAM" : "REST";
+    BINANCE_PRIVATE_STATE.position.coverageSource = sharedResult.snapshot.coverageSource;
+    BINANCE_PRIVATE_STATE.position.restObservedSignature=sharedResult.snapshot.restObservedSignature;
+    BINANCE_PRIVATE_STATE.position.restMismatchCount=sharedResult.snapshot.restMismatchCount;
+    BINANCE_PRIVATE_STATE.position.lastRestMismatchAt=sharedResult.snapshot.lastRestMismatchAt;
+    const reconstructionGeneration=Number(sharedResult.snapshot.generation)||0;
+    const reconstructionNeeded=!!active&&openPositionReconstructionGeneration!==reconstructionGeneration&&openPositionReconstructionInFlight!==reconstructionGeneration;
 
-    if(!changed && reconstructOnlyIfChanged){
-      maybeRefreshBalanceForPositionChange(nextSig,off,active);
+    if(!changed && reconstructOnlyIfChanged&&!reconstructionNeeded){
       return {risk,active,off,changed:false,reconstructed:false,positionSnapshot:openPositionRetrievalState(active),verifiedAt};
     }
 
     if(!active){
-      clearOpenPositionOwner();
       clearActiveParentCache(cfg().symbol);
-      const positionChange = maybeRefreshBalanceForPositionChange("",off,null);
-      if(changed) BINANCE_PRIVATE_STATE.position.stateChangedAt = verifiedAt;
-      updatePositionStrip(candles.length ? candles[candles.length-1] : null);
-      updateTabTitle();
-      publishOpenPositionChange(positionChange);
-      if(changed && render) scheduleAccountChartDraw("position-closed");
+      openPositionReconstructionGeneration=reconstructionGeneration;
       return {risk,active:null,off,changed,reconstructed:true,positionSnapshot:null,verifiedAt};
     }
 
-    applyOpenPositionRiskOnly(risk,cfg().symbol);
-    const loaded = await loadActiveParentReconstruction(key,sec,off,active);
-    if(loaded && loaded.rec && reconstructionOpenMatchesPosition(loaded.rec,active)){
-      applyOpenPositionReconstruction(loaded.rec,risk,cfg().symbol);
-    }else{
-      applyOpenPositionRiskOnly(risk,cfg().symbol);
+    const reconstructionGuard=SHARED_POSITION_OWNER.guard();
+    if(reconstructionNeeded){
+      openPositionReconstructionInFlight=reconstructionGeneration;
+      loadActiveParentReconstruction(key,sec,off,active,reconstructionGuard).then(loaded=>{
+        if(SHARED_POSITION_OWNER.isGuardCurrent(reconstructionGuard)){
+          openPositionReconstructionGeneration=reconstructionGeneration;
+          if(loaded&&loaded.rec&&reconstructionOpenMatchesPosition(loaded.rec,active)){
+            applyOpenPositionReconstruction(loaded.rec,risk,cfg().symbol);
+            scheduleAccountChartDraw("position-reconstruction");
+          }
+        }
+      }).catch(error=>console.warn("Background open-position reconstruction failed",error)).finally(()=>{
+        if(openPositionReconstructionInFlight===reconstructionGeneration)openPositionReconstructionInFlight=-1;
+      });
     }
-
-    const positionChange = maybeRefreshBalanceForPositionChange(nextSig,off,active);
-    if(changed) BINANCE_PRIVATE_STATE.position.stateChangedAt = verifiedAt;
-    updatePositionStrip(candles.length ? candles[candles.length-1] : null);
-    updateTabTitle();
-    publishOpenPositionChange(positionChange);
-    if(changed && render) scheduleAccountChartDraw("position-changed");
-    return {risk,active,loaded,off,changed,reconstructed:true,positionSnapshot:openPositionRetrievalState(active),verifiedAt};
+    return {risk,active,off,changed,reconstructed:false,reconstructionPending:reconstructionNeeded,positionSnapshot:openPositionRetrievalState(active),verifiedAt};
   }catch(e){
     BINANCE_PRIVATE_STATE.position.status = "error";
     BINANCE_PRIVATE_STATE.lastError = e && e.message ? e.message : String(e);
@@ -5116,12 +5144,14 @@ function applyOpenPositionRiskOnly(risk,symbol){
   syncLegacyTradeGlobalsFromOwners();
 }
 
-async function loadActiveParentReconstruction(key,sec,off,active){
+async function loadActiveParentReconstruction(key,sec,off,active,guard=null){
+  const guardCurrent=()=>!guard||SHARED_POSITION_OWNER.isGuardCurrent(guard);
   const now = Date.now() + off;
   const symbol = active && active.symbol || cfg().symbol;
   const cache = readActiveParentCache(symbol);
   if(cache && cache.side === active.side && Number(cache.startTime) > 0){
     const rows = await getUserTradesRange(key,sec,off,Math.max(0,Number(cache.startTime) - 1000),now);
+    if(!guardCurrent())return {rows:[],rec:null,discarded:true,reason:"position-generation-changed"};
     const rec = reconstruct(rows,symbol);
     if(reconstructionOpenMatchesPosition(rec,active)){
       return {rows,rec,fromCache:true,startTime:Number(cache.startTime)};
@@ -5135,6 +5165,7 @@ async function loadActiveParentReconstruction(key,sec,off,active){
   while(end > maxStart){
     const start = Math.max(maxStart,end - TRADE_CHUNK_MS + 1);
     const rows = await getUserTradesRange(key,sec,off,start,end);
+    if(!guardCurrent())return {rows:all,rec:null,discarded:true,reason:"position-generation-changed"};
     for(let i = rows.length - 1; i >= 0; i--){
       const row = rows[i];
       const k = String(row.id ?? "") + "_" + String(row.orderId ?? "") + "_" + String(row.time ?? "");
@@ -5153,6 +5184,7 @@ async function loadActiveParentReconstruction(key,sec,off,active){
       const startTime = Number.isFinite(startSec) && startSec !== Number.MAX_SAFE_INTEGER
         ? startSec * 1000
         : (all[0] ? Number(all[0].time) : start);
+      if(!guardCurrent())return {rows:all,rec:null,discarded:true,reason:"position-generation-changed"};
       writeActiveParentCache(symbol,active,startTime);
       return {rows:all,rec,fromCache:false,startTime};
     }
@@ -7168,7 +7200,7 @@ function handleReloadClick(){
 
 function handleMarketChange(){
   clearTrades();
-  clearOpenPositionOwner();
+  SHARED_POSITION_OWNER.ingestRestRisk([],{source:"symbol-change",symbol:cfg().symbol,expected:SHARED_POSITION_OWNER.captureExpectation(),ignoreStreamAuthority:true});
   lastOpenPositionRetrievalSig = null;
   lastOpenPositionRetrievalState = null;
   loadChart();
@@ -15500,19 +15532,10 @@ startTradeAuto();
     },{passive:false,capture:true});
   }
 
-  function positionSig21(risk){
-    const sym = currentSymbol21();
-    return (Array.isArray(risk) ? risk : [])
-      .filter(r => r && r.symbol === sym && Math.abs(n21(r.positionAmt)) > 1e-12)
-      .map(r => {
-        const amt = n21(r.positionAmt);
-        const side = amt < 0 || String(r.positionSide || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-        const size = Math.abs(amt).toFixed(8);
-        const avg = n21(r.entryPrice).toFixed(8);
-        return [r.symbol,side,size,avg].join(":");
-      })
-      .sort()
-      .join("|");
+  function sharedPositionSig21(){
+    const snapshot=SHARED_POSITION_OWNER.snapshot();
+    const position=snapshot&&snapshot.position;
+    return position?[position.symbol,position.side,Number(position.qty).toFixed(8),Number(position.avg||0).toFixed(8)].join(":"):"";
   }
   function activePosition21(risk){
     const sym = currentSymbol21();
@@ -16020,7 +16043,7 @@ startTradeAuto();
     catch(_e){ return "https://fapi.binance.com"; }
   }
   function selectedPrivateWsBase21(){
-    return /testnet/i.test(selectedRestBase21()) ? "wss://stream.binancefuture.com/ws" : "wss://fstream.binance.com/ws";
+    return /testnet/i.test(selectedRestBase21()) ? "wss://stream.binancefuture.com/ws" : "wss://fstream.binance.com/private/ws";
   }
   function privateSnapshot21(){
     return {
@@ -16032,7 +16055,8 @@ startTradeAuto();
       reconciliationInFlight:!!privateReconcilePromise21,
       safetyCadenceMs:PRIVATE_SAFETY_MS21,
       debounceMs:PRIVATE_DEBOUNCE_MS21,
-      userStream:privateUserStream21 && privateUserStream21.diagnostics ? privateUserStream21.diagnostics() : {streamStatus:"unavailable"}
+      userStream:privateUserStream21 && privateUserStream21.diagnostics ? privateUserStream21.diagnostics() : {streamStatus:"unavailable"},
+      sharedPosition:SHARED_POSITION_OWNER.snapshot()
     };
   }
   function schedulePrivateReconcile21(delay=PRIVATE_DEBOUNCE_MS21){
@@ -16077,7 +16101,7 @@ startTradeAuto();
         positionResult=await window.refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true});
         if(positionResult){
           off=positionResult.off;
-          lastSig21=positionSig21(positionResult.risk || []);
+          lastSig21=sharedPositionSig21();
         }else{
           BINANCE_PRIVATE_STATE.position.status="error";
         }
@@ -16124,6 +16148,17 @@ startTradeAuto();
       getSymbol:currentSymbol21,
       getRestBase:selectedRestBase21,
       getWsBase:selectedPrivateWsBase21,
+      onPositionFact:payload=>{
+        const result=SHARED_POSITION_OWNER.ingestStreamAccountUpdate(payload.event,{symbol:payload.symbol,eventTime:payload.eventTime,receivedAt:payload.receivedAt});
+        const snapshot=result.snapshot||SHARED_POSITION_OWNER.snapshot();
+        BINANCE_PRIVATE_STATE.position.lastAccountUpdateEventTime=snapshot.lastAccountUpdateEventTime;
+        BINANCE_PRIVATE_STATE.position.lastAccountUpdateReceiveTime=snapshot.lastAccountUpdateReceiveTime;
+        BINANCE_PRIVATE_STATE.position.sharedUiAppliedAt=snapshot.sharedUiAppliedAt;
+        BINANCE_PRIVATE_STATE.position.streamRevision=snapshot.streamRevision;
+        BINANCE_PRIVATE_STATE.position.signature=snapshot.signature;
+        lastSig21=sharedPositionSig21();
+        lastBinanceStateSig21=binanceStateSig21(lastSig21);
+      },
       onDirty:event => markPrivateDirty21(event,event.reason,{immediate:event.immediate===true}),
       onStatus:applyPrivateStreamStatus21,
       onAuthoritativeSeed:event => markPrivateDirty21({positionDirty:true,ordersDirty:true},event.reason,{immediate:true})
