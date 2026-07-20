@@ -26,6 +26,16 @@
     const q=n(qty),g=n(guide),r=rates||feeRates();if(!(q>0)||!(g>0))return null;
     return prices({direction,entryPrice:g,qty:q,entryCommission:g*q*r.taker,target,stop,makerRate:r.maker,takerRate:r.taker,tickSize:n(filters.tickSize)||0.01});
   }
+  function preview({direction,guide,qty,target,stop,rates,filters={}}){
+    const g=n(guide),q=n(qty),t=n(target),s=n(stop),known=String(direction||"").toUpperCase();
+    if(!(g>0))return {available:false,reason:"WAITING FOR MARKET DATA"};
+    if(!(q>0)||!(t>0)||!(s>0))return {available:false,reason:"ENTER TRADE VALUES"};
+    try{
+      if(["LONG","SHORT"].includes(known))return {...estimate({direction:known,guide:g,qty:q,target:t,stop:s,rates,filters}),available:true,direction:known,conservative:false};
+      const long=estimate({direction:"LONG",guide:g,qty:q,target:t,stop:s,rates,filters}),short=estimate({direction:"SHORT",guide:g,qty:q,target:t,stop:s,rates,filters});
+      return {available:true,direction:"ANY",conservative:true,tpDelta:Math.max(long.tpDelta,short.tpDelta),slDelta:Math.max(long.slDelta,short.slDelta),tpFee:Math.max(long.tpFee,short.tpFee),slFee:Math.max(long.slFee,short.slFee)};
+    }catch(_e){return {available:false,reason:"OUTCOME UNAVAILABLE"};}
+  }
   function normalizeLot(qty,filters={}){return roundStep(n(qty)||0,n(filters.stepSize)||0.001,"down");}
   function formatNumeric(value,decimals){const number=n(value);return (number==null?0:number).toFixed(decimals);}
   function stepNumeric(value,step,direction,decimals){const current=n(value)||0,next=Math.max(0,roundStep(current+(direction<0?-step:step),step));return formatNumeric(next,decimals);}
@@ -41,8 +51,8 @@
     return {ok:errors.length===0,errors,normalizedLot:normalized};
   }
   function formatOutcome(model){
-    const integer=value=>Number.isFinite(Number(value))?Math.round(Number(value)).toLocaleString("en-US"):"-",money=value=>Number.isFinite(Number(value))?`$${Number(value).toFixed(2)}`:"-";
-    return {guide:Number.isFinite(Number(model&&model.guide))?Number(model.guide).toLocaleString("en-US",{maximumFractionDigits:2}):"-",tpDelta:integer(model&&model.tpDelta),slDelta:integer(model&&model.slDelta),tpFees:money(model&&model.tpFee),slFees:money(model&&model.slFee)};
+    const valid=value=>value!==null&&value!==""&&Number.isFinite(Number(value)),integer=value=>valid(value)?Math.round(Number(value)).toLocaleString("en-US"):"-",money=value=>valid(value)?`$${Number(value).toFixed(2)}`:"-";
+    return {guide:valid(model&&model.guide)?Number(model.guide).toLocaleString("en-US",{maximumFractionDigits:2}):"-",tpDelta:integer(model&&model.tpDelta),slDelta:integer(model&&model.slDelta),tpFees:money(model&&model.tpFee),slFees:money(model&&model.slFee)};
   }
-  root.calculations=Object.freeze({n,roundStep,feeRates,prices,estimate,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
+  root.calculations=Object.freeze({n,roundStep,feeRates,prices,estimate,preview,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
 })();
