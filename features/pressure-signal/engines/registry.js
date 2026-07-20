@@ -12,7 +12,7 @@
   function assert(condition,message){
     if(!condition) throw new TypeError(message);
   }
-  function normalizedId(value){ return String(value || "").trim().toUpperCase(); }
+  function normalizedId(value){ const id=String(value || "").trim().toUpperCase();return id==="SIGNAL-C"?"C":id; }
   function stateCounts(value,seen=new Set()){
     if(!value || typeof value !== "object" || seen.has(value)) return {containers:0,entries:0};
     seen.add(value);
@@ -92,7 +92,7 @@
     function isAvailable(id){ const engine=get(id);return !!engine && engine.status==="available"; }
     function describe(engine){
       if(!engine) return null;
-      return {id:engine.id,displayName:engine.displayName,version:engine.version,status:engine.status,available:engine.status==="available"};
+      return {id:engine.id,signalId:engine.signalId||engine.id,displayName:engine.displayName,version:engine.version,status:engine.status,available:engine.status==="available"};
     }
     function list(){ return VALID_IDS.map(id => describe(engines.get(id)) || {id,displayName:null,version:null,status:"unregistered",available:false}); }
     function activate(id,reason="selection-change"){
@@ -117,13 +117,13 @@
       const engine=get(activeId);
       if(!engine || engine.status!=="available") throw new Error("No available Signal engine is active");
       const directionMode=["AUTO","LONG","SHORT"].includes(String(context.directionMode||"AUTO").toUpperCase())?String(context.directionMode||"AUTO").toUpperCase():"AUTO";
-      const token={id:++evaluationSequence,engineId:engine.id,engineVersion:engine.version,activationGeneration,publicationGeneration:Number(context.publicationGeneration)||0,directionMode};
+      const token={id:++evaluationSequence,engineId:engine.id,signalId:engine.signalId||engine.id,engineVersion:engine.version,activationGeneration,publicationGeneration:Number(context.publicationGeneration)||0,directionMode};
       const signal=activeAbort && activeAbort.signal;
       evaluationCounts.set(engine.id,(evaluationCounts.get(engine.id)||0)+1);reasons.set(engine.id,context.reason || "evaluation");errors.delete(engine.id);
       runningTokens.add(token);
       const settle=output => {
         const normalized=validateOutput(output);
-        return {...normalized,engineId:engine.id,engineVersion:engine.version,publicationGeneration:token.publicationGeneration,directionMode,__engineToken:token};
+        return {...normalized,engineId:engine.id,signalId:token.signalId,engineVersion:engine.version,publicationGeneration:token.publicationGeneration,directionMode,__engineToken:token};
       };
       const fail=error => { errors.set(engine.id,error && error.stack || String(error));throw error; };
       try{
