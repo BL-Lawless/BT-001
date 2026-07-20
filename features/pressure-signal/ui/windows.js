@@ -325,8 +325,12 @@
       const controlRect=control.getBoundingClientRect();
       const viewport=tooltipViewport();
       const priorScrollTop=tip.scrollTop;
-      const top=controlRect.bottom+TOOLTIP_VERTICAL_GAP;
-      const availableHeight=Math.max(1,viewport.height-top-TOOLTIP_BOTTOM_SAFETY);
+      const belowTop=controlRect.bottom+TOOLTIP_VERTICAL_GAP;
+      const belowHeight=Math.max(1,viewport.height-belowTop-TOOLTIP_BOTTOM_SAFETY);
+      const aboveHeight=Math.max(1,controlRect.top-TOOLTIP_VERTICAL_GAP-TOOLTIP_VIEWPORT_MARGIN);
+      const placeAbove=kind==="signal"&&aboveHeight>belowHeight;
+      const top=placeAbove?TOOLTIP_VIEWPORT_MARGIN:belowTop;
+      const availableHeight=placeAbove?aboveHeight:belowHeight;
       const usableWidth=Math.max(1,viewport.width-TOOLTIP_VIEWPORT_MARGIN*2);
       const blocks=Array.from(flow.querySelectorAll(".pressure-tooltip-block"));
       if(!blocks.length) return;
@@ -385,7 +389,8 @@
       tip.style.width=`${chosen.outerWidth}px`;
       tip.style.maxWidth="none";
       tip.style.maxHeight=`${availableHeight}px`;
-      tip.style.overflowY=scrolling ? "auto" : "hidden";
+      tip.style.overflowY=kind==="signal" ? "hidden" : scrolling ? "auto" : "hidden";
+      tip.dataset.placement=placeAbove?"above":"below";
       tip.dataset.columns=String(chosen.columns);
       tip.dataset.maxColumns=String(maxColumns);
       tip.dataset.scrolling=scrolling ? "true" : "false";
@@ -403,6 +408,7 @@
       else left=rightSpace>=leftSpace ? controlRect.left : controlRect.right-width;
       left=Math.max(viewportLeft,Math.min(viewportRight-width,left));
       tip.style.left=`${left}px`;
+      if(placeAbove)tip.style.top=`${Math.max(TOOLTIP_VIEWPORT_MARGIN,controlRect.top-TOOLTIP_VERTICAL_GAP-tip.getBoundingClientRect().height)}px`;
       tip.classList.remove("is-measuring");
       if(scrolling) tip.scrollTop=Math.min(priorScrollTop,Math.max(0,tip.scrollHeight-tip.clientHeight));
     }
@@ -410,7 +416,8 @@
     function createToolbarTooltip(id,label,kind){
       const tip = document.createElement("div");
       tip.id = id;
-      tip.className = "pressure-toolbar-tooltip";
+      tip.className = `pressure-toolbar-tooltip is-${kind}-tooltip`;
+      tip.dataset.tooltipKind=kind;
       tip.setAttribute("role","tooltip");
       tip.setAttribute("aria-label",label);
       tip.setAttribute("aria-hidden","true");
@@ -418,16 +425,18 @@
       flow.className="pressure-tooltip-flow";
       tip.appendChild(flow);
       document.body.appendChild(tip);
-      tip.addEventListener("pointerenter",() => {
-        const hover = state.tooltipHover[kind];
-        hover.tooltipHovered = true;
-        clearTooltipBridge(kind);
-      });
-      tip.addEventListener("pointerleave",() => {
-        state.tooltipHover[kind].tooltipHovered = false;
-        scheduleTooltipBridgeHide(kind);
-      });
-      tip.addEventListener("wheel",event => event.stopPropagation(),{passive:true});
+      if(kind==="position"){
+        tip.addEventListener("pointerenter",() => {
+          const hover = state.tooltipHover[kind];
+          hover.tooltipHovered = true;
+          clearTooltipBridge(kind);
+        });
+        tip.addEventListener("pointerleave",() => {
+          state.tooltipHover[kind].tooltipHovered = false;
+          scheduleTooltipBridgeHide(kind);
+        });
+        tip.addEventListener("wheel",event => event.stopPropagation(),{passive:true});
+      }
       return tip;
     }
     function ensureToolbarTooltip(kind){
@@ -489,13 +498,6 @@
     function ensureSignalTooltipText(){
       if(state.signalTooltip && acceptSignalPayload({publication:state.signalTooltipPublication},"tooltip")) return state.signalTooltip;
       if(state.signalTooltip){ state.signalConsistency.stalePayloadDiscarded+=1;state.signalTooltip="";state.signalTooltipPublication=null; }
-      let payload=null;
-      try{ payload=typeof state.signalTooltipFactory === "function" ? timed("signal.tooltip-content",state.signalTooltipFactory,state.signalTooltipFingerprint) : null; }catch(_error){ payload=null; }
-      if(payload && typeof payload.text==="string" && acceptSignalPayload(payload,"tooltip")){
-        state.signalTooltip=payload.text;
-        state.signalTooltipPublication=payload.publication;
-        return state.signalTooltip;
-      }
       state.signalConsistency.fallbackPrevented+=1;
       state.signalTooltipPublication=state.displayedSignal;
       state.signalTooltip="Signal details unavailable";
@@ -525,7 +527,7 @@
       return document.getElementById(kind === "signal" ? "pressureSignalEntry" : "pressureSignalExit");
     }
     function toolbarControlAvailable(control){
-      if(!control || !control.isConnected || control.hidden) return false;
+      if(!control || !control.isConnected || control.hidden || control.disabled) return false;
       const style = getComputedStyle(control);
       if(style.display === "none" || style.visibility === "hidden") return false;
       const rect = control.getBoundingClientRect();
@@ -593,17 +595,23 @@
       if(state[flag]) return;
       state[flag] = true;
       control.setAttribute("aria-describedby",kind === "signal" ? "pressureSignalToolbarTip" : "pressurePositionToolbarTip");
-      listen(control,"pointerenter",() => {
-        state.tooltipHover[kind].buttonHovered = true;
-        clearTooltipBridge(kind);
-        showToolbarTooltip(kind);
-      });
-      listen(control,"pointerleave",() => {
-        state.tooltipHover[kind].buttonHovered = false;
-        scheduleTooltipBridgeHide(kind);
-      });
-      listen(control,"blur",() => hideToolbarTooltip(kind));
-      listen(control,"pointerdown",() => hideToolbarTooltip(kind));
+      if(kind==="signal"){
+        build.bindSignalTooltipLifecycle({control,listen,show:()=>{state.tooltipHover.signal.buttonHovered=true;showToolbarTooltip("signal");},hide:()=>hideToolbarTooltip("signal")});
+      }else{
+        listen(control,"pointerenter",() => {
+          state.tooltipHover[kind].buttonHovered = true;
+          clearTooltipBridge(kind);
+          showToolbarTooltip(kind);
+        });
+        listen(control,"pointerleave",() => {
+          state.tooltipHover[kind].buttonHovered = false;
+          scheduleTooltipBridgeHide(kind);
+        });
+      }
+      if(kind!=="signal"){
+        listen(control,"blur",() => hideToolbarTooltip(kind));
+        listen(control,"pointerdown",() => hideToolbarTooltip(kind));
+      }
     }
     function profileSourceText(management){
       const source = String(management && management.profileSource || "").toLowerCase();
@@ -1006,7 +1014,7 @@
             });
             scheduleTooltipRelayout();
           });
-          observer.observe(topbar,{subtree:true,childList:true,attributes:true,attributeFilter:["class","style","hidden","aria-hidden"]});
+          observer.observe(topbar,{subtree:true,childList:true,attributes:true,attributeFilter:["class","style","hidden","disabled","aria-hidden"]});
           state.mutationObservers.push(observer);
         }
       }

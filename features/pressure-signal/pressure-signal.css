@@ -160,6 +160,12 @@
   display:block;
   pointer-events:auto;
 }
+.pressure-toolbar-tooltip.is-signal-tooltip,
+.pressure-toolbar-tooltip.is-signal-tooltip.is-open{
+  pointer-events:none;
+  font-size:11px;
+  line-height:1.35;
+}
 .pressure-toolbar-tooltip.is-measuring{visibility:hidden}
 .pressure-tooltip-flow{
   width:100%;

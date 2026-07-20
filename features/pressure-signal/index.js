@@ -5,7 +5,7 @@
     if(window.PRESSURE_SIGNAL && typeof window.PRESSURE_SIGNAL.destroy === "function") window.PRESSURE_SIGNAL.destroy();
   }catch(_e){}
   const build = window.__PRESSURE_SIGNAL_FEATURE_BUILD__ || {};
-  if(!build.config || !build.reporting || !build.createTargetEngine || !build.createPositionEngine || !build.createActionLifecycle || !build.createWindowSystem || typeof window.createSignalEngineRegistry!=="function" || typeof window.createSignalEngineA!=="function" || typeof window.createSignalEngineSelector!=="function"){
+  if(!build.config || !build.reporting || !build.createTargetEngine || !build.createPositionEngine || !build.createActionLifecycle || !build.createWindowSystem || !build.createSignalDiagnosticsTooltip || typeof window.createSignalEngineRegistry!=="function" || typeof window.createSignalEngineA!=="function" || typeof window.createSignalEngineSelector!=="function"){
     throw new Error("Pressure Signal dependencies are not loaded");
   }
   const featureConfig = build.config;
@@ -4422,13 +4422,13 @@
       `Flow effectiveness: ${JSON.stringify(comparison.flowEffectiveness||{})}`,`Chase distance: ${comparison.chaseDistanceAtr??"Unavailable"} ATR`,`Remaining reward/risk: ${comparison.remainingRewardRisk??"Unavailable"}`,`Final state reason: ${comparison.finalStateReason||output.reasons[0]||"Unavailable"}`
     ].join("\n");
     const fallbackReport=()=>({summary:displayedSignalHeader37(displayedSignal).join("\n"),analysis:[...output.reasons,...output.exclusions,"",...(output.detailLines||[])].join("\n")||"No additional engine analysis.",diagnostics:[diagnosticText(),...(output.detailLines||[])].join("\n"),publication:displayedSignalMeta37(displayedSignal)});
-    const fallbackTooltip=()=>({text:[displayedSignal.definition,"",`Direction mode: ${displayedSignal.mode}`,`Evaluated direction: ${displayedSignal.evaluatedDirection||displayedSignal.direction}`,displayedSignal.authoritativePhase?`Authoritative 15m phase: ${displayedSignal.authoritativePhase}`:null,`Direction: ${displayedSignal.direction}`,`Bias confidence: ${displayedSignal.confidenceText}`,`State: ${displayedSignal.visibleState}`,`Setup identity: ${displayedSignal.setupIdentity||"None"}`,`Setup quality: ${displayedSignal.setupQuality||"UNAVAILABLE"}`,`Trigger quality: ${displayedSignal.triggerQuality||"UNAVAILABLE"}`,`Current entry quality: ${displayedSignal.currentEntryQuality||"UNAVAILABLE"}`,`Entry: ${displayedSignal.entryVerdict}`,`Reason: ${output.reasons[0]||"Unavailable"}`,...(output.detailLines||[]),`Publication generation: ${generation}`,"",`Engine: Signal ${output.engineId} · ${output.engineVersion}`].filter(value=>value!=null).join("\n"),publication:displayedSignalMeta37(displayedSignal)});
+    const tooltipPayload=withReportSnapshot(()=>({text:presentation.signal?signalToolbarTooltip37(presentationSignal,presentationEntryQuality,thesis,displayedSignal):build.createSignalDiagnosticsTooltip(output,displayedSignal,horizonLabel37(state.horizon)),publication:displayedSignalMeta37(displayedSignal)}))();
     const publication={
       generation,contextKey,publishedAt,refreshState,sections:{signalEvidence:"READY"},displayedSignal,engineId:output.engineId,signalId:output.signalId||output.engineId,engineVersion:output.engineVersion,directionMode:displayedSignal.mode,publicationGeneration:generation,
       __reportSnapshot:reportSnapshot,signal,decision:displayedSignal.decision,normalizedOutput:output,signalSummaryVariants:displayedSignal.summaryVariants,entryTone:displayedSignal.entryTone,
       signalReport:null,signalReportFactory:withReportSnapshot(presentation.signal?()=>signalDetailsReport37(presentationSignal,thesis,presentationEntryQuality,displayedSignal):fallbackReport),
       snapshot:publicationSnapshot37(reportSnapshot),horizonLabel:horizonLabel37(state.horizon),signalHorizonId:state.horizon,
-      signalTooltip:"",signalTooltipFactory:withReportSnapshot(presentation.signal?()=>({text:signalToolbarTooltip37(presentationSignal,presentationEntryQuality,thesis,displayedSignal),publication:displayedSignalMeta37(displayedSignal)}):fallbackTooltip),
+      signalTooltip:tooltipPayload.text,signalTooltipPublication:tooltipPayload.publication,signalTooltipFactory:null,
       publicationFingerprint,signalReportFingerprint:publicationFingerprint,signalTooltipFingerprint:publicationFingerprint
     };
     publishSignalPresentation37(publication);return publication;
@@ -4648,8 +4648,7 @@
     const publication=state.lastPublishedSnapshot,displayed=publication&&publication.displayedSignal,feed=signalFeed37().diagnostics();
     if(!publication||!displayed) return null;
     const report=ensurePublicationSignalReport37(publication);
-    let tooltip="";
-    try{const payload=typeof publication.signalTooltipFactory==="function"?publication.signalTooltipFactory():null;tooltip=payload&&payload.text||"";}catch(_e){}
+    const tooltip=publication.signalTooltip||"";
     const revisions={};Object.keys(feed.buffers||{}).sort().forEach(tf=>{const buffer=feed.buffers[tf];revisions[tf]={depth:buffer.depth,closedRevision:buffer.closedRevision,formingRevision:buffer.formingRevision};});
     return {
       direction:displayed.direction,confidence:displayed.confidence,entryState:displayed.decision&&displayed.decision.state||null,
