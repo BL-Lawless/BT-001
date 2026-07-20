@@ -1,0 +1,168 @@
+(() => {
+  "use strict";
+  const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config,calc=root.calculations;
+  if(!C||!calc)throw new Error("SCALP dependencies must load before state machine");
+  const n=calc.n,upper=value=>String(value||"").toUpperCase(),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
+  function hash(text){let h=2166136261;for(const ch of String(text)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return (h>>>0).toString(36).toUpperCase();}
+  function clientId(kind,eventId,generation){return `${C.order.namespace}-${kind}-${generation}-${hash(eventId)}`.slice(0,36);}
+  function filterValue(settings,type,key){const row=Array.isArray(settings&&settings.filters)?settings.filters.find(item=>item&&item.filterType===type):null;return n(row&&row[key]);}
+  function normalizedFilters(settings={}){const lotStep=n(settings.stepSize)||filterValue(settings,"LOT_SIZE","stepSize")||0.001,marketStep=filterValue(settings,"MARKET_LOT_SIZE","stepSize")||lotStep,lotMin=filterValue(settings,"LOT_SIZE","minQty")||0,marketMin=filterValue(settings,"MARKET_LOT_SIZE","minQty")||0,maximums=[filterValue(settings,"LOT_SIZE","maxQty"),filterValue(settings,"MARKET_LOT_SIZE","maxQty")].filter(value=>value>0);return {...settings,tickSize:n(settings.tickSize)||filterValue(settings,"PRICE_FILTER","tickSize")||0.01,stepSize:Math.max(lotStep,marketStep),lotStepSize:lotStep,marketStepSize:marketStep,minQty:Math.max(lotMin,marketMin),maxQty:maximums.length?Math.min(...maximums):null,minNotional:filterValue(settings,"MIN_NOTIONAL","notional")||filterValue(settings,"NOTIONAL","minNotional")||0};}
+  function orderClient(row){return String(row&&(row.clientOrderId??row.origClientOrderId??row.clientAlgoId??row.c??row.ca)||"");}
+  function isOwned(row){return orderClient(row).startsWith(C.order.namespace+"-");}
+  function snapshotOrders(value){const snap=value&&value.orders&&Array.isArray(value.orders)?value:value&&value.snapshot||value||{};return [...(Array.isArray(snap.orders)?snap.orders:[]),...(Array.isArray(snap.algoOrders)?snap.algoOrders:[])];}
+  class ScalpEngine extends EventTarget{
+    constructor(options={}){
+      super();this.gateway=options.gateway||window.BT001_BINANCE_TRADING;this.detector=options.detector||new root.Detector();this.now=options.now||Date.now;this.storage=options.storage||localStorage;
+      this.state="OFF";this.status="Idle";this.generation=0;this.config=this.loadConfig();this.guide=null;this.rates=calc.feeRates();this.filters=null;this.latestBySource=new Map();this.baseline=new Set();this.seen=new Set();this.armedAt=0;this.session=null;this.externalPosition=null;this.executionLock=null;this.exitLock=null;this.rearmAfterFlat=false;this.cooloffTimer=null;this.unsubHub=null;this.destroyed=false;this.diagnostics=[];this.fillIds=new Set();this.lastPrivateStatus=null;this.reconnectBusy=false;
+    }
+    loadConfig(){let saved={};try{saved=JSON.parse(this.storage.getItem(C.configKey)||"{}");}catch(_e){}return {...C.defaults,...saved,direction:C.directions.includes(saved.direction)?saved.direction:C.defaults.direction,source:C.sources.includes(saved.source)?saved.source:C.defaults.source,entryType:C.entryTypes.includes(saved.entryType)?saved.entryType:C.defaults.entryType,mode:C.modes.includes(saved.mode)?saved.mode:C.defaults.mode};}
+    saveConfig(){try{this.storage.setItem(C.configKey,JSON.stringify(this.config));}catch(_e){}}
+    emit(reason="update"){const detail=this.snapshot();this.dispatchEvent(new CustomEvent("change",{detail:{...detail,reason}}));try{window.dispatchEvent(new CustomEvent("bt001:scalp-state",{detail:{...detail,reason}}));}catch(_e){}}
+    snapshot(){return {state:this.state,status:this.status,generation:this.generation,config:{...this.config},guide:this.guide,rates:{...this.rates},filters:this.filters?{...this.filters}:null,latest:this.latestBySource.get(this.config.source)||null,detections:this.detectionRows(),session:this.session?clone(this.session):null,externalPosition:this.externalPosition?clone(this.externalPosition):null,armBlockedByPosition:!!this.externalPosition&&!this.session,active:this.isActive(),armed:this.state==="ARMED",locked:this.configurationLocked()};}
+    log(action,data={}){this.diagnostics.push({at:this.now(),state:this.state,action,...data});if(this.diagnostics.length>120)this.diagnostics.shift();}
+    transition(next,reason){if(next===this.state){this.status=reason||this.status;this.emit(reason);return;}const allowed=C.transitions[this.state]||[];if(!allowed.includes(next))throw new Error(`Invalid SCALP transition ${this.state} -> ${next}`);this.log("transition",{from:this.state,to:next,reason});this.state=next;this.status=reason||next;this.emit(reason);}
+    isActive(){return !["OFF","ARMED","COOL_OFF","ERROR","POSITION_MISMATCH"].includes(this.state);}
+    configurationLocked(){return this.isActive()||!!this.session;}
+    position(){const snap=this.gateway&&this.gateway.position&&this.gateway.position();return snap&&Object.prototype.hasOwnProperty.call(snap,"position")?snap.position:snap;}
+    externalPositionText(position){return position&&["LONG","SHORT"].includes(upper(position.side))?`EXISTING ${upper(position.side)} POSITION · SCALP cannot arm`:"OFF";}
+    setExternalPosition(position){this.externalPosition=position?{symbol:position.symbol||this.gateway.symbol(),side:upper(position.side),qty:n(position.qty),avg:n(position.avg)}:null;if(!this.session&&this.state==="OFF")this.status=this.externalPositionText(this.externalPosition);}
+    detectionRows(){
+      const now=this.now();return C.sources.map(source=>{const raw=this.latestBySource.get(source)||{source,eventType:"NONE",eventState:"NONE",qualified:false,publishedAt:0},eventType=upper(raw.eventType)||"NONE",direction=["LONG","SHORT"].includes(upper(raw.direction))?upper(raw.direction):null,phase=upper(raw.eventState||raw.phase)||(eventType==="NONE"?"NONE":"—"),publishedAt=n(raw.publishedAt)||0,stale=eventType!=="NONE"&&(!publishedAt||now-publishedAt>(C.signal.staleMs[source]||120000));let eligibility="ELIGIBLE";
+        if(stale)eligibility="STALE";else if(source!==this.config.source)eligibility="SOURCE FILTER";else if(this.externalPosition&&!this.session)eligibility="BLOCKED BY POSITION";else if(direction&&!this.directionAllowed(direction))eligibility="DIR FILTER";else if(eventType!=="NONE"&&!this.typeAllowed(eventType))eligibility="TYPE FILTER";else if(eventType==="NONE"||!raw.qualified||raw.projected)eligibility="NOT CONFIRMED";
+        return {...clone(raw),source,eventType,direction,phase,rank:raw.rank||null,rankValue:raw.rankValue==null?null:n(raw.rankValue),stale,selected:source===this.config.source,eligibility};});
+    }
+    async initialize(){
+      if(!this.gateway)throw new Error("Canonical Binance trading gateway unavailable");const hub=window.PUBLIC_MARKET_DATA_HUB;
+      if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,C.timeframes.map(tf=>({tf,count:C.signal.minimumRows})));
+      if(hub&&hub.ensureTimeframeBuffer)await Promise.all(C.timeframes.map(tf=>hub.ensureTimeframeBuffer(tf,C.signal.minimumRows).catch(()=>null)));
+      if(hub&&hub.subscribe)this.unsubHub=hub.subscribe(event=>this.onMarket(event));
+      window.addEventListener("bt001:signal-publication",this._signalListener=event=>this.onSignal(event.detail));window.addEventListener("bt001:binance-order-update",this._orderListener=event=>this.onOrder(event.detail));window.addEventListener("v13:open-position-change",this._positionListener=event=>this.onPosition(event.detail));window.addEventListener("bt001:binance-private-status",this._privateStatusListener=event=>this.onPrivateStatus(event.detail));this.lastPrivateStatus=upper(this.gateway.connection()&&this.gateway.connection().streamStatus);
+      C.timeframes.forEach(tf=>this.acceptDetection(tf,this.detector.evaluateTf(tf,null,this.now()),false));const latest=window.PRESSURE_SIGNAL&&window.PRESSURE_SIGNAL.getLatestStructuredSignal&&window.PRESSURE_SIGNAL.getLatestStructuredSignal();if(latest)this.onSignal(latest);
+      const p=window.PUBLIC_MARKET_DATA_HUB&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice();if(p&&p.price)this.guide=p.price;
+      try{const commission=await this.gateway.commissionRate();this.rates=calc.feeRates({makerCommissionRate:n(commission&&commission.makerCommissionRate),takerCommissionRate:n(commission&&commission.takerCommissionRate)});}catch(_e){}
+      await this.recover();this.emit("initialized");return this;
+    }
+    destroy(){this.destroyed=true;if(this.unsubHub)this.unsubHub();const hub=window.PUBLIC_MARKET_DATA_HUB;if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,[]);window.removeEventListener("bt001:signal-publication",this._signalListener);window.removeEventListener("bt001:binance-order-update",this._orderListener);window.removeEventListener("v13:open-position-change",this._positionListener);window.removeEventListener("bt001:binance-private-status",this._privateStatusListener);if(this.cooloffTimer)clearTimeout(this.cooloffTimer);}
+    updateConfig(patch){
+      const locked=this.configurationLocked(),protectedKeys=["direction","source","entryType","mode","lot","target","stop","cooloffMinutes"],next={...patch};if(locked)protectedKeys.forEach(key=>delete next[key]);
+      this.config={...this.config,...next};this.saveConfig();if(this.state==="ARMED"&&protectedKeys.some(key=>Object.prototype.hasOwnProperty.call(next,key)))this.rebase("configuration changed");this.emit("configuration");return this.config;
+    }
+    rebase(reason){this.generation+=1;this.armedAt=this.now();this.baseline.clear();const latest=this.latestBySource.get(this.config.source);if(latest)this.baseline.add(latest.freshnessKey||latest.eventId);this.status=`ARMED · waiting for a new event (${reason})`;this.log("rebase",{reason,generation:this.generation});}
+    sourceReady(){if(this.config.source==="SIG")return !!this.latestBySource.get("SIG");const hub=window.PUBLIC_MARKET_DATA_HUB,snap=hub&&hub.getAuthoritativeMaSnapshot&&hub.getAuthoritativeMaSnapshot(this.config.source,{includeForming:true,periods:[C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast],requiredRows:C.signal.minimumRows});return !!(snap&&snap.reliable);}
+    async arm(){
+      if(this.state!=="OFF"&&this.state!=="ERROR")return {ok:false,errors:[`Cannot arm from ${this.state}`]};
+      if(this.session)return {ok:false,errors:["Existing SCALP execution must be reconciled before arming"]};
+      const existing=this.position();if(existing){this.setExternalPosition(existing);this.emit("arm-blocked-existing-position");return {ok:false,errors:[this.externalPositionText(existing)]};}this.setExternalPosition(null);
+      const connection=this.gateway.connection(),streamHealthy=connection&&upper(connection.streamStatus)==="LIVE",symbol=this.gateway.symbol(),rawSettings=await this.gateway.filters(symbol),filtersReady=rawSettings&&rawSettings.status!=="error"&&n(rawSettings.tickSize)>0&&n(rawSettings.stepSize)>0,settings=normalizedFilters(rawSettings);this.filters=settings;
+      let balance=null;try{balance=await this.gateway.balance();}catch(_e){}const orders=snapshotOrders(await this.gateway.orders({reason:"scalp-arm",maxAgeMs:0})).filter(isOwned),position=this.position();
+      if(position){this.setExternalPosition(position);this.emit("arm-blocked-position-race");return {ok:false,errors:[this.externalPositionText(position)]};}
+      const validation=calc.validateArm({config:this.config,filters:settings,guide:this.guide,balance,authenticated:this.gateway.isAuthenticated(),streamHealthy,sourceReady:this.sourceReady(),filtersReady,position,ownedOrders:orders});
+      if(!validation.ok){this.status=validation.errors.join("; ");this.emit("arm-refused");return validation;}
+      if(this.state==="ERROR")this.transition("OFF","Previous error acknowledged");this.rearmAfterFlat=this.config.mode==="CONTINUOUS";this.transition("ARMED","ARMED · waiting for a new qualifying event");this.rebase("armed");return validation;
+    }
+    disarm(){this.rearmAfterFlat=false;if(this.state==="ARMED"||this.state==="COOL_OFF"){if(this.cooloffTimer)clearTimeout(this.cooloffTimer);this.transition("OFF","Disarmed");}else if(this.isActive()){this.status="ACTIVE · future entries disabled; TP/SL retained";this.emit("disarmed-active");}return this.snapshot();}
+    onMarket(update){if(update&&update.type==="price"&&n(update.price)>0)this.guide=n(update.price);if(update&&update.tf&&C.timeframes.includes(update.tf)){const result=this.detector.evaluateTf(update.tf,update,this.now());this.acceptDetection(update.tf,result);}this.emit("market");}
+    onSignal(detail){const result=this.detector.evaluateSignal(detail);this.acceptDetection("SIG",result);}
+    onPrivateStatus(detail){
+      const next=upper(detail&&detail.streamStatus),previous=this.lastPrivateStatus;this.lastPrivateStatus=next;
+      if(next!=="LIVE"){if(this.state==="ARMED"||this.state==="COOL_OFF"){if(this.cooloffTimer)clearTimeout(this.cooloffTimer);this.cooloffTimer=null;this.transition("OFF","OFF · private stream disconnected; ARM was not retained");}else if(this.session){this.status=`${this.state} · private stream ${next.toLowerCase()}; exchange protection retained`;this.emit("private-stream-interrupted");}return;}
+      if(previous&&previous!=="LIVE")this.reconcileAfterReconnect().catch(error=>this.fail(error,"Reconnect reconciliation failed"));
+    }
+    async reconcileAfterReconnect(){
+      if(this.reconnectBusy)return;this.reconnectBusy=true;try{const facts=await this.gateway.reconcile(),live=this.position(),orders=snapshotOrders(facts&&facts.orders),owned=orders.filter(isOwned);
+        if(!this.session){if(owned.length){if(this.state!=="ERROR")this.transition("ERROR","ERROR · reconnect found unresolved SCALP-owned orders");return;}this.setExternalPosition(live);if(this.state!=="OFF"&&C.transitions[this.state]&&C.transitions[this.state].includes("OFF"))this.transition("OFF",this.externalPositionText(live));else this.emit("reconnect-unrelated-position");return;}
+        if(!live){if(this.isActive())await this.finishExit("reconnect-flat");else{await this.cancelOwned();this.clearSession();if(this.state!=="OFF"&&C.transitions[this.state]&&C.transitions[this.state].includes("OFF"))this.transition("OFF","OFF · reconnect confirmed flat");}return;}
+        if(live.side!==this.session.direction||this.session.liveQty&&Math.abs(n(live.qty)-n(this.session.liveQty))>1e-10){if(this.state!=="POSITION_MISMATCH")this.transition("POSITION_MISMATCH","POSITION MISMATCH · reconnect size or side differs");return;}
+        this.session.liveQty=n(live.qty);this.session.avgEntry=n(live.avg)||this.session.avgEntry;this.persistSession();const ids=new Set(owned.map(orderClient)),hasSl=ids.has(this.session.slClientId),hasTp=ids.has(this.session.tpClientId);
+        if(hasSl&&hasTp){if(["ENTRY_SUBMITTED","ENTRY_PARTIAL"].includes(this.state))this.applyLiveFill(live);if(this.state==="ERROR")this.transition("ENTRY_FILLED","Reconnect recovered filled entry");if(this.state==="ENTRY_FILLED")this.transition("PROTECTION_SUBMITTING","Reconnect confirmed existing protection");if(this.state!=="ACTIVE"&&C.transitions[this.state]&&C.transitions[this.state].includes("ACTIVE"))this.transition("ACTIVE",`ACTIVE · ${this.session.direction} · reconnected`);else{this.status=`ACTIVE · ${this.session.direction} · reconnected`;this.emit("reconnected");}return;}
+        if(this.state==="ERROR")this.transition("ENTRY_FILLED","Reconnect recovered live entry; rebuilding protection");else if(["ENTRY_SUBMITTED","ENTRY_PARTIAL"].includes(this.state))this.applyLiveFill(live);else if(this.state!=="ACTIVE"&&this.state!=="ENTRY_FILLED"&&this.state!=="PROTECTION_SUBMITTING"){this.transition("POSITION_MISMATCH","POSITION MISMATCH · cannot safely rebuild protection from current state");return;}
+        await this.cancelOwned();this.session.slOrderId=null;this.session.tpOrderId=null;await this.ensureProtection(this.state==="ACTIVE");
+      }finally{this.reconnectBusy=false;}
+    }
+    acceptDetection(source,result,notify=true){
+      if(!result)return;if(result.guide)this.guide=result.guide;const event=result.event||result.detection||{source,eventType:"NONE",direction:null,eventState:"NONE",qualified:false,projected:false,publishedAt:this.now(),status:result.status};this.latestBySource.set(source,{...event,source,status:result.status});
+      if(this.session&&result.oppositeCross&&result.oppositeCross.direction&&result.oppositeCross.direction!==this.session.direction&&source===this.session.source)this.requestExit("OPPOSITE_CROSS",result.oppositeCross).catch(error=>this.fail(error,"Opposite-cross exit failed"));
+      if(source===this.config.source&&this.state==="ARMED"&&event)this.considerEntry(event);
+      this.status=this.state==="ARMED"?(event&&event.direction&&!this.directionAllowed(event.direction)?`ARMED · ${event.direction} ${event.eventType||"event"} ignored by DIR ${this.config.direction}`:`ARMED · ${result.status}`):this.status;if(notify)this.emit("signal");
+    }
+    directionAllowed(direction){return this.config.direction==="ANY"||this.config.direction===upper(direction);}
+    typeAllowed(type){return this.config.entryType==="ANY"||this.config.entryType===upper(type);}
+    considerEntry(event){
+      const freshKey=event.freshnessKey||event.eventId;if(!event.qualified||event.projected||!this.directionAllowed(event.direction)||!this.typeAllowed(event.eventType)||this.baseline.has(freshKey)||this.seen.has(freshKey)||n(event.publishedAt)<this.armedAt)return false;
+      this.seen.add(freshKey);this.executeEntry(event).catch(error=>this.fail(error,"Entry failed"));return true;
+    }
+    orderParams(side,qty,extra={}){const params={symbol:this.gateway.symbol(),side,type:extra.type||"MARKET",quantity:String(qty),newClientOrderId:extra.clientId};if(this.filters&&this.filters.positionMode==="HEDGE")params.positionSide=extra.positionSide|| (side==="BUY"?"LONG":"SHORT");else if(extra.reduceOnly)params.reduceOnly="true";return {...params,...extra.params};}
+    async executeEntry(event){
+      if(this.executionLock||this.state!=="ARMED")return;this.executionLock=event.eventId;this.transition("ENTRY_LOCKED",`ENTRY · ${event.direction} ${event.eventType}`);const qty=calc.normalizeLot(this.config.lot,this.filters),generation=this.generation,entryId=clientId("E",event.eventId,generation);
+      this.session={symbol:this.gateway.symbol(),direction:event.direction,source:event.source,eventId:event.eventId,eventType:event.eventType,generation,entryClientId:entryId,tpClientId:clientId("T",event.eventId,generation),slClientId:clientId("S",event.eventId,generation),exitClientId:clientId("X",event.eventId,generation),requestedQty:qty,filledQty:0,avgEntry:0,entryCommission:0,entryCommissionActual:false,mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),createdAt:this.now()};this.persistSession();
+      this.transition("ENTRY_SUBMITTED","ENTRY · Market submitted");const side=event.direction==="LONG"?"BUY":"SELL";
+      try{const response=await this.gateway.submitOrder({...this.orderParams(side,qty,{clientId:entryId}),newOrderRespType:"RESULT"});this.session.entryOrderId=response&&response.orderId||null;this.persistSession();}
+      catch(error){if(error&&error.uncertain){this.status="ENTRY · outcome uncertain; reconciling by client order ID";this.emit("entry-uncertain");this.reconcileUncertainEntry(entryId,0).catch(next=>this.fail(next,"Entry reconciliation failed"));return;}else throw error;}
+      await sleep(C.order.reconcileDelayMs);const live=this.position();if(live&&live.side===event.direction){this.applyLiveFill(live);await this.ensureProtection();}
+    }
+    async queryEntry(id){try{const order=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:id});if(order){this.session.entryOrderId=order.orderId||null;this.persistSession();return order;}}catch(_e){}return null;}
+    async reconcileUncertainEntry(id,attempt){
+      if(!this.session||this.session.entryClientId!==id)return;await sleep([300,700,1500,3000][attempt]||3000);const found=await this.queryEntry(id),live=this.position();
+      if(live&&live.side===this.session.direction){this.applyLiveFill(live);await this.ensureProtection();return;}if(found){this.status="ENTRY · confirmed; awaiting authoritative fill";this.emit("entry-confirmed");return;}
+      if(attempt<3){this.reconcileUncertainEntry(id,attempt+1);return;}this.fail(new Error("Entry outcome remains ambiguous after reconciliation"),"Entry uncertain");
+    }
+    onOrder(detail){
+      const o=detail&&detail.order||detail&&detail.event&&detail.event.o||detail&&detail.o||{},id=orderClient(o);if(!id||!isOwned(o)||!this.session)return;
+      const status=upper(o.X??o.status),executed=n(o.z??o.executedQty)||0,average=n(o.ap??o.avgPrice),commission=n(o.n??o.commission);
+      if(id===this.session.entryClientId){if(executed>0){this.session.filledQty=Math.max(this.session.filledQty,executed);if(average>0)this.session.avgEntry=average;const fillId=String(o.t??o.tradeId??`${executed}|${commission}`),wasEstimated=!this.session.entryCommissionActual;let actualChanged=false;if(commission!=null&&commission>0&&!this.fillIds.has(fillId)){this.fillIds.add(fillId);if(wasEstimated)this.session.entryCommission=0;this.session.entryCommission+=commission;this.session.entryCommissionActual=true;actualChanged=true;}this.persistSession();if(status==="PARTIALLY_FILLED"&&this.state==="ENTRY_SUBMITTED")this.transition("ENTRY_PARTIAL","ENTRY · partial fill");if(actualChanged&&this.state==="ACTIVE")this.rebuildProtectionForActualCommission().catch(error=>this.fail(error,"Protection recalculation failed"));}if(status==="FILLED"){const live=this.position();if(live){this.applyLiveFill(live);this.ensureProtection().catch(error=>this.fail(error,"Protection failed"));}}}
+      if((id===this.session.tpClientId||id===this.session.slClientId)&&status==="FILLED")this.finishExit(id===this.session.tpClientId?"TP":"SL").catch(error=>this.fail(error,"Exit reconciliation failed"));
+    }
+    onPosition(detail){
+      const current=detail&&Object.prototype.hasOwnProperty.call(detail,"current")?detail.current:this.position();if(!this.session){if(current&&this.state==="ARMED")this.transition("OFF",this.externalPositionText(current));this.setExternalPosition(current);this.emit(current?"unrelated-position-detected":"unrelated-position-cleared");return;}
+      if(current&&current.side===this.session.direction){if(this.state==="ENTRY_SUBMITTED"||this.state==="ENTRY_PARTIAL"||this.state==="ERROR"&&this.session.entryClientId){if(this.state==="ERROR")this.transition("ENTRY_FILLED","Late entry fill recovered; submitting protection");this.applyLiveFill(current);this.ensureProtection().catch(error=>this.fail(error,"Protection failed"));return;}if(this.state==="ACTIVE"&&Math.abs(n(current.qty)-n(this.session.liveQty))>1e-10){this.transition("POSITION_MISMATCH","POSITION MISMATCH · unexpected live size change");}}
+      else if(!current&&this.isActive())this.finishExit("position-flat").catch(error=>this.fail(error,"Flat cleanup failed"));
+      else if(current&&current.side!==this.session.direction)this.transition("POSITION_MISMATCH","POSITION MISMATCH · position side changed");
+    }
+    applyLiveFill(position){this.session.liveQty=n(position.qty);this.session.filledQty=Math.max(n(this.session.filledQty)||0,n(position.qty)||0);this.session.avgEntry=n(position.avg)||n(this.session.avgEntry)||0;if(!this.session.entryCommissionActual)this.session.entryCommission=this.session.avgEntry*this.session.liveQty*this.rates.taker;this.persistSession();if(this.state==="ENTRY_SUBMITTED"||this.state==="ENTRY_PARTIAL")this.transition("ENTRY_FILLED",`ENTRY FILLED · ${this.session.direction}`);}
+    protectionPrices(){return calc.prices({direction:this.session.direction,entryPrice:this.session.avgEntry,qty:this.session.liveQty,entryCommission:this.session.entryCommission,target:this.session.target,stop:this.session.stop,makerRate:this.rates.maker,takerRate:this.rates.taker,tickSize:this.filters.tickSize});}
+    async ensureProtection(recovery=false){
+      if(!this.session||this.session.protectionBusy||["EXIT_LOCKED","EXITING","FLAT_RECONCILING"].includes(this.state)||this.state==="ACTIVE"&&!recovery)return;const live=this.position();if(!live)return;this.applyLiveFill(live);this.session.protectionBusy=true;this.persistSession();if(this.state==="ENTRY_FILLED"||this.state==="ACTIVE")this.transition("PROTECTION_SUBMITTING",recovery?"Rebuilding recovered protection":"Submitting exchange-side SL");const outcome=this.protectionPrices(),exitSide=this.session.direction==="LONG"?"SELL":"BUY";
+      let sl=null,slError=null;for(let attempt=0;attempt<=C.order.protectionRetry;attempt++){try{const params={algoType:"CONDITIONAL",symbol:this.gateway.symbol(),side:exitSide,type:"STOP_MARKET",quantity:String(this.session.liveQty),triggerPrice:String(outcome.sl),workingType:"MARK_PRICE",clientAlgoId:this.session.slClientId};if(this.filters.positionMode==="HEDGE")params.positionSide=this.session.direction;else params.reduceOnly="true";sl=await this.gateway.submitAlgoOrder(params);break;}catch(error){slError=error;await this.gateway.reconcile().catch(()=>null);}}
+      if(!sl){this.session.protectionBusy=false;this.persistSession();await this.requestExit("SL_PROTECTION_FAILED",null,{critical:true});throw new Error(`Protective SL failed: ${slError&&slError.message||"unconfirmed"}`);}
+      this.session.slOrderId=sl.algoId??sl.orderId??null;this.session.slPrice=outcome.sl;this.persistSession();let tp=null,tpError=null;
+      for(let attempt=0;attempt<=C.order.tpRetry;attempt++){try{tp=await this.gateway.submitOrder(this.orderParams(exitSide,this.session.liveQty,{type:"LIMIT",clientId:this.session.tpClientId,reduceOnly:true,positionSide:this.session.direction,params:{price:String(outcome.tp),timeInForce:"GTC"}}));break;}catch(error){tpError=error;await this.gateway.orders({reason:"scalp-tp-retry",maxAgeMs:0}).catch(()=>null);}}
+      this.session.protectionBusy=false;this.session.tpPrice=outcome.tp;if(tp)this.session.tpOrderId=tp.orderId||null;this.persistSession();if(!tp){this.status=`ERROR · SL active, TP unconfirmed: ${tpError&&tpError.message||"submission failed"}`;this.emit("tp-error");return;}
+      this.transition("ACTIVE",`ACTIVE · ${this.session.direction}`);this.executionLock=null;
+    }
+    async rebuildProtectionForActualCommission(){
+      if(!this.session||this.state!=="ACTIVE"||this.session.actualCommissionRebuild)return;this.session.actualCommissionRebuild=true;const old={tpOrderId:this.session.tpOrderId,tpClientId:this.session.tpClientId,slOrderId:this.session.slOrderId,slClientId:this.session.slClientId},revision=(n(this.session.protectionRevision)||0)+1;this.session.protectionRevision=revision;this.session.tpClientId=clientId("T",this.session.eventId,`${this.session.generation}R${revision}`);this.session.slClientId=clientId("S",this.session.eventId,`${this.session.generation}R${revision}`);this.session.tpOrderId=null;this.session.slOrderId=null;this.persistSession();
+      try{await this.ensureProtection(true);}finally{const symbol=this.gateway.symbol();await Promise.all([this.gateway.cancelOrder({symbol,...(old.tpOrderId?{orderId:old.tpOrderId}:{origClientOrderId:old.tpClientId})}).catch(()=>null),this.gateway.cancelAlgoOrder({symbol,...(old.slOrderId?{algoId:old.slOrderId}:{clientAlgoId:old.slClientId})}).catch(()=>null)]);if(this.session){this.session.actualCommissionRebuild=false;this.persistSession();}}
+    }
+    async cancelOwned(){
+      if(!this.session)return;const symbol=this.gateway.symbol(),jobs=[];
+      if(this.session.tpOrderId||this.session.tpClientId)jobs.push(this.gateway.cancelOrder({symbol,...(this.session.tpOrderId?{orderId:this.session.tpOrderId}:{origClientOrderId:this.session.tpClientId})}).catch(()=>null));
+      if(this.session.slOrderId||this.session.slClientId)jobs.push(this.gateway.cancelAlgoOrder({symbol,...(this.session.slOrderId?{algoId:this.session.slOrderId}:{clientAlgoId:this.session.slClientId})}).catch(()=>null));await Promise.all(jobs);
+    }
+    async requestExit(reason,event=null,options={}){
+      if(this.exitLock||!this.session)return;this.exitLock=reason;if(this.state==="ACTIVE"||this.state==="PROTECTION_SUBMITTING")this.transition("EXIT_LOCKED",`EXIT · ${reason}`);else if(!["EXIT_LOCKED","EXITING"].includes(this.state))return;
+      await this.cancelOwned();const reconciled=await this.gateway.reconcile().catch(()=>null),live=this.position();if(!live){await this.finishExit(reason);return;}this.transition("EXITING",`EXITING · ${reason}`);const qty=calc.normalizeLot(live.qty,this.filters),side=live.side==="LONG"?"SELL":"BUY";
+      try{await this.gateway.submitOrder(this.orderParams(side,qty,{clientId:this.session.exitClientId,reduceOnly:true,positionSide:live.side}));}
+      catch(error){if(error&&error.uncertain){let found=null;try{found=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:this.session.exitClientId});}catch(_e){}if(!found)throw error;}else throw error;}
+      await sleep(C.order.reconcileDelayMs);await this.gateway.refreshPosition().catch(()=>null);if(!this.position())await this.finishExit(reason);else{this.status=options.critical?"ERROR · protection failed and emergency close is not yet confirmed":`EXITING · ${reason}`;this.emit("exit-pending");}
+    }
+    async finishExit(reason){
+      if(!this.session)return;if(this.position()){this.status=`EXITING · ${reason}; remaining position detected`;this.emit("not-flat");return;}if(this.state!=="FLAT_RECONCILING")this.transition("FLAT_RECONCILING",`FLAT · cleaning SCALP orders`);await this.cancelOwned();const finished=this.session,continuous=finished.mode==="CONTINUOUS"&&this.rearmAfterFlat!==false;this.clearSession();this.executionLock=null;this.exitLock=null;
+      if(continuous){this.transition("COOL_OFF",`COOL-OFF · ${this.config.cooloffMinutes}m`);const delay=Math.max(0,n(this.config.cooloffMinutes)||0)*60000;this.cooloffTimer=setTimeout(()=>{this.cooloffTimer=null;this.transition("ARMED","ARMED · cool-off complete");this.rebase("cool-off complete");},delay);}else this.transition("OFF",`OFF · ${reason}`);
+    }
+    async closeNow(){if(!this.session)return;return this.requestExit("CLOSE_NOW");}
+    fail(error,prefix){this.log("error",{message:error&&error.message||String(error)});this.executionLock=null;this.exitLock=null;if(this.state!=="ERROR"&&C.transitions[this.state]&&C.transitions[this.state].includes("ERROR"))this.transition("ERROR",`${prefix}: ${error&&error.message||error}`);else{this.status=`ERROR · ${prefix}`;this.emit("error");}}
+    persistSession(){if(!this.session)return;try{const clean={...this.session};delete clean.protectionBusy;this.storage.setItem(C.sessionKey,JSON.stringify(clean));}catch(_e){}}
+    clearSession(){this.session=null;try{this.storage.removeItem(C.sessionKey);}catch(_e){}}
+    async recover(){
+      let saved=null;try{saved=JSON.parse(this.storage.getItem(C.sessionKey)||"null");}catch(_e){}const reconciled=await this.gateway.reconcile().catch(()=>null),position=this.position(),orders=snapshotOrders(reconciled&&reconciled.orders||await this.gateway.orders({reason:"scalp-recovery",maxAgeMs:0}).catch(()=>null)),owned=orders.filter(isOwned);
+      if(!position&&!owned.length){this.clearSession();this.setExternalPosition(null);return;}if(!saved){if(position&&!owned.length){this.clearSession();this.setExternalPosition(position);return;}this.transition("ERROR","ERROR · unresolved SCALP-owned orders require reconciliation");return;}
+      const recognizable=position&&position.symbol===saved.symbol&&position.side===saved.direction,ownedIds=new Set(owned.map(orderClient)),ordersMatch=owned.every(row=>[saved.tpClientId,saved.slClientId,saved.entryClientId,saved.exitClientId].includes(orderClient(row)));
+      if(!recognizable||!ordersMatch){this.session=saved;this.transition("POSITION_MISMATCH","POSITION MISMATCH · recovery facts are ambiguous");return;}
+      this.session={...saved,liveQty:n(position.qty),avgEntry:n(position.avg)||saved.avgEntry};this.filters=normalizedFilters(await this.gateway.filters(saved.symbol));this.persistSession();const hasSl=ownedIds.has(saved.slClientId),hasTp=ownedIds.has(saved.tpClientId);
+      if(hasSl&&hasTp)this.transition("ACTIVE",`ACTIVE · ${saved.direction} · recovered`);else{this.transition("ACTIVE",`ACTIVE · ${saved.direction} · rebuilding protection`);await this.cancelOwned();this.session.slOrderId=null;this.session.tpOrderId=null;await this.ensureProtection(true);}
+    }
+    getDiagnostics(){return {snapshot:this.snapshot(),transitions:this.diagnostics.slice(),baseline:[...this.baseline],seen:[...this.seen]};}
+  }
+  root.ScalpEngine=ScalpEngine;root.stateTools=Object.freeze({clientId,isOwned,orderClient,snapshotOrders,normalizedFilters});
+})();

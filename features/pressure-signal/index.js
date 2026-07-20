@@ -151,6 +151,7 @@
     workingSnapshot:null,
     lastPublishedSnapshot:null,
     lastValidPublishedSnapshot:null,
+    lastStructuredSignal:null,
     lastOptimizationTests:null,
     displayFingerprint:"",
     refreshStartedAt:null,
@@ -4353,6 +4354,28 @@
     ["position","protectiveOrders","exitOrderState"].forEach(key=>{if(Object.prototype.hasOwnProperty.call(snapshot,key))publication[key]=snapshot[key];});
     return clonePublicationValue37(publication);
   }
+  function structuredScalpSignal37(publication){
+    const displayed=publication&&publication.displayedSignal||{};
+    const output=publication&&publication.normalizedOutput||{};
+    const phase=String(displayed.authoritativePhase||output.authoritativePhase||output.comparisonDiagnostics&&output.comparisonDiagnostics.authoritativePhase||"").toUpperCase();
+    const family=String(displayed.setupFamily||output.setupFamily||"").toUpperCase();
+    let eventType=null,eventState="NONE";
+    if(/CROSS POSSIBLE|CROSS FORMING|PROJECTED/.test(phase)){eventType="CROSS";eventState="PROJECTED";}
+    else if(/CROSS/.test(phase)||/CROSS/.test(family)){eventType="CROSS";eventState="COMMITTED";}
+    else if(/BOUNCE|RETEST|REJECTION/.test(phase)||/BOUNCE|RETEST|REJECTION/.test(family)){eventType="BOUNCE";eventState="CONFIRMED";}
+    const direction=String(displayed.evaluatedDirection||displayed.direction||"").toUpperCase();
+    const qualified=["CONFIRMED","COMMITTED"].includes(eventState)&&["LONG","SHORT"].includes(direction)&&(/READY/.test(String(output.entryVerdict||"").toUpperCase())||String(displayed.visibleState||"").toUpperCase()==="TRIGGER ACTIVE");
+    const quality=String(output.currentEntryQuality||output.triggerQuality||output.setupQuality||"").toUpperCase(),rank=/^[ABC]$/.test(quality)?quality:null,rankValue=null;
+    return Object.freeze({
+      source:"SIG",symbol:String(publication&&publication.snapshot&&publication.snapshot.symbol||currentSignalSymbol37()).toUpperCase(),
+      eventId:[publication.engineId||"signal",publication.generation||0,eventType||"NONE",direction||"NONE",displayed.setupIdentity||phase||"none"].join("|"),
+      freshnessKey:["SIG",publication.engineId||"signal",eventType||"NONE",direction||"NONE",displayed.setupIdentity||phase||"none",publication.generation||0].join("|"),
+      eventType,direction,eventState,phase:eventState,qualified,projected:eventState==="PROJECTED",rank,rankValue,quality:quality||null,publishedAt:Number(publication.publishedAt)||Date.now(),
+      generation:Number(publication.generation)||0,engineId:publication.engineId||null,engineVersion:publication.engineVersion||null,
+      directionMode:displayed.mode||publication.directionMode||"AUTO",visibleState:displayed.visibleState||null,setupIdentity:displayed.setupIdentity||null,
+      authoritativePhase:displayed.authoritativePhase||null,analyticalDirection:String(output.direction||direction||"").toUpperCase()||null
+    });
+  }
   function publishSignalPresentation37(publication){
     if(publication.generation!==state.refreshGeneration || publication.contextKey!==presentationContextKey37()) return false;
     const displayed=publication.displayedSignal;
@@ -4362,6 +4385,8 @@
     }
     state.lastPublishedSnapshot=publication;
     if(publication.refreshState==="READY") state.lastValidPublishedSnapshot=publication;
+    state.lastStructuredSignal=structuredScalpSignal37(publication);
+    try{window.dispatchEvent(new CustomEvent("bt001:signal-publication",{detail:state.lastStructuredSignal}));}catch(_e){}
     state.signalSummaryVariants=displayed.summaryVariants;
     const nextDisplayFingerprint=[displayed.signalIdentity,displayed.entryTone,displayed.summaryVariants.full].join("|");
     const displayChanged=nextDisplayFingerprint!==state.displayFingerprint;
@@ -4434,7 +4459,7 @@
     publishSignalPresentation37(publication);return publication;
   }
   function publishSignalEngineUnavailable37(error,contextKey=presentationContextKey37()){
-    state.lastError=error&&error.stack||String(error||"Signal engine unavailable");state.lastPublishedSnapshot=null;state.lastValidPublishedSnapshot=null;state.workingSnapshot=null;stopTriggerAlert37();
+    state.lastError=error&&error.stack||String(error||"Signal engine unavailable");state.lastPublishedSnapshot=null;state.lastValidPublishedSnapshot=null;state.lastStructuredSignal=null;state.workingSnapshot=null;stopTriggerAlert37();
     windowSystem.invalidateSignalContext(contextKey);windowSystem.setRefreshState("UNAVAILABLE",contextKey,"Selected Signal engine is unavailable");
     const engine=activeSignalEngine37();
     if(state.entry){state.entry.textContent="Unavailable";state.entry.dataset.tone="gray";state.entry.dataset.signalEngineId=engine&&engine.id||"";state.entry.dataset.signalEngineVersion=engine&&engine.version||"";state.entry.dataset.signalPublicationGeneration=String(state.refreshGeneration);}
@@ -4993,7 +5018,7 @@
     state.seenTriggerAlertOrder.length = 0;
     state.entryTrackers.clear();
     state.setupHistories.clear();
-    actionState.dataKey="";actionState.dataStatus=null;actionState.marketSnapshot=null;actionState.activeSnapshot=null;actionState.evidenceByTf.clear();actionState.smcCache.clear();actionState.lastPublishedSnapshot=null;actionState.lastValidPublishedSnapshot=null;actionState.refreshState="IDLE";actionState.orderRefreshObservedAt=0;actionState.lastAcceptanceTests=null;
+    actionState.dataKey="";actionState.dataStatus=null;actionState.marketSnapshot=null;actionState.activeSnapshot=null;actionState.evidenceByTf.clear();actionState.smcCache.clear();actionState.lastPublishedSnapshot=null;actionState.lastValidPublishedSnapshot=null;actionState.refreshState="IDLE";actionState.orderRefreshObservedAt=0;actionState.lastAcceptanceTests=null;state.lastStructuredSignal=null;
     signalEngineSelector.destroy();
   }
   function setManagementHorizon37(next){
@@ -5025,6 +5050,7 @@
     openPositionManagement:windowSystem.openPosition,
     getSignalCopyContent:windowSystem.getSignalCopy,
     getManagementCopyContent:windowSystem.getPositionCopy,
+    getLatestStructuredSignal:()=>state.lastStructuredSignal ? {...state.lastStructuredSignal} : null,
     invalidatePublishedSnapshot:() => invalidatePublishedContext37(presentationContextKey37()),
     runOptimizationTests:runOptimizationParityTests37,
     runDataFeedTests:() => window.createPressureSignalDataFeed.runSelfTests(),

@@ -34,6 +34,7 @@
     const onStatus = typeof options.onStatus === "function" ? options.onStatus : () => {};
     const onAuthoritativeSeed = typeof options.onAuthoritativeSeed === "function" ? options.onAuthoritativeSeed : () => {};
     const onPositionFact = typeof options.onPositionFact === "function" ? options.onPositionFact : () => {};
+    const onOrderFact = typeof options.onOrderFact === "function" ? options.onOrderFact : () => {};
     const reportPerformance = options.reportPerformance !== false;
     const timers = options.timers || window;
     const now = typeof options.now === "function" ? options.now : Date.now;
@@ -133,6 +134,10 @@
           state.lastPositionFactAt=now();
         }catch(error){state.lastError=String(error&&error.message||error);}
       }
+      if(classified.ordersDirty&&classified.event.e==="ORDER_TRADE_UPDATE"){
+        try{onOrderFact({event:classified.event,order:classified.event.o||null,eventTime:Number(classified.event.E||classified.event.T)||0,receivedAt,symbol:normalizeSymbol(getSymbol())});}
+        catch(error){state.lastError=String(error&&error.message||error);}
+      }
       if(reportPerformance && window.BT001_PERFORMANCE_DIAGNOSTICS) window.BT001_PERFORMANCE_DIAGNOSTICS.accountStreamEvents = state.accountStreamEvents;
       if(classified.positionDirty || classified.ordersDirty){
         onDirty({...classified,reason:classified.event.e === "ACCOUNT_UPDATE" ? "account-update" : classified.event.e === "ORDER_TRADE_UPDATE" ? "order-trade-update" : "listen-key-expired"});
@@ -216,11 +221,12 @@
     const statuses=[];
     const seeds=[];
     const positionFacts=[];
+    const orderFacts=[];
     const api={
       async requestJson(url,options){requests.push({url,method:options.method});return {listenKey:"test-listen-key"};},
       connectWebSocket(_url,options){socketOptions=options;return {disconnect(){}};}
     };
-    const stream=createBinanceUserDataStream({api,getApiKey:()=>"test-key",getSymbol:()=>"BTCUSDT",onDirty:event=>dirty.push(event),onStatus:status=>statuses.push(status),onAuthoritativeSeed:event=>seeds.push(event),onPositionFact:event=>positionFacts.push(event),timers,reportPerformance:false,now:(()=>{let t=1000;return()=>++t;})()});
+    const stream=createBinanceUserDataStream({api,getApiKey:()=>"test-key",getSymbol:()=>"BTCUSDT",onDirty:event=>dirty.push(event),onStatus:status=>statuses.push(status),onAuthoritativeSeed:event=>seeds.push(event),onPositionFact:event=>positionFacts.push(event),onOrderFact:event=>orderFacts.push(event),timers,reportPerformance:false,now:(()=>{let t=1000;return()=>++t;})()});
     await stream.start();
     socketOptions.onOpen();
     const keepaliveWasScheduled=scheduled.some(item=>!item.cancelled&&item.delay===KEEPALIVE_MS);
@@ -235,6 +241,7 @@
       accountUpdateMarksOnlyPosition:dirty.some(item=>item.reason==="account-update"&&item.positionDirty&&!item.ordersDirty),
       accountUpdatePublishesFactSynchronously:positionFacts.length===1&&positionFacts[0].event&&positionFacts[0].event.e==="ACCOUNT_UPDATE",
       orderUpdateMarksOnlyOrders:dirty.some(item=>item.reason==="order-trade-update"&&item.ordersDirty&&!item.positionDirty),
+      orderUpdatePublishesFactSynchronously:orderFacts.length===1&&orderFacts[0].order&&orderFacts[0].order.s==="BTCUSDT",
       unrelatedSymbolIgnored:dirty.filter(item=>item.reason==="order-trade-update").length===1,
       disconnectMarksBothForRecovery:dirty.some(item=>item.reason==="user-stream-disconnect"&&item.positionDirty&&item.ordersDirty&&item.immediate),
       disconnectSchedulesReconnect:reconnectWasScheduled,

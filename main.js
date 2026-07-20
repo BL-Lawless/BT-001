@@ -3108,7 +3108,8 @@ const marketDataHub = (() => {
     maStackSeedPromise:null,
     consumerTimeframes:{},
     consumerDepths:{},
-    timeframeEnsureInFlight:{}
+    timeframeEnsureInFlight:{},
+    subscribers:new Set()
   };
 
   diag.maCacheHits = 0;
@@ -3117,6 +3118,15 @@ const marketDataHub = (() => {
   diag.formingRevisionByTf = state.formingRevisionByTf;
 
   function now(){ return Date.now(); }
+  function publishMarketUpdate(detail){
+    const event=Object.freeze({...detail,symbol:ensureBufferSymbol(),publishedAt:now()});
+    state.subscribers.forEach(listener=>{try{listener(event);}catch(error){console.warn(MODULE+" subscriber failed",error);}});
+  }
+  function subscribe(listener){
+    if(typeof listener!=="function")return()=>{};
+    state.subscribers.add(listener);
+    return()=>state.subscribers.delete(listener);
+  }
   function ensureBufferSymbol(){
     const symbol = String((cfg() && cfg().symbol) || "").toUpperCase();
     if(state.bufferSymbol && state.bufferSymbol !== symbol){
@@ -4245,6 +4255,7 @@ const marketDataHub = (() => {
     lastMarkPrice = price;
     if(mClose) mClose.textContent = ip(price);
     updatePositionStrip({close:price});
+    publishMarketUpdate({type:"price",source:"aggTrade",price,exchangeTime:ms});
   }
   function queueMarkPriceTick(d){
     const price = Number(d && d.p);
@@ -4256,6 +4267,7 @@ const marketDataHub = (() => {
     if(mClose) mClose.textContent = ip(price);
     updatePositionStrip({close:price});
     updateTabTitle();
+    publishMarketUpdate({type:"price",source:"markPrice",price,exchangeTime:ms});
   }
   function handleKline(d){
     ensureBufferSymbol();
@@ -4272,6 +4284,8 @@ const marketDataHub = (() => {
     if(d.k.i === iv()){
       rehydrateActiveChartFromHub(d.k.i,Number((d && d.E) || d.k.t || now()),"ws");
     }
+    const revisions=getTimeframeRevisions(d.k.i);
+    publishMarketUpdate({type:"kline",tf:d.k.i,closed:d.k.x===true,row:{...row},closedRevision:revisions.closedRevision,formingRevision:revisions.formingRevision,exchangeTime:Number((d&&d.E)||d.k.t||now())});
     refreshConnectionStatus();
   }
   function scheduleReconnect(reason,delay=1500){
@@ -4536,6 +4550,10 @@ const marketDataHub = (() => {
     _cacheSelfTest:runRevisionCacheSelfTests,
     canonicalTfKey,
     getAuthoritativeMaSnapshot,
+    subscribe,
+    getLatestPrice:() => Number(diag.latestAggTradeTickTime||0)>=Number(diag.lastMarkPriceTickTime||0)
+      ? {price:Number(diag.latestPrice)||null,at:Number(diag.latestAggTradeTickTime)||null,source:diag.latestPrice?"aggTrade":"unavailable"}
+      : {price:Number(diag.latestMarkPrice)||null,at:Number(diag.lastMarkPriceTickTime)||null,source:diag.latestMarkPrice?"markPrice":"unavailable"},
     prependClosedBuffer,
     ingestRestRows,
     isSsscVisible: () => state.ssscVisible
@@ -4920,6 +4938,23 @@ async function timeOffset(){
   const offset = serverMs - Date.now();
   if(Number.isFinite(offset)) exchangeTimeOffsetMs = offset;
   return offset;
+}
+
+async function signedBinanceRequest(url,method="GET",params={},options={}){
+  if(!hasKeys()) throw new Error("Binance API keys are required.");
+  const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim();
+  const off=options.off!=null?Number(options.off):await timeOffset();
+  const query=new URLSearchParams({...params,recvWindow:String(options.recvWindow||5000),timestamp:String(Date.now()+off)}).toString();
+  const signature=await hmac(secret,query);
+  let response;
+  try{
+    response=await API.fetch(url+"?"+query+"&signature="+signature,{method:String(method||"GET").toUpperCase(),cache:"no-store",headers:{"X-MBX-APIKEY":key}});
+  }catch(cause){
+    const error=new Error(cause&&cause.message||"Binance request outcome is unknown");error.uncertain=true;error.cause=cause;throw error;
+  }
+  const data=await response.json().catch(()=>null);
+  if(!response.ok){const error=new Error(data&&data.msg||("HTTP "+response.status));error.status=response.status;error.code=data&&data.code!=null?data.code:null;error.data=data;error.uncertain=false;throw error;}
+  return data||{};
 }
 
 async function getTrades(key,sec,off){
@@ -16126,6 +16161,7 @@ startTradeAuto();
     return privateReconcilePromise21;
   }
   function applyPrivateStreamStatus21(diag){
+    const previousStatus=BINANCE_PRIVATE_STATE.streamStatus;
     BINANCE_PRIVATE_STATE.streamStatus=String(diag && diag.streamStatus || "disconnected");
     BINANCE_PRIVATE_STATE.coverageSource=BINANCE_PRIVATE_STATE.streamStatus==="live" ? "USER_STREAM" : "REST";
     BINANCE_PRIVATE_STATE.lastError=diag && diag.lastError || null;
@@ -16134,6 +16170,7 @@ startTradeAuto();
       BINANCE_PRIVATE_STATE.orders.coverageSource="USER_STREAM";
     }
     BT001_PERFORMANCE_DIAGNOSTICS.accountStreamEvents=Number(diag && diag.accountStreamEvents) || BT001_PERFORMANCE_DIAGNOSTICS.accountStreamEvents;
+    try{window.dispatchEvent(new CustomEvent("bt001:binance-private-status",{detail:{...privateSnapshot21(),previousStatus}}));}catch(error){console.warn("Private Binance status publication failed",error);}
   }
   function startPrivateUserStream21(){
     if(privateStreamRestartTimer21 != null){ clearTimeout(privateStreamRestartTimer21);privateStreamRestartTimer21=null; }
@@ -16158,6 +16195,9 @@ startTradeAuto();
         BINANCE_PRIVATE_STATE.position.signature=snapshot.signature;
         lastSig21=sharedPositionSig21();
         lastBinanceStateSig21=binanceStateSig21(lastSig21);
+      },
+      onOrderFact:payload=>{
+        try{window.dispatchEvent(new CustomEvent("bt001:binance-order-update",{detail:{...payload,source:"USER_STREAM"}}));}catch(error){console.warn("Immediate Binance order publication failed",error);}
       },
       onDirty:event => markPrivateDirty21(event,event.reason,{immediate:event.immediate===true}),
       onStatus:applyPrivateStreamStatus21,
@@ -16217,6 +16257,34 @@ startTradeAuto();
     runStreamTests:() => window.createBinanceUserDataStream.runSelfTests(),
     _simulateEvent:event => privateUserStream21 && privateUserStream21._handlePayload(event),
     _simulateDisconnect:reason => privateUserStream21 && privateUserStream21._simulateDisconnect(reason)
+  });
+  const tradingRestBase=()=>selectedRestBase21().replace(/\/+$/g,"");
+  const tradingUrl=path=>tradingRestBase()+path;
+  async function tradingWrite(path,method,params){
+    const result=await signedBinanceRequest(tradingUrl(path),method,params);
+    markPrivateDirty21({positionDirty:true,ordersDirty:true},"scalp-order-write",{immediate:true});
+    return result;
+  }
+  window.BT001_BINANCE_TRADING=Object.freeze({
+    version:"BT001_BINANCE_TRADING_GATEWAY_V1",
+    isAuthenticated:()=>hasKeys(),
+    symbol:()=>currentSymbol21(),
+    connection:()=>privateSnapshot21(),
+    position:()=>SHARED_POSITION_OWNER.snapshot(),
+    filters:async(symbol=currentSymbol21())=>window.BT001SymbolTradingSettings.get(symbol),
+    cachedFilters:(symbol=currentSymbol21())=>window.BT001SymbolTradingSettings.getCached(symbol),
+    orders:async(options={})=>requestAuthoritativeOrders21({reason:options.reason||"scalp-reconcile",maxAgeMs:options.maxAgeMs==null?0:options.maxAgeMs}),
+    balance:async()=>getAccountBalance(apiKeyEl.value.trim(),apiSecretEl.value.trim(),await timeOffset()),
+    commissionRate:async(symbol=currentSymbol21())=>signedBinanceRequest(BINANCE_COMMISSION_RATE_URL,"GET",{symbol}),
+    refreshPosition:async()=>refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true,allowRestAdvance:true,source:"scalp-reconcile"}),
+    reconcile:async()=>{const position=await refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true,allowRestAdvance:true,source:"scalp-reconcile"});const orders=await requestAuthoritativeOrders21({reason:"scalp-reconcile",maxAgeMs:0});return{position,orders,sharedPosition:SHARED_POSITION_OWNER.snapshot()};},
+    submitOrder:params=>tradingWrite("/fapi/v1/order","POST",params),
+    cancelOrder:params=>tradingWrite("/fapi/v1/order","DELETE",params),
+    queryOrder:params=>signedBinanceRequest(tradingUrl("/fapi/v1/order"),"GET",params),
+    submitAlgoOrder:params=>tradingWrite("/fapi/v1/algoOrder","POST",params),
+    cancelAlgoOrder:params=>tradingWrite("/fapi/v1/algoOrder","DELETE",params),
+    queryAlgoOrder:params=>signedBinanceRequest(tradingUrl("/fapi/v1/algoOrder"),"GET",params),
+    markDirty:(flags,reason)=>markPrivateDirty21(flags,reason||"scalp",{immediate:true})
   });
 
   setInterval(() => {
@@ -20645,7 +20713,17 @@ If there is NO open position, use this Section 2 instead:
       }
       return out;
     }
-    return {start,stop,refresh,refreshSoon,markerEvents,hubRowToKline,stackPeriods,stackSlots};
+    function classifyTimeframe(interval,options={}){
+      const h=hub(),slots=stackSlots();
+      if(!h||typeof h.getAuthoritativeMaSnapshot!=="function"||!Array.isArray(slots)||slots.length!==5)return null;
+      const periods=slots.map(slot=>slot.period),includeForming=options.includeForming!==false;
+      const snapshot=h.getAuthoritativeMaSnapshot(interval,{slots,includeForming,requiredRows:Math.max(...periods)+10});
+      if(!snapshot||!snapshot.reliable||!Array.isArray(snapshot.rows))return null;
+      const rows=snapshot.rows.map(row=>Array.isArray(row)?row:hubRowToKline(row)).filter(row=>row&&row.every((value,index)=>index>5||Number.isFinite(value)));
+      if(!rows.length)return null;
+      return {...classify(rows,{tfKey:interval,tfInterval:interval,sourceType:snapshot.sourceType||"PUBLIC_MARKET_DATA_HUB",sourcePath:snapshot.sourcePath||`PUBLIC_MARKET_DATA_HUB.getAuthoritativeMaSnapshot(${interval})`,sourceIndex:Number.isFinite(Number(snapshot.sourceIndex))?Number(snapshot.sourceIndex):null},snapshot),slots,source:{type:snapshot.sourceType||"PUBLIC_MARKET_DATA_HUB",path:snapshot.sourcePath||"getAuthoritativeMaSnapshot",index:Number.isFinite(Number(snapshot.sourceIndex))?Number(snapshot.sourceIndex):null,includeForming}};
+    }
+    return {start,stop,refresh,refreshSoon,markerEvents,hubRowToKline,stackPeriods,stackSlots,classifyTimeframe};
   })();
   window.MA_STACK_STRIP = MA_STACK_STRIP;
 
@@ -22831,16 +22909,30 @@ If there is NO open position, use this Section 2 instead:
       if(h) h.setSsscVisible(false);
     }
   }
-  function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); startLive(); render(true); }
-  function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); }
+  function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); startLive(); render(true); installSsscSettingsPlaceholder(); }
+  function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); installSsscSettingsPlaceholder(); }
   function savePanel(){ const p=$('ssscDash'); if(!p)return; const r=p.getBoundingClientRect(); localStorage.setItem(STORE+'panel',JSON.stringify({left:r.left,top:r.top,width:r.width,height:r.height})); }
   function restorePanel(){ const p=$('ssscDash'); if(!p)return; try{ const v=JSON.parse(localStorage.getItem(STORE+'panel')||'null'); if(v){p.style.left=Math.max(6,Math.min(window.innerWidth-100,v.left))+'px';p.style.top=Math.max(6,Math.min(window.innerHeight-80,v.top))+'px';p.style.bottom='auto';p.style.width=Math.max(840,v.width)+'px';p.style.height=Math.max(500,v.height)+'px';} }catch(_e){} }
-  function installSsscSettingsPlaceholder(){}
+  function installSsscSettingsPlaceholder(){
+    const grid=document.querySelector('#settingsModal .settings-grid'); if(!grid) return;
+    const tabs=grid.querySelector(':scope > .v24-settings-tabs'),panelsRoot=grid.querySelector(':scope > .v24-settings-panels');
+    let host=null;
+    if(tabs&&panelsRoot){
+      let tab=document.getElementById('ssscSettingsTab');
+      if(!tab){tab=document.createElement('button');tab.type='button';tab.id='ssscSettingsTab';tab.className='v24-settings-tab';tab.dataset.tab='sssc';tab.textContent='SSSC';tabs.appendChild(tab);tab.addEventListener('click',()=>{grid.querySelectorAll('.v24-settings-tab').forEach(node=>node.classList.toggle('active',node===tab));grid.querySelectorAll('.v24-settings-panel').forEach(node=>node.classList.toggle('active',node.dataset.tab==='sssc'));});}
+      let panel=document.getElementById('ssscSettingsPanel');
+      if(!panel){panel=document.createElement('div');panel.id='ssscSettingsPanel';panel.className='v24-settings-panel';panel.dataset.tab='sssc';panel.innerHTML='<div class="v24-settings-panel-grid"></div>';panelsRoot.appendChild(panel);}
+      host=panel.querySelector('.v24-settings-panel-grid')||panel;
+    }else host=grid;
+    let card=document.getElementById('ssscSettingsControlCard');
+    if(!card){card=document.createElement('div');card.id='ssscSettingsControlCard';card.className='settings-card';card.innerHTML='<div class="settings-card-title">SSSC Dashboard</div><div class="settings-card-desc">Open or hide the existing Stack · Slope · Spread · Crossover dashboard.</div><button class="secondary" id="ssscDashBtn" type="button">Open SSSC</button>';host.appendChild(card);}
+    const button=$('ssscDashBtn');if(button&&!button.__ssscBound){button.__ssscBound=true;button.addEventListener('click',()=>{if(visible)hide();else{try{if(typeof closeSettings==='function')closeSettings();}catch(_e){}show();}});}if(button)button.textContent=visible?'Hide SSSC':'Open SSSC';
+  }
 
   function installResizeGuard(){ installResizeHandles(); }
   function installResizeHandles(){ const p=$('ssscDash'); if(!p||p.__ssscResizeHandles)return; p.__ssscResizeHandles=true; ['n','s','e','w','ne','nw','se','sw'].forEach(dir=>{ const h=document.createElement('div'); h.className='sssc-resize-handle sssc-resize-'+dir; h.dataset.dir=dir; p.appendChild(h); h.addEventListener('pointerdown',e=>{ e.preventDefault(); e.stopPropagation(); const r=p.getBoundingClientRect(); const start={x:e.clientX,y:e.clientY,left:r.left,top:r.top,w:r.width,h:r.height,dir}; p.classList.add('sssc-resizing'); try{h.setPointerCapture(e.pointerId)}catch(_e){} const move=ev=>{ const dx=ev.clientX-start.x, dy=ev.clientY-start.y; let left=start.left, top=start.top, w=start.w, hgt=start.h; const minW=760,minH=440; if(start.dir.includes('e')) w=start.w+dx; if(start.dir.includes('s')) hgt=start.h+dy; if(start.dir.includes('w')){ w=start.w-dx; left=start.left+dx; } if(start.dir.includes('n')){ hgt=start.h-dy; top=start.top+dy; } if(w<minW){ if(start.dir.includes('w')) left-=minW-w; w=minW; } if(hgt<minH){ if(start.dir.includes('n')) top-=minH-hgt; hgt=minH; } left=clamp(left,6,window.innerWidth-80); top=clamp(top,6,window.innerHeight-60); w=Math.min(w,window.innerWidth-left-6); hgt=Math.min(hgt,window.innerHeight-top-6); p.style.left=left+'px'; p.style.top=top+'px'; p.style.bottom='auto'; p.style.width=w+'px'; p.style.height=hgt+'px'; }; const up=ev=>{ document.removeEventListener('pointermove',move,true); document.removeEventListener('pointerup',up,true); document.removeEventListener('pointercancel',up,true); p.classList.remove('sssc-resizing'); try{h.releasePointerCapture(ev.pointerId)}catch(_e){} savePanel(); }; document.addEventListener('pointermove',move,true); document.addEventListener('pointerup',up,true); document.addEventListener('pointercancel',up,true); },true); }); }
   function installDrag(){ const p=$('ssscDash'), h=$('ssscDashHead'); if(!p||!h||h.__ssscDrag)return; h.__ssscDrag=true; h.addEventListener('pointerdown',e=>{ if(e.target.closest('button')||e.target.closest('.sssc-resize-handle'))return; const r=p.getBoundingClientRect(); drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top}; h.setPointerCapture(e.pointerId); e.preventDefault(); }); h.addEventListener('pointermove',e=>{ if(!drag)return; p.style.left=clamp(drag.left+e.clientX-drag.x,6,window.innerWidth-80)+'px'; p.style.top=clamp(drag.top+e.clientY-drag.y,6,window.innerHeight-60)+'px'; p.style.bottom='auto'; }); const end=e=>{ if(drag){drag=null; savePanel(); try{h.releasePointerCapture(e.pointerId)}catch(_e){}}}; h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end); if(typeof ResizeObserver!=='undefined'){ new ResizeObserver(()=>visible&&savePanel()).observe(p); } }
-  function install(){ const top=document.querySelector('.topbar'); const anchor=document.getElementById('v13LabBtn')||document.getElementById('apiKeysBtn')||top?.firstElementChild; if(top&&!$('ssscDashBtn')){ const b=document.createElement('button'); b.id='ssscDashBtn'; b.type='button'; b.textContent='SSSC'; b.title='Show/hide SSSC dashboard'; anchor?anchor.insertAdjacentElement('afterend',b):top.insertAdjacentElement('afterbegin',b); b.addEventListener('click',()=>visible?hide():show()); } $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>seedFromHub(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); installSsscSettingsPlaceholder(); restorePanel(); }
+  function install(){ const oldTop=document.querySelector('.topbar > #ssscDashBtn');if(oldTop)oldTop.remove(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>seedFromHub(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); installSsscSettingsPlaceholder(); restorePanel(); }
 
   if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(installSsscSettingsPlaceholder,0); return r; }; }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
