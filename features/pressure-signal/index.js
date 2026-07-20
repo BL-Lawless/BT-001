@@ -13,6 +13,7 @@
   const targetEngine = build.createTargetEngine(featureConfig);
   const positionEngine = build.createPositionEngine(featureConfig,featureFormat);
   const windowSystem = build.createWindowSystem(featureConfig,featureFormat);
+  if(typeof window.createPressureSignalDataFeed !== "function") throw new Error("Pressure Signal data feed is not loaded");
   const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
   const performanceDiagnostics = window.BT001_PERFORMANCE_DIAGNOSTICS ||= {};
   ["signalLightCalculations","signalFullCalculations","signalSkippedDuplicateRefreshes","signalFullEvidenceBuilds","signalFormingEvidenceBuilds","smcCacheHits","smcCacheMisses","structuredCloneCount","structuredCloneMs","signalPublicationMismatches","signalStalePayloadsDiscarded","signalFallbacksPrevented"].forEach(key => {
@@ -146,7 +147,9 @@
     refreshStartedAt:null,
     lastAnalyticalFingerprint:"",
     scheduledFrozen:null,
-    lastRefreshReason:"initial"
+    lastRefreshReason:"initial",
+    dataFeed:null,
+    lastIsolationTests:null
   };
   const uiPerf = () => window.BT001_UI_PERFORMANCE || null;
   const timed37 = (name,work,fingerprint=null) => {
@@ -162,6 +165,26 @@
     if(value == null || value === "") return null;
     const out = Number(value);
     return Number.isFinite(out) ? out : null;
+  }
+  const SIGNAL_TF_SECONDS37=window.createPressureSignalDataFeed.timeframeSeconds;
+  const SIGNAL_FIXED_DEPTHS37=window.createPressureSignalDataFeed.fixedDepths;
+  function signalIntervalSeconds37(tf){ return Number(SIGNAL_TF_SECONDS37[String(tf||"").toLowerCase()]) || 60; }
+  function currentSignalSymbol37(){
+    try{return String((typeof cfg==="function"&&cfg()&&cfg().symbol)||"").toUpperCase();}catch(_e){return "";}
+  }
+  function signalFeed37(){
+    if(state.dataFeed) return state.dataFeed;
+    state.dataFeed=window.createPressureSignalDataFeed({
+      api:window.API,
+      getRestUrl:()=>{try{return cfg()&&cfg().rest||"https://fapi.binance.com/fapi/v1/klines";}catch(_e){return "https://fapi.binance.com/fapi/v1/klines";}},
+      getWsUrl:()=>{try{return cfg()&&cfg().ws||"wss://fstream.binance.com/market/stream";}catch(_e){return "wss://fstream.binance.com/market/stream";}},
+      onUpdate:event=>scheduleToolbarSignalRefresh37(false,event&&event.reason||"signal-feed")
+    });
+    return state.dataFeed;
+  }
+  function configureSignalFeed37(plan,reason="signal-requirements"){
+    const selected=plan||signalDataPlan37(state.horizon);
+    return signalFeed37().configure({symbol:currentSignalSymbol37(),timeframes:selected.items.map(item=>item.tf),reason});
   }
   function readStoredHorizon(){
     try{
@@ -183,6 +206,7 @@
     stopTriggerAlert37();
     invalidatePublishedContext37(presentationContextKey37());
     try{ localStorage.setItem(STORAGE_KEY,state.horizon); }catch(_e){}
+    configureSignalFeed37(signalDataPlan37(state.horizon),"signal-horizon-change").catch(error=>{state.lastError=error&&error.stack||String(error);});
     scheduleToolbarSignalRefresh37(true);
   }
   function readStoredDirection(){
@@ -377,8 +401,7 @@
     const items = timeframes.map(tf => {
       const pressure = pressureByTf.get(tf);
       const lookbackDepth = pressure ? pressure.lookback * 3 : 0;
-      const fullSessionDepth = typeof ivSec === "function" ? Math.ceil(172800 / Math.max(1,ivSec(tf))) + 20 : 0;
-      const historyTarget = Math.max(320,maxPeriod + 80,lookbackDepth,fullSessionDepth,120);
+      const historyTarget = Number(SIGNAL_FIXED_DEPTHS37[tf]) || Math.max(320,maxPeriod + 80,lookbackDepth,120);
       return {tf,historyTarget,roles:roles.get(tf) || [`${tf} market history`],signalRequired:signalTimeframes.includes(tf),managementRequired:managementTimeframes.includes(tf)};
     });
     return {horizonId,managementHorizonId,engine,management,slots,items,timeframes};
@@ -394,10 +417,10 @@
       return settings ? JSON.stringify(stable(settings)) : "default";
     }catch(_e){ return "unavailable"; }
   }
-  function signalTimeframeRevision37(hub,tf){
-    if(hub && typeof hub.getTimeframeRevisions === "function") return hub.getTimeframeRevisions(tf);
-    const closed = hub && typeof hub.getClosedBuffer === "function" ? hub.getClosedBuffer(tf) || [] : [];
-    const forming = hub && typeof hub.getFormingCandle === "function" ? hub.getFormingCandle(tf) : null;
+  function signalTimeframeRevision37(feed,tf){
+    if(feed && typeof feed.getTimeframeRevisions === "function") return feed.getTimeframeRevisions(tf);
+    const closed = feed && typeof feed.getClosedBuffer === "function" ? feed.getClosedBuffer(tf) || [] : [];
+    const forming = feed && typeof feed.getFormingCandle === "function" ? feed.getFormingCandle(tf) : null;
     const lastClosed = closed.length ? closed[closed.length-1] : null;
     return {symbol:String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase(),tf,closedRevision:`${closed.length}:${lastClosed && lastClosed.time}:${lastClosed && lastClosed.close}`,formingRevision:forming ? `${forming.time}:${forming.close}:${forming.volume}:${forming.takerBuyBase}` : "none"};
   }
@@ -431,7 +454,7 @@
       maSettingsChangeInvalidates:base.closedKey!==keys({periods:"9-20-50-100-200"}).closedKey,
       smcSettingsChangeInvalidatesStructure:base.smcKey!==keys({smc:"smc-b"}).smcKey&&base.closedKey!==keys({smc:"smc-b"}).closedKey,
       symbolChangeInvalidatesAll:base.closedKey!==keys({symbol:"ETHUSDT"}).closedKey,
-      horizonDepthChangeInvalidates:base.closedKey!==keys({depth:640}).closedKey,
+      chartHistoryDepthDoesNotInvalidate:base.closedKey===keys({chartDepth:6400}).closedKey,
       gapRepairOrHistoryReplacementInvalidates:base.closedKey!==keys({closed:1004}).closedKey,
       unrelatedTimeframeUsesIndependentKey:base.closedKey!==otherTf.closedKey
     };
@@ -443,18 +466,19 @@
     if(!latest) return Infinity;
     const activityMs = latest.final === false
       ? Number(latest.openTime || Number(latest.time) * 1000)
-      : Number(latest.closeTime || (Number(latest.time) + (typeof ivSec === "function" ? ivSec(tf) : 0)) * 1000);
-    return Number.isFinite(activityMs) ? Math.max(0,(typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now()) - activityMs) : Infinity;
+      : Number(latest.closeTime || (Number(latest.time) + signalIntervalSeconds37(tf)) * 1000);
+    return Number.isFinite(activityMs) ? Math.max(0,Date.now() - activityMs) : Infinity;
   }
   function latestClosedEvidence37(snapshot,tf){
     const rows = snapshot && snapshot.closedByTf && snapshot.closedByTf[tf] || [];
     const row = rows.length ? rows[rows.length-1] : null;
-    return row ? {tf,time:Number(row.time),openTime:Number(row.openTime || Number(row.time)*1000),closeTime:Number(row.closeTime || (Number(row.time)+(typeof ivSec === "function" ? ivSec(tf) : 0))*1000)} : null;
+    return row ? {tf,time:Number(row.time),openTime:Number(row.openTime || Number(row.time)*1000),closeTime:Number(row.closeTime || (Number(row.time)+signalIntervalSeconds37(tf))*1000)} : null;
   }
   function buildSourceFreshness37(snapshot,plan){
-    const now = typeof getExchangeNowMs === "function" ? getExchangeNowMs() : Date.now();
-    const diag = window.PUBLIC_MARKET_DATA_HUB && window.PUBLIC_MARKET_DATA_HUB.diag || window.BINANCE_REALTIME_DIAG || {};
-    const priceAt = Math.max(Number(diag.latestAggTradeTickTime || 0),Number(diag.lastMarkPriceTickTime || 0));
+    const now = Date.now();
+    const feed = signalFeed37();
+    const diag = feed.diagnostics();
+    const priceAt = Number(diag.latestPriceAt || 0);
     const priceAgeMs = priceAt ? Math.max(0,now-priceAt) : Infinity;
     const privateSync = window.BINANCE_PRIVATE_SYNC && typeof window.BINANCE_PRIVATE_SYNC.diagnostics === "function" ? window.BINANCE_PRIVATE_SYNC.diagnostics() : null;
     const streamStatus = String(privateSync && privateSync.streamStatus || "disconnected").toLowerCase();
@@ -464,13 +488,13 @@
     const positionStreamCovered = streamStatus === "live" && coverageSource === "USER_STREAM";
     const signalPolicy = entryPolicy37(plan.horizonId);
     const management = plan.management;
-    const formingAt = Math.max(Number(diag.lastKlineTickByTf && diag.lastKlineTickByTf[signalPolicy.triggerTf] || 0),Number(diag.lastChartActivityByTf && diag.lastChartActivityByTf[signalPolicy.triggerTf] || 0));
+    const formingAt = Number(diag.buffers && diag.buffers[signalPolicy.triggerTf] && diag.buffers[signalPolicy.triggerTf].lastFormingAt || 0);
     const formingAgeMs = formingAt ? Math.max(0,now-formingAt) : Infinity;
     const triggerClosed = latestClosedEvidence37(snapshot,signalPolicy.triggerTf);
     const managementClosed = latestClosedEvidence37(snapshot,management.primaryTf);
     const contextClosed = latestClosedEvidence37(snapshot,management.contextTf);
     const priceStale = priceAgeMs > featureConfig.freshness.priceStaleMs;
-    const formingStale = formingAgeMs > Math.max(featureConfig.freshness.priceStaleMs,(typeof ivSec === "function" ? ivSec(signalPolicy.triggerTf) : 60)*1000*featureConfig.freshness.formingCadenceMultiplier);
+    const formingStale = formingAgeMs > Math.max(featureConfig.freshness.priceStaleMs,signalIntervalSeconds37(signalPolicy.triggerTf)*1000*featureConfig.freshness.formingCadenceMultiplier);
     const signalStaleSources = [];
     if(priceStale) signalStaleSources.push({source:"Live price",ageMs:priceAgeMs});
     if(formingStale) signalStaleSources.push({source:`${signalPolicy.triggerTf} forming candle`,ageMs:formingAgeMs});
@@ -488,16 +512,16 @@
     else if(snapshot.position && !orderStreamCovered && orderAgeMs > featureConfig.freshness.protectiveOrderStaleMs) stopStaleSources.push({source:"Protective orders",ageMs:orderAgeMs});
     return {checkedAt:now,priceAt,priceAgeMs,positionAt,positionAgeMs,orderAt,orderAgeMs,formingAt,formingAgeMs,triggerClosed,managementClosed,contextClosed,streamStatus,coverageSource,positionStreamCovered,orderStreamCovered,stateChangedAt:privateSync && privateSync.stateChangedAt || null,verifiedAt:privateSync && privateSync.verifiedAt || null,signalStatus:statusFor(signalStaleSources),managementStatus:statusFor(managementStaleSources),stopStatus:statusFor(stopStaleSources),signalStaleSources,managementStaleSources,stopStaleSources};
   }
-  function inspectSignalData37(plan,hub){
-    if(!hub) return {status:"unavailable",managementStatus:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"shared market-data hub unavailable"}))};
+  function inspectSignalData37(plan,feed){
+    if(!feed) return {status:"unavailable",managementStatus:"unavailable",items:plan.items.map(item => ({...item,status:"unavailable",count:0,reason:"Signal data feed unavailable"}))};
     const items = plan.items.map(item => {
-      const closed = typeof hub.getClosedBuffer === "function" ? hub.getClosedBuffer(item.tf) || [] : [];
-      const chart = typeof hub.getChartBuffer === "function" ? hub.getChartBuffer(item.tf) || [] : closed;
+      const closed = typeof feed.getClosedBuffer === "function" ? feed.getClosedBuffer(item.tf) || [] : [];
+      const liveEvidence = typeof feed.getLiveBuffer === "function" ? feed.getLiveBuffer(item.tf) || [] : closed;
       const count = Array.isArray(closed) ? closed.length : 0;
-      const ageMs = signalDataAge37(item.tf,chart);
-      const staleAfterMs = Math.max(90000,(typeof ivSec === "function" ? ivSec(item.tf) : 60) * 1000 * featureConfig.freshness.closedEvidenceCadenceMultiplier);
+      const ageMs = signalDataAge37(item.tf,liveEvidence);
+      const staleAfterMs = Math.max(90000,signalIntervalSeconds37(item.tf) * 1000 * featureConfig.freshness.closedEvidenceCadenceMultiplier);
       const tail = (Array.isArray(closed) ? closed : []).slice(-Math.min(count,item.historyTarget));
-      const step = typeof ivSec === "function" ? ivSec(item.tf) : 0;
+      const step = signalIntervalSeconds37(item.tf);
       const continuous = tail.length > 1 && tail.every((row,index) => index === 0 || Number(row.time)-Number(tail[index-1].time) === step);
       const status = count < item.historyTarget || !continuous
         ? (state.dataLoadPromise ? "loading" : "insufficient")
@@ -525,11 +549,11 @@
     };
   }
   function ensureSignalData37(horizonId=state.horizon){
-    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const feed = signalFeed37();
     const plan = signalDataPlan37(horizonId);
-    const symbol = String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase();
+    const symbol = currentSignalSymbol37();
     const key = `${symbol}|${horizonId}|${plan.managementHorizonId}|${plan.slots.map(slot => slot.period).join("-")}`;
-    if(hub && typeof hub.setTimeframeRequirements === "function") hub.setTimeframeRequirements(MODULE,plan.items.map(item => ({tf:item.tf,count:item.historyTarget})));
+    const configurationChanged=state.dataKey !== key;
     if(state.dataKey !== key){
       state.dataKey = key;
       state.dataStatus = null;
@@ -541,40 +565,42 @@
       state.setupHistories.clear();
       stopTriggerAlert37();
     }
-    let health = inspectSignalData37(plan,hub);
+    let health = inspectSignalData37(plan,feed);
     const retryFailed = state.dataStatus && state.dataStatus.failedAt && Date.now()-state.dataStatus.failedAt >= 30000;
     const needsLoad = health.items.filter(item => item.status === "insufficient" || item.status === "unavailable" || (item.status === "failed" && retryFailed));
-    if(hub && needsLoad.length && !state.dataLoadPromise && typeof hub.ensureTimeframeBuffer === "function"){
+    if((configurationChanged || needsLoad.length) && !state.dataLoadPromise){
       const generation = state.dataLoadGeneration;
-      state.dataLoadPromise = Promise.all(needsLoad.map(item =>
-        hub.ensureTimeframeBuffer(item.tf,item.historyTarget)
+      const loadPromise = configureSignalFeed37(plan,configurationChanged ? "signal-plan-change" : "signal-data-retry").then(() => Promise.all(needsLoad.map(item =>
+        feed.ensureTimeframeBuffer(item.tf,item.historyTarget)
           .then(() => ({tf:item.tf,ok:true}))
           .catch(error => ({tf:item.tf,ok:false,reason:error && error.message ? error.message : String(error)}))
-      )).then(results => {
+      ))).then(results => {
         if(generation !== state.dataLoadGeneration) return;
         state.dataStatus = {failures:results.filter(result => !result.ok),failedAt:Date.now()};
-      }).finally(() => {
+      }).catch(error => {
         if(generation !== state.dataLoadGeneration) return;
-        state.dataLoadPromise = null;
-        scheduleToolbarSignalRefresh37(true);
+        state.dataStatus = {failures:plan.items.map(item=>({tf:item.tf,reason:error&&error.message?error.message:String(error)})),failedAt:Date.now()};
+      }).finally(() => {
+        if(state.dataLoadPromise===loadPromise) state.dataLoadPromise = null;
+        if(generation === state.dataLoadGeneration) scheduleToolbarSignalRefresh37(true);
       });
-      health = inspectSignalData37(plan,hub);
+      state.dataLoadPromise=loadPromise;
+      health = inspectSignalData37(plan,feed);
     }
     return {plan,health};
   }
   function buildSignalSnapshot37(plan,health,frozen={}){
-    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
-    const symbol = String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase();
+    const feed = signalFeed37();
+    const symbol = currentSignalSymbol37();
     const rowsByTf = {};
     const closedByTf = {};
     const maByTf = {};
     const structureByTf = {};
-    if(!hub) return {symbol:"",horizonId:plan.horizonId,createdAt:Date.now(),rowsByTf,closedByTf,maByTf,structureByTf,health};
     const smcSettings = signalSmcSettingsSignature37();
     let fullEvidenceChanged = false;
     let formingEvidenceChanged = false;
     plan.items.forEach(item => {
-      const revision = signalTimeframeRevision37(hub,item.tf);
+      const revision = signalTimeframeRevision37(feed,item.tf);
       const periods = plan.slots.map(slot => slot.period).join("-");
       const closedKey = [revision.symbol,item.tf,item.historyTarget,periods,revision.closedRevision,smcSettings].join("|");
       const liveKey = [closedKey,revision.formingRevision].join("|");
@@ -587,8 +613,8 @@
         structure = prior.structure;
       }else{
         fullEvidenceChanged = true;
-        closedRows = (hub.getClosedBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
-        closedMa = hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots});
+        closedRows = (feed.getClosedBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+        closedMa = feed.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots});
         structure = cachedSignalStructure37(item.tf,closedRows,revision,smcSettings);
       }
       let liveRows,liveMa;
@@ -597,8 +623,8 @@
         liveMa = prior.liveMa;
       }else{
         if(prior && prior.closedKey === closedKey) formingEvidenceChanged = true;
-        liveRows = (hub.getChartBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
-        liveMa = hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots});
+        liveRows = (feed.getLiveBuffer(item.tf) || []).map(row => normalizeSignalRow37(row,item.tf)).filter(Boolean);
+        liveMa = feed.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots});
       }
       const cached = {closedKey,liveKey,closedRows,liveRows,closedMa,liveMa,structure,revision};
       state.evidenceByTf.set(item.tf,cached);
@@ -614,7 +640,7 @@
       horizonId:plan.horizonId,
       createdAt:Date.now(),
       version:++state.snapshotVersion,
-      currentPrice:Object.prototype.hasOwnProperty.call(frozen,"currentPrice") ? frozen.currentPrice : (typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null),
+      currentPrice:Object.prototype.hasOwnProperty.call(frozen,"currentPrice") ? frozen.currentPrice : num37(feed.getCurrentPrice() && feed.getCurrentPrice().value),
       position:Object.prototype.hasOwnProperty.call(frozen,"position") ? frozen.position : openPositionSignal37(),
       protectiveOrders:Object.prototype.hasOwnProperty.call(frozen,"protectiveOrders") ? frozen.protectiveOrders : protectiveOrdersSnapshot37(symbol),
       exitOrderState:Object.prototype.hasOwnProperty.call(frozen,"exitOrderState") ? frozen.exitOrderState : exitOrderStateSnapshot37(symbol),
@@ -628,8 +654,9 @@
     return snapshot;
   }
   function signalSnapshotSignature37(plan){
-    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
-    const currentPrice = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null;
+    const feed = signalFeed37();
+    const ownedPrice=feed.getCurrentPrice();
+    const currentPrice = num37(ownedPrice && ownedPrice.value);
     const position = openPositionSignal37();
     const protectionOrders = protectiveOrdersSnapshot37(String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase());
     const exitOrderState = exitOrderStateSnapshot37(String((typeof cfg === "function" && cfg() && cfg().symbol) || "").toUpperCase());
@@ -646,7 +673,7 @@
       smcIdentity
     ];
     plan.items.forEach(item => {
-      const revision = signalTimeframeRevision37(hub,item.tf);
+      const revision = signalTimeframeRevision37(feed,item.tf);
       parts.push(item.tf,item.historyTarget,revision.closedRevision,revision.formingRevision);
     });
     parts.push(
@@ -670,9 +697,8 @@
     const plan=signalDataPlan37(state.horizon);
     const frozen=signalSnapshotSignature37(plan);
     const now=Date.now();
-    const diag=window.PUBLIC_MARKET_DATA_HUB && window.PUBLIC_MARKET_DATA_HUB.diag || window.BINANCE_REALTIME_DIAG || {};
-    const triggerTf=plan.engine && plan.engine.pressure && plan.engine.pressure[0] && plan.engine.pressure[0].tf;
-    const priceAt=Math.max(Number(diag.lastKlineTickByTf && diag.lastKlineTickByTf[triggerTf] || 0),Number(diag.lastChartActivityByTf && diag.lastChartActivityByTf[triggerTf] || 0),Number(typeof lastWs !== "undefined" ? lastWs : 0));
+    const diag=signalFeed37().diagnostics();
+    const priceAt=Number(diag.latestPriceAt || 0);
     const freshnessRevision=`price-stale:${!priceAt || now-priceAt>featureConfig.freshness.priceStaleMs}`;
     const fingerprint=[presentationContextKey37(),state.direction,state.horizon,plan.managementHorizonId,signalCanonicalSlots37().map(slot=>slot.period).join("-"),signalSmcSettingsSignature37(),freshnessRevision,frozen.signature].join("|");
     return {fingerprint,plan,frozen};
@@ -690,15 +716,14 @@
     return snapshot;
   }
   function buildUncachedSignalSnapshot37(plan,health,reference){
-    const hub=window.PUBLIC_MARKET_DATA_HUB || null;
-    if(!hub) return null;
+    const feed=signalFeed37();
     const rowsByTf={},closedByTf={},maByTf={},structureByTf={};
     plan.items.forEach(item => {
-      rowsByTf[item.tf]=(hub.getChartBuffer(item.tf)||[]).map(row=>normalizeSignalRow37(row,item.tf)).filter(Boolean);
-      closedByTf[item.tf]=(hub.getClosedBuffer(item.tf)||[]).map(row=>normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      rowsByTf[item.tf]=(feed.getLiveBuffer(item.tf)||[]).map(row=>normalizeSignalRow37(row,item.tf)).filter(Boolean);
+      closedByTf[item.tf]=(feed.getClosedBuffer(item.tf)||[]).map(row=>normalizeSignalRow37(row,item.tf)).filter(Boolean);
       maByTf[item.tf]={
-        live:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots,bypassCache:true}),
-        closed:hub.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots,bypassCache:true})
+        live:feed.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:plan.slots,bypassCache:true}),
+        closed:feed.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:plan.slots,bypassCache:true})
       };
       try{ structureByTf[item.tf]=window.SMC_FEATURE && typeof window.SMC_FEATURE.getStructureSnapshot==="function" ? window.SMC_FEATURE.getStructureSnapshot(closedByTf[item.tf]) : null; }
       catch(_e){ structureByTf[item.tf]=null; }
@@ -749,7 +774,7 @@
   }
   function runOptimizationParityTests37(){
     const saved={active:state.activeSnapshot,market:state.marketSnapshot,entry:cloneStateMap37(state.entryTrackers),histories:cloneStateMap37(state.setupHistories)};
-    const hub=window.PUBLIC_MARKET_DATA_HUB;
+    const hub=signalFeed37();
     const results=[];
     try{
       for(const horizonId of HORIZONS.map(item=>item.id)){
@@ -825,10 +850,10 @@
       if(state.activeSnapshot && Array.isArray(state.activeSnapshot.rowsByTf && state.activeSnapshot.rowsByTf[tf])){
         return state.activeSnapshot.rowsByTf[tf].map(row => ({...row}));
       }
-      const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+      const feed = signalFeed37();
       let rows = [];
-      if(hub && typeof hub.getChartBuffer === "function") rows = hub.getChartBuffer(tf) || [];
-      if((!Array.isArray(rows) || !rows.length) && hub && typeof hub.getClosedBuffer === "function") rows = hub.getClosedBuffer(tf) || [];
+      rows = feed.getLiveBuffer(tf) || [];
+      if(!Array.isArray(rows) || !rows.length) rows = feed.getClosedBuffer(tf) || [];
       const deduped = new Map();
       (Array.isArray(rows) ? rows : []).forEach(row => {
         const normalized = normalizeSignalRow37(row,tf);
@@ -846,7 +871,7 @@
       : (Number.isFinite(Number(row.time)) ? Number(row.time) * 1000 : NaN);
     const closeTimeMs = Number.isFinite(Number(row.closeTime))
       ? Number(row.closeTime)
-      : (Number.isFinite(openTimeMs) && typeof ivSec === "function" ? openTimeMs + ivSec(tf) * 1000 - 1 : NaN);
+      : (Number.isFinite(openTimeMs) ? openTimeMs + signalIntervalSeconds37(tf) * 1000 - 1 : NaN);
     const out = {
       time:Number.isFinite(Number(row.time)) ? Number(row.time) : (Number.isFinite(openTimeMs) ? Math.floor(openTimeMs / 1000) : NaN),
       openTime:openTimeMs,
@@ -931,17 +956,13 @@
       return null;
     }
   }
-  function signalCurrentPrice37(fallback=null){
+  function signalCurrentPrice37(){
     const frozen = state.activeSnapshot ? num37(state.activeSnapshot.currentPrice) : null;
     if(frozen != null) return frozen;
-    const live = typeof appCurrentPrice === "function" ? num37(appCurrentPrice()) : null;
-    if(live != null) return live;
-    if(state.activeSnapshot && state.activeSnapshot.rowsByTf){
-      const latest = Object.values(state.activeSnapshot.rowsByTf).map(rows => Array.isArray(rows) && rows.length ? rows[rows.length-1] : null).filter(Boolean).sort((a,b) => Number(b.openTime || b.time)-Number(a.openTime || a.time))[0];
-      const close = num37(latest && latest.close);
-      if(close != null) return close;
-    }
-    return num37(fallback);
+    const published = state.marketSnapshot ? num37(state.marketSnapshot.currentPrice) : null;
+    if(published != null) return published;
+    const owned=signalFeed37().getCurrentPrice();
+    return num37(owned && owned.value);
   }
   function authoritativeOrders37(symbol){
     try{
@@ -3417,7 +3438,7 @@
       return {state:"ZONE ENGAGED",reason:gate.reasons[0] || pressure.blocker || "Zone engaged - adverse evidence has not cleared"};
     }
     const freshness = state.activeSnapshot && state.activeSnapshot.freshness;
-    const freshnessCurrent = !freshness || freshness.signalStatus === "LIVE";
+    const freshnessCurrent = signalFreshnessAllowsReady37(freshness);
     const reliable = freshnessCurrent && interaction.confirmedReaction && interaction.movement && (interaction.confirmedMovement || interaction.sustainedMovement) && pressure.improved && !pressure.effectiveOpposition && !gate.blocksReady;
     if(reliable && assessments.current.grade === "UNACCEPTABLE") return {state:"EXPIRED",reason:`Current entry is not viable - ${assessments.current.unacceptableReasons[0]}`};
     const history = setupHistory37(candidate);
@@ -3430,6 +3451,7 @@
     if(reliable && ["A","B","C"].includes(assessments.current.grade)) return {state:"READY",reason:`${interaction.trigger} confirmed from the current ${assessments.entryMode.toLowerCase()} context`};
     return {state:"TRIGGER DEVELOPING",reason:!freshnessCurrent ? `Actionable confirmation unavailable - ${freshness.signalStaleSources[0] && freshness.signalStaleSources[0].source || "decision-critical data"} needs refresh` : assessments.current.grade === "UNAVAILABLE" ? "Current entry evidence is unavailable" : "Reaction is credible but confirmation remains unresolved"};
   }
+  function signalFreshnessAllowsReady37(freshness){ return !freshness || freshness.signalStatus === "LIVE"; }
   function absorptionState37(candidate,interaction,pressure,samples){
     if(!candidate || !interaction.interacted) return {state:"cleared",reason:"No active level interaction"};
     const sample = (Array.isArray(samples) ? samples : []).find(item => item.tf === candidate.tf);
@@ -4415,6 +4437,81 @@
     }
   }
 
+  function frozenPublicationInvariant37(){
+    const publication=state.lastPublishedSnapshot,displayed=publication&&publication.displayedSignal,feed=signalFeed37().diagnostics();
+    if(!publication||!displayed) return null;
+    const report=ensurePublicationSignalReport37(publication);
+    let tooltip="";
+    try{const payload=typeof publication.signalTooltipFactory==="function"?publication.signalTooltipFactory():null;tooltip=payload&&payload.text||"";}catch(_e){}
+    const revisions={};Object.keys(feed.buffers||{}).sort().forEach(tf=>{const buffer=feed.buffers[tf];revisions[tf]={depth:buffer.depth,closedRevision:buffer.closedRevision,formingRevision:buffer.formingRevision};});
+    return {
+      direction:displayed.direction,confidence:displayed.confidence,entryState:displayed.decision&&displayed.decision.state||null,
+      visibleState:displayed.visibleState,setupIdentity:displayed.setupIdentity||null,setupTimeframe:displayed.setupTimeframe||null,
+      buttonText:state.entry&&state.entry.textContent||"",buttonTone:state.entry&&state.entry.dataset.tone||"",buttonTitle:state.entry&&state.entry.getAttribute("title")||"",
+      tooltip,details:report?JSON.stringify({summary:report.summary,analysis:report.analysis,diagnostics:report.diagnostics}):"",
+      triggerAlertIdentity:state.activeTriggerAlertId||null,revisions,
+      publicationFingerprint:publication.publicationFingerprint,generation:publication.generation,signalIdentity:displayed.signalIdentity,
+      analyticalFingerprint:state.lastAnalyticalFingerprint,feedGeneration:feed.generation,feedSocketGeneration:feed.socketGeneration,
+      subscribedTimeframes:feed.subscribedTimeframes,evidenceFingerprint:feed.evidenceFingerprint,
+      latestPriceAt:feed.latestPriceAt,latestPriceSource:feed.latestPriceSource
+    };
+  }
+  function isolationTextFingerprint37(value){
+    const text=String(value||"");let hash=2166136261;
+    for(let index=0;index<text.length;index+=1){hash^=text.charCodeAt(index);hash=Math.imul(hash,16777619);}
+    return `${text.length}:${(hash>>>0).toString(16)}`;
+  }
+  function summarizePublicationInvariant37(value){
+    if(!value)return null;
+    return {...value,tooltip:isolationTextFingerprint37(value.tooltip),details:isolationTextFingerprint37(value.details)};
+  }
+  async function runChartTimeframeIsolationTests37({exerciseLifecycle=true,settleMs=250}={}){
+    const selector=document.getElementById("interval"),publication=state.lastPublishedSnapshot;
+    if(!selector||!publication) return {passed:false,reason:"A ready Signal publication and chart timeframe selector are required"};
+    const feed=signalFeed37(),original=selector.value,timeframes=["1m","3m","5m","15m","30m","1h","4h","1d"],before=frozenPublicationInvariant37();
+    if(!before) return {passed:false,reason:"Signal publication is unavailable"};
+    const samples=[];
+    for(const tf of timeframes){
+      selector.value=tf;selector.dispatchEvent(new Event("change",{bubbles:true}));
+      const revision=analyticalInputRevision37();
+      samples.push({tf,publication:frozenPublicationInvariant37(),calculationFingerprint:revision.fingerprint});
+    }
+    selector.value=original;selector.dispatchEvent(new Event("change",{bubbles:true}));
+    const comparable=value=>JSON.stringify(value&&{
+      direction:value.direction,confidence:value.confidence,entryState:value.entryState,visibleState:value.visibleState,
+      setupIdentity:value.setupIdentity,setupTimeframe:value.setupTimeframe,buttonText:value.buttonText,buttonTone:value.buttonTone,buttonTitle:value.buttonTitle,
+      tooltip:value.tooltip,details:value.details,triggerAlertIdentity:value.triggerAlertIdentity,revisions:value.revisions,
+      publicationFingerprint:value.publicationFingerprint,generation:value.generation,signalIdentity:value.signalIdentity,
+      analyticalFingerprint:value.analyticalFingerprint,feedGeneration:value.feedGeneration,feedSocketGeneration:value.feedSocketGeneration,
+      subscribedTimeframes:value.subscribedTimeframes,evidenceFingerprint:value.evidenceFingerprint,latestPriceAt:value.latestPriceAt,latestPriceSource:value.latestPriceSource
+    });
+    const baseline=comparable(before),calculationBaseline=samples[0]&&samples[0].calculationFingerprint;
+    const publicationInvariant=samples.every(sample=>comparable(sample.publication)===baseline);
+    const calculationFingerprintInvariant=samples.every(sample=>sample.calculationFingerprint===calculationBaseline);
+    const chartHub=window["PUBLIC_MARKET_DATA_"+"HUB"],freshnessBefore=feed.diagnostics(),lifecycleCalls=[];
+    if(exerciseLifecycle){
+      try{if(typeof loadChart==="function"){loadChart({preserveView:true});lifecycleCalls.push("loadChart");}}catch(_e){}
+      try{if(chartHub&&typeof chartHub.resetConnectionState==="function"){chartHub.resetConnectionState("signal-isolation-test");lifecycleCalls.push("chart-reset");}}catch(_e){}
+      try{if(chartHub&&typeof chartHub.stop==="function"&&typeof chartHub.connect==="function"){chartHub.stop();chartHub.connect();lifecycleCalls.push("chart-reconnect");}}catch(_e){}
+    }
+    await new Promise(resolve=>setTimeout(resolve,Math.max(0,Number(settleMs)||0)));
+    const freshnessAfter=feed.diagnostics();
+    const chartLifecycleIndependent=freshnessAfter.generation===freshnessBefore.generation&&freshnessAfter.socketGeneration===freshnessBefore.socketGeneration&&freshnessAfter.subscribedTimeframes.join("|")===freshnessBefore.subscribedTimeframes.join("|")&&freshnessAfter.latestPriceAt>=freshnessBefore.latestPriceAt;
+    const requestCounters=()=>{const perf=window.BT001_PERFORMANCE_DIAGNOSTICS||{},diag=feed.diagnostics();return {publicRest:diag.counters.restRequests,positionRest:Number(perf.privatePositionRestReads)||0,normalOrderRest:Number(perf.privateNormalOrderRestReads)||0,algoOrderRest:Number(perf.privateAlgoOrderRestReads)||0};};
+    const requestsBeforeHover=requestCounters(),publicationBeforeHover=frozenPublicationInvariant37();
+    try{state.entry.dispatchEvent(new MouseEvent("mouseenter",{bubbles:true}));state.entry.dispatchEvent(new MouseEvent("mouseleave",{bubbles:true}));}catch(_e){}
+    const requestsAfterHover=requestCounters(),hoverReadOnly=JSON.stringify(requestsBeforeHover)===JSON.stringify(requestsAfterHover)&&comparable(frozenPublicationInvariant37())===comparable(publicationBeforeHover);
+    const cases={
+      allChartTimeframesExactInvariant:publicationInvariant&&calculationFingerprintInvariant,
+      chartLifecycleDoesNotReconfigureFeed:chartLifecycleIndependent,
+      hoverCausesNoBinanceRequest:hoverReadOnly,
+      staleFeedCannotActivateTrigger:signalFreshnessAllowsReady37({signalStatus:"STALE"})===false,
+      liveFeedAllowsTriggerEligibility:signalFreshnessAllowsReady37({signalStatus:"LIVE"})===true
+    };
+    const result={ranAt:Date.now(),passed:Object.values(cases).every(Boolean),cases,timeframes:samples.map(sample=>({tf:sample.tf,generation:sample.publication&&sample.publication.generation,publicationFingerprint:sample.publication&&sample.publication.publicationFingerprint,evidenceFingerprint:sample.publication&&sample.publication.evidenceFingerprint,calculationFingerprint:sample.calculationFingerprint})),before:summarizePublicationInvariant37(before),after:summarizePublicationInvariant37(frozenPublicationInvariant37()),freshnessBefore,freshnessAfter,lifecycleCalls,hover:{requestsBeforeHover,requestsAfterHover}};
+    state.lastIsolationTests=result;return result;
+  }
+
   function diagnostics37(){
     const perfDiagnostics=uiPerf();
     if(perfDiagnostics && typeof perfDiagnostics.size === "function"){
@@ -4440,6 +4537,8 @@
       refreshGeneration:state.refreshGeneration,
       analyticalFingerprint:state.lastAnalyticalFingerprint,
       lastRefreshReason:state.lastRefreshReason,
+      lastSignalCalculationReason:state.lastRefreshReason,
+      activeChartTfComparisonOnly:String(document.getElementById("interval")?.value || ""),
       workingSnapshot:state.workingSnapshot ? {generation:state.workingSnapshot.generation,contextKey:state.workingSnapshot.contextKey,sections:state.workingSnapshot.sections,dependencyGate:state.workingSnapshot.dependencyGate} : null,
       snapshot:state.lastPublishedSnapshot ? {
         version:state.lastPublishedSnapshot.snapshot && state.lastPublishedSnapshot.snapshot.version,
@@ -4460,7 +4559,8 @@
       entrySelfTests:runEntrySelfTests37(),
       presentationSelfTests:runPresentationSelfTests37(),
       windowPresentationSelfTests:windowSystem._selfTest(),
-      cacheSelfTests:window.PUBLIC_MARKET_DATA_HUB && typeof window.PUBLIC_MARKET_DATA_HUB._cacheSelfTest==="function" ? window.PUBLIC_MARKET_DATA_HUB._cacheSelfTest() : null,
+      dataFeed:signalFeed37().diagnostics(),
+      isolationTests:state.lastIsolationTests,
       signalCacheSelfTests:runSignalEvidenceCacheSelfTests37(),
       schedulingSelfTests:runSchedulingSelfTests37(),
       privateStreamSelfTests:window.BINANCE_PRIVATE_SYNC && typeof window.BINANCE_PRIVATE_SYNC._selfTest==="function" ? window.BINANCE_PRIVATE_SYNC._selfTest() : null,
@@ -4485,9 +4585,15 @@
       window.addEventListener("v14:binance-state-change",() => scheduleToolbarSignalRefresh37(false,"binance-state"),{signal:lifecycleSignal});
       window.addEventListener("pressure-signal:clear",() => invalidatePublishedContext37(presentationContextKey37()),{signal:lifecycleSignal});
       document.addEventListener("change",event => {
-        if(["market","account","accountSelect","selectedAccount"].includes(event.target && event.target.id)) reconcilePresentationContext37();
+        const id=event.target&&event.target.id;
+        if(id==="market"){
+          state.dataKey="";state.dataStatus=null;state.marketSnapshot=null;state.evidenceByTf.clear();state.smcCache.clear();
+          configureSignalFeed37(signalDataPlan37(state.horizon),"signal-symbol-change").catch(error=>{state.lastError=error&&error.stack||String(error);});
+          reconcilePresentationContext37();
+        }else if(["account","accountSelect","selectedAccount"].includes(id)) reconcilePresentationContext37();
       },{signal:lifecycleSignal,capture:true});
     }
+    configureSignalFeed37(signalDataPlan37(state.horizon),"signal-initialization").catch(error=>{state.lastError=error&&error.stack||String(error);});
     scheduleToolbarSignalRefresh37(true,"initialization");
     state.lifecycleTimer = setInterval(() => scheduleToolbarSignalRefresh37(false,"revision-check"),featureConfig.refreshMs);
     return api;
@@ -4504,10 +4610,8 @@
     state.summaryFrame = null;
     state.dataLoadGeneration += 1;
     state.dataLoadPromise = null;
-    try{
-      const hub = window.PUBLIC_MARKET_DATA_HUB;
-      if(hub && typeof hub.setTimeframeRequirements === "function") hub.setTimeframeRequirements(MODULE,[]);
-    }catch(_e){}
+    try{ if(state.dataFeed) state.dataFeed.destroy(); }catch(_e){}
+    state.dataFeed=null;
     if(state.uiAbort) state.uiAbort.abort();
     state.uiAbort = null;
     state.resizeObservers.splice(0).forEach(observer => observer.disconnect());
@@ -4527,6 +4631,7 @@
     state.lastPublishedSnapshot = null;
     state.lastValidPublishedSnapshot = null;
     state.lastOptimizationTests = null;
+    state.lastIsolationTests = null;
     state.lastAnalyticalFingerprint = "";
     state.scheduledFrozen = null;
     state.refreshGeneration += 1;
@@ -4543,6 +4648,7 @@
     state.marketSnapshot = null;
     state.evidenceByTf.clear();
     invalidatePublishedContext37(presentationContextKey37());
+    configureSignalFeed37(signalDataPlan37(state.horizon),"management-evidence-change").catch(error=>{state.lastError=error&&error.stack||String(error);});
     scheduleToolbarSignalRefresh37(true);
     return selected;
   }
@@ -4565,6 +4671,8 @@
     getManagementCopyContent:windowSystem.getPositionCopy,
     invalidatePublishedSnapshot:() => invalidatePublishedContext37(presentationContextKey37()),
     runOptimizationTests:runOptimizationParityTests37,
+    runDataFeedTests:() => window.createPressureSignalDataFeed.runSelfTests(),
+    runChartTimeframeIsolationTests:runChartTimeframeIsolationTests37,
     getDiagnostics:diagnostics37
   });
   Object.defineProperty(window,"PRESSURE_SIGNAL",{value:api,configurable:true});
