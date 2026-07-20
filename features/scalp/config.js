@@ -15,10 +15,10 @@
     version:"1.0.0",consumerId:"BT001_SCALP",configKey:"bt001_scalp_config_v1",windowKey:"bt001_scalp_window_v1",sessionKey:"bt001_scalp_active_session_v1",
     states:STATES,transitions:TRANSITIONS,timeframes:Object.freeze(["1m","3m","5m"]),sources:Object.freeze(["1m","3m","5m","SIG"]),
     directions:Object.freeze(["SHORT","LONG","ANY"]),entryTypes:Object.freeze(["BOUNCE","CROSS","ANY"]),modes:Object.freeze(["SINGLE","CONTINUOUS"]),
-    defaults:Object.freeze({direction:"ANY",source:"1m",entryType:"ANY",lot:"0.000",target:"5.00",stop:"3.00",mode:"SINGLE",cooloffMinutes:1}),
+    defaults:Object.freeze({direction:"ANY",source:"1m",entryType:"ANY",lot:"0.000",target:"5.0",stop:"3.0",mode:"SINGLE",cooloffMinutes:1}),
     fees:Object.freeze({fallbackMaker:0.0002,fallbackTaker:0.0004}),
     signal:Object.freeze({emaFast:9,emaSlow:55,minimumRows:80,atrPeriod:14,toleranceAtr:0.12,rejectionAtr:0.08,minFastSlopeAtr:0.006,minSlowSlopeAtr:0.002,minSeparationAtr:0.025,maxCompressionAtr:0.04,projectedBandAtr:0.08,crossPersistenceMs:Object.freeze({"1m":3000,"3m":5000,"5m":8000}),staleMs:Object.freeze({"1m":120000,"3m":360000,"5m":600000,"SIG":120000})}),
     order:Object.freeze({namespace:"SCALP",entryPrefix:"SCALP-E",tpPrefix:"SCALP-T",slPrefix:"SCALP-S",exitPrefix:"SCALP-X",reconcileDelayMs:250,protectionRetry:1,tpRetry:2}),
-    ui:Object.freeze({minWidth:370,minHeight:470,defaultWidth:430,defaultHeight:690})
+    ui:Object.freeze({minWidth:370,minHeight:470,defaultWidth:430,defaultHeight:590})
   });
 })();

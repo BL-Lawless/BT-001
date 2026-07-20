@@ -27,6 +27,8 @@
     return prices({direction,entryPrice:g,qty:q,entryCommission:g*q*r.taker,target,stop,makerRate:r.maker,takerRate:r.taker,tickSize:n(filters.tickSize)||0.01});
   }
   function normalizeLot(qty,filters={}){return roundStep(n(qty)||0,n(filters.stepSize)||0.001,"down");}
+  function formatNumeric(value,decimals){const number=n(value);return (number==null?0:number).toFixed(decimals);}
+  function stepNumeric(value,step,direction,decimals){const current=n(value)||0,next=Math.max(0,roundStep(current+(direction<0?-step:step),step));return formatNumeric(next,decimals);}
   function validateArm({config,filters={},guide,balance,authenticated,streamHealthy,sourceReady,filtersReady=true,position,ownedOrders}){
     const errors=[],q=n(config&&config.lot),target=n(config&&config.target),stop=n(config&&config.stop),price=n(guide),normalized=normalizeLot(q,filters),minQty=n(filters.minQty)||0,maxQty=n(filters.maxQty),minNotional=n(filters.minNotional)||0;
     if(!authenticated)errors.push("Authenticated Binance connection required");if(!streamHealthy)errors.push("Healthy Binance user-data stream required");if(!sourceReady)errors.push("Selected signal source is not ready");if(!filtersReady)errors.push("Current symbol trading filters are unavailable");
@@ -42,5 +44,5 @@
     const integer=value=>Number.isFinite(Number(value))?Math.round(Number(value)).toLocaleString("en-US"):"-",money=value=>Number.isFinite(Number(value))?`$${Number(value).toFixed(2)}`:"-";
     return {guide:Number.isFinite(Number(model&&model.guide))?Number(model.guide).toLocaleString("en-US",{maximumFractionDigits:2}):"-",tpDelta:integer(model&&model.tpDelta),slDelta:integer(model&&model.slDelta),tpFees:money(model&&model.tpFee),slFees:money(model&&model.slFee)};
   }
-  root.calculations=Object.freeze({n,roundStep,feeRates,prices,estimate,normalizeLot,validateArm,formatOutcome});
+  root.calculations=Object.freeze({n,roundStep,feeRates,prices,estimate,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
 })();
