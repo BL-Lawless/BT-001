@@ -26,15 +26,32 @@
     const q=n(qty),g=n(guide),r=rates||feeRates();if(!(q>0)||!(g>0))return null;
     return prices({direction,entryPrice:g,qty:q,entryCommission:g*q*r.taker,target,stop,makerRate:r.maker,takerRate:r.taker,tickSize:n(filters.tickSize)||0.01});
   }
-  function preview({direction,guide,qty,target,stop,rates,filters={}}){
-    const g=n(guide),q=n(qty),t=n(target),s=n(stop),known=String(direction||"").toUpperCase();
-    if(!(g>0))return {available:false,reason:"WAITING FOR MARKET DATA"};
-    if(!(q>0)||!(t>0)||!(s>0))return {available:false,reason:"ENTER TRADE VALUES"};
+  function linkedSide({direction,entryPrice,qty,entryCommission,target,stop,tpDelta,slDelta,tpDriver,slDriver,makerRate,takerRate,tickSize}){
+    const d=String(direction||"").toUpperCase(),e=n(entryPrice),q=n(qty),ec=n(entryCommission),t=n(target),s=n(stop),td=n(tpDelta),sd=n(slDelta),mr=n(makerRate),tr=n(takerRate),tick=n(tickSize)||.01;
+    if(!["LONG","SHORT"].includes(d)||!(e>0)||!(q>0)||ec==null||mr==null||tr==null)throw new Error("Invalid linked outcome inputs");
+    let tp,tpNet,tpMove,tpFee;if(tpDriver==="TP_DELTA"){
+      if(td==null||td<0)throw new Error("Invalid TP delta");tp=roundStep(d==="LONG"?e+td:e-td,tick,d==="LONG"?"up":"down");if(!(tp>0))throw new Error("Invalid TP price");tpMove=Math.abs(tp-e);tpFee=tp*q*mr;tpNet=d==="LONG"?(tp-e)*q-ec-tpFee:(e-tp)*q-ec-tpFee;
+    }else{
+      if(!(t>0))throw new Error("Invalid net target");const raw=d==="LONG"?(t+ec+e*q)/(q*(1-mr)):(e*q-ec-t)/(q*(1+mr));tp=roundStep(raw,tick,d==="LONG"?"up":"down");if(!(tp>0))throw new Error("Invalid TP price");tpMove=Math.abs(tp-e);tpFee=tp*q*mr;tpNet=t;
+    }
+    let sl,slNet,slMove,slFee;if(slDriver==="SL_DELTA"){
+      if(sd==null||sd<0)throw new Error("Invalid SL delta");sl=roundStep(d==="LONG"?e-sd:e+sd,tick,d==="LONG"?"up":"down");if(!(sl>0))throw new Error("Invalid SL price");slMove=Math.abs(e-sl);slFee=sl*q*tr;slNet=d==="LONG"?(e-sl)*q+ec+slFee:(sl-e)*q+ec+slFee;
+    }else{
+      if(!(s>0))throw new Error("Invalid net SL");const raw=d==="LONG"?(e*q+ec-s)/(q*(1-tr)):(s+e*q-ec)/(q*(1+tr));sl=roundStep(raw,tick,d==="LONG"?"up":"down");if(!(sl>0))throw new Error("Invalid SL price");slMove=Math.abs(e-sl);slFee=sl*q*tr;slNet=s;
+    }
+    return {direction:d,entryPrice:e,qty:q,tp,sl,target:Math.max(0,tpNet),stop:Math.max(0,slNet),tpDelta:tpMove,slDelta:slMove,tpFee,slFee,entryFee:ec,entryCommission:ec};
+  }
+  function linkedPreview({direction,guide,qty,target,stop,tpDelta,slDelta,tpDriver="NET_TARGET",slDriver="NET_SL",rates,filters={},entryPrice,entryCommission}){
+    const r=rates||feeRates(),e=n(entryPrice)||n(guide),q=n(qty),ec=n(entryCommission)??(e>0&&q>0?e*q*r.taker:null),known=String(direction||"").toUpperCase(),args={entryPrice:e,qty:q,entryCommission:ec,target,stop,tpDelta,slDelta,tpDriver,slDriver,makerRate:r.maker,takerRate:r.taker,tickSize:n(filters.tickSize)||.01};
+    if(!(e>0))return {available:false,reason:"WAITING FOR MARKET DATA"};if(!(q>0))return {available:false,reason:"ENTER TRADE VALUES"};
     try{
-      if(["LONG","SHORT"].includes(known))return {...estimate({direction:known,guide:g,qty:q,target:t,stop:s,rates,filters}),available:true,direction:known,conservative:false};
-      const long=estimate({direction:"LONG",guide:g,qty:q,target:t,stop:s,rates,filters}),short=estimate({direction:"SHORT",guide:g,qty:q,target:t,stop:s,rates,filters});
-      return {available:true,direction:"ANY",conservative:true,tpDelta:Math.max(long.tpDelta,short.tpDelta),slDelta:Math.max(long.slDelta,short.slDelta),tpFee:Math.max(long.tpFee,short.tpFee),slFee:Math.max(long.slFee,short.slFee)};
+      if(["LONG","SHORT"].includes(known))return {...linkedSide({...args,direction:known}),available:true,conservative:false};
+      const long=linkedSide({...args,direction:"LONG"}),short=linkedSide({...args,direction:"SHORT"});
+      return {available:true,direction:"ANY",conservative:true,entryPrice:e,qty:q,target:tpDriver==="TP_DELTA"?Math.min(long.target,short.target):n(target),stop:slDriver==="SL_DELTA"?Math.max(long.stop,short.stop):n(stop),tpDelta:Math.max(long.tpDelta,short.tpDelta),slDelta:Math.min(long.slDelta,short.slDelta),tpFee:Math.max(long.tpFee,short.tpFee),slFee:Math.max(long.slFee,short.slFee),entryFee:Math.max(long.entryFee,short.entryFee)};
     }catch(_e){return {available:false,reason:"OUTCOME UNAVAILABLE"};}
+  }
+  function preview({direction,guide,qty,target,stop,rates,filters={}}){
+    return linkedPreview({direction,guide,qty,target,stop,tpDriver:"NET_TARGET",slDriver:"NET_SL",rates,filters});
   }
   function normalizeLot(qty,filters={}){return roundStep(n(qty)||0,n(filters.stepSize)||0.001,"down");}
   function formatNumeric(value,decimals){const number=n(value);return (number==null?0:number).toFixed(decimals);}
@@ -54,5 +71,5 @@
     const valid=value=>value!==null&&value!==""&&Number.isFinite(Number(value)),integer=value=>valid(value)?Math.round(Number(value)).toLocaleString("en-US"):"-",money=value=>valid(value)?`$${Number(value).toFixed(2)}`:"-";
     return {guide:valid(model&&model.guide)?Number(model.guide).toLocaleString("en-US",{maximumFractionDigits:2}):"-",tpDelta:integer(model&&model.tpDelta),slDelta:integer(model&&model.slDelta),tpFees:money(model&&model.tpFee),slFees:money(model&&model.slFee)};
   }
-  root.calculations=Object.freeze({n,roundStep,feeRates,prices,estimate,preview,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
+  root.calculations=Object.freeze({n,roundStep,feeRates,prices,estimate,linkedSide,linkedPreview,preview,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
 })();
