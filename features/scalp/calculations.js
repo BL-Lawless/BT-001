@@ -12,37 +12,40 @@
   }
   function feeRates(account={}){
     const maker=n(account.makerCommissionRate??account.maker),taker=n(account.takerCommissionRate??account.taker);
-    return {maker:maker!=null&&maker>=0?maker:C.fees.fallbackMaker,taker:taker!=null&&taker>=0?taker:C.fees.fallbackTaker,makerFallback:maker==null,takerFallback:taker==null};
+    const resolvedMaker=maker!=null&&maker>=0?maker:C.fees.fallbackMaker,resolvedTaker=taker!=null&&taker>=0?taker:C.fees.fallbackTaker;
+    const makerFallback=maker==null||maker<0,takerFallback=taker==null||taker<0;
+    return {maker:resolvedMaker,taker:resolvedTaker,conservativeTp:Math.max(resolvedMaker,resolvedTaker),makerFallback,takerFallback,source:makerFallback||takerFallback?"fallback":"account-commission-rate"};
   }
-  function prices({direction,entryPrice,qty,entryCommission,target,stop,makerRate,takerRate,tickSize}){
-    const d=String(direction||"").toUpperCase(),e=n(entryPrice),q=n(qty),ec=n(entryCommission),t=n(target),s=n(stop),mr=n(makerRate),tr=n(takerRate),tick=n(tickSize);
+  function prices({direction,entryPrice,qty,entryCommission,target,stop,makerRate,takerRate,conservativeTpRate,fundingCost=0,tickSize}){
+    const d=String(direction||"").toUpperCase(),e=n(entryPrice),q=n(qty),ec=n(entryCommission),t=n(target),s=n(stop),mr=n(makerRate),tr=n(takerRate),rtp=Math.max(n(conservativeTpRate)||0,mr||0,tr||0),funding=n(fundingCost),tick=n(tickSize);
     if(!["LONG","SHORT"].includes(d)||!(e>0)||!(q>0)||!(t>0)||!(s>0)||ec==null||mr==null||tr==null) throw new Error("Invalid outcome inputs");
-    const rawTp=d==="LONG"?(t+ec+e*q)/(q*(1-mr)):(e*q-ec-t)/(q*(1+mr));
-    const rawSl=d==="LONG"?(e*q+ec-s)/(q*(1-tr)):(s+e*q-ec)/(q*(1+tr));
+    if(funding==null)throw new Error("Invalid funding input");
+    const rawTp=d==="LONG"?(e*q+t+ec+funding)/(q*(1-rtp)):(e*q-t-ec-funding)/(q*(1+rtp));
+    const rawSl=d==="LONG"?(e*q+ec+funding-s)/(q*(1-tr)):(e*q+s-ec-funding)/(q*(1+tr));
     const tp=roundStep(rawTp,tick,d==="LONG"?"up":"down"),sl=roundStep(rawSl,tick,d==="LONG"?"up":"down");
-    return {tp,sl,tpDelta:Math.abs(tp-e),slDelta:Math.abs(e-sl),tpFee:tp*q*mr,slFee:sl*q*tr,entryCommission:ec,rawTp,rawSl};
+    return {tp,sl,tpDelta:Math.abs(tp-e),slDelta:Math.abs(e-sl),tpFee:tp*q*rtp,slFee:sl*q*tr,entryCommission:ec,fundingCost:funding,rawTp,rawSl,diagnostics:{entryRate:tr,tpRate:rtp,slRate:tr,tpRateAssumption:"conservative-max-maker-taker",slFillAssumption:"trigger-price-estimate; execution slippage unavailable",fundingStatus:funding===0?"explicit-zero/no-known-settlement":"provided-known-cost",entrySlippageStatus:"actual-average-fill-after-entry"}};
   }
   function estimate({direction="LONG",guide,qty,target,stop,rates,filters={}}){
     const q=n(qty),g=n(guide),r=rates||feeRates();if(!(q>0)||!(g>0))return null;
-    return prices({direction,entryPrice:g,qty:q,entryCommission:g*q*r.taker,target,stop,makerRate:r.maker,takerRate:r.taker,tickSize:n(filters.tickSize)||0.01});
+    return prices({direction,entryPrice:g,qty:q,entryCommission:g*q*r.taker,target,stop,makerRate:r.maker,takerRate:r.taker,conservativeTpRate:r.conservativeTp,fundingCost:0,tickSize:n(filters.tickSize)||0.01});
   }
-  function linkedSide({direction,entryPrice,qty,entryCommission,target,stop,tpDelta,slDelta,tpDriver,slDriver,makerRate,takerRate,tickSize}){
-    const d=String(direction||"").toUpperCase(),e=n(entryPrice),q=n(qty),ec=n(entryCommission),t=n(target),s=n(stop),td=n(tpDelta),sd=n(slDelta),mr=n(makerRate),tr=n(takerRate),tick=n(tickSize)||.01;
+  function linkedSide({direction,entryPrice,qty,entryCommission,target,stop,tpDelta,slDelta,tpDriver,slDriver,makerRate,takerRate,conservativeTpRate,fundingCost=0,tickSize}){
+    const d=String(direction||"").toUpperCase(),e=n(entryPrice),q=n(qty),ec=n(entryCommission),t=n(target),s=n(stop),td=n(tpDelta),sd=n(slDelta),mr=n(makerRate),tr=n(takerRate),rtp=Math.max(n(conservativeTpRate)||0,mr||0,tr||0),funding=n(fundingCost),tick=n(tickSize)||.01;
     if(!["LONG","SHORT"].includes(d)||!(e>0)||!(q>0)||ec==null||mr==null||tr==null)throw new Error("Invalid linked outcome inputs");
     let tp,tpNet,tpMove,tpFee;if(tpDriver==="TP_DELTA"){
-      if(td==null||td<0)throw new Error("Invalid TP delta");tp=roundStep(d==="LONG"?e+td:e-td,tick,d==="LONG"?"up":"down");if(!(tp>0))throw new Error("Invalid TP price");tpMove=Math.abs(tp-e);tpFee=tp*q*mr;tpNet=d==="LONG"?(tp-e)*q-ec-tpFee:(e-tp)*q-ec-tpFee;
+      if(td==null||td<0)throw new Error("Invalid TP delta");tp=roundStep(d==="LONG"?e+td:e-td,tick,d==="LONG"?"up":"down");if(!(tp>0))throw new Error("Invalid TP price");tpMove=Math.abs(tp-e);tpFee=tp*q*rtp;tpNet=d==="LONG"?(tp-e)*q-ec-funding-tpFee:(e-tp)*q-ec-funding-tpFee;
     }else{
-      if(!(t>0))throw new Error("Invalid net target");const raw=d==="LONG"?(t+ec+e*q)/(q*(1-mr)):(e*q-ec-t)/(q*(1+mr));tp=roundStep(raw,tick,d==="LONG"?"up":"down");if(!(tp>0))throw new Error("Invalid TP price");tpMove=Math.abs(tp-e);tpFee=tp*q*mr;tpNet=t;
+      if(!(t>0))throw new Error("Invalid net target");const raw=d==="LONG"?(e*q+t+ec+funding)/(q*(1-rtp)):(e*q-t-ec-funding)/(q*(1+rtp));tp=roundStep(raw,tick,d==="LONG"?"up":"down");if(!(tp>0))throw new Error("Invalid TP price");tpMove=Math.abs(tp-e);tpFee=tp*q*rtp;tpNet=d==="LONG"?(tp-e)*q-ec-funding-tpFee:(e-tp)*q-ec-funding-tpFee;
     }
     let sl,slNet,slMove,slFee;if(slDriver==="SL_DELTA"){
-      if(sd==null||sd<0)throw new Error("Invalid SL delta");sl=roundStep(d==="LONG"?e-sd:e+sd,tick,d==="LONG"?"up":"down");if(!(sl>0))throw new Error("Invalid SL price");slMove=Math.abs(e-sl);slFee=sl*q*tr;slNet=d==="LONG"?(e-sl)*q+ec+slFee:(sl-e)*q+ec+slFee;
+      if(sd==null||sd<0)throw new Error("Invalid SL delta");sl=roundStep(d==="LONG"?e-sd:e+sd,tick,d==="LONG"?"up":"down");if(!(sl>0))throw new Error("Invalid SL price");slMove=Math.abs(e-sl);slFee=sl*q*tr;slNet=d==="LONG"?(e-sl)*q+ec+funding+slFee:(sl-e)*q+ec+funding+slFee;
     }else{
-      if(!(s>0))throw new Error("Invalid net SL");const raw=d==="LONG"?(e*q+ec-s)/(q*(1-tr)):(s+e*q-ec)/(q*(1+tr));sl=roundStep(raw,tick,d==="LONG"?"up":"down");if(!(sl>0))throw new Error("Invalid SL price");slMove=Math.abs(e-sl);slFee=sl*q*tr;slNet=s;
+      if(!(s>0))throw new Error("Invalid net SL");const raw=d==="LONG"?(e*q+ec+funding-s)/(q*(1-tr)):(e*q+s-ec-funding)/(q*(1+tr));sl=roundStep(raw,tick,d==="LONG"?"up":"down");if(!(sl>0))throw new Error("Invalid SL price");slMove=Math.abs(e-sl);slFee=sl*q*tr;slNet=d==="LONG"?(e-sl)*q+ec+funding+slFee:(sl-e)*q+ec+funding+slFee;
     }
-    return {direction:d,entryPrice:e,qty:q,tp,sl,target:Math.max(0,tpNet),stop:Math.max(0,slNet),tpDelta:tpMove,slDelta:slMove,tpFee,slFee,entryFee:ec,entryCommission:ec};
+    return {direction:d,entryPrice:e,qty:q,tp,sl,target:Math.max(0,tpNet),stop:Math.max(0,slNet),tpDelta:tpMove,slDelta:slMove,tpFee,slFee,entryFee:ec,entryCommission:ec,fundingCost:funding,diagnostics:{entryRate:tr,tpRate:rtp,slRate:tr,tpRateAssumption:"conservative-max-maker-taker",slFillAssumption:"trigger-price-estimate; execution slippage unavailable",fundingStatus:funding===0?"explicit-zero/no-known-settlement":"provided-known-cost",entrySlippageStatus:"actual-average-fill-after-entry"}};
   }
-  function linkedPreview({direction,guide,qty,target,stop,tpDelta,slDelta,tpDriver="NET_TARGET",slDriver="NET_SL",rates,filters={},entryPrice,entryCommission}){
-    const r=rates||feeRates(),e=n(entryPrice)||n(guide),q=n(qty),ec=n(entryCommission)??(e>0&&q>0?e*q*r.taker:null),known=String(direction||"").toUpperCase(),args={entryPrice:e,qty:q,entryCommission:ec,target,stop,tpDelta,slDelta,tpDriver,slDriver,makerRate:r.maker,takerRate:r.taker,tickSize:n(filters.tickSize)||.01};
+  function linkedPreview({direction,guide,qty,target,stop,tpDelta,slDelta,tpDriver="NET_TARGET",slDriver="NET_SL",rates,filters={},entryPrice,entryCommission,fundingCost=0}){
+    const r=rates||feeRates(),e=n(entryPrice)||n(guide),q=n(qty),ec=n(entryCommission)??(e>0&&q>0?e*q*r.taker:null),known=String(direction||"").toUpperCase(),args={entryPrice:e,qty:q,entryCommission:ec,target,stop,tpDelta,slDelta,tpDriver,slDriver,makerRate:r.maker,takerRate:r.taker,conservativeTpRate:n(r.conservativeTp)??Math.max(r.maker,r.taker),fundingCost,tickSize:n(filters.tickSize)||.01};
     if(!(e>0))return {available:false,reason:"WAITING FOR MARKET DATA"};if(!(q>0))return {available:false,reason:"ENTER TRADE VALUES"};
     try{
       if(["LONG","SHORT"].includes(known))return {...linkedSide({...args,direction:known}),available:true,conservative:false};

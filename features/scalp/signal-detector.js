@@ -7,6 +7,8 @@
   const n=value=>{const out=Number(value);return Number.isFinite(out)?out:null;};
   const sign=value=>value>0?1:value<0?-1:0;
   const directionForSign=value=>value>0?"LONG":value<0?"SHORT":null;
+  const clamp=(value,min=0,max=100)=>Math.max(min,Math.min(max,value));
+  const rounded=value=>Math.round(clamp(value));
   const fixedPeriods=()=>[S.emaFast,S.emaSlow,S.emaFast,S.emaSlow,S.emaFast];
   const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
 
@@ -35,25 +37,41 @@
     return Object.freeze({source:tf,eventType:"NONE",direction:null,eventState:"NONE",phase:"NONE",qualified:false,projected:false,publishedAt:now,rank:null,rankValue:null,status});
   }
 
-  function rankLabel(value){return value>=80?"A":value>=60?"B":value>0?"C":null;}
-  function canonicalMeta(tf,event){
-    let model=null;
-    try{
-      const api=window.MA_STACK_STRIP;
-      model=api&&typeof api.classifyTimeframe==="function"?api.classifyTimeframe(tf,{includeForming:true}):null;
-    }catch(_e){}
-    const maEvent=model&&model.maEvent;
-    if(!maEvent||!event)return {rank:null,rankValue:null,quality:null,canonicalSource:null};
-    const periods=String(maEvent.ref||maEvent.label||"").match(/\d+/g)||[];
-    const pairMatches=periods.includes(String(S.emaFast))&&periods.includes(String(S.emaSlow));
-    const canonicalType=String(maEvent.type||"").toLowerCase();
-    const typeMatches=event.eventType==="CROSS"?canonicalType.includes("cross"):canonicalType.includes("bounce");
-    const direction=Number(maEvent.dir)>0?"LONG":Number(maEvent.dir)<0?"SHORT":null;
-    if(!pairMatches||!typeMatches||direction!==event.direction)return {rank:null,rankValue:null,quality:null,canonicalSource:null};
-    const rankValue=n(maEvent.rank),quality=n(model.quality);
-    return {rank:rankLabel(rankValue),rankValue,quality,canonicalSource:model.source||null};
+  function rankLabel(value){return value>=80?"A":value>=60?"B":value>=1?"C":null;}
+  function mean(values){return values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null;}
+  function pressureScore(rows,eventIndex,direction){
+    const event=rows[eventIndex],volume=n(event&&event.volume),takerBuy=n(event&&event.takerBuyBase),open=n(event&&event.open),high=n(event&&event.high),low=n(event&&event.low),close=n(event&&event.close);
+    if(!(volume>0))return {available:false,reason:"event-volume-unavailable"};
+    if(takerBuy==null||takerBuy<0||takerBuy>volume)return {available:false,reason:"event-taker-volume-unavailable"};
+    if([open,high,low,close].some(value=>value==null))return {available:false,reason:"event-ohlc-unavailable"};
+    const priorClosed=[];
+    for(let i=eventIndex-1;i>=0&&priorClosed.length<S.pressureBaseline;i--){const row=rows[i];if(row&&row.final!==false)priorClosed.push(row);}
+    if(priorClosed.length<S.pressureBaseline)return {available:false,reason:`pressure-baseline-${priorClosed.length}-of-${S.pressureBaseline}`};
+    const baseline=priorClosed.map(row=>n(row.volume));if(baseline.some(value=>!(value>0)))return {available:false,reason:"pressure-baseline-volume-unavailable"};
+    const averageVolume=mean(baseline),relativeVolume=volume/averageVolume,buyShare=clamp(takerBuy/volume,0,1),directionalVolume=direction==="LONG"?takerBuy:volume-takerBuy,directionalShare=clamp(directionalVolume/volume,0,1),opposingShare=1-directionalShare;
+    const range=Math.max(high-low,Math.abs(close-open),Number.EPSILON),progress=clamp((direction==="LONG"?close-open:open-close)/range,0,1),effectiveness=clamp(progress/Math.max(relativeVolume,.25),0,1),pressureDirection=directionalShare>=.57?"ALIGNED":directionalShare<=.43?"OPPOSING":"BALANCED",absorption=relativeVolume>=1.5&&progress<.18;
+    const shareTerm=(directionalShare-.5)*100,relativeTerm=clamp((relativeVolume-1)*10,-10,15)*(directionalShare>=.5?1:-1),progressTerm=(progress-.15)*20,effectivenessTerm=(effectiveness-.2)*10,absorptionPenalty=absorption?45:0;
+    const score=rounded(50+shareTerm+relativeTerm+progressTerm+effectivenessTerm-absorptionPenalty);
+    return {available:true,reason:"",score,directionalVolumeShare:directionalShare,relativeVolume,pressureDirection,absorption,opposingShare,directionalPriceProgress:progress,participationEffectiveness:effectiveness,baselineCount:baseline.length,averageBaselineVolume:averageVolume,eventVolume:volume,eventTakerBuyBase:takerBuy,buyShare,eventClosed:event.final===true};
   }
-  function decorate(tf,event){return event?Object.freeze({...event,...canonicalMeta(tf,event)}):event;}
+  function emaScore(event,analysis,row,track,previous,lastCross){
+    const dir=event.direction==="LONG"?1:-1,close=n(row&&row.close)||analysis.s,pricePosition=dir*(close-analysis.s)/analysis.range,slowContext=dir*analysis.slowSlope;
+    let components;
+    if(event.eventType==="CROSS"){
+      const priorSeparation=previous&&n(previous.separation)!=null?previous.separation:analysis.separation,rapid=lastCross&&lastCross.direction!==event.direction&&Math.abs((n(row&&row.time)||0)-lastCross.candleTime)<=2*({"1m":60,"3m":180,"5m":300,"15m":900}[event.source]||60),compression=clamp(100-analysis.separation*180);
+      components={directionalSlope:clamp(50+dir*analysis.fastSlope*400),separationExpansion:clamp(50+(analysis.separation-priorSeparation)*250),pricePosition:clamp(50+pricePosition*100),ema55Context:clamp(50+slowContext*250),cleanliness:clamp((compression+(rapid?15:100))/2),dataReliabilityFreshness:100};
+    }else{
+      const closest=n(track&&track.closestSeparation)??analysis.separation,closeness=clamp(100*(1-closest/Math.max(S.approachAtr,Number.EPSILON))),expansion=clamp((analysis.separation-closest)*100/Math.max(S.bounceExpansionAtr*2,Number.EPSILON));
+      components={approachCloseness:closeness,sameSideIntegrity:100,rejectionExpansion:expansion,directionalSlope:clamp(50+dir*analysis.fastSlope*400),priceFollowThrough:clamp(50+pricePosition*75),ema55Context:clamp(50+slowContext*250),dataReliabilityFreshness:100};
+    }
+    return {score:rounded(mean(Object.values(components))),components};
+  }
+  function rankEvent(tf,event,analysis,rows,track,previous,lastCross){
+    if(!event||!event.qualified)return event;
+    const row=rows[analysis.i],ema=emaScore(event,analysis,row,track,previous,lastCross),pressure=pressureScore(rows,analysis.i,event.direction),emaContribution=pressure.available?ema.score*.70:ema.score,pressureContribution=pressure.available?pressure.score*.30:null,rankValue=Math.round(emaContribution+(pressureContribution||0)),rank=rankLabel(rankValue);
+    const rankDiagnostics=Object.freeze({timeframe:tf,candleTime:event.candleTime,rankValue,rank,emaScore:ema.score,emaContribution,emaComponents:Object.freeze({...ema.components}),pressureAvailable:pressure.available,pressureScore:pressure.available?pressure.score:null,pressureContribution,directionalVolumeShare:pressure.available?pressure.directionalVolumeShare:null,relativeVolume:pressure.available?pressure.relativeVolume:null,pressureDirection:pressure.available?pressure.pressureDirection:null,absorption:pressure.available?pressure.absorption:false,pressureUnavailableReason:pressure.available?"":pressure.reason,rejectionReasons:pressure.available?[]:[pressure.reason],pressure:pressure.available?Object.freeze({...pressure}):null});
+    return Object.freeze({...event,rank,rankValue,emaScore:ema.score,pressureScore:pressure.available?pressure.score:null,rankDiagnostics});
+  }
 
   function analyze(rows,fast,slow){
     const index=rows.length-1;
@@ -77,15 +95,16 @@
       this.crossByTf=new Map();
       this.bounceByTf=new Map();
       this.lastClosedByTf=new Map();
+      this.lastActualCrossByTf=new Map();
       this.diagnosticsByTf=new Map();
       this.diagnosticHistory=[];
     }
 
     reset(tf=null){
       if(tf){
-        this.liveGapByTf.delete(tf);this.crossByTf.delete(tf);this.bounceByTf.delete(tf);this.lastClosedByTf.delete(tf);this.diagnosticsByTf.delete(tf);
+        this.liveGapByTf.delete(tf);this.crossByTf.delete(tf);this.bounceByTf.delete(tf);this.lastClosedByTf.delete(tf);this.lastActualCrossByTf.delete(tf);this.diagnosticsByTf.delete(tf);
       }else{
-        this.liveGapByTf.clear();this.crossByTf.clear();this.bounceByTf.clear();this.lastClosedByTf.clear();this.diagnosticsByTf.clear();this.diagnosticHistory.length=0;
+        this.liveGapByTf.clear();this.crossByTf.clear();this.bounceByTf.clear();this.lastClosedByTf.clear();this.lastActualCrossByTf.clear();this.diagnosticsByTf.clear();this.diagnosticHistory.length=0;
       }
     }
 
@@ -141,6 +160,7 @@
         if(this.bounceByTf.has(tf))rejectionReason="bounce-invalidated-by-cross";
         this.bounceByTf.delete(tf);
         emittedEvent=makeEvent({tf,type:"CROSS",direction,state:"LIVE",qualified:true,row,revision:n(revisions.formingRevision)||0,reason:"Observed live EMA9/EMA55 sign transition",now,raw:{...analysis,previousObservedGap:previous.gap,previousObservedSign:previousNonZeroSign}});
+        emittedEvent=rankEvent(tf,emittedEvent,analysis,rows,null,previous,this.lastActualCrossByTf.get(tf)||null);this.lastActualCrossByTf.set(tf,{direction,candleTime:n(row&&row.time)||0,publishedAt:now});
         event=emittedEvent;
         oppositeCross=emittedEvent;
       }else{
@@ -197,12 +217,12 @@
           if(track&&track.sign===closedSign&&track.contactSeen){
             const expanded=closedAnalysis.separation>=track.closestSeparation+S.bounceExpansionAtr;
             const slopeAway=closedDirection==="LONG"?closedAnalysis.fastSlope>0:closedAnalysis.fastSlope<0;
-            const contradictorySlow=closedDirection==="LONG"?closedAnalysis.slowSlope<-S.maxOppositeSlowSlopeAtr:closedAnalysis.slowSlope>S.maxOppositeSlowSlopeAtr;
-            if(expanded&&slopeAway&&!contradictorySlow){
+            if(expanded&&slopeAway){
               emittedEvent=makeEvent({tf,type:"BOUNCE",direction:closedDirection,state:"CONFIRMED",qualified:true,row:closedRow,revision:n(revisions.closedRevision)||0,reason:"EMA9 contacted EMA55 and closed expanding away on the original side",now,raw:{...closedAnalysis,closestSeparation:track.closestSeparation,contactSeen:true}});
+              emittedEvent=rankEvent(tf,emittedEvent,closedAnalysis,closedRows,track,null,this.lastActualCrossByTf.get(tf)||null);
               event=emittedEvent;
             }else{
-              rejectionReason=contradictorySlow?"bounce-closed-against-strong-ema55-slope":!expanded?"bounce-close-did-not-expand":"bounce-close-fast-slope-not-away";
+              rejectionReason=!expanded?"bounce-close-did-not-expand":"bounce-close-fast-slope-not-away";
             }
             this.bounceByTf.delete(tf);
             bounceEvent=null;
@@ -215,25 +235,17 @@
       }
 
       if(!event)event=bounceEvent||projectedEvent||null;
-      event=decorate(tf,event);emittedEvent=decorate(tf,emittedEvent);oppositeCross=decorate(tf,oppositeCross);
+      if(emittedEvent){event=emittedEvent;if(emittedEvent.eventType==="CROSS")oppositeCross=emittedEvent;}
       const observation={gap:analysis.gap,sign:currentSign,lastNonZeroSign:currentSign||previousNonZeroSign,separation:analysis.separation,observedAt:now,candleTime:n(row&&row.time)||0,formingRevision:n(revisions.formingRevision)||0,closedRevision:n(revisions.closedRevision)||0};
       this.liveGapByTf.set(tf,observation);
       const status=event?`${event.eventState} ${event.direction} ${event.eventType}`:`${direction||"FLAT"} EMA9/EMA55`;
       const bounceTrack=this.bounceByTf.get(tf)||null,crossTrack=this.crossByTf.get(tf)||null;
-      this.recordDiagnostic(tf,{lastMarketUpdateAt:updateAt,closedRevision:observation.closedRevision,formingRevision:observation.formingRevision,reliable:true,reliableReason:"",ema9:analysis.f,ema55:analysis.s,currentGap:analysis.gap,previousObservedGap:previous&&previous.gap!=null?previous.gap:null,currentSign,previousSign:previousObservedSign,previousNonZeroSign,separationAtr:analysis.separation,crossTrack:clone(crossTrack),bounceTrack:clone(bounceTrack),bouncePhase:bounceTrack&&bounceTrack.phase||"NONE",emittedEvent:clone(emittedEvent),rejectionReason});
+      this.recordDiagnostic(tf,{lastMarketUpdateAt:updateAt,closedRevision:observation.closedRevision,formingRevision:observation.formingRevision,reliable:true,reliableReason:"",ema9:analysis.f,ema55:analysis.s,currentGap:analysis.gap,previousObservedGap:previous&&previous.gap!=null?previous.gap:null,currentSign,previousSign:previousObservedSign,previousNonZeroSign,separationAtr:analysis.separation,crossTrack:clone(crossTrack),bounceTrack:clone(bounceTrack),bouncePhase:bounceTrack&&bounceTrack.phase||"NONE",emittedEvent:clone(emittedEvent),rankDiagnostics:clone(emittedEvent&&emittedEvent.rankDiagnostics||null),rejectionReason});
       return {ready:true,status,event,emittedEvent,oppositeCross,detection:event||noneDetection(tf,status,now),guide:price,analysis,diagnostics:this.diagnosticsByTf.get(tf),rejectionReason};
     }
 
-    evaluateSignal(detail){
-      if(!detail){const status="Waiting for canonical Signal publication";return {ready:false,status,event:null,emittedEvent:null,oppositeCross:null,detection:noneDetection("SIG",status,Date.now())};}
-      const event=Object.freeze({...detail,source:"SIG",eventType:detail.eventType||"NONE",eventState:detail.eventState||"NONE",phase:detail.eventState||detail.phase||"NONE",qualified:detail.qualified===true,rank:detail.rank||null,rankValue:detail.rankValue==null?null:n(detail.rankValue)});
-      const emittedEvent=event.eventType!=="NONE"&&event.qualified&&!event.projected?event:null;
-      const oppositeCross=event.eventType==="CROSS"&&["CONFIRMED","LIVE","COMMITTED"].includes(event.eventState)?event:null;
-      const status=event.eventType!=="NONE"?`${event.eventState} ${event.direction} ${event.eventType}`:`Signal ${event.visibleState||"waiting"}`;
-      return {ready:true,status,event:event.eventType!=="NONE"?event:null,emittedEvent,detection:event,oppositeCross};
-    }
   }
 
   root.Detector=Detector;
-  root.detectorTools=Object.freeze({atr,analyze,makeEvent,fixedPeriods});
+  root.detectorTools=Object.freeze({atr,analyze,makeEvent,fixedPeriods,rankLabel,pressureScore,emaScore,rankEvent});
 })();

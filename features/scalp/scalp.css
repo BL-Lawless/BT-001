@@ -19,6 +19,7 @@
 .scalp-trade-label{color:var(--darkgray);font-size:11px;font-weight:400}
 .scalp-trade-empty{min-width:0}
 .scalp-trade-note{margin-top:4px;color:var(--muted);font-size:10px;line-height:1.3;text-align:center;white-space:normal}
+.scalp-rank-control{display:grid;grid-template-columns:minmax(0,1fr) 54px;align-items:center;gap:5px}.scalp-rank-control input{width:100%;margin:0}.scalp-rank-control output{font-size:10px;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}.scalp-footer{width:100%;padding:0 4px 2px}.scalp-footer .scalp-trade-note:first-child{margin-top:1px}
 .scalp-cooloff.hidden{display:none}
 .scalp-actions{grid-template-columns:1fr 1fr;gap:4px;margin-top:1px}
 .scalp-actions.has-close{grid-template-columns:repeat(3,1fr)}
