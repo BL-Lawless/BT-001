@@ -14,6 +14,7 @@
   const truth=value=>value===true?"YES":value===false?"NO":"UNAVAILABLE";
   const section=(label,lines)=>[label,...lines].join("\n");
   const quality=(label,grade,score,reasons)=>`${label}: ${unavailable(grade)} / ${number(score,0)} | ${reasons}`;
+  const rewardRisk=diagnostics=>diagnostics.rewardRiskStatus==="INVALID"||diagnostics.remainingRewardRisk==="INVALID"?"INVALID":number(diagnostics.remainingRewardRisk,2);
 
   build.bindSignalTooltipLifecycle=function bindSignalTooltipLifecycle({control,listen,show,hide}){
     if(!control||typeof listen!=="function")return null;
@@ -63,12 +64,12 @@
         `Current price: ${price(entry.currentPrice)} | Relative to trigger: ${unavailable(entry.currentRelative)}`,
         `Chase distance: ${number(diagnostics.chaseDistanceAtr,2)} ATR`,
         `Invalidation: ${price(entry.invalidation)}`,
-        `Target: ${price(entry.target)} (${unavailable(entry.targetTimeframe)}) | Estimated net RR: ${number(diagnostics.remainingRewardRisk,2)}`,
+        `Target: ${price(entry.target)} (${unavailable(entry.targetTimeframe)}) | Estimated net RR: ${rewardRisk(diagnostics)}`,
         `Volatility/participation persistence: ${unavailable(diagnostics.volatilityRegime)} / ${unavailable(diagnostics.participationState)}`
       ]),
       section("DECISION",[
         `Passed activation gates: ${list(diagnostics.hardGates&&diagnostics.hardGates.passed)}`,
-        `Failed or pending gates: ${list(diagnostics.hardGates&&diagnostics.hardGates.failed)}`,
+        `Failed or pending gates: ${list([...(diagnostics.hardGates&&diagnostics.hardGates.failed||[]),...(diagnostics.hardGates&&diagnostics.hardGates.pending||[])])}`,
         `Supporting evidence: ${supporting}`,
         `Opposing evidence: ${opposing}`,
         `Exact state reason: ${unavailable(diagnostics.finalStateReason||decision.reason)}`

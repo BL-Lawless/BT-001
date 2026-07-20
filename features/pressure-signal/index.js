@@ -4442,7 +4442,7 @@
       `Engine: Signal ${output.engineId} · ${output.engineVersion}`,`Direction mode: ${displayedSignal.mode}`,`Publication generation: ${generation}`,`Data status: ${output.dataStatus}`,
       `Directional permission score: ${comparison.directionalPermissionScore??"Unavailable"}`,`Setup score: ${comparison.setupScore??"Unavailable"}`,`Setup breakdown: ${JSON.stringify(comparison.setupBreakdown||{})}`,
       `Trigger score: ${comparison.triggerScore??"Unavailable"}`,`Trigger breakdown: ${JSON.stringify(comparison.triggerBreakdown||{})}`,`Current-entry score: ${comparison.currentEntryScore??"Unavailable"}`,`Current-entry breakdown: ${JSON.stringify(comparison.currentEntryBreakdown||{})}`,
-      `Hard gates passed: ${(comparison.hardGates&&comparison.hardGates.passed||[]).join(", ")||"None"}`,`Hard gates failed: ${(comparison.hardGates&&comparison.hardGates.failed||[]).join(", ")||"None"}`,
+      `Hard gates passed: ${(comparison.hardGates&&comparison.hardGates.passed||[]).join(", ")||"None"}`,`Hard gates failed: ${(comparison.hardGates&&comparison.hardGates.failed||[]).join(", ")||"None"}`,`Hard gates pending: ${(comparison.hardGates&&comparison.hardGates.pending||[]).join(", ")||"None"}`,
       `Effective opposition: ${(comparison.effectiveOppositionEvidence||[]).join("; ")||"None"}`,`Volatility regime: ${comparison.volatilityRegime||"Unavailable"}`,`Participation: ${comparison.participationState||"UNAVAILABLE"}`,
       `Flow effectiveness: ${JSON.stringify(comparison.flowEffectiveness||{})}`,`Chase distance: ${comparison.chaseDistanceAtr??"Unavailable"} ATR`,`Remaining reward/risk: ${comparison.remainingRewardRisk??"Unavailable"}`,`Final state reason: ${comparison.finalStateReason||output.reasons[0]||"Unavailable"}`
     ].join("\n");
