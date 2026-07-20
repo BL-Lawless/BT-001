@@ -19,6 +19,6 @@
     fees:Object.freeze({fallbackMaker:0.0002,fallbackTaker:0.0004}),
     signal:Object.freeze({emaFast:9,emaSlow:55,minimumRows:80,atrPeriod:14,toleranceAtr:0.12,rejectionAtr:0.08,minFastSlopeAtr:0.006,minSlowSlopeAtr:0.002,minSeparationAtr:0.025,maxCompressionAtr:0.04,projectedBandAtr:0.08,crossPersistenceMs:Object.freeze({"1m":3000,"3m":5000,"5m":8000}),staleMs:Object.freeze({"1m":120000,"3m":360000,"5m":600000,"SIG":120000})}),
     order:Object.freeze({namespace:"SCALP",entryPrefix:"SCALP-E",tpPrefix:"SCALP-T",slPrefix:"SCALP-S",exitPrefix:"SCALP-X",reconcileDelayMs:250,protectionRetry:1,tpRetry:2}),
-    ui:Object.freeze({minWidth:370,minHeight:470,defaultWidth:430,defaultHeight:590})
+    ui:Object.freeze({minWidth:370,minHeight:470,defaultWidth:430,defaultHeight:500})
   });
 })();
