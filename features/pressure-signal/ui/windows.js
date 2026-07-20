@@ -5,22 +5,23 @@
 
   build.createWindowSystem = function createWindowSystem(config,format){
     const state = {
-      signalReport:null,management:null,managementDataStatus:null,snapshot:null,signalCopy:"",positionCopy:"",displayedSignal:null,
+      signalReport:null,management:null,managementDataStatus:null,signalSnapshot:null,positionSnapshot:null,signalCopy:"",positionCopy:"",displayedSignal:null,
       signalHorizonId:null,
       signalWindow:null,positionWindow:null,positionBody:null,positionTitle:null,
       signalTooltip:"",positionTooltip:"",signalTip:null,positionTip:null,
       overlay:null,activeWindow:null,signalBound:false,positionBound:false,viewportBound:false,
       signalTooltipBound:false,positionTooltipBound:false,tooltipScrollBound:false,tooltipGeometryBound:false,tooltipLayoutFrame:null,
       signalReportFactory:null,signalTooltipFactory:null,signalTooltipPublication:null,
-      publicationFingerprint:"",signalReportFingerprint:"",signalTooltipFingerprint:"",positionTooltipFingerprint:"",positionReportFingerprint:"",
+      signalPublicationFingerprint:"",actionPublicationFingerprint:"",signalReportFingerprint:"",signalTooltipFingerprint:"",positionTooltipFingerprint:"",positionReportFingerprint:"",
       renderedTooltipFingerprints:{signal:"",position:""},renderedPositionFingerprint:"",positionViewState:null,
       tooltipHover:{
         signal:{buttonHovered:false,tooltipHovered:false,bridgeTimer:null},
         position:{buttonHovered:false,tooltipHovered:false,bridgeTimer:null}
       },
       geometry:new WeakMap(),resizeObservers:[],mutationObservers:[],listeners:[]
-      ,updating:false,refreshState:"IDLE",refreshMessage:"",contextKey:null,
-      signalConsistency:{buttonGeneration:null,tooltipGeneration:null,detailsGeneration:null,reportGeneration:null,directionMismatch:0,stateMismatch:0,confidenceMismatch:0,setupIdentityMismatch:0,stalePayloadDiscarded:0,fallbackPrevented:0}
+      ,updating:false,signalRefreshState:"IDLE",actionRefreshState:"IDLE",signalRefreshMessage:"",actionRefreshMessage:"",signalContextKey:null,actionContextKey:null,
+      signalConsistency:{buttonGeneration:null,tooltipGeneration:null,detailsGeneration:null,reportGeneration:null,directionMismatch:0,stateMismatch:0,confidenceMismatch:0,setupIdentityMismatch:0,stalePayloadDiscarded:0,fallbackPrevented:0},
+      actionConsistency:{buttonGeneration:null,tooltipGeneration:null,windowGeneration:null,publicationGeneration:null,mismatch:0}
     };
     const TOOLTIP_BRIDGE_DELAY = 110;
     const TOOLTIP_VERTICAL_GAP = 3;
@@ -495,6 +496,7 @@
     }
     function ensurePositionTooltipText(){
       if(!state.positionTooltip) state.positionTooltip=timed("action.tooltip-content",() => positionTooltipText(state.management,state.managementDataStatus),state.positionTooltipFingerprint);
+      state.actionConsistency.tooltipGeneration=state.actionConsistency.publicationGeneration;
       return state.positionTooltip || "";
     }
     function renderToolbarTooltip(kind){
@@ -1099,10 +1101,10 @@
     }
 
     function renderPosition(){
-      if(!state.positionBody || !state.positionWindow || !state.positionWindow.classList.contains("is-open") || !state.management || !state.snapshot) return;
+      if(!state.positionBody || !state.positionWindow || !state.positionWindow.classList.contains("is-open") || !state.management || !state.positionSnapshot) return;
       if(state.renderedPositionFingerprint===state.positionReportFingerprint) return;
       const preserved = state.positionViewState || windowState(state.positionWindow);
-      const report = timed("position.report-generation",() => positionReport(state.management,state.snapshot),state.positionReportFingerprint);
+      const report = timed("position.report-generation",() => positionReport(state.management,state.positionSnapshot),state.positionReportFingerprint);
       state.positionBody.replaceChildren();
       counted("position.window-rebuild",state.positionReportFingerprint);
       const pre = document.createElement("pre");
@@ -1114,95 +1116,107 @@
       state.positionWindow.querySelectorAll("[data-management-horizon]").forEach(button => button.classList.toggle("is-active",button.dataset.managementHorizon === state.management.horizonId));
       state.positionCopy = [
         "POSITION MANAGEMENT",
-        `Symbol: ${state.snapshot.symbol}`,
+        `Symbol: ${state.positionSnapshot.symbol}`,
         `Position: ${state.management.position ? `${state.management.position.side} ${format.quantity(state.management.position.qty)}` : "None"}`,
-        `Snapshot: ${format.time(state.snapshot.createdAt)}`,
+        `Snapshot: ${format.time(state.positionSnapshot.createdAt)}`,
         "",
         report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics
       ].join("\n");
       state.renderedPositionFingerprint=state.positionReportFingerprint;
+      state.actionConsistency.windowGeneration=state.actionConsistency.publicationGeneration;
     }
 
-    function update(payload){
+    function updateSignal(payload){
       state.displayedSignal=payload.displayedSignal || null;
       state.signalConsistency.tooltipGeneration=null;
       state.signalConsistency.detailsGeneration=null;
       state.signalConsistency.reportGeneration=null;
-      state.publicationFingerprint=payload.publicationFingerprint || String(payload.publishedAt || Date.now());
-      state.signalReportFingerprint=payload.signalReportFingerprint || state.publicationFingerprint;
-      state.signalTooltipFingerprint=payload.signalTooltipFingerprint || state.publicationFingerprint;
-      state.positionTooltipFingerprint=payload.positionTooltipFingerprint || state.publicationFingerprint;
-      state.positionReportFingerprint=payload.positionReportFingerprint || state.publicationFingerprint;
+      state.signalPublicationFingerprint=payload.publicationFingerprint || String(payload.publishedAt || Date.now());
+      state.signalReportFingerprint=payload.signalReportFingerprint || state.signalPublicationFingerprint;
+      state.signalTooltipFingerprint=payload.signalTooltipFingerprint || state.signalPublicationFingerprint;
       state.signalReport = payload.signalReport || null;
       state.signalReportFactory = payload.signalReportFactory || null;
-      state.management = payload.management || state.management;
-      if(Object.prototype.hasOwnProperty.call(payload,"managementDataStatus")) state.managementDataStatus = payload.managementDataStatus;
-      state.snapshot = payload.snapshot || state.snapshot;
+      state.signalSnapshot = payload.snapshot || state.signalSnapshot;
       setSignalHorizon(payload.signalHorizonId || state.signalHorizonId);
       state.signalTooltip = payload.signalTooltip || "";
       state.signalTooltipPublication = payload.signalTooltipPublication || null;
       state.signalTooltipFactory = payload.signalTooltipFactory || null;
-      state.positionTooltip = payload.positionTooltip || "";
       bindToolbar();
       buttonMatchesDisplayedSignal(state.displayedSignal);
       renderToolbarTooltip("signal");
-      renderToolbarTooltip("position");
       state.signalCopy="";
-      state.positionCopy="";
       const signalWindow = document.getElementById("pressureSignalDetails");
       if(signalWindow && signalWindow.classList.contains("is-open")){
         signalWindow.querySelectorAll("pre").forEach(pre => renderPriceText(pre,pre.textContent));
       }
-      renderPosition();
+    }
+    function updatePosition(payload){
+      const fingerprint=payload.publicationFingerprint||String(payload.publishedAt||Date.now()),generation=Number(payload.generation);
+      state.actionPublicationFingerprint=fingerprint;state.positionTooltipFingerprint=payload.positionTooltipFingerprint||fingerprint;state.positionReportFingerprint=payload.positionReportFingerprint||fingerprint;
+      state.management=payload.management||null;if(Object.prototype.hasOwnProperty.call(payload,"managementDataStatus"))state.managementDataStatus=payload.managementDataStatus;
+      state.positionSnapshot=payload.snapshot||null;state.positionTooltip=payload.positionTooltip||"";state.positionCopy="";state.renderedPositionFingerprint="";
+      state.actionConsistency.publicationGeneration=Number.isFinite(generation)?generation:null;state.actionConsistency.buttonGeneration=Number(document.getElementById("pressureSignalExit")?.dataset.actionGeneration)||null;state.actionConsistency.tooltipGeneration=state.actionConsistency.publicationGeneration;
+      bindToolbar();renderToolbarTooltip("position");renderPosition();
+    }
+    function update(payload){
+      if(payload&&payload.displayedSignal)updateSignal(payload);
+      if(payload&&Object.prototype.hasOwnProperty.call(payload,"management"))updatePosition(payload);
     }
 
     function updatingElements(){
-      return [document.getElementById("pressureSignalToolbar"),state.signalWindow,state.positionWindow,state.signalTip,state.positionTip].filter(Boolean);
+      return [document.getElementById("pressureSignalEntry"),state.signalWindow,state.signalTip].filter(Boolean);
     }
     function setUpdatingVisual(){
       state.updating=false;
       updatingElements().forEach(element => element.classList.remove("is-updating"));
-      [state.signalWindow,state.positionWindow].filter(Boolean).forEach(win => {
+      [state.signalWindow].filter(Boolean).forEach(win => {
         const indicator=win.querySelector(".pressure-updating-indicator");
         if(indicator) indicator.remove();
       });
       if(state.signalTooltip) renderToolbarTooltip("signal");
-      if(state.positionTooltip) renderToolbarTooltip("position");
     }
     function beginUpdate(contextKey){
       bindToolbar();
-      const compatible=!!contextKey && !!state.contextKey && contextKey===state.contextKey && !!state.signalReport;
-      if(!compatible){ invalidateContext(contextKey); return false; }
+      const compatible=!!contextKey && !!state.signalContextKey && contextKey===state.signalContextKey && !!state.signalReport;
+      if(!compatible){ invalidateSignalContext(contextKey); return false; }
       return true;
     }
     function completeUpdate(contextKey){
-      if(contextKey) state.contextKey=contextKey;
+      if(contextKey) state.signalContextKey=contextKey;
       setUpdatingVisual(false);
     }
     function setRefreshState(next,contextKey,message=""){
       const normalized=["IDLE","REFRESHING","READY","STALE","UNAVAILABLE","ERROR"].includes(next) ? next : "ERROR";
-      if(contextKey) state.contextKey=contextKey;
-      state.refreshState=normalized;
-      state.refreshMessage=message || "";
+      if(contextKey) state.signalContextKey=contextKey;
+      state.signalRefreshState=normalized;
+      state.signalRefreshMessage=message || "";
       setUpdatingVisual(false);
     }
-    function invalidateContext(nextContextKey=null){
+    function setActionRefreshState(next,contextKey,message=""){
+      const normalized=["IDLE","REFRESHING","READY","STALE","UNAVAILABLE","ERROR"].includes(next)?next:"ERROR";
+      if(contextKey)state.actionContextKey=contextKey;state.actionRefreshState=normalized;state.actionRefreshMessage=message||"";
+    }
+    function invalidateSignalContext(nextContextKey=null){
       setUpdatingVisual(false);
-      state.refreshState="UNAVAILABLE";state.refreshMessage="";
-      state.contextKey=nextContextKey;
-      state.signalReport=null;state.management=null;state.snapshot=null;state.signalCopy="";state.positionCopy="";state.displayedSignal=null;
+      state.signalRefreshState="UNAVAILABLE";state.signalRefreshMessage="";state.signalContextKey=nextContextKey;
+      state.signalReport=null;state.signalSnapshot=null;state.signalCopy="";state.displayedSignal=null;
       state.signalReportFactory=null;state.signalTooltipFactory=null;
       state.signalTooltipPublication=null;
       state.signalConsistency.buttonGeneration=null;state.signalConsistency.tooltipGeneration=null;state.signalConsistency.detailsGeneration=null;state.signalConsistency.reportGeneration=null;
-      state.renderedPositionFingerprint="";
       state.signalTooltip="Signal details unavailable";
-      state.positionTooltip="Action: WAIT\nPosition health: Unavailable\nExit warning: Unavailable\nData status: UNAVAILABLE";
       if(state.signalWindow){
         state.signalWindow.querySelectorAll("pre").forEach(pre => { pre.textContent="Unavailable"; });
       }
-      if(state.positionBody) state.positionBody.replaceChildren();
-      hideTooltips();
+      hideToolbarTooltip("signal");
     }
+    function invalidatePositionContext(nextContextKey=null){
+      state.actionRefreshState="UNAVAILABLE";state.actionRefreshMessage="";state.actionContextKey=nextContextKey;
+      state.management=null;state.positionSnapshot=null;state.positionCopy="";state.positionTooltip="Action: WAIT\nPosition health: Unavailable\nExit warning: Unavailable\nData status: UNAVAILABLE";
+      state.actionConsistency.buttonGeneration=null;state.actionConsistency.tooltipGeneration=null;state.actionConsistency.windowGeneration=null;state.actionConsistency.publicationGeneration=null;state.renderedPositionFingerprint="";
+      if(state.positionBody) state.positionBody.replaceChildren();
+      hideToolbarTooltip("position");
+    }
+    function invalidateContext(nextContextKey=null){invalidateSignalContext(nextContextKey);invalidatePositionContext(nextContextKey);}
 
     function openSignal(){
       bindToolbar();
@@ -1270,7 +1284,7 @@
     const recoverWindows = () => allWindows().forEach(win => clampToViewport(win));
     const setSignalHorizon = horizonId => {
       const changed = !!horizonId && horizonId !== state.signalHorizonId;
-      if(changed) hideTooltips();
+      if(changed) hideToolbarTooltip("signal");
       if(horizonId) state.signalHorizonId = horizonId;
       if(state.signalWindow){
         state.signalWindow.querySelectorAll("[data-signal-horizon]").forEach(button => button.classList.toggle("is-active",button.dataset.signalHorizon === state.signalHorizonId));
@@ -1355,17 +1369,17 @@
     function signalCopy(){
       const report=ensureSignalReport();
       const displayed=state.displayedSignal;
-      if(!report || !displayed || !state.snapshot) return "Signal details unavailable";
-      if(!state.signalCopy) state.signalCopy=["SIGNAL DETAILS",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Setup family: ${displayed.setupFamily || "None"}`,`Setup timeframe: ${displayed.setupTimeframe || "None"}`,`Entry: ${displayed.entryVerdict}`,`Publication generation: ${displayed.generation}`,"",`Symbol: ${state.snapshot.symbol}`,`Horizon: ${state.signalHorizonId || "-"}`,`Snapshot: ${format.time(state.snapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
+      if(!report || !displayed || !state.signalSnapshot) return "Signal details unavailable";
+      if(!state.signalCopy) state.signalCopy=["SIGNAL DETAILS",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Setup family: ${displayed.setupFamily || "None"}`,`Setup timeframe: ${displayed.setupTimeframe || "None"}`,`Entry: ${displayed.entryVerdict}`,`Publication generation: ${displayed.generation}`,"",`Symbol: ${state.signalSnapshot.symbol}`,`Horizon: ${state.signalHorizonId || "-"}`,`Snapshot: ${format.time(state.signalSnapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
       return state.signalCopy;
     }
     function positionCopy(){
-      if(!state.positionCopy && state.management && state.snapshot){
-        const report=timed("position.report-generation",() => positionReport(state.management,state.snapshot),state.positionReportFingerprint);
-        state.positionCopy=["POSITION MANAGEMENT",`Symbol: ${state.snapshot.symbol}`,`Position: ${state.management.position ? `${state.management.position.side} ${format.quantity(state.management.position.qty)}` : "None"}`,`Snapshot: ${format.time(state.snapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
+      if(!state.positionCopy && state.management && state.positionSnapshot){
+        const report=timed("position.report-generation",() => positionReport(state.management,state.positionSnapshot),state.positionReportFingerprint);
+        state.positionCopy=["POSITION MANAGEMENT",`Symbol: ${state.positionSnapshot.symbol}`,`Position: ${state.management.position ? `${state.management.position.side} ${format.quantity(state.management.position.qty)}` : "None"}`,`Snapshot: ${format.time(state.positionSnapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
       }
       return state.positionCopy;
     }
-    return {update,beginUpdate,completeUpdate,setRefreshState,invalidateContext,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,recordSignalDetailsPublication,isSignalTooltipOpen:() => !!(state.signalTip && state.signalTip.classList.contains("is-open")),isPositionTooltipOpen:() => !!(state.positionTip && state.positionTip.classList.contains("is-open")),isPositionWindowOpen:() => !!(state.positionWindow && state.positionWindow.classList.contains("is-open")),ensureSignalReport,getSignalCopy:signalCopy,getPositionCopy:positionCopy,destroy,_selfTest:runPresentationSelfTests,_diagnostics:() => ({updating:state.updating,refreshState:state.refreshState,refreshMessage:state.refreshMessage,contextKey:state.contextKey,hasSignal:!!(state.signalReport || state.signalReportFactory),hasManagement:!!state.management,signalConsistency:{...state.signalConsistency},displayedSignal:state.displayedSignal ? {generation:state.displayedSignal.generation,signalIdentity:state.displayedSignal.signalIdentity,direction:state.displayedSignal.direction,confidence:state.displayedSignal.confidence,visibleState:state.displayedSignal.visibleState,setupIdentity:state.displayedSignal.setupIdentity,horizonId:state.displayedSignal.horizonId} : null,tooltips:{signal:tooltipDiagnostics(state.signalTip),position:tooltipDiagnostics(state.positionTip)},renderedTooltipFingerprints:{...state.renderedTooltipFingerprints},positionWindowRebuildFingerprint:state.renderedPositionFingerprint})};
+    return {update,updateSignal,updatePosition,beginUpdate,completeUpdate,setRefreshState,setActionRefreshState,invalidateContext,invalidateSignalContext,invalidatePositionContext,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,recordSignalDetailsPublication,isSignalTooltipOpen:() => !!(state.signalTip && state.signalTip.classList.contains("is-open")),isPositionTooltipOpen:() => !!(state.positionTip && state.positionTip.classList.contains("is-open")),isPositionWindowOpen:() => !!(state.positionWindow && state.positionWindow.classList.contains("is-open")),ensureSignalReport,getSignalCopy:signalCopy,getPositionCopy:positionCopy,destroy,_selfTest:runPresentationSelfTests,_diagnostics:() => ({updating:state.updating,signalRefreshState:state.signalRefreshState,actionRefreshState:state.actionRefreshState,signalContextKey:state.signalContextKey,actionContextKey:state.actionContextKey,hasSignal:!!(state.signalReport || state.signalReportFactory),hasManagement:!!state.management,signalConsistency:{...state.signalConsistency},actionConsistency:{...state.actionConsistency,consistent:[state.actionConsistency.buttonGeneration,state.actionConsistency.tooltipGeneration,state.actionConsistency.windowGeneration].filter(value=>value!=null).every(value=>value===state.actionConsistency.publicationGeneration)},displayedSignal:state.displayedSignal ? {generation:state.displayedSignal.generation,signalIdentity:state.displayedSignal.signalIdentity,direction:state.displayedSignal.direction,confidence:state.displayedSignal.confidence,visibleState:state.displayedSignal.visibleState,setupIdentity:state.displayedSignal.setupIdentity,horizonId:state.displayedSignal.horizonId} : null,tooltips:{signal:tooltipDiagnostics(state.signalTip),position:tooltipDiagnostics(state.positionTip)},renderedTooltipFingerprints:{...state.renderedTooltipFingerprints},positionWindowRebuildFingerprint:state.renderedPositionFingerprint})};
   };
 })();
