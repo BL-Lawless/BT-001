@@ -2946,6 +2946,7 @@
     return {
       generation:displayed.generation,
       signalIdentity:displayed.signalIdentity,
+      directionMode:displayed.directionMode || displayed.mode,
       direction:displayed.direction,
       confidence:displayed.confidence,
       confidenceText:displayed.confidenceText,
@@ -2960,7 +2961,7 @@
   function displayedSignalMatches37(left,right){
     if(!left || !right) return false;
     const a=displayedSignalMeta37(left),b=displayedSignalMeta37(right);
-    return a.generation===b.generation && a.signalIdentity===b.signalIdentity && a.direction===b.direction
+    return a.generation===b.generation && a.signalIdentity===b.signalIdentity && a.directionMode===b.directionMode && a.direction===b.direction
       && a.confidence===b.confidence && a.visibleState===b.visibleState
       && (a.setupIdentity || null)===(b.setupIdentity || null) && a.horizonId===b.horizonId
       && a.engineId===b.engineId && a.engineVersion===b.engineVersion && a.publicationGeneration===b.publicationGeneration;
@@ -2968,7 +2969,7 @@
   function buttonMatchesDisplayedSignal37(displayed){
     if(!displayed || !state.entry) return false;
     const button=state.entry.dataset;
-    const matches=button.signalDirection===displayed.direction
+    const matches=button.signalDirectionMode===displayed.mode && button.signalDirection===displayed.direction
       && (button.signalConfidence==="" ? null : Number(button.signalConfidence))===(displayed.confidence==null ? null : displayed.confidence)
       && button.signalState===displayed.visibleState && (button.signalSetupIdentity || null)===(displayed.setupIdentity || null)
       && Number(button.signalGeneration)===displayed.generation && button.signalIdentity===displayed.signalIdentity
@@ -2981,6 +2982,7 @@
     return [
       "ACTIVE SIGNAL",
       `Engine: Signal ${displayed.engineId} · ${displayed.engineVersion}`,
+      `Direction mode: ${displayed.mode}`,
       `Direction: ${displayed.direction}`,
       `Bias confidence: ${displayed.confidenceText}`,
       `State: ${displayed.visibleState}`,
@@ -3025,7 +3027,7 @@
     const entryVerdict=decision ? (decision.entryAction || (decision.state==="READY" ? `READY ${direction}` : "WAIT")) : "WAIT";
     const summarySignal={marketDirection:direction==="NO BIAS" ? null : direction,confidence};
     const summaryVariants=Object.freeze(signalSummaryVariants37(summarySignal,decision));
-    const signalIdentity=[generation,horizonId,direction,confidence==null ? "na" : confidence,presentation.label,setupIdentity || "none"].join("|");
+    const signalIdentity=[generation,horizonId,mode,direction,confidence==null ? "na" : confidence,presentation.label,setupIdentity || "none"].join("|");
     return Object.freeze({
       generation,publishedAt,signalIdentity,direction,confidence,confidenceText,visibleState:presentation.label,
       definition:presentation.definition,setupIdentity,setupFamily:decision && decision.family || null,
@@ -3038,8 +3040,8 @@
       targets:Object.freeze({...targets}),obstacles:Object.freeze({...obstacle}),
       participation:decision && decision.pressure && (decision.pressure.participationExpectation || decision.pressure.triggerParticipation) || null,
       pressureEvidence:Object.freeze([...(decision && decision.pressure && decision.pressure.evidence || [])]),
-      dataStatus:signal && signal.dataHealth && signal.dataHealth.status || "unavailable",horizonId,horizonLabel:horizonLabel37(horizonId),mode,
-      activeReasons:Object.freeze([decision && decision.reason || entryQuality && entryQuality.instruction].filter(Boolean)),
+      dataStatus:signal && signal.dataHealth && signal.dataHealth.status || "unavailable",horizonId,horizonLabel:horizonLabel37(horizonId),mode,directionMode:mode,
+      activeReasons:Object.freeze([...new Set([decision && decision.reason || entryQuality && entryQuality.instruction,...(decision && decision.opposingEvidence || [])].filter(Boolean))]),
       missingConditions:Object.freeze([...(entryQuality && entryQuality.exclusions || [])]),
       limitations:Object.freeze([assessments.limitation].filter(Boolean)),
       decision,summaryVariants,entryTone:displayedSignalTone37(direction,presentation.label)
@@ -3065,12 +3067,12 @@
     const summarySignal={marketDirection:direction==="NO BIAS"?null:direction,confidence};
     const summaryVariants=Object.freeze(output.summaryVariants||signalSummaryVariants37(summarySignal,decision));
     return Object.freeze({
-      generation,publishedAt,signalIdentity:[generation,horizonId,direction,confidence==null?"na":confidence,visibleState,output.setupIdentity||"none"].join("|"),
+      generation,publishedAt,signalIdentity:[generation,horizonId,mode,direction,confidence==null?"na":confidence,visibleState,output.setupIdentity||"none"].join("|"),
       direction,confidence,confidenceText:confidence==null?"Unavailable":`${confidence}%`,visibleState,definition:output.definition||"Signal engine result.",
       setupIdentity:output.setupIdentity||null,setupFamily:output.setupFamily||null,setupTimeframe:output.setupTimeframe||null,setupOrigin:null,originStatus:null,setupZone:null,entryMode:null,
       setupQuality:output.setupQuality||null,triggerQuality:output.triggerQuality||null,currentEntryQuality:output.currentEntryQuality||null,entryVerdict:output.entryVerdict||"WAIT",
       triggerState:output.triggerIdentity?"active":"absent",triggerEvidence:Object.freeze([...(output.triggerEvidence||[])]),invalidation:null,targets:Object.freeze({}),obstacles:Object.freeze({}),participation:null,pressureEvidence:Object.freeze([]),
-      dataStatus:output.dataStatus||"unavailable",horizonId,horizonLabel:horizonLabel37(horizonId),mode,activeReasons:Object.freeze([...(output.reasons||[])]),missingConditions:Object.freeze([...(output.exclusions||[])]),limitations:Object.freeze([]),
+      dataStatus:output.dataStatus||"unavailable",horizonId,horizonLabel:horizonLabel37(horizonId),mode,directionMode:mode,activeReasons:Object.freeze([...(output.reasons||[])]),missingConditions:Object.freeze([...(output.exclusions||[])]),limitations:Object.freeze([]),
       decision,summaryVariants,entryTone:output.tone||displayedSignalTone37(direction,visibleState),engineId:output.engineId,engineVersion:output.engineVersion,publicationGeneration:generation
     });
   }
@@ -3140,7 +3142,7 @@
     stopTriggerAlert37();
     state.activeTriggerAlertId = identity;
     const engine=activeSignalEngine37();
-    state.activeTriggerAlertMeta={identity,engineId:displayed&&displayed.engineId||engine&&engine.id||null,engineVersion:displayed&&displayed.engineVersion||engine&&engine.version||null,publicationGeneration:displayed&&displayed.publicationGeneration||state.refreshGeneration};
+    state.activeTriggerAlertMeta={identity,directionMode:displayed&&displayed.mode||state.direction,engineId:displayed&&displayed.engineId||engine&&engine.id||null,engineVersion:displayed&&displayed.engineVersion||engine&&engine.version||null,publicationGeneration:displayed&&displayed.publicationGeneration||state.refreshGeneration};
     if(state.seenTriggerAlertIds.has(identity)) return;
     rememberTriggerAlert37(identity);
     state.triggerAlertEndsAt = Date.now()+TRIGGER_ALERT_DURATION37;
@@ -3158,9 +3160,9 @@
     const ageText = age => Number.isFinite(Number(age)) ? `${Math.round(Number(age)/1000)}s ago` : "Unavailable";
     const candleText = evidence => evidence ? `Latest closed ${evidence.tf} candle` : "Unavailable";
     if(!signal || signal.loading || signal.dataIncomplete){
-      return [presentation.definition,"",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${presentation.label}`,`Setup identity: ${displayed.setupIdentity || "None"}`,"Entry: Data incomplete",`Publication generation: ${displayed.generation}`,`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`,"",`Engine: Signal ${displayed.engineId} · ${displayed.engineVersion}`].join("\n");
+      return [presentation.definition,"",`Direction mode: ${displayed.mode}`,`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${presentation.label}`,`Setup identity: ${displayed.setupIdentity || "None"}`,"Entry: Data incomplete",`Publication generation: ${displayed.generation}`,`Reason: ${entryQuality && entryQuality.instruction || "Waiting for required market data"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`,"",`Engine: Signal ${displayed.engineId} · ${displayed.engineVersion}`].join("\n");
     }
-    const lines = [presentation.definition,"",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Horizon: ${displayed.horizonLabel}`,`Publication generation: ${displayed.generation}`];
+    const lines = [presentation.definition,"",`Direction mode: ${displayed.mode}`,`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Horizon: ${displayed.horizonLabel}`,`Publication generation: ${displayed.generation}`];
     if(thesis) lines.push(`Selected thesis: ${displayed.direction} ${thesis.status}${displayed.confidence == null ? "" : ` ${displayed.confidenceText}`}`);
     if(!decision || !decision.family){
       lines.push("Setup: None","Entry: WAIT",`Reason: ${entryQuality && entryQuality.instruction || "Waiting for a valid setup location"}`,`Data status: ${freshness && freshness.signalStatus || "UNAVAILABLE"}`,`Price: ${ageText(freshness && freshness.priceAgeMs)}`);
@@ -3826,7 +3828,8 @@
       I_DETAILS_WINDOW_PARITY:displayedSignalHeader37(shortActive).join("\n").includes("Direction: SHORT\nBias confidence: 72%\nState: TRIGGER ACTIVE\nSetup identity: short-5m-2"),
       J_COPY_AFTER_UPDATE:displayedSignalHeader37(nextShort).join("\n").includes("Publication generation: 6") && !displayedSignalHeader37(nextShort).join("\n").includes("long-15m-1"),
       K_STALE_CACHED_TOOLTIP:!displayedSignalMatches37(displayedSignalMeta37(longForming),nextShort),
-      L_OPPOSITE_HISTORY_BLOCKED:!historicalSetupMatches37({direction:"LONG",tf:"15m"},nextShort) && historicalSetupMatches37({direction:"SHORT",tf:"15m"},nextShort)
+      L_OPPOSITE_HISTORY_BLOCKED:!historicalSetupMatches37({direction:"LONG",tf:"15m"},nextShort) && historicalSetupMatches37({direction:"SHORT",tf:"15m"},nextShort),
+      M_DIRECTION_MODE_METADATA:/Direction mode: SHORT/.test(shortNoSetupTip) && displayedSignalMeta37(shortNoSetup).directionMode==="SHORT"
     };
     return {passed:Object.values(cases).every(Boolean),cases,reproduction:{button:shortNoSetup.summaryVariants.full,tooltip:shortNoSetupTip}};
   }
@@ -3869,7 +3872,7 @@
       noBiasWordingNotShortened:Object.values(signalSummaryVariants37({marketDirection:null,confidence:null},{state:"NO BIAS"})).every(value => value === "NO SETUP \u00b7 NO BIAS"),
       noBiasWithoutSetup:signalSummaryVariants37({marketDirection:null,confidence:null},{state:"NO BIAS"}).full === "NO SETUP \u00b7 NO BIAS",
       tooltipDefinitionFirst:tooltip.split("\n")[0] === definition,
-      tooltipHasOneBlankLine:tooltip.split("\n")[1] === "" && tooltip.split("\n")[2] === "Direction: LONG",
+      tooltipHasOneBlankLine:tooltip.split("\n")[1] === "" && tooltip.split("\n")[2] === "Direction mode: AUTO" && tooltip.split("\n")[3] === "Direction: LONG",
       tooltipDefinitionNotDuplicated:tooltip.split(definition).length-1 === 1,
       triggerIdentityStable:identity === sameIdentity,
       materiallyNewTriggerIdentity:identity !== newIdentity,
@@ -3937,21 +3940,26 @@
       state.seenTriggerAlertOrder = saved.seenTriggerAlertOrder;
     }
   }
-  function evaluateEntryDecision37(bias,samples,horizonId){
-    const prior = state.entryTrackers.get(horizonId) || null;
+  function evaluateEntryDecision37(bias,samples,horizonId,directionMode="AUTO"){
+    const trackerKey = directionMode === "AUTO" ? horizonId : `${horizonId}|${directionMode}`;
+    const prior = state.entryTrackers.get(trackerKey) || null;
     const priorWasActive = prior && prior.family && !["EXPIRED","INVALIDATED"].includes(prior.state);
     if(!bias.permission){
+      if(directionMode !== "AUTO"){
+        state.entryTrackers.delete(trackerKey);
+        return {state:"BIAS CONFIRMED",direction:bias.direction,family:null,reason:bias.reason,candidates:[],candidateAudit:[],selected:null,opposingEvidence:[...(bias.opposingEvidence||[])]};
+      }
       if(priorWasActive){
         const invalidated = {...prior,state:"INVALIDATED",reason:"Invalidated - directional permission or MA alignment failed",validFor:0,terminalVersion:Number(state.activeSnapshot && state.activeSnapshot.version || 0)};
-        state.entryTrackers.set(horizonId,invalidated);
+        state.entryTrackers.set(trackerKey,invalidated);
         return invalidated;
       }
-      state.entryTrackers.delete(horizonId);
+      state.entryTrackers.delete(trackerKey);
       return {state:"NO BIAS",direction:null,family:null,reason:bias.reason,candidates:[],candidateAudit:[],selected:null};
     }
     if(priorWasActive && prior.direction !== bias.direction){
       const invalidated = {...prior,state:"INVALIDATED",reason:"Invalidated - authoritative bias changed direction",validFor:0,terminalVersion:Number(state.activeSnapshot && state.activeSnapshot.version || 0)};
-      state.entryTrackers.set(horizonId,invalidated);
+      state.entryTrackers.set(trackerKey,invalidated);
       return invalidated;
     }
     const raw = [...emaCandidates37(bias,horizonId),...structureCandidates37(bias,horizonId),...compressionCandidates37(bias,horizonId)];
@@ -4007,7 +4015,7 @@
         selected:null,
         previousCandidate
       };
-      state.entryTrackers.set(horizonId,decision);
+      state.entryTrackers.set(trackerKey,decision);
       return decision;
     }
     const decision = {
@@ -4028,35 +4036,47 @@
         replacedHistory.lastState = "REPLACED";
       }
     }
-    state.entryTrackers.set(horizonId,{...decision,zone:{...decision.zone},candidates:[],terminalVersion:terminalStates.includes(decision.state) ? snapshotVersion : null});
+    state.entryTrackers.set(trackerKey,{...decision,zone:{...decision.zone},candidates:[],terminalVersion:terminalStates.includes(decision.state) ? snapshotVersion : null});
     return decision;
   }
-  function evaluateToolbarPressureSignal37(horizonId){
+  function evaluateToolbarPressureSignal37(horizonId,directionMode="AUTO"){
+    const mode = ["LONG","SHORT"].includes(String(directionMode).toUpperCase()) ? String(directionMode).toUpperCase() : "AUTO";
     const engine = horizonEngine37(horizonId);
     const configsForHorizon = engine.pressure;
     const samples = configsForHorizon.map(item => ({...samplePressureSignal37(item.tf,item.lookback,item.maSlot),weight:item.weight,role:item.role}));
     if(samples.some(sample => !sample.available)){
       const maEvaluation = evaluateMaEvents37(horizonId,samples,0);
+      const manualDirection = mode === "AUTO" ? null : mode;
       const incomplete = {
         entry:"ENTRY WAIT",
         confidence:null,
         action:"Data incomplete",
         exit:"EXIT WAIT",
         normalized:0,
-        dominantSide:0,
-        marketDirection:null,
+        dominantSide:manualDirection === "LONG" ? 1 : manualDirection === "SHORT" ? -1 : 0,
+        marketDirection:manualDirection,
         samples,
         maEvents:maEvaluation.events,
         maImpact:0,
         maAudit:maEvaluation.audit,
-        dataIncomplete:true
+        dataIncomplete:true,
+        directionMode:mode,
+        manualThesis:manualDirection ? {status:"MISSING",confidence:null,action:"Data incomplete",direction:manualDirection,maEvents:[],maImpact:0,missing:true} : null
       };
       return incomplete;
     }
-    const bias = evaluateBias37(samples,horizonId);
+    const automaticBias = evaluateBias37(samples,horizonId);
+    const preliminary = {normalized:automaticBias.score,samples,breakdown:{participation:0,forming:0}};
+    const manualThesis = mode === "AUTO" ? null : evaluateDirectionThesis37(preliminary,mode,horizonId);
+    const manualEvaluation = mode === "AUTO" ? null : window.evaluateSignalADirectionalThesis({
+      directionMode:mode,automaticBias,manualThesis,
+      evaluateSelectedSetup:selectedBias=>{selectedBias.pressure=pressureAudit37(samples,selectedBias.side);return evaluateEntryDecision37(selectedBias,samples,horizonId,mode);}
+    });
+    const bias = mode === "AUTO" ? automaticBias : manualEvaluation.bias;
+    if(mode !== "AUTO" && !bias.pressure) bias.pressure=pressureAudit37(samples,bias.side);
     const signalDirection = bias.side;
     const maEvaluation = evaluateMaEvents37(horizonId,samples,signalDirection);
-    const entryDecision = evaluateEntryDecision37(bias,samples,horizonId);
+    const entryDecision = mode === "AUTO" ? evaluateEntryDecision37(bias,samples,horizonId,mode) : manualEvaluation.entryDecision;
     const confidence = bias.confidence;
     const entry = entryDecision.state === "READY" && bias.direction ? `ENTRY ${bias.direction}` : "ENTRY WAIT";
     const structural = bias.direction ? structuralMarketContext37(bias.direction,horizonId) : structuralMarketContext37(1,horizonId);
@@ -4080,9 +4100,12 @@
       breakdown:{base:54,stack:Math.round(Math.abs(bias.stackScore)*18),pressure:Math.round(Math.abs(bias.pressureScore)*8),structure:Math.round(Math.abs(bias.structureScore)*5),setup:0,ma:0,context:0,participation:0,forming:0,micro:0},
       structuralContext:structural
     };
-    result.independentThesis = result.marketDirection
+    result.directionMode=mode;
+    result.automaticBias=automaticBias;
+    result.manualThesis=manualThesis;
+    result.independentThesis = mode === "AUTO" && result.marketDirection
       ? evaluateDirectionThesis37(result,result.marketDirection,horizonId)
-      : null;
+      : manualThesis;
     return result;
   }
   function evaluateDirectionThesis37(market,direction,horizonId){
@@ -4340,6 +4363,7 @@
       if(state.entry.textContent!==displayed.summaryVariants.full) state.entry.textContent=displayed.summaryVariants.full;
       state.entry.dataset.signalGeneration=String(displayed.generation);
       state.entry.dataset.signalIdentity=displayed.signalIdentity;
+      state.entry.dataset.signalDirectionMode=displayed.mode;
       state.entry.dataset.signalDirection=displayed.direction;
       state.entry.dataset.signalConfidence=displayed.confidence==null ? "" : String(displayed.confidence);
       state.entry.dataset.signalState=displayed.visibleState;
@@ -4366,7 +4390,7 @@
     return true;
   }
   function publishEngineEvaluation37(output,{generation,contextKey,reportSnapshot,bundle}){
-    if(!signalEngineRegistry.accepts(output) || generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return {discarded:true};
+    if(!signalEngineRegistry.accepts(output,{directionMode:state.direction,publicationGeneration:generation}) || generation!==state.refreshGeneration || contextKey!==presentationContextKey37()) return {discarded:true};
     const publishedAt=Date.now(),presentation=output.presentation||{};
     const displayedSignal=displayedFromEngineOutput37(output,{generation,publishedAt,mode:state.direction,horizonId:state.horizon});
     const signal=presentation.signal||{marketDirection:displayedSignal.direction==="NO BIAS"?null:displayedSignal.direction,confidence:displayedSignal.confidence,entryDecision:displayedSignal.decision,dataHealth:bundle.health};
@@ -4379,7 +4403,7 @@
     const publicationFingerprint=[reportSnapshot&&reportSnapshot.signature||"engine",displayedSignal.signalIdentity,displayedSignal.engineId,displayedSignal.engineVersion].join("|");
     const comparison=output.comparisonDiagnostics||{};
     const diagnosticText=()=>[
-      `Engine: Signal ${output.engineId} · ${output.engineVersion}`,`Publication generation: ${generation}`,`Data status: ${output.dataStatus}`,
+      `Engine: Signal ${output.engineId} · ${output.engineVersion}`,`Direction mode: ${displayedSignal.mode}`,`Publication generation: ${generation}`,`Data status: ${output.dataStatus}`,
       `Directional permission score: ${comparison.directionalPermissionScore??"Unavailable"}`,`Setup score: ${comparison.setupScore??"Unavailable"}`,`Setup breakdown: ${JSON.stringify(comparison.setupBreakdown||{})}`,
       `Trigger score: ${comparison.triggerScore??"Unavailable"}`,`Trigger breakdown: ${JSON.stringify(comparison.triggerBreakdown||{})}`,`Current-entry score: ${comparison.currentEntryScore??"Unavailable"}`,`Current-entry breakdown: ${JSON.stringify(comparison.currentEntryBreakdown||{})}`,
       `Hard gates passed: ${(comparison.hardGates&&comparison.hardGates.passed||[]).join(", ")||"None"}`,`Hard gates failed: ${(comparison.hardGates&&comparison.hardGates.failed||[]).join(", ")||"None"}`,
@@ -4387,9 +4411,9 @@
       `Flow effectiveness: ${JSON.stringify(comparison.flowEffectiveness||{})}`,`Chase distance: ${comparison.chaseDistanceAtr??"Unavailable"} ATR`,`Remaining reward/risk: ${comparison.remainingRewardRisk??"Unavailable"}`,`Final state reason: ${comparison.finalStateReason||output.reasons[0]||"Unavailable"}`
     ].join("\n");
     const fallbackReport=()=>({summary:displayedSignalHeader37(displayedSignal).join("\n"),analysis:[...output.reasons,...output.exclusions].join("\n")||"No additional engine analysis.",diagnostics:diagnosticText(),publication:displayedSignalMeta37(displayedSignal)});
-    const fallbackTooltip=()=>({text:[displayedSignal.definition,"",`Direction: ${displayedSignal.direction}`,`Bias confidence: ${displayedSignal.confidenceText}`,`State: ${displayedSignal.visibleState}`,`Setup identity: ${displayedSignal.setupIdentity||"None"}`,`Setup quality: ${displayedSignal.setupQuality||"UNAVAILABLE"}`,`Trigger quality: ${displayedSignal.triggerQuality||"UNAVAILABLE"}`,`Current entry quality: ${displayedSignal.currentEntryQuality||"UNAVAILABLE"}`,`Entry: ${displayedSignal.entryVerdict}`,`Reason: ${output.reasons[0]||"Unavailable"}`,`Publication generation: ${generation}`,"",`Engine: Signal ${output.engineId} · ${output.engineVersion}`].join("\n"),publication:displayedSignalMeta37(displayedSignal)});
+    const fallbackTooltip=()=>({text:[displayedSignal.definition,"",`Direction mode: ${displayedSignal.mode}`,`Direction: ${displayedSignal.direction}`,`Bias confidence: ${displayedSignal.confidenceText}`,`State: ${displayedSignal.visibleState}`,`Setup identity: ${displayedSignal.setupIdentity||"None"}`,`Setup quality: ${displayedSignal.setupQuality||"UNAVAILABLE"}`,`Trigger quality: ${displayedSignal.triggerQuality||"UNAVAILABLE"}`,`Current entry quality: ${displayedSignal.currentEntryQuality||"UNAVAILABLE"}`,`Entry: ${displayedSignal.entryVerdict}`,`Reason: ${output.reasons[0]||"Unavailable"}`,`Publication generation: ${generation}`,"",`Engine: Signal ${output.engineId} · ${output.engineVersion}`].join("\n"),publication:displayedSignalMeta37(displayedSignal)});
     const publication={
-      generation,contextKey,publishedAt,refreshState,sections:{signalEvidence:"READY"},displayedSignal,engineId:output.engineId,engineVersion:output.engineVersion,publicationGeneration:generation,
+      generation,contextKey,publishedAt,refreshState,sections:{signalEvidence:"READY"},displayedSignal,engineId:output.engineId,engineVersion:output.engineVersion,directionMode:displayedSignal.mode,publicationGeneration:generation,
       __reportSnapshot:reportSnapshot,signal,decision:displayedSignal.decision,normalizedOutput:output,signalSummaryVariants:displayedSignal.summaryVariants,entryTone:displayedSignal.entryTone,
       signalReport:null,signalReportFactory:withReportSnapshot(presentation.signal?()=>signalDetailsReport37(presentationSignal,thesis,presentationEntryQuality,displayedSignal):fallbackReport),
       snapshot:publicationSnapshot37(reportSnapshot),horizonLabel:horizonLabel37(state.horizon),signalHorizonId:state.horizon,
@@ -4485,18 +4509,18 @@
     try{
       const reportSnapshot=state.activeSnapshot;
       const output=signalEngineRegistry.evaluate({
-        publicationGeneration:generation,reason:state.lastRefreshReason,horizonId:state.horizon,mode:state.direction,snapshot:reportSnapshot,dataHealth:bundle.health,
-        evaluateSignalA:()=>{
+        publicationGeneration:generation,reason:state.lastRefreshReason,horizonId:state.horizon,directionMode:state.direction,mode:state.direction,snapshot:reportSnapshot,dataHealth:bundle.health,
+        evaluateSignalA:({directionMode})=>{
           let signal;
           performanceDiagnostics.signalLightCalculations += 1;
-          signal=timed37("signal.calculation",()=>evaluateToolbarPressureSignal37(state.horizon),preparedRevision&&preparedRevision.fingerprint);
+          signal=timed37("signal.calculation",()=>evaluateToolbarPressureSignal37(state.horizon,directionMode),preparedRevision&&preparedRevision.fingerprint);
           state.activeSnapshot.signal=signal;signal.dataHealth=bundle.health;
           if(bundle.health.status==="stale"&&num37(signal.confidence)!=null){signal.confidence=Math.min(62,signal.confidence);signal.staleConfidenceCap=62;}
-          const thesis=state.direction==="AUTO"?null:evaluateDirectionThesis37(signal,state.direction,state.horizon);
+          const thesis=signal.manualThesis||null;
           if(thesis&&bundle.health.status==="stale"&&num37(thesis.confidence)!=null){thesis.confidence=Math.min(62,thesis.confidence);thesis.staleConfidenceCap=62;}
-          const entryDirection=state.direction==="AUTO"?(signal.fadeDirection||signal.marketDirection):state.direction;
+          const entryDirection=directionMode==="AUTO"?(signal.fadeDirection||signal.marketDirection):directionMode;
           const entryQuality=evaluateEntryQuality37(signal,thesis,entryDirection);
-          const displayedSignal=buildDisplayedSignalPublication37({generation,publishedAt:Date.now(),mode:state.direction,horizonId:state.horizon,signal,thesis,entryQuality});
+          const displayedSignal=buildDisplayedSignalPublication37({generation,publishedAt:Date.now(),mode:directionMode,horizonId:state.horizon,signal,thesis,entryQuality});
           return normalizedSignalAOutput37(signal,thesis,entryQuality,displayedSignal);
         }
       });

@@ -116,13 +116,14 @@
     function evaluate(context={}){
       const engine=get(activeId);
       if(!engine || engine.status!=="available") throw new Error("No available Signal engine is active");
-      const token={id:++evaluationSequence,engineId:engine.id,engineVersion:engine.version,activationGeneration,publicationGeneration:Number(context.publicationGeneration)||0};
+      const directionMode=["AUTO","LONG","SHORT"].includes(String(context.directionMode||"AUTO").toUpperCase())?String(context.directionMode||"AUTO").toUpperCase():"AUTO";
+      const token={id:++evaluationSequence,engineId:engine.id,engineVersion:engine.version,activationGeneration,publicationGeneration:Number(context.publicationGeneration)||0,directionMode};
       const signal=activeAbort && activeAbort.signal;
       evaluationCounts.set(engine.id,(evaluationCounts.get(engine.id)||0)+1);reasons.set(engine.id,context.reason || "evaluation");errors.delete(engine.id);
       runningTokens.add(token);
       const settle=output => {
         const normalized=validateOutput(output);
-        return {...normalized,engineId:engine.id,engineVersion:engine.version,publicationGeneration:token.publicationGeneration,__engineToken:token};
+        return {...normalized,engineId:engine.id,engineVersion:engine.version,publicationGeneration:token.publicationGeneration,directionMode,__engineToken:token};
       };
       const fail=error => { errors.set(engine.id,error && error.stack || String(error));throw error; };
       try{
@@ -131,9 +132,11 @@
         const output=settle(result);runningTokens.delete(token);return output;
       }catch(error){runningTokens.delete(token);fail(error);}
     }
-    function accepts(output){
+    function accepts(output,expected={}){
       const token=output && output.__engineToken;
-      return !!token && token.engineId===activeId && token.activationGeneration===activationGeneration && isAvailable(token.engineId);
+      const expectedMode=expected.directionMode==null?null:String(expected.directionMode).toUpperCase(),expectedGeneration=expected.publicationGeneration==null?null:Number(expected.publicationGeneration);
+      return !!token && token.engineId===activeId && token.activationGeneration===activationGeneration && isAvailable(token.engineId)
+        && (expectedMode==null||token.directionMode===expectedMode) && (expectedGeneration==null||token.publicationGeneration===expectedGeneration);
     }
     function subscribe(listener){ assert(typeof listener === "function","Registry listener must be a function");listeners.add(listener);return () => listeners.delete(listener); }
     function diagnostics(){

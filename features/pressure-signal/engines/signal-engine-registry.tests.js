@@ -88,8 +88,8 @@ const run=(async()=>{
   const contextBody=source.slice(source.indexOf("function signalContextKey37"),source.indexOf("function presentationContextKey37"));
   assert(!/interval|activeChartTf/.test(contextBody),"visible chart TF entered the Signal engine context");
   for(const visibleTf of ["1m","5m","15m","1h","4h"])assert.equal(windowOne.selector.getSelectedId(),"B",`chart TF ${visibleTf} changed the engine`);
-  assert(source.includes("signalEngineRegistry.accepts(output)")&&windows.includes("left.engineId===right.engineId")&&windows.includes("left.engineVersion===right.engineVersion"),"tooltip/report publication isolation is not engine-aware");
-  assert(source.includes("engineId:output.engineId,engineVersion:output.engineVersion,publicationGeneration:generation"),"publication tags are missing");
+  assert(source.includes("signalEngineRegistry.accepts(output,{directionMode:state.direction,publicationGeneration:generation})")&&windows.includes("left.engineId===right.engineId")&&windows.includes("left.engineVersion===right.engineVersion"),"tooltip/report publication isolation is not engine-aware");
+  assert(source.includes("engineId:output.engineId,engineVersion:output.engineVersion,directionMode:displayedSignal.mode,publicationGeneration:generation"),"publication tags are missing");
   assert(selectorSource.includes('tab.dataset.tab="signals"')&&selectorSource.includes('tab.textContent="Signals"'),"dedicated Signals settings tab is missing");
   assert(selectorSource.includes('A:"Signal A — Current"')&&selectorSource.includes('B:"Signal B — Refined blend"')&&selectorSource.includes('C:"Signal C — 9/55"'),"Signal choices do not match the specification");
   assert(selectorSource.includes("input.disabled=!available")&&selectorSource.includes('status.textContent=available ?'),"unavailable choices are not visibly disabled");
