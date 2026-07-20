@@ -15,6 +15,7 @@
   const windowSystem = build.createWindowSystem(featureConfig,featureFormat);
   const signalEngineRegistry=window.createSignalEngineRegistry();
   const signalEngineA=signalEngineRegistry.register(window.createSignalEngineA());
+  if(typeof window.createSignalEngineB==="function") signalEngineRegistry.register(window.createSignalEngineB());
   if(typeof window.createPressureSignalDataFeed !== "function") throw new Error("Pressure Signal data feed is not loaded");
   const MODULE = "BT001_TOPBAR_PRESSURE_SIGNAL";
   const performanceDiagnostics = window.BT001_PERFORMANCE_DIAGNOSTICS ||= {};
@@ -459,7 +460,7 @@
     return {horizonId,engine,slots,items,timeframes};
   }
   function signalDataPlan37(horizonId=state.horizon){
-    return signalEngineRegistry.requirements({horizonId,getSignalARequirements:()=>signalADataPlan37(horizonId)});
+    return signalEngineRegistry.requirements({horizonId,getSignalARequirements:()=>signalADataPlan37(horizonId),getCanonicalSlots:signalCanonicalSlots37});
   }
   function actionDataPlan37(horizonId=positionEngine.getManagementHorizon()||"quick"){
     const managementHorizonId=featureConfig.managementHorizons[horizonId]?horizonId:"quick";
@@ -3060,9 +3061,9 @@
     const legacy=output.presentation&&output.presentation.displayedSignal;
     if(legacy) return Object.freeze({...legacy,engineId:output.engineId,engineVersion:output.engineVersion,publicationGeneration:generation});
     const direction=normalizeDisplayedDirection37(output.direction),confidence=output.confidence==null?null:Math.round(Number(output.confidence));
-    const visibleState=String(output.visibleState||output.entryState||"NO SETUP");
+    const visibleState=String(output.visibleState||output.entryState||"NO SETUP"),decision=output.decision||null;
     const summarySignal={marketDirection:direction==="NO BIAS"?null:direction,confidence};
-    const summaryVariants=Object.freeze(output.summaryVariants||signalSummaryVariants37(summarySignal,null));
+    const summaryVariants=Object.freeze(output.summaryVariants||signalSummaryVariants37(summarySignal,decision));
     return Object.freeze({
       generation,publishedAt,signalIdentity:[generation,horizonId,direction,confidence==null?"na":confidence,visibleState,output.setupIdentity||"none"].join("|"),
       direction,confidence,confidenceText:confidence==null?"Unavailable":`${confidence}%`,visibleState,definition:output.definition||"Signal engine result.",
@@ -3070,7 +3071,7 @@
       setupQuality:output.setupQuality||null,triggerQuality:output.triggerQuality||null,currentEntryQuality:output.currentEntryQuality||null,entryVerdict:output.entryVerdict||"WAIT",
       triggerState:output.triggerIdentity?"active":"absent",triggerEvidence:Object.freeze([...(output.triggerEvidence||[])]),invalidation:null,targets:Object.freeze({}),obstacles:Object.freeze({}),participation:null,pressureEvidence:Object.freeze([]),
       dataStatus:output.dataStatus||"unavailable",horizonId,horizonLabel:horizonLabel37(horizonId),mode,activeReasons:Object.freeze([...(output.reasons||[])]),missingConditions:Object.freeze([...(output.exclusions||[])]),limitations:Object.freeze([]),
-      decision:null,summaryVariants,entryTone:output.tone||displayedSignalTone37(direction,visibleState),engineId:output.engineId,engineVersion:output.engineVersion,publicationGeneration:generation
+      decision,summaryVariants,entryTone:output.tone||displayedSignalTone37(direction,visibleState),engineId:output.engineId,engineVersion:output.engineVersion,publicationGeneration:generation
     });
   }
   function topSignalText37(signal,decision){
@@ -3099,6 +3100,7 @@
   }
   function triggerIdentity37(signal,decision){
     if(!decision || decision.state !== "READY") return null;
+    if(decision.triggerIdentity) return decision.triggerIdentity;
     const snapshot = state.activeSnapshot || state.marketSnapshot;
     const activationTime = decision.interaction && (decision.interaction.reactionTime ?? decision.interaction.interactionTime);
     return [
@@ -4375,8 +4377,17 @@
     const withReportSnapshot=work=>()=>{const prior=state.activeSnapshot;state.activeSnapshot=reportSnapshot;try{return work();}finally{state.activeSnapshot=prior;}};
     const refreshState=reportSnapshot&&reportSnapshot.freshness&&reportSnapshot.freshness.signalStatus==="STALE"||bundle.health.status==="stale"?"STALE":reportSnapshot&&reportSnapshot.freshness&&reportSnapshot.freshness.signalStatus==="UNAVAILABLE"?"UNAVAILABLE":"READY";
     const publicationFingerprint=[reportSnapshot&&reportSnapshot.signature||"engine",displayedSignal.signalIdentity,displayedSignal.engineId,displayedSignal.engineVersion].join("|");
-    const fallbackReport=()=>({summary:displayedSignalHeader37(displayedSignal).join("\n"),analysis:[...output.reasons,...output.exclusions].join("\n")||"No additional engine analysis.",diagnostics:[`Engine: Signal ${output.engineId} · ${output.engineVersion}`,`Data status: ${output.dataStatus}`,`Publication generation: ${generation}`].join("\n"),publication:displayedSignalMeta37(displayedSignal)});
-    const fallbackTooltip=()=>({text:[displayedSignal.definition,"",`Direction: ${displayedSignal.direction}`,`Bias confidence: ${displayedSignal.confidenceText}`,`State: ${displayedSignal.visibleState}`,`Setup identity: ${displayedSignal.setupIdentity||"None"}`,`Entry: ${displayedSignal.entryVerdict}`,`Publication generation: ${generation}`,"",`Engine: Signal ${output.engineId} · ${output.engineVersion}`].join("\n"),publication:displayedSignalMeta37(displayedSignal)});
+    const comparison=output.comparisonDiagnostics||{};
+    const diagnosticText=()=>[
+      `Engine: Signal ${output.engineId} · ${output.engineVersion}`,`Publication generation: ${generation}`,`Data status: ${output.dataStatus}`,
+      `Directional permission score: ${comparison.directionalPermissionScore??"Unavailable"}`,`Setup score: ${comparison.setupScore??"Unavailable"}`,`Setup breakdown: ${JSON.stringify(comparison.setupBreakdown||{})}`,
+      `Trigger score: ${comparison.triggerScore??"Unavailable"}`,`Trigger breakdown: ${JSON.stringify(comparison.triggerBreakdown||{})}`,`Current-entry score: ${comparison.currentEntryScore??"Unavailable"}`,`Current-entry breakdown: ${JSON.stringify(comparison.currentEntryBreakdown||{})}`,
+      `Hard gates passed: ${(comparison.hardGates&&comparison.hardGates.passed||[]).join(", ")||"None"}`,`Hard gates failed: ${(comparison.hardGates&&comparison.hardGates.failed||[]).join(", ")||"None"}`,
+      `Effective opposition: ${(comparison.effectiveOppositionEvidence||[]).join("; ")||"None"}`,`Volatility regime: ${comparison.volatilityRegime||"Unavailable"}`,`Participation: ${comparison.participationState||"UNAVAILABLE"}`,
+      `Flow effectiveness: ${JSON.stringify(comparison.flowEffectiveness||{})}`,`Chase distance: ${comparison.chaseDistanceAtr??"Unavailable"} ATR`,`Remaining reward/risk: ${comparison.remainingRewardRisk??"Unavailable"}`,`Final state reason: ${comparison.finalStateReason||output.reasons[0]||"Unavailable"}`
+    ].join("\n");
+    const fallbackReport=()=>({summary:displayedSignalHeader37(displayedSignal).join("\n"),analysis:[...output.reasons,...output.exclusions].join("\n")||"No additional engine analysis.",diagnostics:diagnosticText(),publication:displayedSignalMeta37(displayedSignal)});
+    const fallbackTooltip=()=>({text:[displayedSignal.definition,"",`Direction: ${displayedSignal.direction}`,`Bias confidence: ${displayedSignal.confidenceText}`,`State: ${displayedSignal.visibleState}`,`Setup identity: ${displayedSignal.setupIdentity||"None"}`,`Setup quality: ${displayedSignal.setupQuality||"UNAVAILABLE"}`,`Trigger quality: ${displayedSignal.triggerQuality||"UNAVAILABLE"}`,`Current entry quality: ${displayedSignal.currentEntryQuality||"UNAVAILABLE"}`,`Entry: ${displayedSignal.entryVerdict}`,`Reason: ${output.reasons[0]||"Unavailable"}`,`Publication generation: ${generation}`,"",`Engine: Signal ${output.engineId} · ${output.engineVersion}`].join("\n"),publication:displayedSignalMeta37(displayedSignal)});
     const publication={
       generation,contextKey,publishedAt,refreshState,sections:{signalEvidence:"READY"},displayedSignal,engineId:output.engineId,engineVersion:output.engineVersion,publicationGeneration:generation,
       __reportSnapshot:reportSnapshot,signal,decision:displayedSignal.decision,normalizedOutput:output,signalSummaryVariants:displayedSignal.summaryVariants,entryTone:displayedSignal.entryTone,
