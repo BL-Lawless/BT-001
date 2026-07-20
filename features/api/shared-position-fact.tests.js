@@ -36,7 +36,7 @@ const vm=require("vm");
   assert(grad.includes('source:"gr-positionRisk"')&&grad.includes("sharedOwner.ingestRestRisk"),"GR positionRisk must feed and consume the shared owner");
   assert(main.includes('onDraw:detail=>scheduleAccountChartDraw'),"shared update bursts must use the single RAF draw scheduler");
   assert(main.includes('window.addEventListener("v13:open-position-change",event =>')&&main.includes("maybeRefreshLivePreview();"),"Waterfall must consume the shared position event");
-  assert(pressure.includes('window.addEventListener("v13:open-position-change",reconcilePresentationContext37'),"Action/Position Management must consume the shared position event");
+  assert(pressure.includes('actionLifecycle.listen(window,"v13:open-position-change","position-change")')||pressure.includes('window.addEventListener("v13:open-position-change",reconcilePresentationContext37'),"Action/Position Management must consume the shared position event");
 
   console.log("shared position fact tests: PASS",ownerCases,streamResult.cases);
 })().catch(error=>{console.error(error);process.exitCode=1;});
