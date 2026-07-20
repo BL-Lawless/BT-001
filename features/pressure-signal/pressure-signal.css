@@ -509,3 +509,10 @@
     flex-basis:100px;
   }
 }
+.signal-engine-settings-card{display:flex;flex-direction:column;gap:12px}
+.signal-engine-choices{display:grid;gap:8px}
+.signal-engine-choice{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--line,#d9dce1);border-radius:8px;cursor:pointer}
+.signal-engine-choice[data-available="false"]{cursor:not-allowed;opacity:.52;background:rgba(127,127,127,.06)}
+.signal-engine-choice input{margin-top:3px}
+.signal-engine-choice-copy{display:flex;flex-direction:column;gap:3px}
+.signal-engine-choice-copy small,.signal-engine-storage-note{color:var(--muted,#6b7280);font-size:11px}

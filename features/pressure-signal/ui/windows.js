@@ -442,7 +442,8 @@
       return Number(left.generation)===Number(right.generation) && left.signalIdentity===right.signalIdentity
         && left.direction===right.direction && (left.confidence==null ? null : Number(left.confidence))===(right.confidence==null ? null : Number(right.confidence))
         && left.visibleState===right.visibleState && (left.setupIdentity || null)===(right.setupIdentity || null)
-        && left.horizonId===right.horizonId;
+        && left.horizonId===right.horizonId && left.engineId===right.engineId && left.engineVersion===right.engineVersion
+        && Number(left.publicationGeneration)===Number(right.publicationGeneration);
     }
     function buttonMatchesDisplayedSignal(displayed){
       const button=toolbarControl("signal");
@@ -453,7 +454,9 @@
         state:button.dataset.signalState===displayed.visibleState,
         setup:(button.dataset.signalSetupIdentity || null)===(displayed.setupIdentity || null),
         generation:Number(button.dataset.signalGeneration)===Number(displayed.generation),
-        identity:button.dataset.signalIdentity===displayed.signalIdentity
+        identity:button.dataset.signalIdentity===displayed.signalIdentity,
+        engine:button.dataset.signalEngineId===displayed.engineId && button.dataset.signalEngineVersion===displayed.engineVersion,
+        publicationGeneration:Number(button.dataset.signalPublicationGeneration)===Number(displayed.publicationGeneration)
       };
       state.signalConsistency.buttonGeneration=Number(button.dataset.signalGeneration) || null;
       if(!checks.direction) state.signalConsistency.directionMismatch+=1;
@@ -1370,7 +1373,7 @@
       const report=ensureSignalReport();
       const displayed=state.displayedSignal;
       if(!report || !displayed || !state.signalSnapshot) return "Signal details unavailable";
-      if(!state.signalCopy) state.signalCopy=["SIGNAL DETAILS",`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Setup family: ${displayed.setupFamily || "None"}`,`Setup timeframe: ${displayed.setupTimeframe || "None"}`,`Entry: ${displayed.entryVerdict}`,`Publication generation: ${displayed.generation}`,"",`Symbol: ${state.signalSnapshot.symbol}`,`Horizon: ${state.signalHorizonId || "-"}`,`Snapshot: ${format.time(state.signalSnapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
+      if(!state.signalCopy) state.signalCopy=["SIGNAL DETAILS",`Engine: Signal ${displayed.engineId} · ${displayed.engineVersion}`,`Direction: ${displayed.direction}`,`Bias confidence: ${displayed.confidenceText}`,`State: ${displayed.visibleState}`,`Setup identity: ${displayed.setupIdentity || "None"}`,`Setup family: ${displayed.setupFamily || "None"}`,`Setup timeframe: ${displayed.setupTimeframe || "None"}`,`Entry: ${displayed.entryVerdict}`,`Publication generation: ${displayed.generation}`,"",`Symbol: ${state.signalSnapshot.symbol}`,`Horizon: ${state.signalHorizonId || "-"}`,`Snapshot: ${format.time(state.signalSnapshot.createdAt)}`,"",report.summary,"","Analysis",report.analysis,"","Diagnostics",report.diagnostics].join("\n");
       return state.signalCopy;
     }
     function positionCopy(){
@@ -1380,6 +1383,6 @@
       }
       return state.positionCopy;
     }
-    return {update,updateSignal,updatePosition,beginUpdate,completeUpdate,setRefreshState,setActionRefreshState,invalidateContext,invalidateSignalContext,invalidatePositionContext,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,recordSignalDetailsPublication,isSignalTooltipOpen:() => !!(state.signalTip && state.signalTip.classList.contains("is-open")),isPositionTooltipOpen:() => !!(state.positionTip && state.positionTip.classList.contains("is-open")),isPositionWindowOpen:() => !!(state.positionWindow && state.positionWindow.classList.contains("is-open")),ensureSignalReport,getSignalCopy:signalCopy,getPositionCopy:positionCopy,destroy,_selfTest:runPresentationSelfTests,_diagnostics:() => ({updating:state.updating,signalRefreshState:state.signalRefreshState,actionRefreshState:state.actionRefreshState,signalContextKey:state.signalContextKey,actionContextKey:state.actionContextKey,hasSignal:!!(state.signalReport || state.signalReportFactory),hasManagement:!!state.management,signalConsistency:{...state.signalConsistency},actionConsistency:{...state.actionConsistency,consistent:[state.actionConsistency.buttonGeneration,state.actionConsistency.tooltipGeneration,state.actionConsistency.windowGeneration].filter(value=>value!=null).every(value=>value===state.actionConsistency.publicationGeneration)},displayedSignal:state.displayedSignal ? {generation:state.displayedSignal.generation,signalIdentity:state.displayedSignal.signalIdentity,direction:state.displayedSignal.direction,confidence:state.displayedSignal.confidence,visibleState:state.displayedSignal.visibleState,setupIdentity:state.displayedSignal.setupIdentity,horizonId:state.displayedSignal.horizonId} : null,tooltips:{signal:tooltipDiagnostics(state.signalTip),position:tooltipDiagnostics(state.positionTip)},renderedTooltipFingerprints:{...state.renderedTooltipFingerprints},positionWindowRebuildFingerprint:state.renderedPositionFingerprint})};
+    return {update,updateSignal,updatePosition,beginUpdate,completeUpdate,setRefreshState,setActionRefreshState,invalidateContext,invalidateSignalContext,invalidatePositionContext,bindToolbar,openSignal,openPosition,closePosition,focusSignal,recoverWindows,setSignalHorizon,recordSignalDetailsPublication,isSignalTooltipOpen:() => !!(state.signalTip && state.signalTip.classList.contains("is-open")),isPositionTooltipOpen:() => !!(state.positionTip && state.positionTip.classList.contains("is-open")),isPositionWindowOpen:() => !!(state.positionWindow && state.positionWindow.classList.contains("is-open")),ensureSignalReport,getSignalCopy:signalCopy,getPositionCopy:positionCopy,destroy,_selfTest:runPresentationSelfTests,_diagnostics:() => ({updating:state.updating,signalRefreshState:state.signalRefreshState,actionRefreshState:state.actionRefreshState,signalContextKey:state.signalContextKey,actionContextKey:state.actionContextKey,hasSignal:!!(state.signalReport || state.signalReportFactory),hasManagement:!!state.management,signalConsistency:{...state.signalConsistency},actionConsistency:{...state.actionConsistency,consistent:[state.actionConsistency.buttonGeneration,state.actionConsistency.tooltipGeneration,state.actionConsistency.windowGeneration].filter(value=>value!=null).every(value=>value===state.actionConsistency.publicationGeneration)},displayedSignal:state.displayedSignal ? {generation:state.displayedSignal.generation,signalIdentity:state.displayedSignal.signalIdentity,direction:state.displayedSignal.direction,confidence:state.displayedSignal.confidence,visibleState:state.displayedSignal.visibleState,setupIdentity:state.displayedSignal.setupIdentity,horizonId:state.displayedSignal.horizonId,engineId:state.displayedSignal.engineId,engineVersion:state.displayedSignal.engineVersion,publicationGeneration:state.displayedSignal.publicationGeneration} : null,tooltips:{signal:tooltipDiagnostics(state.signalTip),position:tooltipDiagnostics(state.positionTip)},renderedTooltipFingerprints:{...state.renderedTooltipFingerprints},positionWindowRebuildFingerprint:state.renderedPositionFingerprint})};
   };
 })();
