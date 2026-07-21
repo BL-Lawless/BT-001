@@ -38,6 +38,7 @@
         `Signal B \u2014 Refined Blend \u00b7 ${unavailable(output.engineVersion)}`,
         `Mode: ${unavailable(displayed.mode)} | Evaluated: ${unavailable(displayed.evaluatedDirection||displayed.direction)} | Horizon: ${unavailable(horizonLabel)}`,
         `State: ${unavailable(displayed.visibleState)} | Confidence/alignment: ${number(displayed.confidence,0)}`,
+        `Readiness score: ${number(diagnostics.readinessScore,0)}`,
         `Publication generation: ${unavailable(displayed.publicationGeneration)}`
       ]),
       section("QUALITY",[

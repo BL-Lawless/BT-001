@@ -2917,17 +2917,22 @@
     }
     return bias ? SIGNAL_PRESENTATION37["BIAS CONFIRMED"] : SIGNAL_PRESENTATION37["NO BIAS"];
   }
-  function signalDirectionConfidence37(signal){
+  function signalDirectionConfidence37(signal,{plainNumber=false}={}){
     const direction = signal && signal.marketDirection;
     const confidence = num37(signal && signal.confidence);
-    return direction && confidence != null ? `${direction} ${Math.round(confidence)}%` : direction || "";
+    if(!direction) return "";
+    if(confidence == null) return direction;
+    return plainNumber ? `${direction} ${Math.round(confidence)}` : `${direction} ${Math.round(confidence)}%`;
   }
-  function signalSummaryVariants37(signal,decision){
+  function signalSummaryVariants37(signal,decision,{readinessScore}={}){
     const bias = signal && signal.marketDirection;
     if(!bias) return {full:"NO SETUP \u00b7 NO BIAS",short:"NO SETUP \u00b7 NO BIAS",minimal:"NO SETUP \u00b7 NO BIAS"};
-    const directionConfidence = signalDirectionConfidence37(signal);
+    const hasReadiness = readinessScore != null && Number.isFinite(Number(readinessScore));
+    const directionConfidence = signalDirectionConfidence37(signal,{plainNumber:hasReadiness});
     const presentation = signalPresentation37(signal,decision);
-    const full = `${directionConfidence} \u00b7 ${presentation.label}`;
+    const full = hasReadiness
+      ? `${directionConfidence} \u00b7 ${presentation.label} \u00b7 READY ${Math.round(Number(readinessScore))}`
+      : `${directionConfidence} \u00b7 ${presentation.label}`;
     return {
       full,
       short:full,
@@ -3073,7 +3078,7 @@
     const direction=normalizeDisplayedDirection37(output.direction),confidence=output.confidence==null?null:Math.round(Number(output.confidence));
     const visibleState=String(output.visibleState||output.entryState||"NO SETUP"),decision=output.decision||null,evaluatedDirection=normalizeDisplayedDirection37(output.evaluatedDirection||output.direction),authoritativePhase=output.authoritativePhase||output.comparisonDiagnostics&&output.comparisonDiagnostics.authoritativePhase||null;
     const summarySignal={marketDirection:direction==="NO BIAS"?null:direction,confidence};
-    const summaryVariants=Object.freeze(output.summaryVariants||signalSummaryVariants37(summarySignal,decision));
+    const summaryVariants=Object.freeze(output.summaryVariants||signalSummaryVariants37(summarySignal,decision,{readinessScore:output.readinessScore}));
     return Object.freeze({
       generation,publishedAt,signalIdentity:[generation,horizonId,mode,evaluatedDirection,authoritativePhase||"no-phase",direction,confidence==null?"na":confidence,visibleState,output.setupIdentity||"none"].join("|"),
       direction,confidence,confidenceText:confidence==null?"Unavailable":`${confidence}%`,visibleState,definition:output.definition||"Signal engine result.",

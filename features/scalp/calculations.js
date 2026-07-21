@@ -66,7 +66,9 @@
     if(!(target>0))errors.push("Net target must be greater than zero");if(!(stop>0))errors.push("Net stop must be greater than zero");if(price&&q*price<minNotional)errors.push(`Notional is below minimum ${minNotional}`);
     const balanceRow=Array.isArray(balance)?balance.find(row=>n(row&&row.availableBalance)!=null)||balance[0]:balance;
     const available=n(balanceRow&&(balanceRow.availableBalance??balanceRow.available));
-    if(available==null)errors.push("Available margin is unavailable");else if(price&&q*price>available*Math.max(1,n(filters.leverage)||1))errors.push("Available margin is insufficient");
+    const leverage=Math.max(1,n(filters.leverage)||1),requiredMargin=price&&q>0?(price*q)/leverage:null;
+    if(available==null)errors.push("Available margin is unavailable");
+    else if(requiredMargin!=null&&requiredMargin>available)errors.push(`Available margin is insufficient: requires $${requiredMargin.toFixed(2)} at ${leverage}x leverage, have $${available.toFixed(2)} (short $${(requiredMargin-available).toFixed(2)})`);
     if(position&&Math.abs(n(position.positionAmt??position.qty)||0)>0)errors.push("An open position already exists for this symbol");if(Array.isArray(ownedOrders)&&ownedOrders.length)errors.push("Unresolved SCALP-owned orders exist");
     return {ok:errors.length===0,errors,normalizedLot:normalized};
   }
