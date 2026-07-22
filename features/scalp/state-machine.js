@@ -16,15 +16,23 @@
     constructor(options={}){
       super();this.gateway=options.gateway||window.BT001_BINANCE_TRADING;this.detector=options.detector||new root.Detector();this.now=options.now||Date.now;this.storage=options.storage||localStorage;
       this.state="OFF";this.status="";this.generation=0;this.config=this.loadConfig();this.guide=null;this.rates=calc.feeRates();this.filters=null;this.marketSymbol=this.gateway&&this.gateway.symbol?this.gateway.symbol():null;this.latestBySource=new Map();this.lastQualifiedBySource=new Map();this.baseline=new Set();this.seen=new Set();this.rankRejected=new Set();this.armedAt=0;this.session=null;this.externalPosition=null;this.executionLock=null;this.exitLock=null;this.rearmAfterFlat=false;this.cooloffTimer=null;this.unsubHub=null;this.destroyed=false;this.diagnostics=[];this.fillIds=new Set();this.lastPrivateStatus=null;this.reconnectBusy=false;
+      this.cascadeByTf=new Map();this.autoArmActive=false;this.autoArmBusy=false;this.autoArmSuspended=false;this.autoDisabledReason=null;this.autoLossState=this.loadAutoLossState();
     }
-    loadConfig(){let saved={};try{saved=JSON.parse(this.storage.getItem(C.configKey)||"{}");}catch(_e){}const nonnegative=(value,fallback,decimals)=>n(value)!=null&&n(value)>=0?Number(value).toFixed(decimals):fallback,minimumRank=Math.round(Math.max(0,Math.min(100,n(saved.minimumRank)??C.defaults.minimumRank)));return {...C.defaults,...saved,direction:C.directions.includes(saved.direction)?saved.direction:C.defaults.direction,source:C.sources.includes(saved.source)?saved.source:C.defaults.source,entryType:C.entryTypes.includes(saved.entryType)?saved.entryType:C.defaults.entryType,minimumRank,mode:C.modes.includes(saved.mode)?saved.mode:C.defaults.mode,lot:nonnegative(saved.lot,C.defaults.lot,3),target:nonnegative(saved.target,C.defaults.target,1),tpDelta:nonnegative(saved.tpDelta,C.defaults.tpDelta,0),tpDriver:["NET_TARGET","TP_DELTA"].includes(saved.tpDriver)?saved.tpDriver:C.defaults.tpDriver,stop:nonnegative(saved.stop,C.defaults.stop,1),slDelta:nonnegative(saved.slDelta,C.defaults.slDelta,0),slDriver:["NET_SL","SL_DELTA"].includes(saved.slDriver)?saved.slDriver:C.defaults.slDriver};}
+    loadConfig(){let saved={};try{saved=JSON.parse(this.storage.getItem(C.configKey)||"{}");}catch(_e){}const nonnegative=(value,fallback,decimals)=>n(value)!=null&&n(value)>=0?Number(value).toFixed(decimals):fallback,minimumRank=Math.round(Math.max(0,Math.min(100,n(saved.minimumRank)??C.defaults.minimumRank))),positiveInt=(value,fallback)=>n(value)!=null&&n(value)>=1?Math.round(n(value)):fallback,nonnegativeNumber=(value,fallback)=>n(value)!=null&&n(value)>=0?n(value):fallback;return {...C.defaults,...saved,direction:C.directions.includes(saved.direction)?saved.direction:C.defaults.direction,source:C.sources.includes(saved.source)?saved.source:C.defaults.source,entryType:C.entryTypes.includes(saved.entryType)?saved.entryType:C.defaults.entryType,minimumRank,mode:C.modes.includes(saved.mode)?saved.mode:C.defaults.mode,lot:nonnegative(saved.lot,C.defaults.lot,3),target:nonnegative(saved.target,C.defaults.target,1),tpDelta:nonnegative(saved.tpDelta,C.defaults.tpDelta,0),tpDriver:["NET_TARGET","TP_DELTA"].includes(saved.tpDriver)?saved.tpDriver:C.defaults.tpDriver,stop:nonnegative(saved.stop,C.defaults.stop,1),slDelta:nonnegative(saved.slDelta,C.defaults.slDelta,0),slDriver:["NET_SL","SL_DELTA"].includes(saved.slDriver)?saved.slDriver:C.defaults.slDriver,autoEntryEnabled:saved.autoEntryEnabled===true,autoTradingEnabled:saved.autoTradingEnabled===true,maxConcurrentAutoPositions:positiveInt(saved.maxConcurrentAutoPositions,C.defaults.maxConcurrentAutoPositions),maxDailyAutoLossUsd:nonnegativeNumber(saved.maxDailyAutoLossUsd,C.defaults.maxDailyAutoLossUsd)};}
     saveConfig(){try{this.storage.setItem(C.configKey,JSON.stringify(this.config));}catch(_e){}}
+    loadAutoLossState(){try{const saved=JSON.parse(this.storage.getItem(C.autoLossKey)||"null");if(saved&&typeof saved.day==="string")return {day:saved.day,accumulatedUsd:Math.max(0,n(saved.accumulatedUsd)||0)};}catch(_e){}return {day:null,accumulatedUsd:0};}
+    saveAutoLossState(){try{this.storage.setItem(C.autoLossKey,JSON.stringify(this.autoLossState));}catch(_e){}}
     emit(reason="update"){const detail=this.snapshot();this.dispatchEvent(new CustomEvent("change",{detail:{...detail,reason}}));try{window.dispatchEvent(new CustomEvent("bt001:scalp-state",{detail:{...detail,reason}}));}catch(_e){}}
     previewDirection(){if(this.session&&["LONG","SHORT"].includes(upper(this.session.direction)))return upper(this.session.direction);if(["LONG","SHORT"].includes(upper(this.config.direction)))return upper(this.config.direction);const latest=this.displayDetection(this.config.source);return latest&&["LONG","SHORT"].includes(upper(latest.direction))?upper(latest.direction):"ANY";}
     outcomePreview(){const actual=this.session&&n(this.session.avgEntry)>0&&(n(this.session.liveQty)>0||n(this.session.filledQty)>0),outcome=calc.linkedPreview({direction:this.previewDirection(),guide:this.guide,qty:actual?n(this.session.liveQty)||n(this.session.filledQty):this.config.lot,target:actual&&this.config.tpDriver==="NET_TARGET"?this.session.target:this.config.target,stop:actual&&this.config.slDriver==="NET_SL"?this.session.stop:this.config.stop,tpDelta:this.config.tpDelta,slDelta:this.config.slDelta,tpDriver:this.config.tpDriver,slDriver:this.config.slDriver,rates:this.rates,filters:this.filters||{},entryPrice:actual?this.session.avgEntry:null,entryCommission:actual?this.session.entryCommission:null,fundingCost:actual?n(this.session.fundingCost)||0:0});if(outcome.available){const patch={};if(this.config.tpDriver==="TP_DELTA")patch.target=calc.formatNumeric(outcome.target,1);else patch.tpDelta=calc.formatNumeric(outcome.tpDelta,0);if(this.config.slDriver==="SL_DELTA")patch.stop=calc.formatNumeric(outcome.stop,1);else patch.slDelta=calc.formatNumeric(outcome.slDelta,0);let changed=false;for(const [key,value] of Object.entries(patch))if(this.config[key]!==value){this.config[key]=value;changed=true;}if(actual){if(this.config.tpDriver==="TP_DELTA"&&n(this.session.target)!==n(patch.target)){this.session.target=n(patch.target);changed=true;}if(this.config.slDriver==="SL_DELTA"&&n(this.session.stop)!==n(patch.stop)){this.session.stop=n(patch.stop);changed=true;}}if(changed){this.saveConfig();if(actual)this.persistSession();}}return outcome;}
-    snapshot(){const outcome=this.outcomePreview();return {state:this.state,status:this.status,generation:this.generation,config:{...this.config},guide:this.guide,rates:{...this.rates},filters:this.filters?{...this.filters}:null,latest:this.displayDetection(this.config.source),detections:this.detectionRows(),outcome,session:this.session?clone(this.session):null,externalPosition:this.externalPosition?clone(this.externalPosition):null,armBlockedByPosition:!!this.externalPosition&&!this.session,active:this.isActive(),armed:this.state==="ARMED",locked:this.configurationLocked()};}
+    snapshot(){const outcome=this.outcomePreview();return {state:this.state,status:this.status,generation:this.generation,config:{...this.config},guide:this.guide,rates:{...this.rates},filters:this.filters?{...this.filters}:null,latest:this.displayDetection(this.config.source),detections:this.detectionRows(),outcome,session:this.session?clone(this.session):null,externalPosition:this.externalPosition?clone(this.externalPosition):null,armBlockedByPosition:!!this.externalPosition&&!this.session,active:this.isActive(),armed:this.state==="ARMED",locked:this.configurationLocked(),cascade:this.cascadeState(),autoTrading:this.autoTradingSnapshot()};}
     log(action,data={}){this.diagnostics.push({at:this.now(),state:this.state,action,...data});if(this.diagnostics.length>120)this.diagnostics.shift();}
-    transition(next,reason){if(next===this.state){this.status=reason||this.status;this.emit(reason);return;}const allowed=C.transitions[this.state]||[];if(!allowed.includes(next))throw new Error(`Invalid SCALP transition ${this.state} -> ${next}`);this.log("transition",{from:this.state,to:next,reason});this.state=next;this.status=reason||next;this.emit(reason);}
+    transition(next,reason){
+      if(next===this.state){this.status=reason||this.status;this.emit(reason);return;}const allowed=C.transitions[this.state]||[];if(!allowed.includes(next))throw new Error(`Invalid SCALP transition ${this.state} -> ${next}`);
+      if(this.state==="ARMED"&&next!=="ENTRY_LOCKED")this.autoArmActive=false;
+      this.log("transition",{from:this.state,to:next,reason});this.state=next;this.status=reason||next;this.emit(reason);
+      if(next==="OFF")this.maybeAutoArm().catch(error=>this.fail(error,"Auto-arm failed"));
+    }
     isActive(){return !["OFF","ARMED","COOL_OFF","ERROR","POSITION_MISMATCH"].includes(this.state);}
     configurationLocked(){return this.isActive()||!!this.session;}
     position(){const snap=this.gateway&&this.gateway.position&&this.gateway.position();return snap&&Object.prototype.hasOwnProperty.call(snap,"position")?snap.position:snap;}
@@ -52,12 +60,14 @@
       C.timeframes.forEach(tf=>this.acceptDetection(tf,this.detector.evaluateTf(tf,null,this.now()),false));
       const p=window.PUBLIC_MARKET_DATA_HUB&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice();if(p&&p.price)this.guide=p.price;
       await this.refreshPreviewSettings().catch(()=>null);
-      await this.recover();this.emit("initialized");return this;
+      await this.recover();this.emit("initialized");this.maybeAutoArm().catch(error=>this.fail(error,"Auto-arm failed"));return this;
     }
     destroy(){this.destroyed=true;if(this.unsubHub)this.unsubHub();const hub=window.PUBLIC_MARKET_DATA_HUB;if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,[]);window.removeEventListener("bt001:binance-order-update",this._orderListener);window.removeEventListener("v13:open-position-change",this._positionListener);window.removeEventListener("bt001:binance-private-status",this._privateStatusListener);if(this.cooloffTimer)clearTimeout(this.cooloffTimer);}
     updateConfig(patch){
       const locked=this.configurationLocked(),protectedKeys=["direction","source","entryType","minimumRank","mode","lot","target","tpDelta","tpDriver","stop","slDelta","slDriver","cooloffMinutes"],next={...patch};if(Object.prototype.hasOwnProperty.call(next,"minimumRank"))next.minimumRank=Math.round(Math.max(0,Math.min(100,n(next.minimumRank)??0)));if(locked)protectedKeys.forEach(key=>delete next[key]);
-      this.config={...this.config,...next};this.saveConfig();if(this.state==="ARMED"&&protectedKeys.some(key=>Object.prototype.hasOwnProperty.call(next,key)))this.rebase("configuration changed");this.emit("configuration");return this.config;
+      this.config={...this.config,...next};this.saveConfig();if(this.state==="ARMED"&&protectedKeys.some(key=>Object.prototype.hasOwnProperty.call(next,key)))this.rebase("configuration changed");
+      if(["autoEntryEnabled","autoTradingEnabled"].some(key=>Object.prototype.hasOwnProperty.call(next,key))){this.autoArmSuspended=false;if(next.autoTradingEnabled===true)this.autoDisabledReason=null;if(this.state==="OFF")this.maybeAutoArm().catch(error=>this.fail(error,"Auto-arm failed"));}
+      this.emit("configuration");return this.config;
     }
     rebase(reason){this.generation+=1;this.armedAt=this.now();this.baseline.clear();const latest=this.displayDetection(this.config.source);if(latest)this.baseline.add(latest.freshnessKey||latest.eventId);this.status=`ARMED · waiting for a new event (${reason})`;this.log("rebase",{reason,generation:this.generation});}
     sourceReady(){const hub=window.PUBLIC_MARKET_DATA_HUB,periods=root.detectorTools&&root.detectorTools.fixedPeriods?root.detectorTools.fixedPeriods():[C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast],snap=hub&&hub.getAuthoritativeMaSnapshot&&hub.getAuthoritativeMaSnapshot(this.config.source,{includeForming:true,periods,requiredRows:C.signal.minimumRows});return !!(snap&&snap.reliable);}
@@ -72,7 +82,71 @@
       if(!validation.ok){this.status=validation.errors.join("; ");this.emit("arm-refused");return validation;}
       if(this.state==="ERROR")this.transition("OFF","Previous error acknowledged");this.rearmAfterFlat=this.config.mode==="CONTINUOUS";this.transition("ARMED","ARMED · waiting for a new qualifying event");this.rebase("armed");return validation;
     }
-    disarm(){this.rearmAfterFlat=false;if(this.state==="ARMED"||this.state==="COOL_OFF"){if(this.cooloffTimer)clearTimeout(this.cooloffTimer);this.transition("OFF","Disarmed");}else if(this.isActive()){this.status="ACTIVE · future entries disabled; TP/SL retained";this.emit("disarmed-active");}return this.snapshot();}
+    autoConcurrentAutoCount(){return this.session&&this.session.autoEntered?1:0;}
+    autoTradingBlockedReason(){
+      // Kill switch: BOTH checks below (master enable, concurrency cap) are re-verified in
+      // considerEntry() immediately before an auto-armed event is allowed to reach executeEntry,
+      // in addition to being checked here at auto-arm time -- so a flip of either setting between
+      // "armed" and "an event actually firing" is still caught before an order is submitted.
+      if(!this.config.autoTradingEnabled)return this.autoDisabledReason||"Auto-trading is OFF";
+      if(!this.config.autoEntryEnabled)return "Auto-entry is OFF";
+      const limit=Math.max(1,Math.round(n(this.config.maxConcurrentAutoPositions)||1));
+      if(this.autoConcurrentAutoCount()>=limit)return `Max concurrent auto positions (${limit}) reached`;
+      return null;
+    }
+    async maybeAutoArm(){
+      // Drives auto-entry by automatically performing the exact same manual ARM step a user would
+      // click -- it never submits an order itself. Once ARMED this way, the pre-existing
+      // acceptDetection -> considerEntry -> executeEntry path (used identically by manual ARM) takes
+      // over unchanged, including its minimumRank gate. This is the ONLY place autoArmActive is set.
+      if(this.autoArmBusy||this.destroyed||this.autoArmSuspended||this.state!=="OFF"||this.session)return;
+      if(this.autoTradingBlockedReason())return;
+      this.autoArmBusy=true;
+      try{const result=await this.arm();if(result&&result.ok===true)this.autoArmActive=true;}
+      finally{this.autoArmBusy=false;}
+    }
+    estimateRealizedPnl(session,reason){
+      // Estimate only, for the daily auto-loss cap and decision log -- NOT used by any exit or
+      // SL/TP logic. Exact realized fees/slippage on the exit leg are not tracked by this engine,
+      // so TP/SL exits use the already-known protection price and other exits fall back to the
+      // last observed guide price.
+      const dir=upper(session&&session.direction),entry=n(session&&session.avgEntry),qty=n(session&&session.liveQty)||n(session&&session.filledQty);
+      if(!["LONG","SHORT"].includes(dir)||!(entry>0)||!(qty>0))return null;
+      const exit=reason==="TP"?n(session.tpPrice):reason==="SL"?n(session.slPrice):n(this.guide);
+      if(!(exit>0))return null;
+      const side=dir==="LONG"?1:-1,gross=(exit-entry)*qty*side,exitFeeRate=reason==="TP"?(this.rates.conservativeTp||this.rates.taker):this.rates.taker,fees=(n(session.entryCommission)||0)+exit*qty*exitFeeRate;
+      return gross-fees;
+    }
+    applyAutoLoss(lossUsd){
+      const today=new Date(this.now()).toISOString().slice(0,10);
+      if(this.autoLossState.day!==today)this.autoLossState={day:today,accumulatedUsd:0};
+      this.autoLossState.accumulatedUsd+=Math.max(0,n(lossUsd)||0);this.saveAutoLossState();
+      const cap=n(this.config.maxDailyAutoLossUsd);
+      if(cap>0&&this.autoLossState.accumulatedUsd>=cap&&this.config.autoTradingEnabled){
+        this.config.autoTradingEnabled=false;this.saveConfig();
+        this.autoDisabledReason=`Daily auto-loss cap of $${cap.toFixed(2)} reached (realized $${this.autoLossState.accumulatedUsd.toFixed(2)} today); auto-trading disabled -- re-enable manually`;
+        this.log("auto-trading-disabled",{reason:this.autoDisabledReason,accumulatedUsd:this.autoLossState.accumulatedUsd});
+        this.logAutoDecision("AUTO_TRADING_DISABLED",{detectorState:null,cascadeAgreement:null,positionState:{reason:this.autoDisabledReason,accumulatedUsd:this.autoLossState.accumulatedUsd,capUsd:cap}});
+        this.emit("auto-trading-disabled");
+      }
+    }
+    recordAutoLossIfNeeded(session,reason){
+      const pnl=this.estimateRealizedPnl(session,reason);if(pnl!=null&&pnl<0)this.applyAutoLoss(-pnl);
+      this.logAutoDecision("AUTO_POSITION_CLOSED",{detectorState:{reason},cascadeAgreement:session.cascadeAgreementAtEntry||null,positionState:{...session,estimatedRealizedPnlUsd:pnl}});
+    }
+    logAutoDecision(action,detail={}){
+      // Fire-and-forget decision logging for auto-entry review (PART 4). Never awaited by callers
+      // and never allowed to affect engine state -- a missing/misconfigured Supabase credential, or
+      // a network failure (buffered/retried inside services/supabase.service.js), must not change
+      // trading behaviour.
+      if(typeof window==="undefined"||!window.BT001Supabase||typeof window.BT001Supabase.log!=="function")return;
+      const row={created_at:new Date(this.now()).toISOString(),action,detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),position_state:clone(detail.positionState??null)};
+      try{window.BT001Supabase.log("scalp_auto_entry_log",row).catch(()=>{});}catch(_e){}
+    }
+    autoTradingSnapshot(){
+      return {enabled:this.config.autoTradingEnabled===true,autoEntryEnabled:this.config.autoEntryEnabled===true,blockedReason:this.autoTradingBlockedReason(),disabledReason:this.autoDisabledReason||null,maxConcurrentAutoPositions:n(this.config.maxConcurrentAutoPositions),activeAutoPositions:this.autoConcurrentAutoCount(),dailyLoss:{day:this.autoLossState.day,accumulatedUsd:this.autoLossState.accumulatedUsd,capUsd:n(this.config.maxDailyAutoLossUsd)}};
+    }
+    disarm(){this.rearmAfterFlat=false;if(this.state==="ARMED"||this.state==="COOL_OFF"){if(this.cooloffTimer)clearTimeout(this.cooloffTimer);this.autoArmSuspended=true;this.transition("OFF","Disarmed");}else if(this.isActive()){this.status="ACTIVE · future entries disabled; TP/SL retained";this.emit("disarmed-active");}return this.snapshot();}
     onMarket(update){if(update&&update.type==="price"&&n(update.price)>0){this.guide=n(update.price);const symbol=upper(update.symbol);if(symbol&&symbol!==upper(this.marketSymbol)){this.marketSymbol=symbol;this.rebaselineMarketDetections("symbol-change");this.refreshPreviewSettings().then(()=>this.emit("preview-settings")).catch(()=>null);}}if(update&&update.tf&&C.timeframes.includes(update.tf)){const result=this.detector.evaluateTf(update.tf,update,this.now());this.acceptDetection(update.tf,result);}this.emit("market");}
     onPrivateStatus(detail){
       const next=upper(detail&&detail.streamStatus),previous=this.lastPrivateStatus;this.lastPrivateStatus=next;
@@ -90,8 +164,25 @@
         await this.cancelOwned();this.session.slOrderId=null;this.session.tpOrderId=null;await this.ensureProtection(this.state==="ACTIVE");
       }finally{this.reconnectBusy=false;}
     }
+    recordCascade(source,event){
+      if(!event||!["LONG","SHORT"].includes(upper(event.direction)))return;
+      this.cascadeByTf.set(source,{timeframe:source,direction:upper(event.direction),eventType:event.eventType||null,at:n(event.publishedAt)||this.now(),candleTime:n(event.candleTime),rankValue:event.rankValue==null?null:n(event.rankValue),rank:event.rank||null});
+    }
+    cascadeState(){return [...this.cascadeByTf.values()].map(record=>({...record}));}
+    cascadeAgreement(direction){
+      const side=upper(direction),agreeing=[...this.cascadeByTf.values()].filter(record=>record.direction===side);
+      return {direction:side,count:agreeing.length,timeframes:agreeing.map(record=>record.timeframe),records:agreeing.map(record=>({...record}))};
+    }
     acceptDetection(source,result,notify=true){
       if(!result)return;const event=result.event||result.detection||{source,eventType:"NONE",direction:null,eventState:"NONE",qualified:false,projected:false,publishedAt:this.now(),status:result.status},emitted=result.emittedEvent||(result.event&&result.event.qualified&&!result.event.projected?result.event:null);this.latestBySource.set(source,{...event,source,status:result.status});if(emitted&&emitted.qualified&&!emitted.projected)this.lastQualifiedBySource.set(source,{...emitted,source,status:result.status});
+      // Cascade tracking is a booster/informational signal only (see cascadeState()/cascadeAgreement()):
+      // it is recorded for every watched timeframe here, never gated on this.config.source or this.state,
+      // so it can never block or delay an entry on a faster timeframe. Each qualifying cross/bounce simply
+      // replaces the prior record for that same timeframe -- which is also how expiry works: a record is
+      // only ever overwritten (invalidated) by a new qualifying event on that SAME timeframe (an opposite
+      // cross changes its direction; a same-direction cross/bounce just refreshes it), never by another
+      // timeframe and never by a timer/staleness check.
+      if(emitted&&emitted.qualified&&!emitted.projected)this.recordCascade(source,emitted);
       if(this.session&&result.oppositeCross&&result.oppositeCross.direction&&result.oppositeCross.direction!==this.session.direction&&source===this.session.source)this.requestExit("OPPOSITE_CROSS",result.oppositeCross).catch(error=>this.fail(error,"Opposite-cross exit failed"));
       if(source===this.config.source&&this.state==="ARMED"&&emitted)this.considerEntry(emitted);
       this.status=this.state==="ARMED"?(event&&event.direction&&!this.directionAllowed(event.direction)?`ARMED · ${event.direction} ${event.eventType||"event"} ignored by DIR ${this.config.direction}`:`ARMED · ${result.status}`):this.status;if(notify)this.emit("signal");
@@ -100,13 +191,27 @@
     typeAllowed(type){return this.config.entryType==="ANY"||this.config.entryType===upper(type);}
     considerEntry(event){
       const freshKey=event.freshnessKey||event.eventId;if(!event.qualified||event.projected||!this.directionAllowed(event.direction)||!this.typeAllowed(event.eventType)||this.baseline.has(freshKey)||this.seen.has(freshKey)||n(event.publishedAt)<this.armedAt)return false;
-      const threshold=n(this.config.minimumRank)||0,rank=event.rankValue==null?null:n(event.rankValue);if(threshold>0&&(rank==null||rank<threshold)){this.seen.add(freshKey);this.rankRejected.add(freshKey);this.log("rank-rejected",{freshnessKey:freshKey,rankValue:rank,minimumRank:threshold});this.status=`ARMED · event rank ${rank==null?"unavailable":rank} below ${threshold}`;return false;}
+      const threshold=n(this.config.minimumRank)||0,rank=event.rankValue==null?null:n(event.rankValue);if(threshold>0&&(rank==null||rank<threshold)){
+        this.seen.add(freshKey);this.rankRejected.add(freshKey);this.log("rank-rejected",{freshnessKey:freshKey,rankValue:rank,minimumRank:threshold});this.status=`ARMED · event rank ${rank==null?"unavailable":rank} below ${threshold}`;
+        if(this.autoArmActive)this.logAutoDecision("AUTO_RANK_REJECTED",{detectorState:event,cascadeAgreement:this.cascadeAgreement(event.direction),positionState:null});
+        return false;
+      }
+      if(this.autoArmActive){
+        const blocked=this.autoTradingBlockedReason();
+        if(blocked){this.seen.add(freshKey);this.log("auto-entry-blocked",{freshnessKey:freshKey,reason:blocked});this.logAutoDecision("AUTO_ENTRY_BLOCKED",{detectorState:event,cascadeAgreement:this.cascadeAgreement(event.direction),positionState:{blockedReason:blocked}});this.disarm();return false;}
+        this.seen.add(freshKey);const cascadeAgreement=this.cascadeAgreement(event.direction);
+        this.executeEntry(event)
+          .then(()=>this.logAutoDecision("AUTO_ENTRY_SUBMITTED",{detectorState:event,cascadeAgreement,positionState:this.session?clone(this.session):null}))
+          .catch(error=>{this.logAutoDecision("AUTO_ENTRY_FAILED",{detectorState:event,cascadeAgreement,positionState:{error:error&&error.message||String(error)}});this.fail(error,"Entry failed");});
+        return true;
+      }
       this.seen.add(freshKey);this.executeEntry(event).catch(error=>this.fail(error,"Entry failed"));return true;
     }
     orderParams(side,qty,extra={}){const params={symbol:this.gateway.symbol(),side,type:extra.type||"MARKET",quantity:String(qty),newClientOrderId:extra.clientId};if(this.filters&&this.filters.positionMode==="HEDGE")params.positionSide=extra.positionSide|| (side==="BUY"?"LONG":"SHORT");else if(extra.reduceOnly)params.reduceOnly="true";return {...params,...extra.params};}
     async executeEntry(event){
       if(this.executionLock||this.state!=="ARMED")return;this.executionLock=event.eventId;this.transition("ENTRY_LOCKED",`ENTRY · ${event.direction} ${event.eventType}`);const qty=calc.normalizeLot(this.config.lot,this.filters),generation=this.generation,entryId=clientId("E",event.eventId,generation);
-      this.fillIds.clear();this.session={symbol:this.gateway.symbol(),quoteAsset:quoteAsset(this.gateway.symbol()),direction:event.direction,source:event.source,eventId:event.eventId,eventType:event.eventType,generation,entryClientId:entryId,tpClientId:clientId("T",event.eventId,generation),slClientId:clientId("S",event.eventId,generation),exitClientId:clientId("X",event.eventId,generation),requestedQty:qty,filledQty:0,avgEntry:0,entryCommission:0,entryCommissionActual:false,entryCommissionFills:[],fundingCost:0,fundingStatus:"no-known-settlement",mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),createdAt:this.now()};this.persistSession();
+      const autoEntered=this.autoArmActive===true;this.autoArmActive=false;
+      this.fillIds.clear();this.session={symbol:this.gateway.symbol(),quoteAsset:quoteAsset(this.gateway.symbol()),direction:event.direction,source:event.source,eventId:event.eventId,eventType:event.eventType,generation,entryClientId:entryId,tpClientId:clientId("T",event.eventId,generation),slClientId:clientId("S",event.eventId,generation),exitClientId:clientId("X",event.eventId,generation),requestedQty:qty,filledQty:0,avgEntry:0,entryCommission:0,entryCommissionActual:false,entryCommissionFills:[],fundingCost:0,fundingStatus:"no-known-settlement",mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),createdAt:this.now(),autoEntered,cascadeAgreementAtEntry:this.cascadeAgreement(event.direction)};this.persistSession();
       this.transition("ENTRY_SUBMITTED","ENTRY · Market submitted");const side=event.direction==="LONG"?"BUY":"SELL";
       try{const response=await this.gateway.submitOrder({...this.orderParams(side,qty,{clientId:entryId}),newOrderRespType:"RESULT"});this.session.entryOrderId=response&&response.orderId||null;this.persistSession();}
       catch(error){if(error&&error.uncertain){this.status="ENTRY · outcome uncertain; reconciling by client order ID";this.emit("entry-uncertain");this.reconcileUncertainEntry(entryId,0).catch(next=>this.fail(next,"Entry reconciliation failed"));return;}else throw error;}
@@ -165,7 +270,7 @@
       await sleep(C.order.reconcileDelayMs);await this.gateway.refreshPosition().catch(()=>null);if(!this.position())await this.finishExit(reason);else{this.status=options.critical?"ERROR · protection failed and emergency close is not yet confirmed":`EXITING · ${reason}`;this.emit("exit-pending");}
     }
     async finishExit(reason){
-      if(!this.session)return;if(this.position()){this.status=`EXITING · ${reason}; remaining position detected`;this.emit("not-flat");return;}if(this.state!=="FLAT_RECONCILING")this.transition("FLAT_RECONCILING",`FLAT · cleaning SCALP orders`);await this.cancelOwned();const finished=this.session,continuous=finished.mode==="CONTINUOUS"&&this.rearmAfterFlat!==false;this.clearSession();this.executionLock=null;this.exitLock=null;
+      if(!this.session)return;if(this.position()){this.status=`EXITING · ${reason}; remaining position detected`;this.emit("not-flat");return;}if(this.state!=="FLAT_RECONCILING")this.transition("FLAT_RECONCILING",`FLAT · cleaning SCALP orders`);await this.cancelOwned();const finished=this.session,continuous=finished.mode==="CONTINUOUS"&&this.rearmAfterFlat!==false;if(finished.autoEntered)this.recordAutoLossIfNeeded(finished,reason);this.clearSession();this.executionLock=null;this.exitLock=null;
       if(continuous){this.transition("COOL_OFF",`COOL-OFF · ${this.config.cooloffMinutes}m`);const delay=Math.max(0,n(this.config.cooloffMinutes)||0)*60000;this.cooloffTimer=setTimeout(()=>{this.cooloffTimer=null;this.transition("ARMED","ARMED · cool-off complete");this.rebase("cool-off complete");},delay);}else this.transition("OFF",`OFF · ${reason}`);
     }
     async closeNow(){if(!this.session)return;return this.requestExit("CLOSE_NOW");}
@@ -180,7 +285,7 @@
       this.session={fundingCost:0,fundingStatus:"no-known-settlement",entryCommissionFills:[],quoteAsset:quoteAsset(saved.symbol),...saved,liveQty:n(position.qty),avgEntry:n(position.avg)||saved.avgEntry};this.fillIds=new Set(this.session.entryCommissionFills.map(fill=>String(fill.fillId)));this.filters=normalizedFilters(await this.gateway.filters(saved.symbol));this.persistSession();const hasSl=ownedIds.has(saved.slClientId),hasTp=ownedIds.has(saved.tpClientId);
       if(hasSl&&hasTp)this.transition("ACTIVE",`ACTIVE · ${saved.direction} · recovered`);else{this.transition("ACTIVE",`ACTIVE · ${saved.direction} · rebuilding protection`);await this.cancelOwned();this.session.slOrderId=null;this.session.tpOrderId=null;await this.ensureProtection(true);}
     }
-    getDiagnostics(){return {snapshot:this.snapshot(),transitions:this.diagnostics.slice(),baseline:[...this.baseline],seen:[...this.seen],rankRejected:[...this.rankRejected],feeAssumptions:{rates:{...this.rates},entry:"MARKET/taker",tp:"LIMIT/max(account maker,taker)",sl:"STOP_MARKET/taker trigger-fill estimate",fundingStatus:this.session&&this.session.fundingStatus||"no-known-settlement",commissionConversionStatus:this.session&&this.session.commissionConversionStatus||"estimated"},currentDetections:Object.fromEntries([...this.latestBySource].map(([source,value])=>[source,clone(value)])),lastQualified:Object.fromEntries([...this.lastQualifiedBySource].map(([source,value])=>[source,clone(value)])),detector:this.detector&&typeof this.detector.diagnostics==="function"?this.detector.diagnostics():null};}
+    getDiagnostics(){return {snapshot:this.snapshot(),transitions:this.diagnostics.slice(),baseline:[...this.baseline],seen:[...this.seen],rankRejected:[...this.rankRejected],cascade:this.cascadeState(),feeAssumptions:{rates:{...this.rates},entry:"MARKET/taker",tp:"LIMIT/max(account maker,taker)",sl:"STOP_MARKET/taker trigger-fill estimate",fundingStatus:this.session&&this.session.fundingStatus||"no-known-settlement",commissionConversionStatus:this.session&&this.session.commissionConversionStatus||"estimated"},currentDetections:Object.fromEntries([...this.latestBySource].map(([source,value])=>[source,clone(value)])),lastQualified:Object.fromEntries([...this.lastQualifiedBySource].map(([source,value])=>[source,clone(value)])),detector:this.detector&&typeof this.detector.diagnostics==="function"?this.detector.diagnostics():null};}
   }
   root.ScalpEngine=ScalpEngine;root.stateTools=Object.freeze({clientId,isOwned,orderClient,snapshotOrders,normalizedFilters,quoteAsset});
 })();

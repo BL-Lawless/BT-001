@@ -71,7 +71,52 @@ const run=(async()=>{
   assert.equal(activeResult.entryState,"TRIGGER ACTIVE");
   assert.equal(activeResult.readinessScore,100);
 
-  console.log("readiness score tests: PASS",{baseEntryState:baseResult.entryState,baseReadinessScore:baseResult.readinessScore,formingReadinessScore:formingResult.readinessScore});
+  // Shared fixture for the chase-distance tests below: identical gates, scores and
+  // forming/early/momentum bonus signals throughout; only current.originDistanceAtr varies.
+  const chaseFixtureBase={
+    fresh:true,profile:{early:"1m",trigger:"3m",primary:"5m",setups:["3m","5m"],structures:["15m","1h"],boundaries:["4h","1d"],eventWindow:7,chaseAtr:1.35,minNetRr:1.35},
+    directionalPermission:{permission:true,direction:"LONG",score:84,longScore:84,shortScore:31,reason:"LONG primary/structural permission",breakdown:{}},
+    setup:{valid:true,identity:"BTCUSDT|quick|LONG|chase-fixture",family:"Structural retest",tf:"5m",interacted:true,interactionTime:120,reactionConfirmed:true,invalidated:false,repeatedTests:1,nonEma:true},
+    setupComponents:{structuralLocation:90,regimeAlignment:86,eventLevelQuality:84,invalidationTargetGeometry:82,volatilitySuitability:85},
+    trigger:{microstructureShift:true,shiftTime:180,displacementQuality:88,wickHeavy:false,flow:{effective:true,absorption:false,ineffectiveHighVolume:false,directionalImbalance:.18,priceProgressAtr:.72,efficiency:1.1,evidence:["Effective directional flow"]},participation:{state:"STRONG",score:88,credibleAbsorption:false,persistence:.75},retestHeld:true,qualifiedFollowThrough:false,freshnessScore:92,evidence:[]},
+    // opposition stays effective throughout so the noEffectivePrimaryOpposition gate fails and
+    // the fixture never reaches TRIGGER ACTIVE (which would force readinessScore to a flat 100
+    // and hide the chase-distance effect entirely).
+    opposition:{effective:true,evidence:["5m opposing flow produced 0.40 ATR progress"],neutral:false},
+    volatility:{regime:"Expanding/controlled",controlledAcceptance:true,realizedRangePercentile:78},
+    geometry:{netRr:2.1,viable:true},
+    readinessSignals:{
+      formingTrigger:{available:true,progress:.6,imbalance:.5},
+      early:{available:true,progress:.5,closeShare:.7},
+      momentum:{available:true,recentImbalance:.3,priorImbalance:.05}
+    }
+  };
+  const buildChaseFacts=originDistanceAtr=>({...chaseFixtureBase,current:{price:101,originDistanceAtr,chased:originDistanceAtr>chaseFixtureBase.profile.chaseAtr,adverseEvidenceSafety:90}});
+  const evaluateChase=originDistanceAtr=>context.createSignalEngineB().evaluateFacts(buildChaseFacts(originDistanceAtr),{horizonId:"quick",symbol:"BTCUSDT",version:1,directionMode:"LONG"});
+
+  // (a) Same gate statuses, same setupScore/triggerScore, same forming/early/momentum bonus
+  // inputs -- only originDistanceAtr differs. The nearer setup must score higher or equal.
+  const nearResult=evaluateChase(.1),farResult=evaluateChase(1.2);
+  assert.notEqual(nearResult.entryState,"TRIGGER ACTIVE","fixture must not be maxed out, or the chase dampener has nothing to dampen");
+  assert.equal(nearResult.entryState,farResult.entryState);
+  assert.deepStrictEqual(nearResult.decision.gateStatuses,farResult.decision.gateStatuses);
+  assert.deepStrictEqual(nearResult.comparisonDiagnostics.hardGates,farResult.comparisonDiagnostics.hardGates);
+  assert.equal(nearResult.comparisonDiagnostics.setupScore,farResult.comparisonDiagnostics.setupScore);
+  assert.equal(nearResult.comparisonDiagnostics.triggerScore,farResult.comparisonDiagnostics.triggerScore);
+  assert(nearResult.readinessScore>=farResult.readinessScore,`expected nearer setup (originDistanceAtr=0.1) readinessScore ${nearResult.readinessScore} to be >= farther setup (originDistanceAtr=1.2) readinessScore ${farResult.readinessScore}`);
+  assert(nearResult.readinessScore>farResult.readinessScore,"expected the chase dampener to strictly separate the two readinessScores given the large distance gap");
+
+  // (b) Crossing the chaseWarning threshold (60% of chaseAtr = 0.81) flips the flag true, while
+  // entryState and every one of the 16 hard gates stay exactly as they were.
+  const belowWarningResult=evaluateChase(.5),aboveWarningResult=evaluateChase(1.0);
+  assert.equal(belowWarningResult.comparisonDiagnostics.chaseWarning,false,"0.5 ATR is below the 0.81 ATR chaseWarning threshold");
+  assert.equal(aboveWarningResult.comparisonDiagnostics.chaseWarning,true,"1.0 ATR is above the 0.81 ATR chaseWarning threshold");
+  assert.equal(belowWarningResult.entryState,aboveWarningResult.entryState);
+  assert.deepStrictEqual(belowWarningResult.decision.gateStatuses,aboveWarningResult.decision.gateStatuses);
+  assert.deepStrictEqual(belowWarningResult.comparisonDiagnostics.hardGates,aboveWarningResult.comparisonDiagnostics.hardGates);
+  assert.equal(belowWarningResult.decision.gateStatuses.notChased,"passed","both fixtures stay under chaseAtr, so the separate hard notChased gate must not fire");
+
+  console.log("readiness score tests: PASS",{baseEntryState:baseResult.entryState,baseReadinessScore:baseResult.readinessScore,formingReadinessScore:formingResult.readinessScore,nearChaseReadinessScore:nearResult.readinessScore,farChaseReadinessScore:farResult.readinessScore,belowWarning:belowWarningResult.comparisonDiagnostics.chaseWarning,aboveWarning:aboveWarningResult.comparisonDiagnostics.chaseWarning});
   return {passed:true};
 })();
 module.exports=run;if(require.main===module)run.catch(error=>{console.error(error);process.exitCode=1;});

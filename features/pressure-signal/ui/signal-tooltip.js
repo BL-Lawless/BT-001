@@ -64,6 +64,7 @@
         `Trigger level / zone: ${price(entry.triggerLevel)} / ${zone(entry.zone)}`,
         `Current price: ${price(entry.currentPrice)} | Relative to trigger: ${unavailable(entry.currentRelative)}`,
         `Chase distance: ${number(diagnostics.chaseDistanceAtr,2)} ATR`,
+        diagnostics.chaseWarning===true?`CHASE WARNING: ${number(diagnostics.chaseDistanceAtr,2)} / ${number(diagnostics.chaseAtr,2)} ATR from origin`:"Chase warning: NOT ACTIVE",
         `Invalidation: ${price(entry.invalidation)}`,
         `Target: ${price(entry.target)} (${unavailable(entry.targetTimeframe)}) | Estimated net RR: ${rewardRisk(diagnostics)}`,
         `Volatility/participation persistence: ${unavailable(diagnostics.volatilityRegime)} / ${unavailable(diagnostics.participationState)}`

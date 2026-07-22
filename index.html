@@ -138,6 +138,21 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 <label>EMA 3<input id="emaPeriod3" max="999" min="1" step="1" type="number"/></label>
 </div>
 </div>
+<div class="settings-card">
+<div class="settings-card-title">Supabase (SCALP auto-entry log)</div>
+<div class="settings-card-desc">Project URL and anon key used only to INSERT decision-log rows for SCALP auto-entry review. Stored locally in this browser after Save; never pre-populated; the field is cleared immediately after saving.</div>
+<div class="modal-row">
+<label for="scalpSupabaseUrl">Project URL</label>
+<input autocomplete="off" id="scalpSupabaseUrl" placeholder="https://xxxxxxxx.supabase.co" type="text"/>
+</div>
+<div class="modal-row">
+<label for="scalpSupabaseAnonKey">Anon key</label>
+<input autocomplete="off" id="scalpSupabaseAnonKey" placeholder="Paste anon key, then Save" type="password"/>
+</div>
+<div class="settings-card-desc" id="scalpSupabaseStatus">NOT CONFIGURED</div>
+<button class="secondary" id="scalpSupabaseSave" type="button">Save</button>
+<button class="secondary" id="scalpSupabaseClear" type="button">Clear</button>
+</div>
 </div>
 <div class="modal-actions">
 <button class="secondary" id="closeSettings">Close</button>
@@ -148,6 +163,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 
   <script src="services/rest.service.js" defer></script>
   <script src="services/websocket.service.js" defer></script>
+  <script src="services/supabase.service.js" defer></script>
   <script src="apis.js" defer></script>
   <script src="features/api/api-config.module.js" defer></script>
   <script src="features/api/binance-rest.module.js" defer></script>
@@ -192,6 +208,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/scalp/state-machine.js" defer></script>
   <script src="features/scalp/ui.js" defer></script>
   <script src="features/scalp/index.js" defer></script>
+  <script src="features/scalp/supabase-settings.module.js" defer></script>
   <script src="features/calculator/index.js" defer></script>
   <script src="features/grad-calculator/index.js" defer></script>
 

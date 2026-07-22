@@ -27,6 +27,8 @@
 .scalp-actions .danger{border-color:var(--red);color:#b91c1c;background:#fff}
 .scalp-error{min-height:0;margin-top:0}
 .scalp-error:empty{display:none}
+.scalp-auto-status{margin-top:0;color:var(--muted);font-size:10px;line-height:1.3;text-align:center;white-space:normal}
+.scalp-auto-status.is-warning{color:var(--red)}
 .scalp-detection-head,.scalp-detection-row{display:grid;grid-template-columns:minmax(24px,.55fr) minmax(30px,.65fr) minmax(42px,.9fr) minmax(56px,1.35fr) minmax(32px,.65fr) minmax(84px,2fr);align-items:center;gap:3px;width:100%;min-width:0;text-align:center;white-space:nowrap}
 .scalp-detection-head{padding:1px 3px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase}
 .scalp-detection-row{min-height:19px;padding:0 3px;border:1px solid transparent;border-radius:5px;color:var(--text);font-size:11px;font-variant-numeric:tabular-nums}
