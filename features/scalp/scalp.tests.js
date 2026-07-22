@@ -86,6 +86,23 @@ async function run(){
   const restartStorage=new MemoryStorage({[C.configKey]:JSON.stringify({...C.defaults,lot:"0.100"})}),restartEngine=new build.ScalpEngine({gateway:fakeGateway(),storage:restartStorage});assert.equal(restartEngine.state,"OFF");cases.restartDoesNotRestoreArmed=true;
   restartEngine.state="ARMED";restartEngine.onPrivateStatus({streamStatus:"disconnected"});assert.equal(restartEngine.state,"OFF");cases.reconnectDoesNotRetainIdleArm=true;
   const recoverySession={symbol:"BTCUSDT",direction:"LONG",source:"1m",eventId:"recover",generation:7,entryClientId:"SCALP-E-R",tpClientId:"SCALP-T-R",slClientId:"SCALP-S-R",exitClientId:"SCALP-X-R",liveQty:.1,avgEntry:100,entryCommission:.004,entryCommissionActual:true,target:1,stop:1,mode:"SINGLE"},recoveryStorage=new MemoryStorage({[C.sessionKey]:JSON.stringify(recoverySession)}),recoveryGateway=fakeGateway();recoveryGateway._setPosition({symbol:"BTCUSDT",side:"LONG",qty:.1,avg:100});const recoveredOrders={orders:[{symbol:"BTCUSDT",clientOrderId:"SCALP-T-R"}],algoOrders:[{symbol:"BTCUSDT",clientAlgoId:"SCALP-S-R"}]};recoveryGateway.orders=async()=>recoveredOrders;recoveryGateway.reconcile=async()=>({orders:recoveredOrders});const recoveryEngine=new build.ScalpEngine({gateway:recoveryGateway,storage:recoveryStorage});await recoveryEngine.recover();assert.equal(recoveryEngine.state,"ACTIVE");assert(recoveryEngine.status.includes("recovered"));cases.restartRecoversUnambiguousActive=true;
+  // Memory hygiene: seen/rankRejected are freshnessKey sets that never need eviction for
+  // correctness (candleTime makes every key unique forever), but a fresh arm cycle still has no
+  // legitimate reason to carry entries over from a previous one -- rebase() must clear both, the
+  // same place it already clears baseline, without changing what gets accepted/rejected.
+  context.PUBLIC_MARKET_DATA_HUB={getAuthoritativeMaSnapshot:()=>({reliable:true,rows:[],alignedByPeriod:{},valuesByPeriod:{}})};
+  const rebaseGateway=fakeGateway({filters:async()=>({tickSize:.1,stepSize:.001,minQty:.001,minNotional:5,leverage:10,positionMode:"ONE_WAY",filters:[{filterType:"LOT_SIZE",stepSize:"0.001",minQty:"0.001",maxQty:"1000"}]})}),rebaseEngine=new build.ScalpEngine({gateway:rebaseGateway,storage:new MemoryStorage()});
+  rebaseEngine.guide=100;rebaseEngine.config={...rebaseEngine.config,lot:"0.100",target:"1",stop:"1",direction:"ANY",source:"1m",entryType:"ANY",minimumRank:70};
+  const firstArm=await rebaseEngine.arm();assert.equal(firstArm.ok,true);
+  rebaseEngine.considerEntry({...event("LONG","CROSS","pre-disarm-1"),rankValue:10});
+  rebaseEngine.considerEntry({...event("LONG","CROSS","pre-disarm-2"),rankValue:10});
+  assert(rebaseEngine.seen.size>0&&rebaseEngine.rankRejected.size>0,"fixture must actually populate seen/rankRejected before disarm");
+  rebaseEngine.disarm();
+  assert(rebaseEngine.seen.size>0&&rebaseEngine.rankRejected.size>0,"disarm alone must not clear seen/rankRejected");
+  const secondArm=await rebaseEngine.arm();assert.equal(secondArm.ok,true);
+  assert.equal(rebaseEngine.seen.size,0,"a fresh arm cycle must not remember detections from a previous one");
+  assert.equal(rebaseEngine.rankRejected.size,0,"a fresh arm cycle must not remember rank-rejections from a previous one");
+  cases.rebaseClearsSeenAndRankRejectedFromPriorArmCycle=true;
   console.log("SCALP tests: PASS",cases);return cases;
 }
 module.exports=run;if(require.main===module)run().catch(error=>{console.error(error);process.exitCode=1;});

@@ -25,6 +25,24 @@
 
   function getRest(){return window.restService||null;}
 
+  // Stable per-browser identifier attached to every log row so activity from the same machine
+  // can be grouped later. Deliberately a clear/readable key -- unlike the credential slots above,
+  // there's nothing sensitive to obscure here.
+  const DEVICE_ID_KEY="bt001_device_id";
+  function generateDeviceId(){
+    if(typeof crypto!=="undefined"&&typeof crypto.randomUUID==="function")return crypto.randomUUID();
+    return `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+  function getDeviceId(){
+    try{
+      const existing=localStorage.getItem(DEVICE_ID_KEY);
+      if(existing)return existing;
+      const generated=generateDeviceId();
+      try{localStorage.setItem(DEVICE_ID_KEY,generated);}catch(_e){}
+      return generated;
+    }catch(_e){return null;}
+  }
+
   // In-memory retry queue: a transient network failure must not silently drop a decision-log row.
   // Rows never touch localStorage here -- if the tab closes before a retry succeeds, the row is
   // lost, which is an accepted tradeoff for a client-only prototype (see PART 4 write-up).
@@ -68,6 +86,6 @@
 
   window.BT001Supabase=Object.freeze({
     getUrl,getAnonKey,configured,saveUrlFromInput,saveKeyFromInput,clearUrl,clearKey,
-    log,flushPending,pendingCount
+    log,flushPending,pendingCount,getDeviceId
   });
 })();

@@ -69,7 +69,7 @@
       if(["autoEntryEnabled","autoTradingEnabled"].some(key=>Object.prototype.hasOwnProperty.call(next,key))){this.autoArmSuspended=false;if(next.autoTradingEnabled===true)this.autoDisabledReason=null;if(this.state==="OFF")this.maybeAutoArm().catch(error=>this.fail(error,"Auto-arm failed"));}
       this.emit("configuration");return this.config;
     }
-    rebase(reason){this.generation+=1;this.armedAt=this.now();this.baseline.clear();const latest=this.displayDetection(this.config.source);if(latest)this.baseline.add(latest.freshnessKey||latest.eventId);this.status=`ARMED · waiting for a new event (${reason})`;this.log("rebase",{reason,generation:this.generation});}
+    rebase(reason){this.generation+=1;this.armedAt=this.now();this.baseline.clear();this.seen.clear();this.rankRejected.clear();const latest=this.displayDetection(this.config.source);if(latest)this.baseline.add(latest.freshnessKey||latest.eventId);this.status=`ARMED · waiting for a new event (${reason})`;this.log("rebase",{reason,generation:this.generation});}
     sourceReady(){const hub=window.PUBLIC_MARKET_DATA_HUB,periods=root.detectorTools&&root.detectorTools.fixedPeriods?root.detectorTools.fixedPeriods():[C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast],snap=hub&&hub.getAuthoritativeMaSnapshot&&hub.getAuthoritativeMaSnapshot(this.config.source,{includeForming:true,periods,requiredRows:C.signal.minimumRows});return !!(snap&&snap.reliable);}
     async arm(){
       if(this.state!=="OFF"&&this.state!=="ERROR")return {ok:false,errors:[`Cannot arm from ${this.state}`]};
@@ -154,7 +154,8 @@
         requested_qty:n(session.requestedQty),filled_qty:n(session.filledQty)??n(session.liveQty),
         avg_entry_price:n(session.avgEntry),entry_commission:n(session.entryCommission),
         exit_reason:reason||null,exit_price:exitPrice,estimated_realized_pnl_usd:pnl,
-        raw_session:clone(session)
+        raw_session:clone(session),
+        device_id:typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null
       };
       try{window.BT001Supabase.log("scalp_trades",row).catch(()=>{});}catch(_e){}
     }
@@ -167,7 +168,8 @@
         created_at:new Date(this.now()).toISOString(),
         symbol:this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null,
         action,source_timeframe:detail.sourceTimeframe??null,auto_entered:detail.autoEntered==null?null:detail.autoEntered===true,
-        detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),position_state:clone(detail.positionState??null)
+        detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),position_state:clone(detail.positionState??null),
+        device_id:typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null
       };
       try{window.BT001Supabase.log("scalp_activity_log",row).catch(()=>{});}catch(_e){}
     }
