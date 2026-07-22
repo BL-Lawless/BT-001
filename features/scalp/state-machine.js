@@ -80,7 +80,8 @@
       if(position){this.setExternalPosition(position);this.emit("arm-blocked-position-race");return {ok:false,errors:[this.externalPositionText(position)]};}
       const validation=calc.validateArm({config:this.config,filters:settings,guide:this.guide,balance,authenticated:this.gateway.isAuthenticated(),streamHealthy,sourceReady:this.sourceReady(),filtersReady,position,ownedOrders:orders});
       if(!validation.ok){this.status=validation.errors.join("; ");this.emit("arm-refused");return validation;}
-      if(this.state==="ERROR")this.transition("OFF","Previous error acknowledged");this.rearmAfterFlat=this.config.mode==="CONTINUOUS";this.transition("ARMED","ARMED · waiting for a new qualifying event");this.rebase("armed");return validation;
+      if(this.state==="ERROR")this.transition("OFF","Previous error acknowledged");this.rearmAfterFlat=this.config.mode==="CONTINUOUS";this.transition("ARMED","ARMED · waiting for a new qualifying event");this.rebase("armed");
+      this.logActivity("ARMED",{sourceTimeframe:this.config.source});return validation;
     }
     autoConcurrentAutoCount(){return this.session&&this.session.autoEntered?1:0;}
     autoTradingBlockedReason(){
@@ -126,27 +127,54 @@
         this.config.autoTradingEnabled=false;this.saveConfig();
         this.autoDisabledReason=`Daily auto-loss cap of $${cap.toFixed(2)} reached (realized $${this.autoLossState.accumulatedUsd.toFixed(2)} today); auto-trading disabled -- re-enable manually`;
         this.log("auto-trading-disabled",{reason:this.autoDisabledReason,accumulatedUsd:this.autoLossState.accumulatedUsd});
-        this.logAutoDecision("AUTO_TRADING_DISABLED",{detectorState:null,cascadeAgreement:null,positionState:{reason:this.autoDisabledReason,accumulatedUsd:this.autoLossState.accumulatedUsd,capUsd:cap}});
+        this.logActivity("AUTO_TRADING_DISABLED",{positionState:{reason:this.autoDisabledReason,accumulatedUsd:this.autoLossState.accumulatedUsd,capUsd:cap}});
         this.emit("auto-trading-disabled");
       }
     }
-    recordAutoLossIfNeeded(session,reason){
-      const pnl=this.estimateRealizedPnl(session,reason);if(pnl!=null&&pnl<0)this.applyAutoLoss(-pnl);
-      this.logAutoDecision("AUTO_POSITION_CLOSED",{detectorState:{reason},cascadeAgreement:session.cascadeAgreementAtEntry||null,positionState:{...session,estimatedRealizedPnlUsd:pnl}});
+    recordPositionClosed(session,reason){
+      // Fires for EVERY closed position (manual or auto), unlike the loss-cap accounting below
+      // which stays scoped to auto-entered sessions only.
+      const pnl=this.estimateRealizedPnl(session,reason);
+      if(session.autoEntered&&pnl!=null&&pnl<0)this.applyAutoLoss(-pnl);
+      this.logActivity("POSITION_CLOSED",{sourceTimeframe:session.source,autoEntered:session.autoEntered===true,detectorState:{reason},cascadeAgreement:session.cascadeAgreementAtEntry||null,positionState:{...session,estimatedRealizedPnlUsd:pnl}});
+      this.recordTradeLedger(session,reason,pnl);
     }
-    logAutoDecision(action,detail={}){
-      // Fire-and-forget decision logging for auto-entry review (PART 4). Never awaited by callers
-      // and never allowed to affect engine state -- a missing/misconfigured Supabase credential, or
-      // a network failure (buffered/retried inside services/supabase.service.js), must not change
-      // trading behaviour.
+    recordTradeLedger(session,reason,pnl){
+      // PART 2: scalp_trades -- one row per completed trade SCALP itself placed (manual or auto),
+      // written from this same finishExit() path regardless of autoEntered. estimated_realized_pnl_usd
+      // reuses estimateRealizedPnl() and carries the exact same caveat as its use in the daily loss
+      // cap above: exact realized fees/slippage on the exit leg are not tracked by this engine, so
+      // this is an ESTIMATE, not an authoritative fill-derived P&L.
       if(typeof window==="undefined"||!window.BT001Supabase||typeof window.BT001Supabase.log!=="function")return;
-      const row={created_at:new Date(this.now()).toISOString(),action,detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),position_state:clone(detail.positionState??null)};
-      try{window.BT001Supabase.log("scalp_auto_entry_log",row).catch(()=>{});}catch(_e){}
+      const exitPrice=reason==="TP"?n(session.tpPrice):reason==="SL"?n(session.slPrice):n(this.guide);
+      const row={
+        created_at:new Date(n(session.createdAt)||this.now()).toISOString(),closed_at:new Date(this.now()).toISOString(),
+        symbol:session.symbol||this.marketSymbol||null,direction:session.direction||null,mode:session.mode||null,source_timeframe:session.source||null,event_type:session.eventType||null,
+        auto_entered:session.autoEntered===true,cascade_agreement_at_entry:clone(session.cascadeAgreementAtEntry||null),
+        requested_qty:n(session.requestedQty),filled_qty:n(session.filledQty)??n(session.liveQty),
+        avg_entry_price:n(session.avgEntry),entry_commission:n(session.entryCommission),
+        exit_reason:reason||null,exit_price:exitPrice,estimated_realized_pnl_usd:pnl,
+        raw_session:clone(session)
+      };
+      try{window.BT001Supabase.log("scalp_trades",row).catch(()=>{});}catch(_e){}
+    }
+    logActivity(action,detail={}){
+      // Fire-and-forget activity logging (PART 4). Never awaited by callers and never allowed to
+      // affect engine state -- a missing/misconfigured Supabase credential, or a network failure
+      // (buffered/retried inside services/supabase.service.js), must not change trading behaviour.
+      if(typeof window==="undefined"||!window.BT001Supabase||typeof window.BT001Supabase.log!=="function")return;
+      const row={
+        created_at:new Date(this.now()).toISOString(),
+        symbol:this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null,
+        action,source_timeframe:detail.sourceTimeframe??null,auto_entered:detail.autoEntered==null?null:detail.autoEntered===true,
+        detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),position_state:clone(detail.positionState??null)
+      };
+      try{window.BT001Supabase.log("scalp_activity_log",row).catch(()=>{});}catch(_e){}
     }
     autoTradingSnapshot(){
       return {enabled:this.config.autoTradingEnabled===true,autoEntryEnabled:this.config.autoEntryEnabled===true,blockedReason:this.autoTradingBlockedReason(),disabledReason:this.autoDisabledReason||null,maxConcurrentAutoPositions:n(this.config.maxConcurrentAutoPositions),activeAutoPositions:this.autoConcurrentAutoCount(),dailyLoss:{day:this.autoLossState.day,accumulatedUsd:this.autoLossState.accumulatedUsd,capUsd:n(this.config.maxDailyAutoLossUsd)}};
     }
-    disarm(){this.rearmAfterFlat=false;if(this.state==="ARMED"||this.state==="COOL_OFF"){if(this.cooloffTimer)clearTimeout(this.cooloffTimer);this.autoArmSuspended=true;this.transition("OFF","Disarmed");}else if(this.isActive()){this.status="ACTIVE · future entries disabled; TP/SL retained";this.emit("disarmed-active");}return this.snapshot();}
+    disarm(){this.rearmAfterFlat=false;if(this.state==="ARMED"||this.state==="COOL_OFF"){if(this.cooloffTimer)clearTimeout(this.cooloffTimer);this.autoArmSuspended=true;this.logActivity("DISARMED",{sourceTimeframe:this.config.source});this.transition("OFF","Disarmed");}else if(this.isActive()){this.status="ACTIVE · future entries disabled; TP/SL retained";this.emit("disarmed-active");}return this.snapshot();}
     onMarket(update){if(update&&update.type==="price"&&n(update.price)>0){this.guide=n(update.price);const symbol=upper(update.symbol);if(symbol&&symbol!==upper(this.marketSymbol)){this.marketSymbol=symbol;this.rebaselineMarketDetections("symbol-change");this.refreshPreviewSettings().then(()=>this.emit("preview-settings")).catch(()=>null);}}if(update&&update.tf&&C.timeframes.includes(update.tf)){const result=this.detector.evaluateTf(update.tf,update,this.now());this.acceptDetection(update.tf,result);}this.emit("market");}
     onPrivateStatus(detail){
       const next=upper(detail&&detail.streamStatus),previous=this.lastPrivateStatus;this.lastPrivateStatus=next;
@@ -182,7 +210,7 @@
       // only ever overwritten (invalidated) by a new qualifying event on that SAME timeframe (an opposite
       // cross changes its direction; a same-direction cross/bounce just refreshes it), never by another
       // timeframe and never by a timer/staleness check.
-      if(emitted&&emitted.qualified&&!emitted.projected)this.recordCascade(source,emitted);
+      if(emitted&&emitted.qualified&&!emitted.projected){this.recordCascade(source,emitted);this.logActivity("DETECTION_QUALIFIED",{sourceTimeframe:source,detectorState:emitted,cascadeAgreement:this.cascadeAgreement(emitted.direction)});}
       if(this.session&&result.oppositeCross&&result.oppositeCross.direction&&result.oppositeCross.direction!==this.session.direction&&source===this.session.source)this.requestExit("OPPOSITE_CROSS",result.oppositeCross).catch(error=>this.fail(error,"Opposite-cross exit failed"));
       if(source===this.config.source&&this.state==="ARMED"&&emitted)this.considerEntry(emitted);
       this.status=this.state==="ARMED"?(event&&event.direction&&!this.directionAllowed(event.direction)?`ARMED · ${event.direction} ${event.eventType||"event"} ignored by DIR ${this.config.direction}`:`ARMED · ${result.status}`):this.status;if(notify)this.emit("signal");
@@ -193,19 +221,22 @@
       const freshKey=event.freshnessKey||event.eventId;if(!event.qualified||event.projected||!this.directionAllowed(event.direction)||!this.typeAllowed(event.eventType)||this.baseline.has(freshKey)||this.seen.has(freshKey)||n(event.publishedAt)<this.armedAt)return false;
       const threshold=n(this.config.minimumRank)||0,rank=event.rankValue==null?null:n(event.rankValue);if(threshold>0&&(rank==null||rank<threshold)){
         this.seen.add(freshKey);this.rankRejected.add(freshKey);this.log("rank-rejected",{freshnessKey:freshKey,rankValue:rank,minimumRank:threshold});this.status=`ARMED · event rank ${rank==null?"unavailable":rank} below ${threshold}`;
-        if(this.autoArmActive)this.logAutoDecision("AUTO_RANK_REJECTED",{detectorState:event,cascadeAgreement:this.cascadeAgreement(event.direction),positionState:null});
+        // Always logged now (manual arm included) -- previously this only logged when auto-armed.
+        this.logActivity("RANK_REJECTED",{sourceTimeframe:event.source,autoEntered:this.autoArmActive===true,detectorState:event,cascadeAgreement:this.cascadeAgreement(event.direction)});
         return false;
       }
-      if(this.autoArmActive){
+      const autoEntered=this.autoArmActive===true,cascadeAgreement=this.cascadeAgreement(event.direction);
+      if(autoEntered){
         const blocked=this.autoTradingBlockedReason();
-        if(blocked){this.seen.add(freshKey);this.log("auto-entry-blocked",{freshnessKey:freshKey,reason:blocked});this.logAutoDecision("AUTO_ENTRY_BLOCKED",{detectorState:event,cascadeAgreement:this.cascadeAgreement(event.direction),positionState:{blockedReason:blocked}});this.disarm();return false;}
-        this.seen.add(freshKey);const cascadeAgreement=this.cascadeAgreement(event.direction);
-        this.executeEntry(event)
-          .then(()=>this.logAutoDecision("AUTO_ENTRY_SUBMITTED",{detectorState:event,cascadeAgreement,positionState:this.session?clone(this.session):null}))
-          .catch(error=>{this.logAutoDecision("AUTO_ENTRY_FAILED",{detectorState:event,cascadeAgreement,positionState:{error:error&&error.message||String(error)}});this.fail(error,"Entry failed");});
-        return true;
+        if(blocked){this.seen.add(freshKey);this.log("auto-entry-blocked",{freshnessKey:freshKey,reason:blocked});this.logActivity("AUTO_ENTRY_BLOCKED",{sourceTimeframe:event.source,autoEntered:true,detectorState:event,cascadeAgreement,positionState:{blockedReason:blocked}});this.disarm();return false;}
       }
-      this.seen.add(freshKey);this.executeEntry(event).catch(error=>this.fail(error,"Entry failed"));return true;
+      this.seen.add(freshKey);
+      // ENTRY_SUBMITTED / ENTRY_FAILED are now logged for BOTH manual and auto entries (auto_entered
+      // records which); executeEntry() itself is the exact same call either way -- no parallel path.
+      this.executeEntry(event)
+        .then(()=>this.logActivity("ENTRY_SUBMITTED",{sourceTimeframe:event.source,autoEntered,detectorState:event,cascadeAgreement,positionState:this.session?clone(this.session):null}))
+        .catch(error=>{this.logActivity("ENTRY_FAILED",{sourceTimeframe:event.source,autoEntered,detectorState:event,cascadeAgreement,positionState:{error:error&&error.message||String(error)}});this.fail(error,"Entry failed");});
+      return true;
     }
     orderParams(side,qty,extra={}){const params={symbol:this.gateway.symbol(),side,type:extra.type||"MARKET",quantity:String(qty),newClientOrderId:extra.clientId};if(this.filters&&this.filters.positionMode==="HEDGE")params.positionSide=extra.positionSide|| (side==="BUY"?"LONG":"SHORT");else if(extra.reduceOnly)params.reduceOnly="true";return {...params,...extra.params};}
     async executeEntry(event){
@@ -270,7 +301,7 @@
       await sleep(C.order.reconcileDelayMs);await this.gateway.refreshPosition().catch(()=>null);if(!this.position())await this.finishExit(reason);else{this.status=options.critical?"ERROR · protection failed and emergency close is not yet confirmed":`EXITING · ${reason}`;this.emit("exit-pending");}
     }
     async finishExit(reason){
-      if(!this.session)return;if(this.position()){this.status=`EXITING · ${reason}; remaining position detected`;this.emit("not-flat");return;}if(this.state!=="FLAT_RECONCILING")this.transition("FLAT_RECONCILING",`FLAT · cleaning SCALP orders`);await this.cancelOwned();const finished=this.session,continuous=finished.mode==="CONTINUOUS"&&this.rearmAfterFlat!==false;if(finished.autoEntered)this.recordAutoLossIfNeeded(finished,reason);this.clearSession();this.executionLock=null;this.exitLock=null;
+      if(!this.session)return;if(this.position()){this.status=`EXITING · ${reason}; remaining position detected`;this.emit("not-flat");return;}if(this.state!=="FLAT_RECONCILING")this.transition("FLAT_RECONCILING",`FLAT · cleaning SCALP orders`);await this.cancelOwned();const finished=this.session,continuous=finished.mode==="CONTINUOUS"&&this.rearmAfterFlat!==false;this.recordPositionClosed(finished,reason);this.clearSession();this.executionLock=null;this.exitLock=null;
       if(continuous){this.transition("COOL_OFF",`COOL-OFF · ${this.config.cooloffMinutes}m`);const delay=Math.max(0,n(this.config.cooloffMinutes)||0)*60000;this.cooloffTimer=setTimeout(()=>{this.cooloffTimer=null;this.transition("ARMED","ARMED · cool-off complete");this.rebase("cool-off complete");},delay);}else this.transition("OFF",`OFF · ${reason}`);
     }
     async closeNow(){if(!this.session)return;return this.requestExit("CLOSE_NOW");}
