@@ -67,6 +67,7 @@
         diagnostics.chaseWarning===true?`CHASE WARNING: ${number(diagnostics.chaseDistanceAtr,2)} / ${number(diagnostics.chaseAtr,2)} ATR from origin`:"Chase warning: NOT ACTIVE",
         `Invalidation: ${price(entry.invalidation)}`,
         `Target: ${price(entry.target)} (${unavailable(entry.targetTimeframe)}) | Estimated net RR: ${rewardRisk(diagnostics)}`,
+        `Fee/slippage allowance: ${number(diagnostics.feeSlippageAllowance,2)} (range ATR: ${number(diagnostics.rangeAtr,2)})`,
         `Volatility/participation persistence: ${unavailable(diagnostics.volatilityRegime)} / ${unavailable(diagnostics.participationState)}`
       ]),
       section("DECISION",[
