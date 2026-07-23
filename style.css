@@ -128,6 +128,8 @@ button:hover{filter:brightness(1.04)}
   line-height:1.35;
   flex:1;
 }
+.settings-card-desc.is-ok{color:var(--green);font-weight:700}
+.settings-card-desc.is-warning{color:var(--red);font-weight:700}
 
 @media(max-width:800px){
   .settings-grid{grid-template-columns:1fr}
@@ -2712,15 +2714,13 @@ button:hover{filter:brightness(1.04)}
 .wf-crosshair-h{
   position:absolute;
   pointer-events:none;
-  background-color:transparent;
+  background-color:rgba(112,122,138,.38);
 }
 .wf-crosshair-v{
   width:var(--wf-crosshair-hairline,1px);
-  background-image:repeating-linear-gradient(to bottom,rgba(112,122,138,.38) 0 4px,transparent 4px 8px);
 }
 .wf-crosshair-h{
   height:var(--wf-crosshair-hairline,1px);
-  background-image:repeating-linear-gradient(to right,rgba(112,122,138,.38) 0 4px,transparent 4px 8px);
 }
 .wf-crosshair-values{
   position:absolute;
@@ -2748,6 +2748,26 @@ button:hover{filter:brightness(1.04)}
   text-align:center;
 }
 .wf-crosshair-amount{color:#111;font-weight:400}
+.wf-crosshair-selected{
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+.wf-crosshair-axis-value{
+  position:absolute;
+  left:4px;
+  width:40px;
+  height:18px;
+  line-height:16px;
+  box-sizing:border-box;
+  transform:translateY(-50%);
+  text-align:center;
+  z-index:3;
+  background:rgba(255,255,255,.98);
+  border:1px solid #d9dce1;
+  border-radius:2px;
+  font:bold 12px Arial,Helvetica,sans-serif;
+  color:#111;
+}
 .wf-bars{
   position:absolute;
   display:grid;

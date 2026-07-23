@@ -84,8 +84,31 @@
 
   function pendingCount(){return pending.length;}
 
+  // Real end-to-end verification for the Settings panel: logActivity() is fire-and-forget and never
+  // surfaces a failure anywhere (by design, so a bad credential can't affect trading), which means a
+  // typo'd URL or a wrong/mismatched anon key silently drops every row with zero feedback. This writes
+  // one real, clearly-tagged row through the exact same insert path logActivity() uses -- a plain
+  // reachability/SELECT check would pass even when the anon key correctly has INSERT-only grants (see
+  // insertRow's return=minimal note above), so only an actual insert proves rows really land.
+  async function testConnection(){
+    if(!configured())return {ok:false,reason:"NOT_CONFIGURED",message:"Enter a project URL and anon key, then Save, before testing"};
+    if(!getRest())return {ok:false,reason:"REST_UNAVAILABLE",message:"services/rest.service.js (window.restService) is unavailable"};
+    const row={created_at:new Date().toISOString(),symbol:null,action:"CONNECTION_TEST",source_timeframe:null,auto_entered:null,detector_state:null,cascade_agreement:null,position_state:null,device_id:getDeviceId()};
+    try{
+      await insertRow("scalp_activity_log",row);
+      return {ok:true,reason:"OK",message:"Success: a test row was written to scalp_activity_log"};
+    }catch(error){
+      const status=error&&error.status,data=error&&error.data,detail=data&&typeof data==="object"?(data.message||data.msg||data.hint):null;
+      if(status===401)return {ok:false,reason:"UNAUTHORIZED",message:"Rejected (HTTP 401): the anon key is invalid, or was pasted for a different project"};
+      if(status===403)return {ok:false,reason:"FORBIDDEN",message:`Rejected (HTTP 403): reached the project, but its row-level security policy blocked the insert${detail?` — ${detail}`:" -- check the anon INSERT grant on scalp_activity_log"}`};
+      if(status===404)return {ok:false,reason:"NOT_FOUND",message:"Reached the project, but table \"scalp_activity_log\" was not found (HTTP 404) -- check the URL points at the right project"};
+      if(Number.isFinite(status))return {ok:false,reason:"HTTP_ERROR",message:`Rejected (HTTP ${status})${detail?`: ${detail}`:""}`};
+      return {ok:false,reason:"NETWORK_ERROR",message:`Could not reach ${getUrl()||"the configured URL"} -- check the Project URL for typos (${error&&error.message||String(error)})`};
+    }
+  }
+
   window.BT001Supabase=Object.freeze({
     getUrl,getAnonKey,configured,saveUrlFromInput,saveKeyFromInput,clearUrl,clearKey,
-    log,flushPending,pendingCount,getDeviceId
+    log,flushPending,pendingCount,getDeviceId,testConnection
   });
 })();

@@ -23432,9 +23432,18 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function wfCrosshairDifferenceText(selected,current){
     return wfCrosshairMoney(Number(selected)-Number(current),{signed:true});
   }
+  function wfMostRecentClosedTradeNet(trades){
+    const rows=arguments.length?trades:(lastModel && Array.isArray(lastModel.trades) ? lastModel.trades : []);
+    const last=Array.isArray(rows) && rows.length ? rows[rows.length-1] : null;
+    return last ? (num(last.net)||0) : 0;
+  }
+  // CLOSED P&L ONLY -- realizedPartials excludes floatingPL entirely (the live position's netLivePL,
+  // shown elsewhere in the WF sidebar, is realizedPartials+floatingPL and must never be used here).
+  // With no live position, falls back to the most recently closed trade's own net P/L instead of 0.
   function wfCurrentCampaignClosedPartialPL(liveTrade){
     const live=arguments.length?liveTrade:livePreviewTrade();
-    return live&&live.parentTradeId ? (num(live.realizedPartials)||0) : 0;
+    if(live&&live.parentTradeId)return num(live.realizedPartials)||0;
+    return wfMostRecentClosedTradeNet();
   }
   function hideWfCrosshair({clear=true}={}){
     const crosshair=wfSyncState.crosshair;
@@ -23460,13 +23469,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(arguments.length?liveTrade:livePreviewTrade());
     const vertical=overlay.querySelector(".wf-crosshair-v");
     const horizontal=overlay.querySelector(".wf-crosshair-h");
-    const selected=values && values.querySelector(".wf-crosshair-selected");
+    const selected=overlay.querySelector(".wf-crosshair-selected");
     const amount=values && values.querySelector(".wf-crosshair-amount");
     if(!vertical || !horizontal || !selected || !amount){ overlay.classList.add("hidden");values.classList.add("hidden");return; }
     const hairline=`${1/(window.devicePixelRatio || 1)}px`;
     overlay.style.setProperty("--wf-crosshair-hairline",hairline);
     vertical.style.left=`${localX}px`;vertical.style.top=`${scale.plotTop}px`;vertical.style.height=`${scale.plotHeight}px`;
     horizontal.style.left=`${scale.plotLeft}px`;horizontal.style.right=`${scale.plotRight}px`;horizontal.style.top=`${localY}px`;
+    selected.style.top=`${localY}px`;
     selected.textContent=wfCrosshairMoney(crosshair.selectedLevel,{signed:true});
     amount.textContent=wfCrosshairDifferenceText(crosshair.selectedLevel,currentCampaignClosedPartials);
     overlay.classList.remove("hidden");
@@ -23492,6 +23502,19 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const valueToY=value=>((domainMax-value)/(domainMax-domainMin))*height;
     const yToValue=y=>domainMax-(y/height)*(domainMax-domainMin);
     const probes=[-2000,-500,0,1250,3000];
+    // wfCurrentCampaignClosedPartialPL(null) now falls back to lastModel.trades when there is no
+    // live position, so these two cases pin lastModel to a controlled value for the duration of the
+    // check and restore it afterward -- this must never leak into (or read from) live app state.
+    const priorModel=lastModel;
+    let flatCampaignReset,flatCampaignUsesLastClosedTradeNet;
+    try{
+      lastModel=null;
+      flatCampaignReset=wfCurrentCampaignClosedPartialPL(null)===0;
+      lastModel={trades:[{net:-150},{net:220}]};
+      flatCampaignUsesLastClosedTradeNet=wfCurrentCampaignClosedPartialPL(null)===220;
+    }finally{
+      lastModel=priorModel;
+    }
     const cases={
       positiveDifference:wfCrosshairDifferenceText(2000,1500)==="+$500",
       negativeDifference:wfCrosshairDifferenceText(1000,1500)==="−$500",
@@ -23504,7 +23527,21 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       axisRoundTrip:probes.every(value=>Math.abs(yToValue(valueToY(value))-value)<1e-8),
       currentCampaignPartials:wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:900})===43,
       floatingExcluded:wfCrosshairDifferenceText(55,wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-800}))==="+$12",
-      flatCampaignReset:wfCurrentCampaignClosedPartialPL(null)===0
+      // CLOSED P&L ONLY, locked in explicitly: realizedPartials must drive the distance baseline no
+      // matter how large floatingPL is, in either direction. floatingPL must never leak in here --
+      // that combined figure is netLivePL = realizedPartials+floatingPL, shown elsewhere in the WF
+      // sidebar as NET P/L, and is a deliberately different, excluded quantity in this calculation.
+      floatingExclusionHoldsForHugePositiveFloating:wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9})===43,
+      floatingExclusionHoldsForHugeNegativeFloating:wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-1e9})===43,
+      // When no live position exists, the distance baseline must fall back to the most recently
+      // closed trade's own net P/L (last item in chronological order) instead of a flat 0 -- both at
+      // the pure-helper level and through the integrated wfCurrentCampaignClosedPartialPL(null) call
+      // sites actually used by renderWfCrosshair/_diagnostics.
+      flatCampaignReset,
+      flatCampaignUsesLastClosedTradeNet,
+      mostRecentClosedTradeNetUsesLastChronologicalTrade:wfMostRecentClosedTradeNet([{net:-150},{net:220}])===220,
+      mostRecentClosedTradeNetDefaultsToZeroWhenNoTrades:wfMostRecentClosedTradeNet([])===0,
+      flatUsesLastClosedTradeNetAsBaseline:wfCrosshairDifferenceText(500,wfMostRecentClosedTradeNet([{net:-150},{net:220}]))==="+$280"
     };
     return {passed:Object.values(cases).every(Boolean),cases};
   }
@@ -24283,7 +24320,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         `Distance from closed HWM: ${money(hwm.delta)}`
       ].join("\n");
       result.innerHTML = `<div class="wf-crosshair-values hidden" id="wfCrosshairValues" aria-hidden="true">
-          <div class="wf-crosshair-label wf-crosshair-selected"></div>
           <div class="wf-crosshair-label wf-crosshair-amount"></div>
         </div>
         <div class="wf-result-metric">
@@ -24412,6 +24448,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}</div>
         <div class="wf-crosshair hidden" id="wfCrosshair" aria-hidden="true">
           <div class="wf-crosshair-v"></div><div class="wf-crosshair-h"></div>
+          <div class="wf-crosshair-label wf-crosshair-selected wf-crosshair-axis-value"></div>
         </div>
       </div>`;
     fitWfDirectionLabels(chart);
@@ -24691,7 +24728,7 @@ window.BT001_WATERFALL_WINDOW = {
       visible,listenerBindings:crosshair.listenerBindings,active:crosshair.active,updates:crosshair.updates,
       selectedLevel:crosshair.selectedLevel,currentCampaignClosedPartials:closedPartials,
       amountToLevel:Number.isFinite(crosshair.selectedLevel) ? crosshair.selectedLevel-closedPartials : null,
-      selectedText:values && values.querySelector(".wf-crosshair-selected") && values.querySelector(".wf-crosshair-selected").textContent || "",
+      selectedText:overlay && overlay.querySelector(".wf-crosshair-selected") && overlay.querySelector(".wf-crosshair-selected").textContent || "",
       amountText:values && values.querySelector(".wf-crosshair-amount") && values.querySelector(".wf-crosshair-amount").textContent || "",
       labelRect:valuesRect ? {left:valuesRect.left,top:valuesRect.top,right:valuesRect.right,bottom:valuesRect.bottom,width:valuesRect.width,height:valuesRect.height} : null,
       scale:scale ? {domainMin:scale.domainMin,domainMax:scale.domainMax,plotTop:scale.plotTop,plotLeft:scale.plotLeft,plotRight:scale.plotRight,plotBottom:scale.plotBottom,plotHeight:scale.plotHeight} : null
