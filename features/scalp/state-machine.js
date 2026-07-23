@@ -14,6 +14,12 @@
   class ScalpEngine extends EventTarget{
     constructor(options={}){
       super();this.gateway=options.gateway||window.BT001_BINANCE_TRADING;this.detector=options.detector||new root.Detector();this.now=options.now||Date.now;this.storage=options.storage||localStorage;
+      // Default true preserves existing behaviour exactly (the single global Binance private
+      // stream feeds these events for the default/only account). Set false when this engine is
+      // bound to a secondary-account gateway (features/scalp/secondary-gateway.module.js), which
+      // instead feeds onOrder/onPosition/onPrivateStatus directly via its own independent stream --
+      // otherwise a second engine would also react to the FIRST account's order/position events.
+      this.useGlobalPrivateEvents=options.useGlobalPrivateEvents!==false;
       this.state="OFF";this.status="";this.generation=0;this.config=this.loadConfig();this.guide=null;this.rates=calc.feeRates();this.filters=null;this.marketSymbol=this.gateway&&this.gateway.symbol?this.gateway.symbol():null;this.latestBySource=new Map();this.lastQualifiedBySource=new Map();this.baseline=new Set();this.seen=new Set();this.rankRejected=new Set();this.armedAt=0;this.session=null;this.externalPosition=null;this.executionLock=null;this.exitLock=null;this.rearmAfterFlat=false;this.cooloffTimer=null;this.unsubHub=null;this.destroyed=false;this.diagnostics=[];this.fillIds=new Set();this.lastPrivateStatus=null;this.reconnectBusy=false;
       this.cascadeByTf=new Map();this.autoArmActive=false;this.autoArmBusy=false;this.autoArmSuspended=false;this.autoDisabledReason=null;this.autoLossState=this.loadAutoLossState();
     }
@@ -55,13 +61,14 @@
       if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,C.timeframes.map(tf=>({tf,count:C.signal.minimumRows})));
       if(hub&&hub.ensureTimeframeBuffer)await Promise.all(C.timeframes.map(tf=>hub.ensureTimeframeBuffer(tf,C.signal.minimumRows).catch(()=>null)));
       if(hub&&hub.subscribe)this.unsubHub=hub.subscribe(event=>this.onMarket(event));
-      window.addEventListener("bt001:binance-order-update",this._orderListener=event=>this.onOrder(event.detail));window.addEventListener("v13:open-position-change",this._positionListener=event=>this.onPosition(event.detail));window.addEventListener("bt001:binance-private-status",this._privateStatusListener=event=>this.onPrivateStatus(event.detail));this.lastPrivateStatus=upper(this.gateway.connection()&&this.gateway.connection().streamStatus);
+      if(this.useGlobalPrivateEvents){window.addEventListener("bt001:binance-order-update",this._orderListener=event=>this.onOrder(event.detail));window.addEventListener("v13:open-position-change",this._positionListener=event=>this.onPosition(event.detail));window.addEventListener("bt001:binance-private-status",this._privateStatusListener=event=>this.onPrivateStatus(event.detail));}
+      this.lastPrivateStatus=upper(this.gateway.connection()&&this.gateway.connection().streamStatus);
       C.timeframes.forEach(tf=>this.acceptDetection(tf,this.detector.evaluateTf(tf,null,this.now()),false));
       const p=window.PUBLIC_MARKET_DATA_HUB&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice();if(p&&p.price)this.guide=p.price;
       await this.refreshPreviewSettings().catch(()=>null);
       await this.recover();this.emit("initialized");this.maybeAutoArm().catch(error=>this.fail(error,"Auto-arm failed"));return this;
     }
-    destroy(){this.destroyed=true;if(this.unsubHub)this.unsubHub();const hub=window.PUBLIC_MARKET_DATA_HUB;if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,[]);window.removeEventListener("bt001:binance-order-update",this._orderListener);window.removeEventListener("v13:open-position-change",this._positionListener);window.removeEventListener("bt001:binance-private-status",this._privateStatusListener);if(this.cooloffTimer)clearTimeout(this.cooloffTimer);}
+    destroy(){this.destroyed=true;if(this.unsubHub)this.unsubHub();const hub=window.PUBLIC_MARKET_DATA_HUB;if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,[]);if(this.useGlobalPrivateEvents){window.removeEventListener("bt001:binance-order-update",this._orderListener);window.removeEventListener("v13:open-position-change",this._positionListener);window.removeEventListener("bt001:binance-private-status",this._privateStatusListener);}if(this.cooloffTimer)clearTimeout(this.cooloffTimer);}
     updateConfig(patch){
       const locked=this.configurationLocked(),protectedKeys=["direction","source","entryType","minimumRank","mode","lot","target","tpDelta","tpDriver","stop","slDelta","slDriver","cooloffMinutes"],next={...patch};if(Object.prototype.hasOwnProperty.call(next,"minimumRank"))next.minimumRank=Math.round(Math.max(0,Math.min(100,n(next.minimumRank)??0)));if(locked)protectedKeys.forEach(key=>delete next[key]);
       this.config={...this.config,...next};this.saveConfig();if(this.state==="ARMED"&&protectedKeys.some(key=>Object.prototype.hasOwnProperty.call(next,key)))this.rebase("configuration changed");

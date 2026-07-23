@@ -115,14 +115,53 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 </div>
 </div>
 </div>
+<div class="modal-backdrop hidden" id="apiModalScalper">
+<div class="modal">
+<h3>Binance API Keys — Scalper Account</h3>
+<div class="modal-row">
+<label for="apiKeyScalper">API Key</label>
+<input autocomplete="off" id="apiKeyScalper" type="password"/>
+</div>
+<div class="modal-row">
+<label for="apiSecretScalper">Secret</label>
+<input autocomplete="off" id="apiSecretScalper" type="password"/>
+</div>
+<label class="toggle">
+<input checked="" id="rememberKeysScalper" type="checkbox"/>
+      Remember keys locally in this browser
+    </label>
+<div class="modal-note">
+      Keys are stored only in this browser’s local storage when Remember is checked. This account is used ONLY by the SCALP module when its "Enable Scalper" toggle is on -- never by the main chart, manual trading, or calculator.
+    </div>
+<div class="modal-actions">
+<button class="secondary" id="closeApiKeysScalper">Close</button>
+<button id="saveApiKeysScalper">Save</button>
+</div>
+</div>
+</div>
 <div class="modal-backdrop hidden" id="settingsModal">
 <div class="modal">
 <h3>Settings</h3>
 <div class="settings-grid">
 <div class="settings-card">
 <div class="settings-card-title">Binance API</div>
-<div class="settings-card-desc">API key and secret used for trades, positions, and open-position display.</div>
+<div class="settings-card-desc">Two independent Binance accounts. Only the account with "Enable Scalper" on is used by the SCALP module -- the main chart, manual trading, and calculator always use the Main account below, regardless of that toggle.</div>
+<div class="api-account-block" data-account="main">
+<div class="api-account-row">
+<input class="api-account-nickname" id="apiNicknameMain" placeholder="Nickname" type="text" value="Main"/>
+<label class="toggle api-account-scalper-toggle"><input id="apiScalperToggleMain" type="checkbox"/> Enable Scalper</label>
+</div>
 <button class="secondary" id="openBinanceSettings">Open Binance API</button>
+<details class="api-account-status" id="apiStatusMain"><summary>Status</summary><div class="api-account-status-body" id="apiStatusBodyMain"></div></details>
+</div>
+<div class="api-account-block" data-account="scalper">
+<div class="api-account-row">
+<input class="api-account-nickname" id="apiNicknameScalper" placeholder="Nickname" type="text" value="Scalper"/>
+<label class="toggle api-account-scalper-toggle"><input id="apiScalperToggleScalper" type="checkbox"/> Enable Scalper</label>
+</div>
+<button class="secondary" id="openBinanceSettingsScalper">Open Binance API</button>
+<details class="api-account-status" id="apiStatusScalper"><summary>Status</summary><div class="api-account-status-body" id="apiStatusBodyScalper"></div></details>
+</div>
 </div>
 <div class="settings-card">
 <div class="settings-card-title">GPT API</div>
@@ -209,6 +248,8 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/scalp/signal-detector.js" defer></script>
   <script src="features/scalp/state-machine.js" defer></script>
   <script src="features/scalp/ui.js" defer></script>
+  <script src="features/scalp/account-settings.module.js" defer></script>
+  <script src="features/scalp/secondary-gateway.module.js" defer></script>
   <script src="features/scalp/index.js" defer></script>
   <script src="features/scalp/supabase-settings.module.js" defer></script>
   <script src="features/calculator/index.js" defer></script>

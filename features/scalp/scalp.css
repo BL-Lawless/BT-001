@@ -46,3 +46,11 @@
 .scalp-toolbar-button:active{filter:brightness(.96)}
 .scalp-toolbar-button:disabled{background:#eef0f2;border-color:#d9dce1;color:var(--muted);opacity:.55;cursor:not-allowed}
 @media(max-width:520px){.scalp-window{left:6px!important;top:48px!important;width:calc(100vw - 12px)!important;max-height:calc(100vh - 54px)}.scalp-row{grid-template-columns:84px minmax(0,1fr)}.scalp-detection-head,.scalp-detection-row{gap:2px}.scalp-trade-head,.scalp-trade-row{gap:3px}#scalpMaxConcurrentRow,#scalpMaxDailyAutoLossRow{grid-template-columns:minmax(0,2.15fr) minmax(92px,1.35fr);gap:6px}}
+.api-account-block{margin-top:8px;padding-top:8px;border-top:1px solid #d9dce1}
+.api-account-block:first-of-type{margin-top:6px;padding-top:0;border-top:none}
+.api-account-row{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.api-account-nickname{flex:1;min-width:0;height:26px;box-sizing:border-box;padding:2px 8px;border:1px solid #d9dce1;border-radius:5px;font-size:12px}
+.api-account-scalper-toggle{display:flex;align-items:center;gap:5px;font-size:11px;white-space:nowrap}
+.api-account-status{margin-top:4px;font-size:10px;color:var(--muted)}
+.api-account-status summary{cursor:pointer;font-size:11px;color:var(--text)}
+.api-account-status-body{margin-top:4px;line-height:1.4}
