@@ -3,6 +3,8 @@
   const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config;
   if(!C) throw new Error("SCALP config must load before calculations");
   const n=value=>{const out=Number(value);return Number.isFinite(out)?out:null;};
+  const upper=value=>String(value||"").toUpperCase();
+  function quoteAsset(symbol){const value=upper(symbol);return ["USDT","USDC","FDUSD","BUSD"].find(asset=>value.endsWith(asset))||null;}
   const decimalPlaces=value=>{const text=String(value||"");return text.includes(".")?text.split(".")[1].length:0;};
   function roundStep(value,step,mode="nearest"){
     const v=n(value),s=n(step);if(v==null||!(s>0))return v;
@@ -59,12 +61,13 @@
   function normalizeLot(qty,filters={}){return roundStep(n(qty)||0,n(filters.stepSize)||0.001,"down");}
   function formatNumeric(value,decimals){const number=n(value);return (number==null?0:number).toFixed(decimals);}
   function stepNumeric(value,step,direction,decimals){const current=n(value)||0,next=Math.max(0,roundStep(current+(direction<0?-step:step),step));return formatNumeric(next,decimals);}
-  function validateArm({config,filters={},guide,balance,authenticated,streamHealthy,sourceReady,filtersReady=true,position,ownedOrders}){
+  function validateArm({config,filters={},guide,balance,symbol,authenticated,streamHealthy,sourceReady,filtersReady=true,position,ownedOrders}){
     const errors=[],q=n(config&&config.lot),target=n(config&&config.target),stop=n(config&&config.stop),price=n(guide),normalized=normalizeLot(q,filters),minQty=n(filters.minQty)||0,maxQty=n(filters.maxQty),minNotional=n(filters.minNotional)||0;
     if(!authenticated)errors.push("Authenticated Binance connection required");if(!streamHealthy)errors.push("Healthy Binance user-data stream required");if(!sourceReady)errors.push("Selected signal source is not ready");if(!filtersReady)errors.push("Current symbol trading filters are unavailable");
     if(!(q>0))errors.push("Lot size must be greater than 0.000");if(Math.abs((q||0)-normalized)>1e-10)errors.push(`Lot must match step size ${filters.stepSize||0.001}`);if(q<minQty)errors.push(`Lot is below minimum quantity ${minQty}`);if(maxQty!=null&&q>maxQty)errors.push(`Lot exceeds maximum quantity ${maxQty}`);
     if(!(target>0))errors.push("Net target must be greater than zero");if(!(stop>0))errors.push("Net stop must be greater than zero");if(price&&q*price<minNotional)errors.push(`Notional is below minimum ${minNotional}`);
-    const balanceRow=Array.isArray(balance)?balance.find(row=>n(row&&row.availableBalance)!=null)||balance[0]:balance;
+    const requiredAsset=quoteAsset(symbol),balanceRows=Array.isArray(balance)?balance:(balance?[balance]:[]);
+    const balanceRow=requiredAsset?balanceRows.find(row=>upper(row&&row.asset)===requiredAsset):null;
     const available=n(balanceRow&&(balanceRow.availableBalance??balanceRow.available));
     const leverage=Math.max(1,n(filters.leverage)||1),requiredMargin=price&&q>0?(price*q)/leverage:null;
     if(available==null)errors.push("Available margin is unavailable");
@@ -76,5 +79,5 @@
     const valid=value=>value!==null&&value!==""&&Number.isFinite(Number(value)),integer=value=>valid(value)?Math.round(Number(value)).toLocaleString("en-US"):"-",money=value=>valid(value)?`$${Number(value).toFixed(2)}`:"-";
     return {guide:valid(model&&model.guide)?Number(model.guide).toLocaleString("en-US",{maximumFractionDigits:2}):"-",tpDelta:integer(model&&model.tpDelta),slDelta:integer(model&&model.slDelta),tpFees:money(model&&model.tpFee),slFees:money(model&&model.slFee)};
   }
-  root.calculations=Object.freeze({n,roundStep,feeRates,prices,estimate,linkedSide,linkedPreview,preview,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
+  root.calculations=Object.freeze({n,quoteAsset,roundStep,feeRates,prices,estimate,linkedSide,linkedPreview,preview,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
 })();

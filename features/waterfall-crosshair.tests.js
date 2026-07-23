@@ -21,8 +21,8 @@ assert.equal(difference(-20,10),"−$30","negative cursor arithmetic");
 assert.equal(difference(55,-10),"+$65","negative partial result");
 assert.equal(difference(55,43),difference(55,43),"floating changes are absent from the formula");
 assert(source.includes('const realizedPartials = links.reduce((sum,link) => sum + (num(link && link.netPnl) || 0),0)'),"reference must use active-chain realized partial links");
-assert(source.includes('wfCurrentCampaignClosedPartialPL')&&source.includes('num(live.realizedPartials)||0'),"crosshair must use current-campaign realized partials");
-assert(!/const current=Number\(lastModel && lastModel\.selectedNet\)/.test(source),"crosshair must not reference WF Net P/L/floating");
+assert(source.includes('wfCurrentCampaignClosedPartialPL')&&source.includes('num(live.realizedPartials)||0'),"crosshair must add current-position realized partials");
+assert(!/lastModel\s*&&\s*lastModel\.selectedNet/.test(source),"crosshair must not reference headline WF Net P/L/floating");
 assert(source.includes('if(wfSyncState.crosshair.active)renderWfCrosshair(live)'),"stationary crosshair must update on partial changes");
 assert(source.includes('id="wfCrosshairValues"')&&source.indexOf('id="wfCrosshairValues"')<source.indexOf('<div class="wf-result-metric">'),"values must live at the top of the result column");
 assert(!source.includes('wfCrosshairBlockPosition'),"intersection-side label placement must be removed");
@@ -54,40 +54,32 @@ assert(!/\.wf-crosshair-axis-value\{[^}]*text-align:right/.test(css),"boxed tag 
 // Value 2 (distance) must stay exactly where it was: inside wf-crosshair-values, unmoved.
 assert(source.includes('<div class="wf-crosshair-label wf-crosshair-amount"></div>'),"Value 2 markup must remain inside the floating wf-crosshair-values box, unmoved");
 
-// Value 2 must be CLOSED P&L only (realizedPartials, or the last closed trade's net when flat) and
-// must never be influenced by floatingPL -- that combined figure (netLivePL = realizedPartials +
-// floatingPL) is the WF sidebar's separate "NET P/L" and is explicitly excluded here.
-assert(source.includes("if(live&&live.parentTradeId)return num(live.realizedPartials)||0;"),"the live-position branch must still use realizedPartials only, unchanged");
+// Value 2 must be cumulative CLOSED P&L only: every selected closed trade plus the live position's
+// realizedPartials. It must never be influenced by floatingPL -- that combined live figure is the
+// WF sidebar's separate "NET P/L" and is explicitly excluded here.
+assert(source.includes("return closedSelectedNet+realizedPartials;"),"baseline must add cumulative selected closed net and current-position realized partials");
 assert(!source.slice(source.indexOf("function wfCurrentCampaignClosedPartialPL"),source.indexOf("function wfCurrentCampaignClosedPartialPL")+400).includes("floatingPL"),"wfCurrentCampaignClosedPartialPL's own body must never read floatingPL");
-assert(source.includes("const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(arguments.length?liveTrade:livePreviewTrade());"),"renderWfCrosshair must route through the (now self-sufficient) wfCurrentCampaignClosedPartialPL for its baseline");
+assert(source.includes("const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(lastModel&&lastModel.closedSelectedNet,arguments.length?liveTrade:livePreviewTrade());"),"renderWfCrosshair must use the model's cumulative closedSelectedNet and the current live position");
 assert(source.includes("closedPartials=wfCurrentCampaignClosedPartialPL();"),"_diagnostics must read the same self-sufficient baseline, with no separate fallback branch to keep in sync");
 
-// Fallback baseline fix, folded into wfCurrentCampaignClosedPartialPL itself: with no live position,
-// the distance value must use the most recently closed trade's own net P/L instead of a flat 0.
-assert(source.includes("return wfMostRecentClosedTradeNet();"),"wfCurrentCampaignClosedPartialPL must fall back to the most recently closed trade's net P/L, not a bare 0, when there is no live position");
-assert(source.includes("function wfMostRecentClosedTradeNet(trades){")&&source.includes("rows[rows.length-1]"),"fallback must read the last (most recent) trade from the cached WF model");
+// Both data modes must feed the same cumulative closed-trade total used by the sidebar.
+assert(source.includes('mode === "fast"')&&source.includes('(num(fastSummary && fastSummary.netTotal) || 0)')&&source.includes('trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0)'),"selected closed net must retain the sidebar's exact fast/detail computations");
+assert(!source.includes("wfMostRecentClosedTradeNet"),"the isolated last-trade fallback must be removed entirely");
 
-const mostRecentClosedTradeNet=trades=>{
-  const rows=Array.isArray(trades)?trades:[];
-  const last=rows.length?rows[rows.length-1]:null;
-  return last?(Number(last.net)||0):0;
-};
-assert.equal(mostRecentClosedTradeNet([{net:-150},{net:220}]),220,"fallback baseline uses the most recently closed trade's own net P/L, not an earlier one");
-assert.equal(mostRecentClosedTradeNet([]),0,"fallback baseline is 0 when there is no closed-trade history at all");
-assert.equal(difference(500,mostRecentClosedTradeNet([{net:-150},{net:220}])),"+$280","distance value uses the last-closed-trade baseline instead of 0 when flat");
-assert.equal(difference(500,mostRecentClosedTradeNet([])),"+$500","distance value still falls back to 0 baseline when there is truly no trade history");
+const closedTrades=[{net:-150},{net:220},{net:35},{net:-5}];
+const selectedNet=closedTrades.reduce((sum,trade)=>sum+(Number(trade.net)||0),0);
+assert.equal(selectedNet,100,"selected net is the full sum of several closed trades");
 
-// Executable mirror of the floating-exclusion lock-in: realizedPartials must drive the distance no
-// matter how large floatingPL is, in either direction.
-const currentCampaignClosedPartialPL=liveTrade=>liveTrade&&liveTrade.parentTradeId?(Number(liveTrade.realizedPartials)||0):mostRecentClosedTradeNet([]);
-assert.equal(currentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9}),43,"a huge positive floatingPL must never leak into the closed-P&L baseline");
-assert.equal(currentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-1e9}),43,"a huge negative floatingPL must never leak into the closed-P&L baseline");
-assert.equal(difference(55,currentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9})),"+$12","distance text is unaffected by floatingPL regardless of magnitude or sign");
+// Executable mirror: cumulative closed net plus realizedPartials, with floatingPL excluded.
+const currentCampaignClosedPartialPL=(closedNet,liveTrade)=>closedNet+(liveTrade&&liveTrade.parentTradeId?(Number(liveTrade.realizedPartials)||0):0);
+assert.equal(currentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9}),143,"a huge positive floatingPL must never leak into the cumulative closed-P&L baseline");
+assert.equal(currentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-1e9}),143,"a huge negative floatingPL must never leak into the cumulative closed-P&L baseline");
+assert.equal(difference(155,currentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9})),"+$12","distance text is unaffected by floatingPL regardless of magnitude or sign");
+assert.equal(currentCampaignClosedPartialPL(selectedNet,null),100,"flat baseline uses the sum of all closed trades, not the final trade");
+assert.equal(difference(500,currentCampaignClosedPartialPL(selectedNet,null)),"+$400","flat distance uses cumulative closed net");
 
-// Self-tests: both the floating-exclusion lock-in and the no-position fallback must be present as
-// named cases in runWfCrosshairSelfTests, restoring lastModel afterward so the check can't leak into
-// (or depend on) live app state.
-assert(source.includes("floatingExclusionHoldsForHugePositiveFloating:wfCurrentCampaignClosedPartialPL({parentTradeId:\"campaign-a\",realizedPartials:43,floatingPL:1e9})===43")&&source.includes("floatingExclusionHoldsForHugeNegativeFloating:wfCurrentCampaignClosedPartialPL({parentTradeId:\"campaign-a\",realizedPartials:43,floatingPL:-1e9})===43"),"self-tests must lock in floating-exclusion for both huge-positive and huge-negative floatingPL");
-assert(source.includes("flatCampaignUsesLastClosedTradeNet=wfCurrentCampaignClosedPartialPL(null)===220")&&source.includes("lastModel=priorModel;"),"self-tests must cover the no-position fallback via the integrated call and restore lastModel afterward");
+// Self-tests must lock in both corrected formulas.
+assert(source.includes("floatingExclusionHoldsForHugePositiveFloating:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:\"campaign-a\",realizedPartials:43,floatingPL:1e9})===143")&&source.includes("floatingExclusionHoldsForHugeNegativeFloating:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:\"campaign-a\",realizedPartials:43,floatingPL:-1e9})===143"),"self-tests must lock in floating-exclusion against cumulative closed net for both signs");
+assert(source.includes("flatCampaignUsesAllClosedTrades:wfCurrentCampaignClosedPartialPL(selectedNet,null)===100"),"self-tests must cover the flat cumulative baseline with several trades");
 
 console.log("waterfall crosshair tests: PASS");

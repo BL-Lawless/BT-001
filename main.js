@@ -23432,18 +23432,14 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function wfCrosshairDifferenceText(selected,current){
     return wfCrosshairMoney(Number(selected)-Number(current),{signed:true});
   }
-  function wfMostRecentClosedTradeNet(trades){
-    const rows=arguments.length?trades:(lastModel && Array.isArray(lastModel.trades) ? lastModel.trades : []);
-    const last=Array.isArray(rows) && rows.length ? rows[rows.length-1] : null;
-    return last ? (num(last.net)||0) : 0;
-  }
-  // CLOSED P&L ONLY -- realizedPartials excludes floatingPL entirely (the live position's netLivePL,
-  // shown elsewhere in the WF sidebar, is realizedPartials+floatingPL and must never be used here).
-  // With no live position, falls back to the most recently closed trade's own net P/L instead of 0.
-  function wfCurrentCampaignClosedPartialPL(liveTrade){
-    const live=arguments.length?liveTrade:livePreviewTrade();
-    if(live&&live.parentTradeId)return num(live.realizedPartials)||0;
-    return wfMostRecentClosedTradeNet();
+  // CLOSED P&L ONLY -- closedSelectedNet is the cumulative net of every closed trade in view and
+  // realizedPartials is the open position's already-closed portion. The live position's netLivePL,
+  // shown elsewhere in the WF sidebar, includes floatingPL and must never be used here.
+  function wfCurrentCampaignClosedPartialPL(selectedNet,liveTrade){
+    const closedSelectedNet=arguments.length ? (num(selectedNet)||0) : (num(lastModel&&lastModel.closedSelectedNet)||0);
+    const live=arguments.length>1?liveTrade:livePreviewTrade();
+    const realizedPartials=live&&live.parentTradeId ? (num(live.realizedPartials)||0) : 0;
+    return closedSelectedNet+realizedPartials;
   }
   function hideWfCrosshair({clear=true}={}){
     const crosshair=wfSyncState.crosshair;
@@ -23466,7 +23462,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const localX=clamp(Number(crosshair.clientX)-chartRect.left,scale.plotLeft,Math.max(scale.plotLeft,chart.clientWidth-scale.plotRight));
     const plotY=clamp(scale.valueToY(crosshair.selectedLevel),0,scale.plotHeight);
     const localY=scale.plotTop+plotY;
-    const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(arguments.length?liveTrade:livePreviewTrade());
+    const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(lastModel&&lastModel.closedSelectedNet,arguments.length?liveTrade:livePreviewTrade());
     const vertical=overlay.querySelector(".wf-crosshair-v");
     const horizontal=overlay.querySelector(".wf-crosshair-h");
     const selected=overlay.querySelector(".wf-crosshair-selected");
@@ -23502,19 +23498,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const valueToY=value=>((domainMax-value)/(domainMax-domainMin))*height;
     const yToValue=y=>domainMax-(y/height)*(domainMax-domainMin);
     const probes=[-2000,-500,0,1250,3000];
-    // wfCurrentCampaignClosedPartialPL(null) now falls back to lastModel.trades when there is no
-    // live position, so these two cases pin lastModel to a controlled value for the duration of the
-    // check and restore it afterward -- this must never leak into (or read from) live app state.
-    const priorModel=lastModel;
-    let flatCampaignReset,flatCampaignUsesLastClosedTradeNet;
-    try{
-      lastModel=null;
-      flatCampaignReset=wfCurrentCampaignClosedPartialPL(null)===0;
-      lastModel={trades:[{net:-150},{net:220}]};
-      flatCampaignUsesLastClosedTradeNet=wfCurrentCampaignClosedPartialPL(null)===220;
-    }finally{
-      lastModel=priorModel;
-    }
+    const closedTrades=[{net:-150},{net:220},{net:35},{net:-5}];
+    const selectedNet=closedTrades.reduce((sum,trade)=>sum+(num(trade.net)||0),0);
     const cases={
       positiveDifference:wfCrosshairDifferenceText(2000,1500)==="+$500",
       negativeDifference:wfCrosshairDifferenceText(1000,1500)==="−$500",
@@ -23525,23 +23510,16 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       equality:wfCrosshairDifferenceText(1500,1500)==="$0",
       signedFormatting:wfCrosshairMoney(1234,{signed:true})==="+$1,234" && wfCrosshairMoney(-1234,{signed:true})==="−$1,234" && wfCrosshairMoney(0,{signed:true})==="$0",
       axisRoundTrip:probes.every(value=>Math.abs(yToValue(valueToY(value))-value)<1e-8),
-      currentCampaignPartials:wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:900})===43,
-      floatingExcluded:wfCrosshairDifferenceText(55,wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-800}))==="+$12",
-      // CLOSED P&L ONLY, locked in explicitly: realizedPartials must drive the distance baseline no
-      // matter how large floatingPL is, in either direction. floatingPL must never leak in here --
-      // that combined figure is netLivePL = realizedPartials+floatingPL, shown elsewhere in the WF
-      // sidebar as NET P/L, and is a deliberately different, excluded quantity in this calculation.
-      floatingExclusionHoldsForHugePositiveFloating:wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9})===43,
-      floatingExclusionHoldsForHugeNegativeFloating:wfCurrentCampaignClosedPartialPL({parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-1e9})===43,
-      // When no live position exists, the distance baseline must fall back to the most recently
-      // closed trade's own net P/L (last item in chronological order) instead of a flat 0 -- both at
-      // the pure-helper level and through the integrated wfCurrentCampaignClosedPartialPL(null) call
-      // sites actually used by renderWfCrosshair/_diagnostics.
-      flatCampaignReset,
-      flatCampaignUsesLastClosedTradeNet,
-      mostRecentClosedTradeNetUsesLastChronologicalTrade:wfMostRecentClosedTradeNet([{net:-150},{net:220}])===220,
-      mostRecentClosedTradeNetDefaultsToZeroWhenNoTrades:wfMostRecentClosedTradeNet([])===0,
-      flatUsesLastClosedTradeNetAsBaseline:wfCrosshairDifferenceText(500,wfMostRecentClosedTradeNet([{net:-150},{net:220}]))==="+$280"
+      liveBaselineIncludesSelectedNetAndPartials:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:900})===143,
+      floatingExcluded:wfCrosshairDifferenceText(155,wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-800}))==="+$12",
+      // CLOSED P&L ONLY, locked in explicitly: cumulative closed-trade net plus realizedPartials must
+      // drive the distance baseline no matter how large floatingPL is, in either direction.
+      floatingExclusionHoldsForHugePositiveFloating:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9})===143,
+      floatingExclusionHoldsForHugeNegativeFloating:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-1e9})===143,
+      // With no live position, the full cumulative sum of all closed trades is the baseline.
+      flatCampaignUsesAllClosedTrades:wfCurrentCampaignClosedPartialPL(selectedNet,null)===100,
+      flatCampaignWithNoClosedTrades:wfCurrentCampaignClosedPartialPL(0,null)===0,
+      flatUsesCumulativeClosedNetAsBaseline:wfCrosshairDifferenceText(500,wfCurrentCampaignClosedPartialPL(selectedNet,null))==="+$400"
     };
     return {passed:Object.values(cases).every(Boolean),cases};
   }

@@ -2,7 +2,7 @@
   "use strict";
   const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config,calc=root.calculations;
   if(!C||!calc)throw new Error("SCALP dependencies must load before state machine");
-  const n=calc.n,upper=value=>String(value||"").toUpperCase(),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  const n=calc.n,quoteAsset=calc.quoteAsset,upper=value=>String(value||"").toUpperCase(),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
   function hash(text){let h=2166136261;for(const ch of String(text)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return (h>>>0).toString(36).toUpperCase();}
   function clientId(kind,eventId,generation){return `${C.order.namespace}-${kind}-${generation}-${hash(eventId)}`.slice(0,36);}
@@ -11,7 +11,6 @@
   function orderClient(row){return String(row&&(row.clientOrderId??row.origClientOrderId??row.clientAlgoId??row.c??row.ca)||"");}
   function isOwned(row){return orderClient(row).startsWith(C.order.namespace+"-");}
   function snapshotOrders(value){const snap=value&&value.orders&&Array.isArray(value.orders)?value:value&&value.snapshot||value||{};return [...(Array.isArray(snap.orders)?snap.orders:[]),...(Array.isArray(snap.algoOrders)?snap.algoOrders:[])];}
-  function quoteAsset(symbol){const value=upper(symbol);return ["USDT","USDC","FDUSD","BUSD"].find(asset=>value.endsWith(asset))||null;}
   class ScalpEngine extends EventTarget{
     constructor(options={}){
       super();this.gateway=options.gateway||window.BT001_BINANCE_TRADING;this.detector=options.detector||new root.Detector();this.now=options.now||Date.now;this.storage=options.storage||localStorage;
@@ -78,7 +77,7 @@
       const connection=this.gateway.connection(),streamHealthy=connection&&upper(connection.streamStatus)==="LIVE",symbol=this.gateway.symbol(),rawSettings=await this.gateway.filters(symbol),filtersReady=rawSettings&&rawSettings.status!=="error"&&n(rawSettings.tickSize)>0&&n(rawSettings.stepSize)>0,settings=normalizedFilters(rawSettings);this.filters=settings;
       let balance=null;try{balance=await this.gateway.balance();}catch(_e){}const orders=snapshotOrders(await this.gateway.orders({reason:"scalp-arm",maxAgeMs:0})).filter(isOwned),position=this.position();
       if(position){this.setExternalPosition(position);this.emit("arm-blocked-position-race");return {ok:false,errors:[this.externalPositionText(position)]};}
-      const validation=calc.validateArm({config:this.config,filters:settings,guide:this.guide,balance,authenticated:this.gateway.isAuthenticated(),streamHealthy,sourceReady:this.sourceReady(),filtersReady,position,ownedOrders:orders});
+      const validation=calc.validateArm({config:this.config,filters:settings,guide:this.guide,balance,symbol,authenticated:this.gateway.isAuthenticated(),streamHealthy,sourceReady:this.sourceReady(),filtersReady,position,ownedOrders:orders});
       if(!validation.ok){this.status=validation.errors.join("; ");this.emit("arm-refused");return validation;}
       if(this.state==="ERROR")this.transition("OFF","Previous error acknowledged");this.rearmAfterFlat=this.config.mode==="CONTINUOUS";this.transition("ARMED","ARMED · waiting for a new qualifying event");this.rebase("armed");
       this.logActivity("ARMED",{sourceTimeframe:this.config.source});return validation;
