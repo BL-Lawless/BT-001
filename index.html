@@ -145,22 +145,27 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 <div class="settings-grid">
 <div class="settings-card">
 <div class="settings-card-title">Binance API</div>
-<div class="settings-card-desc">Two independent Binance accounts. Only the account with "Enable Scalper" on is used by the SCALP module -- the main chart, manual trading, and calculator always use the Main account below, regardless of that toggle.</div>
 <div class="api-account-block" data-account="main">
 <div class="api-account-row">
 <input class="api-account-nickname" id="apiNicknameMain" placeholder="Nickname" type="text" value="Main"/>
+<div class="api-account-controls">
 <label class="toggle api-account-scalper-toggle"><input id="apiScalperToggleMain" type="checkbox"/> Enable Scalper</label>
+<button class="secondary api-account-read" id="readBinanceAccountMain" type="button">Read</button>
+<button class="secondary api-account-switch" id="switchBinanceAccountMain" type="button">Switch to</button>
 </div>
-<button class="secondary" id="openBinanceSettings">Open Binance API</button>
-<details class="api-account-status" id="apiStatusMain"><summary>Status</summary><div class="api-account-status-body" id="apiStatusBodyMain"></div></details>
+</div>
+<button class="secondary" id="openBinanceSettings" type="button">Open Binance API</button>
 </div>
 <div class="api-account-block" data-account="scalper">
 <div class="api-account-row">
 <input class="api-account-nickname" id="apiNicknameScalper" placeholder="Nickname" type="text" value="Scalper"/>
+<div class="api-account-controls">
 <label class="toggle api-account-scalper-toggle"><input id="apiScalperToggleScalper" type="checkbox"/> Enable Scalper</label>
+<button class="secondary api-account-read" id="readBinanceAccountScalper" type="button">Read</button>
+<button class="secondary api-account-switch" id="switchBinanceAccountScalper" type="button">Switch to</button>
 </div>
-<button class="secondary" id="openBinanceSettingsScalper">Open Binance API</button>
-<details class="api-account-status" id="apiStatusScalper"><summary>Status</summary><div class="api-account-status-body" id="apiStatusBodyScalper"></div></details>
+</div>
+<button class="secondary" id="openBinanceSettingsScalper" type="button">Open Binance API</button>
 </div>
 </div>
 <div class="settings-card">
@@ -200,6 +205,16 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 </div>
 </div>
 </div>
+<section aria-label="Binance account status" class="api-account-status-window hidden" id="apiAccountStatusWindow">
+<header class="api-account-status-head" id="apiAccountStatusHead">
+<div>
+<div class="api-account-status-title" id="apiAccountStatusTitle">Binance Account Status</div>
+<div class="api-account-status-subtitle" id="apiAccountStatusSubtitle"></div>
+</div>
+<button aria-label="Close Binance account status" class="secondary" id="closeApiAccountStatus" type="button">×</button>
+</header>
+<div class="api-account-status-content" id="apiAccountStatusContent"></div>
+</section>
 
 
   <script src="services/rest.service.js" defer></script>
@@ -212,6 +227,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/api/binance-user-stream.module.js" defer></script>
   <script src="features/api/shared-position-fact.module.js" defer></script>
   <script src="features/api/api-index.js" defer></script>
+  <script src="features/scalp/account-settings.module.js" defer></script>
   <script src="features/ma/ma-settings.module.js" defer></script>
   <script src="features/ma/ma-series.module.js" defer></script>
   <script src="features/ma/ma-overlay.module.js" defer></script>
@@ -248,7 +264,6 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/scalp/signal-detector.js" defer></script>
   <script src="features/scalp/state-machine.js" defer></script>
   <script src="features/scalp/ui.js" defer></script>
-  <script src="features/scalp/account-settings.module.js" defer></script>
   <script src="features/scalp/secondary-gateway.module.js" defer></script>
   <script src="features/scalp/index.js" defer></script>
   <script src="features/scalp/supabase-settings.module.js" defer></script>

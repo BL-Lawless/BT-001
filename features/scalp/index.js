@@ -7,12 +7,12 @@
     try{
       const build=window.__BT001_SCALP_BUILD__;if(!build||!build.ScalpEngine||!build.ScalpUI)return;
       try{if(window.BT001_SCALP&&window.BT001_SCALP.destroy)window.BT001_SCALP.destroy();}catch(_e){}
-      // Default (no second account configured, or "Main" is the scalp-bound slot) uses
-      // window.BT001_BINANCE_TRADING exactly as before this feature existed -- byte-for-byte the
-      // same gateway/engine options as the original single-account behaviour.
       const accountApi=window.BT001ScalpAccount,slot=accountApi&&accountApi.getSlot?accountApi.getSlot():"main";
-      const useSecondary=slot==="scalper"&&window.BT001ScalpSecondaryGateway&&accountApi&&accountApi.hasScalperKeys&&accountApi.hasScalperKeys();
-      const secondaryGateway=useSecondary?window.BT001ScalpSecondaryGateway.create():null;
+      const interfaceSlot=accountApi&&accountApi.getInterfaceSlot?accountApi.getInterfaceSlot():"main";
+      // Share the main gateway only when both features intentionally use the same account. When
+      // they differ, SCALP gets a private client/stream for its selected slot in either direction.
+      const useSecondary=slot!==interfaceSlot&&window.BT001ScalpSecondaryGateway&&accountApi;
+      const secondaryGateway=useSecondary?window.BT001ScalpSecondaryGateway.create(slot):null;
       const engineOptions=secondaryGateway?{gateway:secondaryGateway,useGlobalPrivateEvents:false}:{};
       const engine=new build.ScalpEngine(engineOptions),ui=new build.ScalpUI(engine);ui.install();
       if(secondaryGateway)secondaryGateway.attach(engine);
@@ -29,4 +29,9 @@
   // features/scalp/account-settings.module.js) -- destroys and recreates exactly as a page reload
   // would, just without requiring one.
   window.addEventListener("bt001:scalp-account-slot-changed",()=>{install();});
+  window.addEventListener("bt001:main-account-slot-changed",()=>{install();});
+  window.addEventListener("bt001:api-account-credentials-changed",event=>{
+    const accountApi=window.BT001ScalpAccount,slot=accountApi&&accountApi.getSlot?accountApi.getSlot():"main";
+    if(!event.detail||event.detail.slot===slot)install();
+  });
 })();

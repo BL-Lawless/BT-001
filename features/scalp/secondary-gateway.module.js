@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  // Independent Binance Futures client for the "Scalper" account slot -- only ever constructed
-  // when that slot is actually configured AND enabled (see features/scalp/index.js). It never
+  // Independent Binance Futures client for whichever account SCALP uses when that account is not
+  // also active in the main interface (see features/scalp/index.js). It never
   // touches window.BT001_BINANCE_TRADING's internals, main.js's apiKeyEl/apiSecretEl, or the
   // main account's private stream/position cache; it builds its own signed requests and its own
   // independent user-data-stream via the already-parameterized window.createBinanceUserDataStream
@@ -37,7 +37,7 @@
   async function signedRequest(credentials, path, method, params = {}) {
     const rest = window.restService;
     if (!rest) throw new Error("services/rest.service.js (window.restService) is unavailable");
-    if (!credentials || !credentials.key || !credentials.secret) throw new Error("Scalper account credentials are required");
+    if (!credentials || !credentials.key || !credentials.secret) throw new Error("Selected Binance account credentials are required");
     const off = await timeOffset();
     const query = new URLSearchParams({ ...params, recvWindow: "5000", timestamp: String(Date.now() + off) }).toString();
     const signature = await hmacHex(credentials.secret, query);
@@ -52,11 +52,12 @@
     return { symbol: upper(row.symbol), side: amt > 0 ? "LONG" : "SHORT", qty: Math.abs(amt), avg: n(row.entryPrice) || 0, leverage: n(row.leverage) || 1 };
   }
 
-  function create() {
+  function create(accountSlot = "scalper") {
+    const slot = accountSlot === "main" ? "main" : "scalper";
     let streamStatus = "OFFLINE", stream = null, attachedEngine = null;
 
     function credentials() {
-      return window.BT001ScalpAccount ? window.BT001ScalpAccount.getScalperCredentials() : { key: "", secret: "" };
+      return window.BT001ScalpAccount && window.BT001ScalpAccount.getCredentials ? window.BT001ScalpAccount.getCredentials(slot) : { key: "", secret: "" };
     }
     // Scalp keeps trading whatever symbol the app is already showing -- this account gets its own
     // credentials/balance/position/orders, not its own independently-selected symbol.
@@ -69,7 +70,7 @@
     }
     function setStreamStatus(status) {
       streamStatus = status;
-      if (window.BT001ScalpAccount) window.BT001ScalpAccount.reportConnectionStatus("scalper", status);
+      if (window.BT001ScalpAccount) window.BT001ScalpAccount.reportConnectionStatus(slot, status);
     }
 
     async function positionRows() {

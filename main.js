@@ -669,8 +669,7 @@ async function fetchSelectedSymbolTradingSettings(symbolOverride,options = {}){
       let positionMode = null;
       let leverageBracket = null;
       if(typeof hasKeys === "function" && hasKeys()){
-        const key = apiKeyEl.value.trim();
-        const sec = apiSecretEl.value.trim();
+        const {key,secret:sec} = activeApiCredentials();
         const off = typeof timeOffset === "function" ? await timeOffset() : 0;
         const marketCfg = typeof cfg === "function" ? cfg() : null;
         const positionRiskUrl = marketCfg && marketCfg.positionRisk ? marketCfg.positionRisk : "https://fapi.binance.com/fapi/v2/positionRisk";
@@ -1186,8 +1185,7 @@ async function getAccountBalance(key,sec,off){
 let accountBalanceLoading = false;
 async function refreshAccountBalance(opt={}){
   const silent = !!opt.silent;
-  const key = apiKeyEl.value.trim();
-  const sec = apiSecretEl.value.trim();
+  const {key,secret:sec} = activeApiCredentials();
 
   saveKeysLocal();
   if(!key || !sec){
@@ -1312,8 +1310,7 @@ function schedulePositionVerificationRetry(attempt=0){
 async function refreshOpenPosition(opt={}){
   const silent = !!opt.silent;
   const reconstructOnlyIfChanged = opt.reconstructOnlyIfChanged !== false;
-  const key = apiKeyEl.value.trim();
-  const sec = apiSecretEl.value.trim();
+  const {key,secret:sec} = activeApiCredentials();
 
   saveKeysLocal();
   if(!key || !sec){
@@ -1901,8 +1898,7 @@ function buildClosedTradeFastReport(rec,win,symbol,contextLimited){
 
 async function loadClosedTradesFastForPeriod(period,opt={}){
   const silent = !!opt.silent;
-  const key = apiKeyEl.value.trim();
-  const sec = apiSecretEl.value.trim();
+  const {key,secret:sec} = activeApiCredentials();
 
   saveKeysLocal();
   if(!key || !sec){
@@ -1968,8 +1964,7 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
 
 async function loadClosedTradesForPeriod(period,opt={}){
   const silent = !!opt.silent;
-  const key = apiKeyEl.value.trim();
-  const sec = apiSecretEl.value.trim();
+  const {key,secret:sec} = activeApiCredentials();
 
   saveKeysLocal();
   if(!key || !sec){
@@ -2103,7 +2098,8 @@ function updateTabTitle(){
   const price = candles.length ? candles[candles.length-1].close : lastMarkPrice;
   const flt = openBoxesFloating(price);
   const lot = (openPositionBoxes || []).reduce((total,box) => total + Math.abs(Number(box && box.qty) || 0),0);
-  document.title = titlePrice(price) + " | " + lot.toFixed(3) + " | " + titlePL(flt, !!(openPositionBoxes && openPositionBoxes.length));
+  const accountPrefix = window.BT001ScalpAccount && window.BT001ScalpAccount.getInterfaceSlot && window.BT001ScalpAccount.getInterfaceSlot()==="scalper" ? "S " : "M ";
+  document.title = accountPrefix + titlePrice(price) + " | " + lot.toFixed(3) + " | " + titlePL(flt, !!(openPositionBoxes && openPositionBoxes.length));
 }
 
 function startTitleUpdater(){
@@ -2161,8 +2157,19 @@ function gross(sign,en,ex,q){
    SECTION 5 — API KEY MODAL / LOCAL STORAGE
 ========================================================= */
 
+function activeApiCredentials(){
+  const accountApi=window.BT001ScalpAccount;
+  if(accountApi&&typeof accountApi.getInterfaceCredentials==="function"){
+    const credentials=accountApi.getInterfaceCredentials()||{};
+    return {key:String(credentials.key||"").trim(),secret:String(credentials.secret||"").trim()};
+  }
+  return {key:apiKeyEl.value.trim(),secret:apiSecretEl.value.trim()};
+}
+window.BT001_ACTIVE_BINANCE_CREDENTIALS=activeApiCredentials;
+
 function hasKeys(){
-  return !!(apiKeyEl.value.trim() && apiSecretEl.value.trim());
+  const {key,secret}=activeApiCredentials();
+  return !!(key&&secret);
 }
 
 function gptKeyReady(){
@@ -4942,7 +4949,7 @@ async function timeOffset(){
 
 async function signedBinanceRequest(url,method="GET",params={},options={}){
   if(!hasKeys()) throw new Error("Binance API keys are required.");
-  const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim();
+  const {key,secret}=activeApiCredentials();
   const off=options.off!=null?Number(options.off):await timeOffset();
   const query=new URLSearchParams({...params,recvWindow:String(options.recvWindow||5000),timestamp:String(Date.now()+off)}).toString();
   const signature=await hmac(secret,query);
@@ -14058,8 +14065,7 @@ startTradeAuto();
     if(positionRefreshBusy14 || !hasKeys()) return;
     positionRefreshBusy14 = true;
     try{
-      const key = apiKeyEl.value.trim();
-      const sec = apiSecretEl.value.trim();
+      const {key,secret:sec} = activeApiCredentials();
       const off = await timeOffset();
       const risk = await getPositions(key,sec,off);
       lastPositionSuccess14 = Date.now();
@@ -16013,7 +16019,7 @@ startTradeAuto();
     if(!force && cached.status==="ok" && cached.sourcesChecked && (streamCovers || (cached.verifiedAt && Date.now()-cached.verifiedAt<=maxAgeMs))) return cached;
     if(openOrdersRefreshPromise21){ await openOrdersRefreshPromise21; return authoritativeOrderSnapshot21(); }
     if(typeof hasKeys !== "function" || !hasKeys()) return cached;
-    const key=apiKeyEl.value.trim(),sec=apiSecretEl.value.trim();
+    const {key,secret:sec}=activeApiCredentials();
     if(!key || !sec) return cached;
     const off=opt.off != null ? opt.off : (typeof timeOffset === "function" ? await timeOffset() : 0);
     const previous=binanceStateSig21(lastSig21 || "");
@@ -16181,7 +16187,7 @@ startTradeAuto();
     }
     privateUserStream21=window.createBinanceUserDataStream({
       api:window.API,
-      getApiKey:() => apiKeyEl.value.trim(),
+      getApiKey:() => activeApiCredentials().key,
       getSymbol:currentSymbol21,
       getRestBase:selectedRestBase21,
       getWsBase:selectedPrivateWsBase21,
@@ -16274,7 +16280,7 @@ startTradeAuto();
     filters:async(symbol=currentSymbol21())=>window.BT001SymbolTradingSettings.get(symbol),
     cachedFilters:(symbol=currentSymbol21())=>window.BT001SymbolTradingSettings.getCached(symbol),
     orders:async(options={})=>requestAuthoritativeOrders21({reason:options.reason||"scalp-reconcile",maxAgeMs:options.maxAgeMs==null?0:options.maxAgeMs}),
-    balance:async()=>getAccountBalance(apiKeyEl.value.trim(),apiSecretEl.value.trim(),await timeOffset()),
+    balance:async()=>{const {key,secret}=activeApiCredentials();return getAccountBalance(key,secret,await timeOffset());},
     commissionRate:async(symbol=currentSymbol21())=>signedBinanceRequest(BINANCE_COMMISSION_RATE_URL,"GET",{symbol}),
     refreshPosition:async()=>refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true,allowRestAdvance:true,source:"scalp-reconcile"}),
     reconcile:async()=>{const position=await refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true,allowRestAdvance:true,source:"scalp-reconcile"});const orders=await requestAuthoritativeOrders21({reason:"scalp-reconcile",maxAgeMs:0});return{position,orders,sharedPosition:SHARED_POSITION_OWNER.snapshot()};},
@@ -17482,8 +17488,7 @@ startTradeAuto();
     apiCapabilityState = {...apiCapabilityState,status:"loading",symbol};
     renderApiCapabilityCard();
     const request = (async() => {
-      const key = apiKeyEl.value.trim();
-      const sec = apiSecretEl.value.trim();
+      const {key,secret:sec} = activeApiCredentials();
       const off = await timeOffset().catch(() => 0);
       const [spotAccount,futuresAccount,exchangeInfo,symbolSettings] = await Promise.all([
         signedGetVerbose(BINANCE_SPOT_ACCOUNT_URL,{},key,sec,off),
@@ -17813,8 +17818,7 @@ startTradeAuto();
     if(!win) return Promise.resolve();
     if(openFundingCacheCovers25(win)) return Promise.resolve();
     const now = Date.now();
-    const key = apiKeyEl.value.trim();
-    const sec = apiSecretEl.value.trim();
+    const {key,secret:sec} = activeApiCredentials();
     const recentSameSymbol =
       openFundingFeeCache.symbol === win.symbol &&
       openFundingFeeCache.start <= win.start &&
@@ -17909,8 +17913,7 @@ startTradeAuto();
     if(!win) return Promise.resolve();
     if(openCommissionCacheCovers25(win)) return Promise.resolve();
     const now = Date.now();
-    const key = apiKeyEl.value.trim();
-    const sec = apiSecretEl.value.trim();
+    const {key,secret:sec} = activeApiCredentials();
     if(
       openCommissionFeeCache.inFlight &&
       openCommissionFeeCache.symbol === win.symbol &&

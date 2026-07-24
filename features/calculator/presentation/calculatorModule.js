@@ -2338,8 +2338,7 @@
     if(typeof hasKeys !== "function" || !hasKeys()) return null;
     const sharedOwner=window.BT001_SHARED_POSITION;
     const expected=sharedOwner&&typeof sharedOwner.captureExpectation==="function"?sharedOwner.captureExpectation():null;
-    const key = apiKeyEl.value.trim();
-    const sec = apiSecretEl.value.trim();
+    const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
     const off = typeof timeOffset === "function" ? await timeOffset() : 0;
     const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
     if(sharedOwner&&typeof sharedOwner.ingestRestRisk==="function"){
@@ -4291,8 +4290,7 @@
       algoFetchError:null
     };
     if(typeof hasKeys === "function" && hasKeys() && typeof signedGet === "function"){
-      const key = apiKeyEl.value.trim();
-      const sec = apiSecretEl.value.trim();
+      const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
       const off = typeof timeOffset === "function" ? await timeOffset() : 0;
       try{
         snapshot.normalOrders = unwrapOrders(await signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off));
@@ -5664,8 +5662,7 @@
   }
   async function signedBinanceWrite(url,method,params){
     if(typeof hasKeys !== "function" || !hasKeys()) throw new Error("API keys are required.");
-    const key = apiKeyEl.value.trim();
-    const sec = apiSecretEl.value.trim();
+    const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
     const off = typeof timeOffset === "function" ? await timeOffset() : 0;
     const q = new URLSearchParams({
       ...params,

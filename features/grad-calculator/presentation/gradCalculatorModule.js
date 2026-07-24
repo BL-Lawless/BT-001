@@ -671,7 +671,7 @@
   }
   async function openOrdersSnapshot(){
     if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
-    const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
+    const {key,secret}=window.BT001_ACTIVE_BINANCE_CREDENTIALS(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
     const normal=await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     return liveOrdersSnapshotBySymbol({normal:Array.isArray(normal)?normal:[],algo:Array.isArray(algo)?algo:[]});
@@ -861,7 +861,7 @@
 
   async function signedWrite(url,method,params){
     if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
-    const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
+    const {key,secret}=window.BT001_ACTIVE_BINANCE_CREDENTIALS(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
     const query=new URLSearchParams({...params,recvWindow:"5000",timestamp:String(Date.now()+offset)}).toString(),signature=await hmac(secret,query);
     const response=await API.fetch(url+"?"+query+"&signature="+signature,{method,cache:"no-store",headers:{"X-MBX-APIKEY":key}});
     const data=await response.json().catch(()=>({}));
@@ -886,7 +886,7 @@
     if(typeof hasKeys!=="function" || !hasKeys()) return null;
     const sharedOwner=window.BT001_SHARED_POSITION;
     const expected=sharedOwner&&typeof sharedOwner.captureExpectation==="function"?sharedOwner.captureExpectation():null;
-    const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
+    const {key,secret}=window.BT001_ACTIVE_BINANCE_CREDENTIALS(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
     const list=typeof getPositions==="function" ? await getPositions(key,secret,offset) : [];
     if(sharedOwner&&typeof sharedOwner.ingestRestRisk==="function"){
       const result=sharedOwner.ingestRestRisk(list,{source:"gr-positionRisk",symbol:currentSymbol(),expected,observedAt:Date.now(),allowAdvance:true,ignoreStreamAuthority:!window.BINANCE_PRIVATE_STATE||window.BINANCE_PRIVATE_STATE.streamStatus!=="live"});
@@ -923,7 +923,7 @@
   }
   async function sectionOrders(section){
     if(typeof hasKeys!=="function" || !hasKeys()) throw new Error("API keys are required.");
-    const key=apiKeyEl.value.trim(),secret=apiSecretEl.value.trim(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
+    const {key,secret}=window.BT001_ACTIVE_BINANCE_CREDENTIALS(),offset=typeof timeOffset==="function" ? await timeOffset() : 0;
     const normal=await signedGet(OPEN_ORDERS_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     const algo=await signedGet(OPEN_ALGO_URL,{symbol:currentSymbol()},key,secret,offset).catch(()=>[]);
     return [].concat(Array.isArray(normal)?normal:[],Array.isArray(algo)?algo:[]).filter(order=>{
