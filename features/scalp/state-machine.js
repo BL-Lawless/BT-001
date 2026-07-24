@@ -32,7 +32,7 @@
       this.state="OFF";this.status="";this.generation=0;this.config=this.loadConfig();this.guide=null;this.rates=calc.feeRates();this.filters=null;this.marketSymbol=this.gateway&&this.gateway.symbol?this.gateway.symbol():null;this.book=this.loadTrancheBook();this.livePositions={LONG:null,SHORT:null};this.externalPosition=null;this.latestBySource=new Map();this.lastQualifiedBySource=new Map();this.baseline=new Set();this.seen=new Set();this.rankRejected=new Set();this.armedAt=0;this.unsubHub=null;this.diagnostics=[];this.fillIdsByTranche=new Map();this.lastPrivateStatus=null;this.reconnectBusy=false;this.reconcileQueued=false;
       this.cascadeByTf=new Map();this.autoLossState=this.loadAutoLossState();
     }
-    loadConfig(){let saved={};try{saved=JSON.parse(this.storage.getItem(C.configKey)||"{}");}catch(_e){}["autoEntryEnabled","autoTradingEnabled","cooloffMinutes"].forEach(key=>delete saved[key]);const nonnegative=(value,fallback,decimals)=>n(value)!=null&&n(value)>=0?Number(value).toFixed(decimals):fallback,minimumRank=Math.round(Math.max(0,Math.min(100,n(saved.minimumRank)??C.defaults.minimumRank))),positiveInt=(value,fallback)=>n(value)!=null&&n(value)>=1?Math.round(n(value)):fallback,nonnegativeNumber=(value,fallback)=>n(value)!=null&&n(value)>=0?n(value):fallback;return {...C.defaults,...saved,direction:C.directions.includes(saved.direction)?saved.direction:C.defaults.direction,source:C.sources.includes(saved.source)?saved.source:C.defaults.source,entryType:C.entryTypes.includes(saved.entryType)?saved.entryType:C.defaults.entryType,minimumRank,mode:"CONTINUOUS",lot:nonnegative(saved.lot,C.defaults.lot,3),target:nonnegative(saved.target,C.defaults.target,1),tpDelta:nonnegative(saved.tpDelta,C.defaults.tpDelta,0),tpDriver:["NET_TARGET","TP_DELTA"].includes(saved.tpDriver)?saved.tpDriver:C.defaults.tpDriver,stop:nonnegative(saved.stop,C.defaults.stop,1),slDelta:nonnegative(saved.slDelta,C.defaults.slDelta,0),slDriver:["NET_SL","SL_DELTA"].includes(saved.slDriver)?saved.slDriver:C.defaults.slDriver,maxConcurrentAutoPositions:positiveInt(saved.maxConcurrentAutoPositions,C.defaults.maxConcurrentAutoPositions),maxDailyAutoLossUsd:nonnegativeNumber(saved.maxDailyAutoLossUsd,C.defaults.maxDailyAutoLossUsd)};}
+    loadConfig(){let saved={};try{saved=JSON.parse(this.storage.getItem(C.configKey)||"{}");}catch(_e){}["autoEntryEnabled","autoTradingEnabled","cooloffMinutes"].forEach(key=>delete saved[key]);const nonnegative=(value,fallback,decimals)=>n(value)!=null&&n(value)>=0?Number(value).toFixed(decimals):fallback,minimumRank=Math.round(Math.max(0,Math.min(100,n(saved.minimumRank)??C.defaults.minimumRank))),positiveInt=(value,fallback)=>n(value)!=null&&n(value)>=1?Math.round(n(value)):fallback,nonnegativeNumber=(value,fallback)=>n(value)!=null&&n(value)>=0?n(value):fallback,percentage=(value,fallback,max=100)=>Math.max(1,Math.min(max,n(value)??fallback));return {...C.defaults,...saved,direction:C.directions.includes(saved.direction)?saved.direction:C.defaults.direction,source:C.sources.includes(saved.source)?saved.source:C.defaults.source,entryType:C.entryTypes.includes(saved.entryType)?saved.entryType:C.defaults.entryType,minimumRank,mode:"CONTINUOUS",lot:nonnegative(saved.lot,C.defaults.lot,3),target:nonnegative(saved.target,C.defaults.target,1),tpDelta:nonnegative(saved.tpDelta,C.defaults.tpDelta,0),tpDriver:["NET_TARGET","TP_DELTA"].includes(saved.tpDriver)?saved.tpDriver:C.defaults.tpDriver,stop:nonnegative(saved.stop,C.defaults.stop,1),slDelta:nonnegative(saved.slDelta,C.defaults.slDelta,0),slDriver:["NET_SL","SL_DELTA"].includes(saved.slDriver)?saved.slDriver:C.defaults.slDriver,maxConcurrentAutoPositions:positiveInt(saved.maxConcurrentAutoPositions,C.defaults.maxConcurrentAutoPositions),maxDailyAutoLossUsd:nonnegativeNumber(saved.maxDailyAutoLossUsd,C.defaults.maxDailyAutoLossUsd),profitLockEnabled:saved.profitLockEnabled===true,lockThresholdPct:percentage(saved.lockThresholdPct,C.defaults.lockThresholdPct),lockPortionPct:percentage(saved.lockPortionPct,C.defaults.lockPortionPct,99),rankBoostEnabled:saved.rankBoostEnabled===true,rankBoostThreshold:Math.max(0,Math.min(100,n(saved.rankBoostThreshold)??C.defaults.rankBoostThreshold)),rankBoostPoints:nonnegativeNumber(saved.rankBoostPoints,C.defaults.rankBoostPoints)};}
     loadTrancheBook(){
       let saved=null;try{saved=JSON.parse(this.storage.getItem(this.trancheStorageKey)||"null");}catch(_e){}
       if(saved)return tranches.normalize(saved,{accountSlot:this.accountSlot,symbol:this.gateway&&this.gateway.symbol?this.gateway.symbol():null});
@@ -135,7 +135,7 @@
     }
     destroy(){if(this.unsubHub)this.unsubHub();const hub=window.PUBLIC_MARKET_DATA_HUB;if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,[]);if(this.useGlobalPrivateEvents){window.removeEventListener("bt001:binance-order-update",this._orderListener);window.removeEventListener("v13:open-position-change",this._positionListener);window.removeEventListener("bt001:binance-private-status",this._privateStatusListener);}}
     updateConfig(patch){
-      const locked=this.configurationLocked(),protectedKeys=["direction","source","entryType","minimumRank","lot","target","tpDelta","tpDriver","stop","slDelta","slDriver"],next={...patch};["autoEntryEnabled","autoTradingEnabled","mode","cooloffMinutes"].forEach(key=>delete next[key]);if(Object.prototype.hasOwnProperty.call(next,"minimumRank"))next.minimumRank=Math.round(Math.max(0,Math.min(100,n(next.minimumRank)??0)));if(locked)protectedKeys.forEach(key=>delete next[key]);
+      const locked=this.configurationLocked(),protectedKeys=["direction","source","entryType","minimumRank","lot","target","tpDelta","tpDriver","stop","slDelta","slDriver","profitLockEnabled","lockThresholdPct","lockPortionPct","rankBoostEnabled","rankBoostThreshold","rankBoostPoints"],next={...patch};["autoEntryEnabled","autoTradingEnabled","mode","cooloffMinutes"].forEach(key=>delete next[key]);if(Object.prototype.hasOwnProperty.call(next,"minimumRank"))next.minimumRank=Math.round(Math.max(0,Math.min(100,n(next.minimumRank)??0)));if(Object.prototype.hasOwnProperty.call(next,"profitLockEnabled"))next.profitLockEnabled=next.profitLockEnabled===true;if(Object.prototype.hasOwnProperty.call(next,"lockThresholdPct"))next.lockThresholdPct=Math.max(1,Math.min(100,n(next.lockThresholdPct)??C.defaults.lockThresholdPct));if(Object.prototype.hasOwnProperty.call(next,"lockPortionPct"))next.lockPortionPct=Math.max(1,Math.min(99,n(next.lockPortionPct)??C.defaults.lockPortionPct));if(Object.prototype.hasOwnProperty.call(next,"rankBoostEnabled"))next.rankBoostEnabled=next.rankBoostEnabled===true;if(Object.prototype.hasOwnProperty.call(next,"rankBoostThreshold"))next.rankBoostThreshold=Math.max(0,Math.min(100,n(next.rankBoostThreshold)??C.defaults.rankBoostThreshold));if(Object.prototype.hasOwnProperty.call(next,"rankBoostPoints"))next.rankBoostPoints=Math.max(0,n(next.rankBoostPoints)??C.defaults.rankBoostPoints);if(locked)protectedKeys.forEach(key=>delete next[key]);
       this.config={...this.config,...next};this.saveConfig();if(this.state==="ARMED"&&protectedKeys.some(key=>Object.prototype.hasOwnProperty.call(next,key)))this.rebase("configuration changed");
       this.emit("configuration");return this.config;
     }
@@ -146,7 +146,7 @@
       const connection=this.gateway.connection(),streamHealthy=connection&&upper(connection.streamStatus)==="LIVE",symbol=this.gateway.symbol(),rawSettings=await this.gateway.filters(symbol),filtersReady=rawSettings&&rawSettings.status!=="error"&&n(rawSettings.tickSize)>0&&n(rawSettings.stepSize)>0,settings=normalizedFilters(rawSettings);this.filters=settings;
       let balance=null,facts=null;try{[balance,facts]=await Promise.all([this.gateway.balance(),this.readExchangeFacts()]);}catch(error){const failed={ok:false,errors:[`Binance reconciliation failed: ${error&&error.message||error}`]};this.status=failed.errors[0];this.emit("arm-refused");return failed;}
       const owned=snapshotOrders(facts&&facts.orders).filter(isOwned);if(!this.isActive()&&owned.length)this.adoptOrphanedTranches(owned);
-      const knownIds=new Set(tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction).flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.exitClientId].filter(Boolean)))),unresolved=owned.filter(order=>!knownIds.has(orderClient(order)));
+      const knownIds=new Set(tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction).flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.profitLockClientId,row.exitClientId].filter(Boolean)))),unresolved=owned.filter(order=>!knownIds.has(orderClient(order)));
       if(unresolved.length){const failed={ok:false,errors:["Unresolved SCALP-owned orders exist"]};this.status=failed.errors[0];this.emit("arm-refused");return failed;}
       for(const direction of tranches.DIRECTIONS){const live=this.position(direction),tracked=tranches.activeQuantity(this.book,direction);if(live&&Math.abs((n(live.qty)||0)-tracked)>1e-8){this.setExternalPosition(live);const failed={ok:false,errors:[this.externalPositionText(live)]};this.emit("arm-refused");return failed;}}
       this.setExternalPosition(null);
@@ -237,6 +237,7 @@
         refresh=this.refreshPreviewSettings(symbol).then(()=>this.emit("preview-settings")).catch(()=>false);
       }
       if(update&&update.type==="price"&&n(update.price)>0)this.guide=n(update.price);
+      if(update&&update.type==="price"&&n(update.price)>0)this.maybeProfitLocks(n(update.price));
       if(update&&update.tf&&C.timeframes.includes(update.tf)){const result=this.detector.evaluateTf(update.tf,update,this.now());this.acceptDetection(update.tf,result);}
       this.emit("market");return refresh;
     }
@@ -307,9 +308,11 @@
       const direction=upper(event.direction),id=trancheId(direction,event.eventId,this.generation),qty=calc.normalizeLot(this.config.lot,this.filters);
       return {
         trancheId:id,symbol:this.gateway.symbol(),quoteAsset:quoteAsset(this.gateway.symbol()),direction,source:event.source,eventId:event.eventId,eventType:event.eventType,generation:this.generation,
-        entryClientId:trancheClientId("E",id),partialTpClientId:trancheClientId("T",id),pslClientId:trancheClientId("S",id),exitClientId:trancheClientId("X",id),
+        entryClientId:trancheClientId("E",id),partialTpClientId:trancheClientId("T",id),pslClientId:trancheClientId("S",id),profitLockClientId:trancheClientId("L",id),exitClientId:trancheClientId("X",id),
         requestedQty:qty,filledQty:0,remainingQty:qty,entryPrice:0,entryCommission:0,entryCommissionActual:false,entryCommissionFills:[],
         fundingCost:0,fundingStatus:"no-known-settlement",mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),tpDelta:n(this.config.tpDelta),slDelta:n(this.config.slDelta),tpDriver:this.config.tpDriver,slDriver:this.config.slDriver,
+        profitLockEnabled:this.config.profitLockEnabled===true,lockThresholdPct:n(this.config.lockThresholdPct),lockPortionPct:n(this.config.lockPortionPct),profitLockTriggered:false,profitLockPending:false,
+        rankBoostEnabled:this.config.rankBoostEnabled===true,rankBoostThreshold:n(this.config.rankBoostThreshold),rankBoostPoints:n(this.config.rankBoostPoints),triggerRank:event.rankValue==null?null:n(event.rankValue),rankBoostApplied:false,
         createdAt:this.now(),status:"ENTRY_PENDING",cascadeAgreementAtEntry:this.cascadeAgreement(direction)
       };
     }
@@ -338,6 +341,7 @@
         this.applyEntryResponse(tranche,response,before,after);
         if(!(tranche.filledQty>0)){const queried=await this.queryEntry(tranche);this.applyEntryResponse(tranche,queried,before,after);}
         if(!(tranche.filledQty>0))throw new Error(`Entry ${tranche.entryClientId} has no confirmed fill`);
+        this.applyRankBoost(tranche,event);
         await this.ensureTrancheProtection(tranche);
         tranche.status="ACTIVE";branch.state="IDLE";this.persistTrancheBook();
         this.logActivity("TRANCHE_ADDED",{sourceTimeframe:tranche.source,detectorState:event,cascadeAgreement:tranche.cascadeAgreementAtEntry,positionState:{direction,trancheId:tranche.trancheId,...clone(tranche)}});
@@ -387,6 +391,55 @@
       const value=detail&&detail.positions?detail.positions:detail&&detail.current?detail.current:detail;this.applyPositionFacts(value);
       if(!this.isActive())this.setExternalPosition(this.position());
       this.emit("position-fact");if(!tranches.DIRECTIONS.some(direction=>tranches.directionBook(this.book,direction).executionLock))this.reconcileLive({positionUpdate:true}).catch(error=>this.fail(error,"Position reconciliation failed"));
+    }
+    applyRankBoost(tranche,event){
+      if(!tranche)return tranche;const rank=event&&event.rankValue==null?n(tranche.triggerRank):n(event&&event.rankValue);tranche.triggerRank=rank;tranche.rankBoostApplied=false;
+      if(!tranche.rankBoostEnabled||rank==null||!(rank>n(tranche.rankBoostThreshold))||!(n(tranche.rankBoostPoints)>0))return tranche;
+      const normal=this.protectionPrices(tranche).tp,points=n(tranche.rankBoostPoints),tick=n(this.filters&&this.filters.tickSize)||.01,extended=calc.roundStep(tranche.direction==="LONG"?normal+points:normal-points,tick,tranche.direction==="LONG"?"up":"down");
+      tranche.basePartialTpPrice=normal;tranche.partialTpPrice=extended;tranche.rankBoostApplied=true;tranche.rankBoostAppliedAt=this.now();return tranche;
+    }
+    profitLockLevel(tranche){
+      const entry=n(tranche&&tranche.entryPrice),tp=n(tranche&&tranche.partialTpPrice),pct=n(tranche&&tranche.lockThresholdPct);
+      if(!(entry>0)||!(tp>0)||!(pct>0))return null;
+      return calc.roundStep(entry+(tp-entry)*(pct/100),n(this.filters&&this.filters.tickSize)||.01,tranche.direction==="LONG"?"up":"down");
+    }
+    profitLockQuantity(tranche){
+      const remaining=n(tranche&&tranche.remainingQty)||0,step=n(this.filters&&this.filters.stepSize)||.001,requested=calc.normalizeLot(remaining*((n(tranche&&tranche.lockPortionPct)||0)/100),this.filters||{}),maximum=calc.normalizeLot(Math.max(0,remaining-step),this.filters||{});
+      return Math.min(requested,maximum);
+    }
+    profitLockReached(tranche,price){
+      const level=this.profitLockLevel(tranche),current=n(price);return !!(tranche&&tranche.profitLockEnabled&&!tranche.profitLockTriggered&&!tranche.profitLockPending&&upper(tranche.status)==="ACTIVE"&&level>0&&current>0&&(tranche.direction==="LONG"?current>=level:current<=level));
+    }
+    maybeProfitLocks(price=this.guide){
+      if(this.state==="ERROR"||this.state==="POSITION_MISMATCH")return;
+      for(const direction of tranches.DIRECTIONS){
+        const branch=tranches.directionBook(this.book,direction);if(!branch||branch.executionLock)continue;
+        const tranche=tranches.activeTranches(this.book,direction).find(row=>this.profitLockReached(row,price));if(!tranche)continue;
+        this.executeProfitLock(tranche,this.profitLockLevel(tranche)).catch(error=>this.fail(error,"Profit lock failed"));
+      }
+    }
+    async executeProfitLock(tranche,designatedLevel=this.profitLockLevel(tranche)){
+      const branch=tranches.directionBook(this.book,tranche&&tranche.direction),closeQty=this.profitLockQuantity(tranche);if(!branch||branch.executionLock||!(closeQty>0))return null;
+      const lock=`PROFIT_LOCK:${tranche.trancheId}`,beforeQty=n(tranche.remainingQty)||0,originalPslPrice=n(tranche.pslPrice);let completed=false;branch.executionLock=lock;branch.state="EXIT_PENDING";tranche.profitLockPending=true;this.persistTrancheBook();
+      try{
+        await this.cancelTrancheProtection(tranche);tranche.pslOrderId=null;tranche.partialTpOrderId=null;this.persistTrancheBook();
+        const side=tranche.direction==="LONG"?"SELL":"BUY",response=await this.gateway.submitOrder({...this.orderParams(side,closeQty,{clientId:tranche.profitLockClientId,positionSide:tranche.direction,reduceOnly:true}),newOrderRespType:"RESULT"}),executed=this.normalizedOrderQuantity(n(response&&response.executedQty)||closeQty),remaining=calc.normalizeLot(Math.max(0,beforeQty-executed),this.filters||{});
+        tranche.profitLockOrderId=response&&response.orderId||null;tranche.profitLockPrice=designatedLevel;tranche.profitLockFillPrice=n(response&&response.avgPrice)||designatedLevel;tranche.profitLockClosedQty=executed;tranche.profitLockTriggered=true;tranche.profitLockTriggeredAt=this.now();tranche.remainingQty=remaining;
+        if(!(remaining>0)){tranche.closedPrice=tranche.profitLockFillPrice;tranche.closedQty=executed;await this.finishTranche(tranche,"PROFIT_LOCK",{skipCancel:true});completed=true;return tranche;}
+        const allocatedEntryCommission=(n(tranche.entryCommission)||0)*(remaining/Math.max(remaining,n(tranche.filledQty)||remaining)),breakeven=calc.feeAwareBreakeven({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:remaining,entryCommission:allocatedEntryCommission,exitRate:this.rates.taker,tickSize:this.filters.tickSize});
+        if(!(breakeven>0))throw new Error("Fee-aware breakeven price is unavailable");
+        tranche.feeAwareBreakevenPrice=breakeven;tranche.pslPrice=breakeven;await this.ensureTrancheProtection(tranche);
+        this.logActivity("PROFIT_LOCK_APPLIED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,designatedLevel,closedQuantity:executed,remainingQuantity:remaining,feeAwareBreakevenPrice:breakeven,...clone(tranche)}});
+        this.status=`PROFIT LOCK · ${tranche.direction} tranche ${tranche.trancheId} · ${executed} closed`;this.emit("profit-lock-applied");completed=true;return tranche;
+      }catch(error){
+        if(n(tranche.remainingQty)>0&&(!tranche.pslOrderId||!tranche.partialTpOrderId)){
+          if(!tranche.profitLockTriggered)tranche.pslPrice=originalPslPrice;
+          try{await this.ensureTrancheProtection(tranche);}catch(protectionError){tranche.status="UNPROTECTED";tranche.unprotectedQuantity=n(tranche.remainingQty);tranche.profitLockFailure={at:this.now(),message:error&&error.message||String(error),protectionError:protectionError&&protectionError.message||String(protectionError)};this.logActivity("PROFIT_LOCK_FAILED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,unprotectedQuantity:tranche.unprotectedQuantity,error:tranche.profitLockFailure,...clone(tranche)}});throw new Error(`${this.unprotectedQuantityText(tranche.direction,tranche.remainingQty)} Profit-lock protection failed: ${tranche.profitLockFailure.protectionError}`);}
+        }
+        throw error;
+      }finally{
+        tranche.profitLockPending=false;if(branch.executionLock===lock)branch.executionLock=null;if(branch.state!=="ERROR")branch.state="IDLE";this.persistTrancheBook();if(completed&&this.state!=="ERROR"&&this.state!=="POSITION_MISMATCH")this.maybeProfitLocks(this.guide);
+      }
     }
     protectionPrices(tranche){return calc.prices({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:tranche.filledQty,entryCommission:tranche.entryCommission,target:tranche.target,stop:tranche.stop,tpDelta:tranche.tpDelta,slDelta:tranche.slDelta,tpDriver:tranche.tpDriver,slDriver:tranche.slDriver,makerRate:this.rates.maker,takerRate:this.rates.taker,conservativeTpRate:this.rates.conservativeTp,fundingCost:n(tranche.fundingCost)||0,tickSize:this.filters.tickSize});}
     async ensureTrancheProtection(tranche,{psl=true,tp=true}={}){
@@ -468,7 +521,7 @@
         if(this.state!=="ERROR"&&C.transitions[this.state]&&C.transitions[this.state].includes("ERROR"))this.transition("ERROR",message);else{this.status=message;this.emit("unprotected-tranche-recovered");}
         return;
       }
-      const knownIds=new Set(active.flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.exitClientId].filter(Boolean))),unknown=owned.filter(order=>!knownIds.has(orderClient(order)));if(unknown.length){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH","POSITION MISMATCH · unknown SCALP orders found");return;}
+      const knownIds=new Set(active.flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.profitLockClientId,row.exitClientId].filter(Boolean))),unknown=owned.filter(order=>!knownIds.has(orderClient(order)));if(unknown.length){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH","POSITION MISMATCH · unknown SCALP orders found");return;}
       for(const tranche of active){
         const hasPsl=ownedIds.has(tranche.pslClientId),hasTp=ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}
         const status=await this.queryProtectionStatus(tranche),tpStatus=upper(status.tp&&(status.tp.status??status.tp.orderStatus)),pslStatus=upper(status.psl&&(status.psl.status??status.psl.orderStatus));

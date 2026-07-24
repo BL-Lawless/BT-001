@@ -90,7 +90,7 @@
     if(!id)return null;
     for(const direction of DIRECTIONS){
       const row=directionBook(book,direction).tranches.find(item=>
-        [item.entryClientId,item.pslClientId,item.partialTpClientId,item.exitClientId].includes(id)
+        [item.entryClientId,item.pslClientId,item.partialTpClientId,item.profitLockClientId,item.exitClientId].includes(id)
       );
       if(row)return row;
     }

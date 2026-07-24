@@ -59,6 +59,12 @@
     return linkedPreview({direction,guide,qty,target,stop,tpDriver:"NET_TARGET",slDriver:"NET_SL",rates,filters});
   }
   function normalizeLot(qty,filters={}){return roundStep(n(qty)||0,n(filters.stepSize)||0.001,"down");}
+  function feeAwareBreakeven({direction,entryPrice,qty,entryCommission=0,exitRate=0,tickSize=.01}={}){
+    const side=upper(direction),entry=n(entryPrice),quantity=n(qty),commission=Math.max(0,n(entryCommission)||0),rate=Math.max(0,n(exitRate)||0),tick=n(tickSize)||.01;
+    if(!["LONG","SHORT"].includes(side)||!(entry>0)||!(quantity>0))return null;
+    const raw=side==="LONG"?(entry*quantity+commission)/(quantity*(1-rate)):(entry*quantity-commission)/(quantity*(1+rate));
+    return roundStep(raw,tick,side==="LONG"?"up":"down");
+  }
   function formatNumeric(value,decimals){const number=n(value);return (number==null?0:number).toFixed(decimals);}
   function stepNumeric(value,step,direction,decimals){const current=n(value)||0,next=Math.max(0,roundStep(current+(direction<0?-step:step),step));return formatNumeric(next,decimals);}
   function validateArm({config,filters={},guide,balance,symbol,authenticated,streamHealthy,sourceReady,filtersReady=true,position,ownedOrders,direction,trancheCounts}){
@@ -84,5 +90,5 @@
     const valid=value=>value!==null&&value!==""&&Number.isFinite(Number(value)),integer=value=>valid(value)?Math.round(Number(value)).toLocaleString("en-US"):"-",money=value=>valid(value)?`$${Number(value).toFixed(2)}`:"-";
     return {guide:valid(model&&model.guide)?Number(model.guide).toLocaleString("en-US",{maximumFractionDigits:2}):"-",tpDelta:integer(model&&model.tpDelta),slDelta:integer(model&&model.slDelta),tpFees:money(model&&model.tpFee),slFees:money(model&&model.slFee)};
   }
-  root.calculations=Object.freeze({n,quoteAsset,roundStep,feeRates,prices,estimate,linkedSide,linkedPreview,preview,normalizeLot,formatNumeric,stepNumeric,validateArm,formatOutcome});
+  root.calculations=Object.freeze({n,quoteAsset,roundStep,feeRates,prices,estimate,linkedSide,linkedPreview,preview,normalizeLot,feeAwareBreakeven,formatNumeric,stepNumeric,validateArm,formatOutcome});
 })();
