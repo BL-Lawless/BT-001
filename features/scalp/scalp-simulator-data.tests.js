@@ -12,8 +12,10 @@ function runtime(extra={}){
   }
   return context;
 }
-function eventRow({time,rank=50,direction="LONG",source="1m",eventType="CROSS",symbol="BTCUSDT",id}){
-  return {action:"DETECTION_QUALIFIED",symbol,source_timeframe:source,detector_state:{source,direction,eventType,candleTime:time,rankValue:rank,eventId:id||`${source}|${direction}|${eventType}|${time}|${rank}`}};
+function eventRow({time,rank=50,direction="LONG",source="1m",eventType="CROSS",symbol="BTCUSDT",id,metrics=null}){
+  const detector_state={source,direction,eventType,candleTime:time,rankValue:rank,eventId:id||`${source}|${direction}|${eventType}|${time}|${rank}`};
+  if(metrics){detector_state.raw={fastSlope:metrics.fastSlope,slowSlope:metrics.slowSlope,separation:metrics.separation,previousFastSlope:metrics.previousFastSlope,previousGap:metrics.previousGap};detector_state.rankDiagnostics={relativeVolume:metrics.relativeVolume};}
+  return {action:"DETECTION_QUALIFIED",symbol,source_timeframe:source,detector_state};
 }
 function candle(openTime,{open=100,high=101,low=99,close=100}={}){
   return {openTime,closeTime:openTime+59999,open,high,low,close,volume:1};
@@ -33,6 +35,19 @@ async function run(){
   assert.equal(deduped.length,4);assert(deduped.some(row=>row.eventId==="highest"));assert(!deduped.some(row=>row.eventId==="low"));assert(deduped.some(row=>row.eventId==="outside-window"));assert(deduped.some(row=>row.eventId==="other-direction"));assert(deduped.some(row=>row.eventId==="other-timeframe"&&row.sourceTimeframe==="3m"&&row.direction==="LONG"));
   assert(deduped.every(row=>!Object.prototype.hasOwnProperty.call(row,"symbol")),"BTCUSDT/BTCUSDC must not split the event stream");
   cases.candleTimeToleranceDedupeKeepsHighestRank=true;
+
+  const rawMetrics={fastSlope:.2,slowSlope:.05,separation:.1,previousFastSlope:.12,previousGap:-.03,relativeVolume:.5},metricEvent=data.normalizeEvent(eventRow({time:0,rank:80,id:"metric-event",metrics:rawMetrics}));
+  for(const [key,value] of Object.entries(rawMetrics))assert.equal(metricEvent[key],value,`${key} must be normalized from detector_state without recomputation`);
+  const metricConfig=data.simulationConfig({slopeWeight:2,volumeGateThreshold:1}),computed=data.exploratoryMetrics(metricEvent,metricConfig);assert(Math.abs(computed.effectiveSeparation-.5)<1e-12);assert(Math.abs(computed.volumeGatedAngle-.1)<1e-12);
+  const metricCandles=data.normalizeCandles([candle(0),candle(60000,{high:106,low:94})]),metricBase={lot:1,target:5,stop:5,minimumRank:70,direction:"LONG",eventType:"CROSS",sourceTimeframe:"1m",rates:{maker:0,taker:0},filters:{tickSize:.1,stepSize:.001}};
+  const rawFiltered=data.simulate([metricEvent],metricCandles,{...metricBase,minFastSlope:.15,maxFastSlope:.25,minSlowSlope:.04,maxSlowSlope:.06,minSeparation:.05,maxSeparation:.15,minRelativeVolume:.4,maxRelativeVolume:.6,slopeWeight:2,minEffectiveSeparation:.49,volumeGateThreshold:1,minVolumeGatedAngle:.09});
+  assert.equal(rawFiltered.eventsShown,1);assert.equal(rawFiltered.trades.length,1);assert.equal(rawFiltered.trades[0].fastSlope,.2);assert.equal(rawFiltered.trades[0].slowSlope,.05);assert.equal(rawFiltered.trades[0].separation,.1);assert.equal(rawFiltered.trades[0].relativeVolume,.5);assert(Math.abs(rawFiltered.trades[0].effectiveSeparation-.5)<1e-12);assert(Math.abs(rawFiltered.trades[0].volumeGatedAngle-.1)<1e-12);
+  assert.equal(data.simulate([metricEvent],metricCandles,{...metricBase,minFastSlope:.21}).eventsShown,0,"raw min/max filters must exclude independently");
+  assert.equal(data.simulate([metricEvent],metricCandles,{...metricBase,slopeWeight:1,minEffectiveSeparation:.49}).eventsShown,0,"slope weight must recalculate the effective-separation gate");
+  assert.equal(data.simulate([metricEvent],metricCandles,{...metricBase,slopeWeight:2,minEffectiveSeparation:.49,volumeGateThreshold:2,minVolumeGatedAngle:.09}).eventsShown,0,"volume threshold must multiplicatively damp the angle below the gate");
+  assert.equal(data.simulate([metricEvent],metricCandles,{...metricBase,minimumRank:81,slopeWeight:2,minEffectiveSeparation:.49}).eventsShown,0,"rank and exploratory filters must combine");
+  assert.equal(data.simulate([metricEvent],metricCandles,{...metricBase,minimumRank:0,slopeWeight:2,minEffectiveSeparation:.49}).eventsShown,1,"exploratory filters must work with rank disabled");
+  cases.rawAndComputedExploratoryMetricsFilterTogether=true;
 
   const supabaseRequests=[],supabaseContext=runtime({
     BT001Supabase:{configured:()=>true,getUrl:()=>"https://project.supabase.co",getAnonKey:()=>"anon"},

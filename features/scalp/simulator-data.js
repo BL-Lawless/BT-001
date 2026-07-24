@@ -20,11 +20,15 @@
     if(typeof value==="string")try{return JSON.parse(value);}catch(_e){}
     return null;
   }
+  function detectorMetric(state,key){
+    const direct=n(state&&state[key]),raw=n(state&&state.raw&&state.raw[key]),diagnostic=n(state&&state.rankDiagnostics&&state.rankDiagnostics[key]);
+    return direct??raw??diagnostic;
+  }
   function normalizeEvent(row){
     const state=detectorState(row);if(!state)return null;
     const source=String(row&&row.source_timeframe||state.source||"").trim().toLowerCase(),direction=upper(state.direction),eventType=upper(state.eventType),candleTimeMs=timeMs(state.candleTime),rank=n(state.rankValue??(state.rankDiagnostics&&state.rankDiagnostics.rankValue));
     if(!source||!["LONG","SHORT"].includes(direction)||!["CROSS","BOUNCE"].includes(eventType)||candleTimeMs==null||rank==null)return null;
-    return {sourceTimeframe:source,direction,eventType,candleTime:n(state.candleTime),candleTimeMs,signalCloseTimeMs:candleTimeMs+timeframeMs(source)-1,rank,eventId:String(state.eventId||state.freshnessKey||`${source}|${direction}|${eventType}|${candleTimeMs}`),detectorState:clone(state)};
+    return {sourceTimeframe:source,direction,eventType,candleTime:n(state.candleTime),candleTimeMs,signalCloseTimeMs:candleTimeMs+timeframeMs(source)-1,rank,fastSlope:detectorMetric(state,"fastSlope"),slowSlope:detectorMetric(state,"slowSlope"),separation:detectorMetric(state,"separation"),previousFastSlope:detectorMetric(state,"previousFastSlope"),previousGap:detectorMetric(state,"previousGap"),relativeVolume:detectorMetric(state,"relativeVolume"),eventId:String(state.eventId||state.freshnessKey||`${source}|${direction}|${eventType}|${candleTimeMs}`),detectorState:clone(state)};
   }
   function dedupeEvents(rows,{toleranceMs=DEDUPE_TOLERANCE_MS}={}){
     const normalized=(Array.isArray(rows)?rows:[]).filter(row=>!row||!row.action||upper(row.action)===EVENT_ACTION).map(normalizeEvent).filter(Boolean).sort((a,b)=>a.sourceTimeframe.localeCompare(b.sourceTimeframe)||a.direction.localeCompare(b.direction)||a.candleTimeMs-b.candleTimeMs||b.rank-a.rank),groups=[];
@@ -79,15 +83,33 @@
   function simulationConfig(input={}){
     const filters={tickSize:n(input.filters&&input.filters.tickSize)||.1,stepSize:n(input.filters&&input.filters.stepSize)||.001},rates=calc.feeRates(input.rates||{});
     const requestedTimeframe=String(input.sourceTimeframe||"ANY").trim().toLowerCase(),sourceTimeframe=requestedTimeframe==="any"?"ANY":C.sources.includes(requestedTimeframe)?requestedTimeframe:"ANY";
+    const optional=value=>n(value);
     return {
       minimumRank:Math.max(0,n(input.minimumRank)??C.defaults.minimumRank),direction:["LONG","SHORT","ANY"].includes(upper(input.direction))?upper(input.direction):"ANY",eventType:["CROSS","BOUNCE","ANY"].includes(upper(input.eventType))?upper(input.eventType):"ANY",sourceTimeframe,
+      minFastSlope:optional(input.minFastSlope),maxFastSlope:optional(input.maxFastSlope),minSlowSlope:optional(input.minSlowSlope),maxSlowSlope:optional(input.maxSlowSlope),minSeparation:optional(input.minSeparation),maxSeparation:optional(input.maxSeparation),minRelativeVolume:optional(input.minRelativeVolume),maxRelativeVolume:optional(input.maxRelativeVolume),
+      slopeWeight:Math.max(0,n(input.slopeWeight)??1),minEffectiveSeparation:Math.max(0,n(input.minEffectiveSeparation)??0),volumeGateThreshold:Math.max(Number.EPSILON,n(input.volumeGateThreshold)??1),minVolumeGatedAngle:Math.max(0,n(input.minVolumeGatedAngle)??0),
       lot:calc.normalizeLot(n(input.lot)??n(C.defaults.lot),filters),target:Math.max(0,n(input.target)??n(C.defaults.target)),stop:Math.max(0,n(input.stop)??n(C.defaults.stop)),maxConcurrentAutoPositions:Math.max(1,Math.round(n(input.maxConcurrentAutoPositions)??C.defaults.maxConcurrentAutoPositions)),
       profitLockEnabled:input.profitLockEnabled===true,lockThresholdPct:Math.max(1,Math.min(100,n(input.lockThresholdPct)??C.defaults.lockThresholdPct)),lockPortionPct:Math.max(1,Math.min(99,n(input.lockPortionPct)??C.defaults.lockPortionPct)),
       rankBoostEnabled:input.rankBoostEnabled===true,rankBoostThreshold:Math.max(0,Math.min(100,n(input.rankBoostThreshold)??C.defaults.rankBoostThreshold)),rankBoostPoints:Math.max(0,n(input.rankBoostPoints)??C.defaults.rankBoostPoints),filters,rates
     };
   }
+  function exploratoryMetrics(event,config){
+    const fastSlope=n(event&&event.fastSlope),separation=n(event&&event.separation),relativeVolume=n(event&&event.relativeVolume),slopeWeight=Math.max(0,n(config&&config.slopeWeight)??1),volumeGateThreshold=Math.max(Number.EPSILON,n(config&&config.volumeGateThreshold)??1);
+    return {
+      effectiveSeparation:fastSlope==null||separation==null?null:separation+slopeWeight*Math.abs(fastSlope),
+      volumeGatedAngle:fastSlope==null||relativeVolume==null?null:Math.abs(fastSlope)*Math.min(1,Math.max(0,relativeVolume)/volumeGateThreshold)
+    };
+  }
+  function withinRange(value,min,max){
+    if(min==null&&max==null)return true;
+    const numeric=n(value);return numeric!=null&&(min==null||numeric>=min)&&(max==null||numeric<=max);
+  }
   function eventAllowed(event,config){
-    return event.rank>=config.minimumRank&&(config.direction==="ANY"||event.direction===config.direction)&&(config.eventType==="ANY"||event.eventType===config.eventType)&&(config.sourceTimeframe==="ANY"||event.sourceTimeframe===config.sourceTimeframe);
+    const metrics=exploratoryMetrics(event,config),effectiveActive=config.minEffectiveSeparation>0,volumeAngleActive=config.minVolumeGatedAngle>0;
+    return event.rank>=config.minimumRank&&(config.direction==="ANY"||event.direction===config.direction)&&(config.eventType==="ANY"||event.eventType===config.eventType)&&(config.sourceTimeframe==="ANY"||event.sourceTimeframe===config.sourceTimeframe)
+      &&withinRange(event.fastSlope,config.minFastSlope,config.maxFastSlope)&&withinRange(event.slowSlope,config.minSlowSlope,config.maxSlowSlope)&&withinRange(event.separation,config.minSeparation,config.maxSeparation)&&withinRange(event.relativeVolume,config.minRelativeVolume,config.maxRelativeVolume)
+      &&(!effectiveActive||(metrics.effectiveSeparation!=null&&metrics.effectiveSeparation>=config.minEffectiveSeparation))
+      &&(!volumeAngleActive||(metrics.volumeGatedAngle!=null&&metrics.volumeGatedAngle>=config.minVolumeGatedAngle));
   }
   function entryCandleIndex(candles,event){
     let low=0,high=candles.length-1,answer=-1;
@@ -109,9 +131,9 @@
     tranche.mddUsd=Math.max(n(tranche.mddUsd)||0,drawdown);
   }
   function closeOutcome(book,tranche,decision,eventById,candle,config){
-    const qty=n(tranche.remainingQty)||0,rate=decision.reason==="PARTIAL_TP"?config.rates.conservativeTp:config.rates.taker,pnl=(n(tranche.realizedPnlUsd)||0)+pnlAt(tranche,qty,decision.exitPrice,rate),event=eventById.get(tranche.eventId);
+    const qty=n(tranche.remainingQty)||0,rate=decision.reason==="PARTIAL_TP"?config.rates.conservativeTp:config.rates.taker,pnl=(n(tranche.realizedPnlUsd)||0)+pnlAt(tranche,qty,decision.exitPrice,rate),event=eventById.get(tranche.eventId),metrics=exploratoryMetrics(event,config);
     tranches.close(book,tranche.trancheId,{reason:decision.reason,closedAt:candle.closeTime});
-    return {eventId:tranche.eventId,candleTime:event.candleTime,candleTimeMs:event.candleTimeMs,entryTimeMs:tranche.createdAt,exitTimeMs:candle.closeTime,sourceTimeframe:event.sourceTimeframe,direction:tranche.direction,eventType:event.eventType,rank:event.rank,lot:n(tranche.filledQty),entryPrice:tranche.entryPrice,exitPrice:decision.exitPrice,exitReason:decision.reason,pnlUsd:pnl,mddUsd:n(tranche.mddUsd)||0,profitLockApplied:!!tranche.profitLockTriggered,rankBoostApplied:!!tranche.rankBoostApplied};
+    return {eventId:tranche.eventId,candleTime:event.candleTime,candleTimeMs:event.candleTimeMs,entryTimeMs:tranche.createdAt,exitTimeMs:candle.closeTime,sourceTimeframe:event.sourceTimeframe,direction:tranche.direction,eventType:event.eventType,rank:event.rank,fastSlope:event.fastSlope,slowSlope:event.slowSlope,separation:event.separation,previousFastSlope:event.previousFastSlope,previousGap:event.previousGap,relativeVolume:event.relativeVolume,effectiveSeparation:metrics.effectiveSeparation,volumeGatedAngle:metrics.volumeGatedAngle,lot:n(tranche.filledQty),entryPrice:tranche.entryPrice,exitPrice:decision.exitPrice,exitReason:decision.reason,pnlUsd:pnl,mddUsd:n(tranche.mddUsd)||0,profitLockApplied:!!tranche.profitLockTriggered,rankBoostApplied:!!tranche.rankBoostApplied};
   }
   function applyProfitLock(tranche,candle,config){
     const triggerPrice=tranche.direction==="LONG"?candle.high:candle.low,lock=decisions.profitLockDecision({tranche,price:triggerPrice,filters:config.filters});
@@ -157,7 +179,7 @@
 
   const service=create();
   root.simulatorData=Object.freeze({
-    EVENT_ACTION,DEDUPE_TOLERANCE_MS,PRICE_INTERVAL,PRICE_SYMBOL,normalizeEvent,dedupeEvents,normalizeCandles,fetchSupabaseEvents,fetchHistoricalCandles,simulationConfig,simulate,create,
+    EVENT_ACTION,DEDUPE_TOLERANCE_MS,PRICE_INTERVAL,PRICE_SYMBOL,normalizeEvent,dedupeEvents,normalizeCandles,fetchSupabaseEvents,fetchHistoricalCandles,simulationConfig,exploratoryMetrics,eventAllowed,simulate,create,
     loadData:input=>service.loadData(input),recalculate:input=>service.recalculate(input),getCache:()=>service.getCache()
   });
 })();
