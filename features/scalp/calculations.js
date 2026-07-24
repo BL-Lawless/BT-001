@@ -61,7 +61,7 @@
   function normalizeLot(qty,filters={}){return roundStep(n(qty)||0,n(filters.stepSize)||0.001,"down");}
   function formatNumeric(value,decimals){const number=n(value);return (number==null?0:number).toFixed(decimals);}
   function stepNumeric(value,step,direction,decimals){const current=n(value)||0,next=Math.max(0,roundStep(current+(direction<0?-step:step),step));return formatNumeric(next,decimals);}
-  function validateArm({config,filters={},guide,balance,symbol,authenticated,streamHealthy,sourceReady,filtersReady=true,position,ownedOrders}){
+  function validateArm({config,filters={},guide,balance,symbol,authenticated,streamHealthy,sourceReady,filtersReady=true,position,ownedOrders,direction,trancheCounts}){
     const errors=[],q=n(config&&config.lot),target=n(config&&config.target),stop=n(config&&config.stop),price=n(guide),normalized=normalizeLot(q,filters),minQty=n(filters.minQty)||0,maxQty=n(filters.maxQty),minNotional=n(filters.minNotional)||0;
     if(!authenticated)errors.push("Authenticated Binance connection required");if(!streamHealthy)errors.push("Healthy Binance user-data stream required");if(!sourceReady)errors.push("Selected signal source is not ready");if(!filtersReady)errors.push("Current symbol trading filters are unavailable");
     if(!(q>0))errors.push("Lot size must be greater than 0.000");if(Math.abs((q||0)-normalized)>1e-10)errors.push(`Lot must match step size ${filters.stepSize||0.001}`);if(q<minQty)errors.push(`Lot is below minimum quantity ${minQty}`);if(maxQty!=null&&q>maxQty)errors.push(`Lot exceeds maximum quantity ${maxQty}`);
@@ -72,7 +72,12 @@
     const leverage=Math.max(1,n(filters.leverage)||1),requiredMargin=price&&q>0?(price*q)/leverage:null;
     if(available==null)errors.push("Available margin is unavailable");
     else if(requiredMargin!=null&&requiredMargin>available)errors.push(`Available margin is insufficient: requires $${requiredMargin.toFixed(2)} at ${leverage}x leverage, have $${available.toFixed(2)} (short $${(requiredMargin-available).toFixed(2)})`);
-    if(position&&Math.abs(n(position.positionAmt??position.qty)||0)>0)errors.push("An open position already exists for this symbol");if(Array.isArray(ownedOrders)&&ownedOrders.length)errors.push("Unresolved SCALP-owned orders exist");
+    const normalizedDirection=upper(direction),hasDirectionalCounts=trancheCounts&&typeof trancheCounts==="object"&&["LONG","SHORT"].includes(normalizedDirection);
+    if(hasDirectionalCounts){
+      const count=Math.max(0,Math.round(n(trancheCounts[normalizedDirection])||0)),limit=Math.max(1,Math.round(n(config&&config.maxConcurrentAutoPositions)||1));
+      if(count>=limit)errors.push(`${normalizedDirection} tranche limit reached (${count}/${limit})`);
+    }else if(position&&Math.abs(n(position.positionAmt??position.qty)||0)>0)errors.push("An open position already exists for this symbol");
+    if(Array.isArray(ownedOrders)&&ownedOrders.length&&!hasDirectionalCounts)errors.push("Unresolved SCALP-owned orders exist");
     return {ok:errors.length===0,errors,normalizedLot:normalized};
   }
   function formatOutcome(model){

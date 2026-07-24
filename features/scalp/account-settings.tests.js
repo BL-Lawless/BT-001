@@ -20,6 +20,7 @@ class Element{
     this.id=id;this.ownerDocument=document;this.classList=new ClassList(hidden?["hidden"]:[]);this.value=value;this.checked=checked;this.disabled=false;this.dataset={};this.listeners={};this.style={};this.attributes={};this.textContent="";this.innerHTML="";this.offsetWidth=500;
   }
   addEventListener(type,listener,options){(this.listeners[type]||=[]).push({listener,capture:options===true||!!(options&&options.capture)});}
+  dispatchEvent(event){this.dispatch(event.type,event);return true;}
   dispatch(type,extra={}){
     let stopped=false;
     const event={type,target:this,key:extra.key,clientX:extra.clientX||0,clientY:extra.clientY||0,pointerId:1,preventDefault(){},stopImmediatePropagation(){stopped=true;}};
@@ -33,8 +34,8 @@ class Element{
   setPointerCapture(){}
   setAttribute(name,value){this.attributes[name]=String(value);}
 }
-function runtime(){
-  const localStorage=new MemoryStorage(),elements={},windowListeners={};let reloads=0;
+function runtime(seed={}){
+  const localStorage=new MemoryStorage(seed),elements={},windowListeners={};let reloads=0;
   const document={readyState:"complete",activeElement:null,getElementById:id=>elements[id]||null};
   const add=(id,options)=>elements[id]=new Element(id,document,options);
   [
@@ -42,10 +43,10 @@ function runtime(){
     "openBinanceSettings","openBinanceSettingsScalper","apiModal","apiModalScalper","settingsModal",
     "apiKey","apiSecret","apiKeyScalper","apiSecretScalper","rememberKeysScalper","closeApiKeysScalper",
     "saveApiKeysScalper","readBinanceAccountMain","readBinanceAccountScalper","switchBinanceAccountMain","switchBinanceAccountScalper","apiAccountStatusWindow",
-    "apiAccountStatusTitle","apiAccountStatusSubtitle","apiAccountStatusContent","apiAccountStatusHead","closeApiAccountStatus"
+    "apiAccountStatusTitle","apiAccountStatusSubtitle","apiAccountStatusContent","apiAccountStatusHead","closeApiAccountStatus","market"
   ].forEach(id=>add(id,{hidden:["apiModal","apiModalScalper","apiAccountStatusWindow"].includes(id)}));
-  elements.apiNicknameMain.value="Main";elements.apiNicknameScalper.value="Scalper";elements.rememberKeysScalper.checked=true;
-  const context={console,Date,Promise,Map,Set,Array,Object,String,Number,Boolean,JSON,Math,Error,TypeError,URLSearchParams,TextEncoder,Uint8Array,localStorage,document,CustomEvent:class{constructor(type,options={}){this.type=type;this.detail=options.detail;}},window:null,setTimeout,clearTimeout};
+  elements.apiNicknameMain.value="Main";elements.apiNicknameScalper.value="Scalper";elements.rememberKeysScalper.checked=true;elements.market.value="btcusdc";
+  const context={console,Date,Promise,Map,Set,Array,Object,String,Number,Boolean,JSON,Math,Error,TypeError,URLSearchParams,TextEncoder,Uint8Array,localStorage,document,Event:class{constructor(type,options={}){this.type=type;this.bubbles=!!options.bubbles;}},CustomEvent:class{constructor(type,options={}){this.type=type;this.detail=options.detail;}},window:null,setTimeout,clearTimeout};
   context.window=context;context.innerWidth=1200;context.innerHeight=800;context.location={reload:()=>{reloads+=1;}};context.dispatchEvent=event=>{(windowListeners[event.type]||[]).forEach(listener=>listener(event));return true;};context.addEventListener=(type,listener)=>{(windowListeners[type]||=[]).push(listener);};
   // Simulate a previously installed buggy bubble listener. The new capture-bound handler must
   // stop it before it can redirect Main to the Scalper modal.
@@ -88,21 +89,29 @@ async function run(){
   elements.apiKey.value="main-key";elements.apiSecret.value="main-secret";
   elements.apiKeyScalper.value="scalper-key";elements.apiSecretScalper.value="scalper-secret";
   assert.deepEqual(JSON.parse(JSON.stringify(api.getInterfaceCredentials())),{key:"main-key",secret:"main-secret"});
+  let marketChanges=0;elements.market.addEventListener("change",()=>{marketChanges+=1;});api.setSlot("main");elements.market.value="paxgusdt";elements.apiScalperToggleScalper.checked=true;elements.apiScalperToggleScalper.dispatch("change");assert.equal(api.getSlot(),"scalper");assert.equal(api.getInterfaceSlot(),"main");assert.equal(elements.market.value,"btcusdt");assert.equal(marketChanges,1);assert.equal(getReloads(),0);
+  elements.market.value="clusdt";api.setSlot("scalper");assert.equal(elements.market.value,"clusdt","an already-enabled Scalper slot must not continuously override the symbol");
   elements.switchBinanceAccountScalper.dispatch("click");
   assert.equal(api.getInterfaceSlot(),"scalper");
   assert.deepEqual(JSON.parse(JSON.stringify(api.getInterfaceCredentials())),{key:"scalper-key",secret:"scalper-secret"});
   assert.equal(api.getSlot(),"scalper","switching the main interface must not alter the Scalper binding");
+  assert.equal(elements.market.value,"btcusdt");
   assert.equal(elements.switchBinanceAccountScalper.disabled,true);
   assert.equal(elements.switchBinanceAccountMain.disabled,false);
   assert.equal(getReloads(),1);
+  const reloadSeed=Object.fromEntries(localStorage.data),reloadedScalper=runtime(reloadSeed);assert.equal(reloadedScalper.elements.market.value,"btcusdt","the one-shot default must survive the Switch-to reload");assert.equal(reloadedScalper.localStorage.getItem("btc_futures_chart_v12_scalper_btcusdt_once"),null);
+  const alreadyEnabled=runtime({"btc_futures_chart_v12_scalp_account_slot":"scalper"});assert.equal(alreadyEnabled.elements.market.value,"btcusdt","a persisted active Scalper account must retain its BTCUSDT default after refresh");
   api.setSlot("main");
   assert.equal(api.getInterfaceSlot(),"scalper","changing the Scalper binding must not alter the main-interface selection");
+  elements.market.value="clusdt";
   elements.switchBinanceAccountMain.dispatch("click");
   assert.equal(api.getInterfaceSlot(),"main");
   assert.equal(api.getSlot(),"main");
+  assert.equal(elements.market.value,"clusdt","switching back to Main must preserve the current symbol");
   assert.equal(getReloads(),2);
   assert.equal(localStorage.getItem("btc_futures_chart_v12_main_interface_account_slot"),"main");
   cases.mainInterfaceAndScalperSelectionsAreIndependent=true;
+  cases.scalperActivationDefaultsBtcusdtOnceWithoutAffectingMain=true;
 
   const html=fs.readFileSync(path.join(repo,"index.html"),"utf8"),source=fs.readFileSync(path.join(repo,"features/scalp/account-settings.module.js"),"utf8"),css=fs.readFileSync(path.join(repo,"features/scalp/scalp.css"),"utf8");
   assert(!html.includes("Two independent Binance accounts."));
@@ -119,7 +128,7 @@ async function run(){
   assert(main.includes('getInterfaceSlot()==="scalper" ? "S " : "M "'));
   assert(source.includes('typeof window.updateTabTitle==="function"'));
   assert(calculator.includes("window.BT001_ACTIVE_BINANCE_CREDENTIALS()")&&grad.includes("window.BT001_ACTIVE_BINANCE_CREDENTIALS()"));
-  assert(scalpIndex.includes("slot!==interfaceSlot")&&secondary.includes("getCredentials(slot)"));
+  assert(scalpIndex.includes("BT001ScalpSecondaryGateway.create(slot)")&&scalpIndex.includes("accountSlot:slot")&&secondary.includes("getCredentials(slot)")&&secondary.includes("normalizePositions"));
   cases.mainAndCalculatorsUseActiveAccountWhileScalpCanUseEitherIndependentSlot=true;
 
   const titleFunction=(main.match(/function updateTabTitle\(\)\{[\s\S]*?\n\}/)||[])[0];

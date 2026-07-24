@@ -9,6 +9,7 @@
   const NICK_SCALPER=STORE+"api_nickname_scalper";
   const SCALP_SLOT_KEY=STORE+"scalp_account_slot";
   const INTERFACE_SLOT_KEY=STORE+"main_interface_account_slot";
+  const SCALPER_SYMBOL_PENDING_KEY=STORE+"scalper_btcusdt_once";
   const FUTURES_BASE="https://fapi.binance.com";
   const SPOT_BASE="https://api.binance.com";
   const $=id=>document.getElementById(id);
@@ -43,8 +44,28 @@
     try{window.dispatchEvent(new CustomEvent("bt001:main-account-slot-changed",{detail:{slot:next,nickname:getNickname(next)}}));}catch(_e){}
   }
   function switchInterfaceSlot(slot){
+    if(slot==="scalper")activateScalperSymbol({throughReload:true});
     setInterfaceSlot(slot);
     try{if(window.location&&typeof window.location.reload==="function")window.location.reload();}catch(_e){}
+  }
+  function setMarketSymbol(symbol,{notify=false}={}){
+    const market=$("market"),value=String(symbol||"").toLowerCase();if(!market||!value)return false;
+    const changed=market.value!==value;market.value=value;
+    if(changed&&notify){try{market.dispatchEvent(new Event("change",{bubbles:true}));}catch(_e){try{if(typeof market.dispatch==="function")market.dispatch("change");}catch(_ignored){}}}
+    return changed;
+  }
+  function activateScalperSymbol({throughReload=false}={}){
+    // Preserve the activation default through the next load as well as applying it immediately.
+    // The pending flag is consumed once during deferred startup, so this never becomes a
+    // permanent symbol lock and switching back to Main still leaves the selected symbol alone.
+    try{localStorage.setItem(SCALPER_SYMBOL_PENDING_KEY,"1");}catch(_e){}
+    setMarketSymbol("btcusdt",{notify:!throughReload});
+  }
+  function consumePendingScalperSymbol(){
+    let pending=false;try{pending=localStorage.getItem(SCALPER_SYMBOL_PENDING_KEY)==="1";if(pending)localStorage.removeItem(SCALPER_SYMBOL_PENDING_KEY);}catch(_e){}
+    // A persisted Scalper selection represents the same active state after refresh. Keep its
+    // default deterministic instead of falling back to index.html's Main-account BTCUSDC option.
+    if(pending||getSlot()==="scalper"||getInterfaceSlot()==="scalper")setMarketSymbol("btcusdt");
   }
   function getNickname(slot){
     const key=slot==="scalper"?NICK_SCALPER:NICK_MAIN,fallback=slot==="scalper"?"Scalper":"Main";
@@ -251,7 +272,7 @@
     if(nicknameScalper)nicknameScalper.addEventListener("change",()=>setNickname("scalper",nicknameScalper.value));
     const toggleMain=$("apiScalperToggleMain"),toggleScalper=$("apiScalperToggleScalper");
     if(toggleMain)toggleMain.addEventListener("change",()=>{if(toggleMain.checked)setSlot("main");else render();});
-    if(toggleScalper)toggleScalper.addEventListener("change",()=>{if(toggleScalper.checked)setSlot("scalper");else render();});
+    if(toggleScalper)toggleScalper.addEventListener("change",()=>{if(toggleScalper.checked){setSlot("scalper");activateScalperSymbol();}else render();});
 
     bindCredentialButton("openBinanceSettings","main");
     bindCredentialButton("openBinanceSettingsScalper","scalper");
@@ -275,7 +296,7 @@
 
   // This deferred script is intentionally loaded before main.js. Restore the second slot now so
   // an already-selected second account is available to main.js's very first authenticated read.
-  restoreScalperKeys();
+  restoreScalperKeys();consumePendingScalperSymbol();
   window.BT001ScalpAccount=Object.freeze({
     getSlot,setSlot,getInterfaceSlot,setInterfaceSlot,getInterfaceCredentials,getCredentials,getNickname,isConfigured,getScalperCredentials,hasScalperKeys,clearScalperKeys,
     reportConnectionStatus,subscribe,snapshot,openCredentialModal,openStatusWindow,readAccount

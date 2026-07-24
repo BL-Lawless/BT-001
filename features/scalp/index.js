@@ -8,12 +8,11 @@
       const build=window.__BT001_SCALP_BUILD__;if(!build||!build.ScalpEngine||!build.ScalpUI)return;
       try{if(window.BT001_SCALP&&window.BT001_SCALP.destroy)window.BT001_SCALP.destroy();}catch(_e){}
       const accountApi=window.BT001ScalpAccount,slot=accountApi&&accountApi.getSlot?accountApi.getSlot():"main";
-      const interfaceSlot=accountApi&&accountApi.getInterfaceSlot?accountApi.getInterfaceSlot():"main";
-      // Share the main gateway only when both features intentionally use the same account. When
-      // they differ, SCALP gets a private client/stream for its selected slot in either direction.
-      const useSecondary=slot!==interfaceSlot&&window.BT001ScalpSecondaryGateway&&accountApi;
-      const secondaryGateway=useSecondary?window.BT001ScalpSecondaryGateway.create(slot):null;
-      const engineOptions=secondaryGateway?{gateway:secondaryGateway,useGlobalPrivateEvents:false}:{};
+      // SCALP always uses its own account-scoped gateway. The main gateway exposes one canonical
+      // position for the chart workflow, while hedge-mode SCALP needs simultaneous LONG and SHORT
+      // facts and must never bind its lifecycle to whichever account the main interface displays.
+      const secondaryGateway=window.BT001ScalpSecondaryGateway&&accountApi?window.BT001ScalpSecondaryGateway.create(slot):null;
+      const engineOptions=secondaryGateway?{gateway:secondaryGateway,useGlobalPrivateEvents:false,accountSlot:slot}:{accountSlot:slot};
       const engine=new build.ScalpEngine(engineOptions),ui=new build.ScalpUI(engine);ui.install();
       if(secondaryGateway)secondaryGateway.attach(engine);
       const api={version:"BT001_SCALP_V1",engine,ui,show:()=>ui.show(),hide:()=>ui.hide(),arm:()=>engine.arm(),disarm:()=>engine.disarm(),closeNow:()=>engine.closeNow(),snapshot:()=>engine.snapshot(),diagnostics:()=>engine.getDiagnostics(),destroy:()=>{if(secondaryGateway)secondaryGateway.detach();ui.destroy();engine.destroy();}};

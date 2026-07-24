@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  // Independent Binance Futures client for whichever account SCALP uses when that account is not
-  // also active in the main interface (see features/scalp/index.js). It never
+  // Independent Binance Futures client for whichever account SCALP uses (see
+  // features/scalp/index.js). It never
   // touches window.BT001_BINANCE_TRADING's internals, main.js's apiKeyEl/apiSecretEl, or the
   // main account's private stream/position cache; it builds its own signed requests and its own
   // independent user-data-stream via the already-parameterized window.createBinanceUserDataStream
@@ -45,11 +45,45 @@
     return rest.requestJson(url, { method: String(method || "GET").toUpperCase(), cache: "no-store", headers: { "X-MBX-APIKEY": credentials.key } });
   }
 
-  function normalizePosition(rows, symbol) {
-    const row = (Array.isArray(rows) ? rows : []).find(item => upper(item && item.symbol) === upper(symbol) && Math.abs(n(item && item.positionAmt) || 0) > 1e-12);
-    if (!row) return null;
-    const amt = n(row.positionAmt) || 0;
-    return { symbol: upper(row.symbol), side: amt > 0 ? "LONG" : "SHORT", qty: Math.abs(amt), avg: n(row.entryPrice) || 0, leverage: n(row.leverage) || 1 };
+  function normalizePositions(rows, symbol) {
+    const positions = { LONG: null, SHORT: null };
+    for (const row of (Array.isArray(rows) ? rows : [])) {
+      if (upper(row && row.symbol) !== upper(symbol)) continue;
+      const amount = n(row && row.positionAmt) || 0;
+      if (Math.abs(amount) <= 1e-12) continue;
+      const explicit = upper(row && row.positionSide);
+      const side = explicit === "LONG" || explicit === "SHORT" ? explicit : amount < 0 ? "SHORT" : "LONG";
+      positions[side] = {
+        symbol: upper(row.symbol), side, positionSide: side, qty: Math.abs(amount),
+        avg: n(row.entryPrice) || 0, leverage: n(row.leverage) || 1
+      };
+    }
+    return positions;
+  }
+  function filterNumber(filters, type, key) {
+    const row = (Array.isArray(filters) ? filters : []).find(item => upper(item && item.filterType) === type);
+    return n(row && row[key]);
+  }
+  function flattenSymbolFilters(symbolInfo) {
+    const filters = (symbolInfo && Array.isArray(symbolInfo.filters)) ? symbolInfo.filters : [];
+    const lotStepSize = filterNumber(filters, "LOT_SIZE", "stepSize");
+    const marketStepSize = filterNumber(filters, "MARKET_LOT_SIZE", "stepSize") || lotStepSize;
+    const lotMinQty = filterNumber(filters, "LOT_SIZE", "minQty") || 0;
+    const marketMinQty = filterNumber(filters, "MARKET_LOT_SIZE", "minQty") || 0;
+    const maximums = [
+      filterNumber(filters, "LOT_SIZE", "maxQty"),
+      filterNumber(filters, "MARKET_LOT_SIZE", "maxQty")
+    ].filter(value => value > 0);
+    return {
+      filters,
+      tickSize: filterNumber(filters, "PRICE_FILTER", "tickSize"),
+      stepSize: Math.max(lotStepSize || 0, marketStepSize || 0) || null,
+      lotStepSize,
+      marketStepSize,
+      minQty: Math.max(lotMinQty, marketMinQty),
+      maxQty: maximums.length ? Math.min(...maximums) : null,
+      minNotional: filterNumber(filters, "MIN_NOTIONAL", "notional") || filterNumber(filters, "NOTIONAL", "minNotional")
+    };
   }
 
   function create(accountSlot = "scalper") {
@@ -81,10 +115,15 @@
       const data = await signedRequest(credentials(), "/fapi/v2/balance", "GET");
       return Array.isArray(data) ? data : [];
     }
-    async function position() {
-      const rows = await positionRows().catch(() => []);
-      return { position: normalizePosition(rows, symbol()) };
+    async function positions() {
+      const rows = await positionRows();
+      return { positions: normalizePositions(rows, symbol()) };
     }
+    async function position() {
+      const result = await positions();
+      return { position: result.positions.LONG || result.positions.SHORT || null, positions: result.positions };
+    }
+    async function refreshPositions() { return (await positions()).positions; }
     async function refreshPosition() { return (await position()).position; }
     async function filters(sym = symbol()) {
       // Exchange-level lot/tick/notional rules are account-agnostic (public exchangeInfo); position
@@ -97,7 +136,9 @@
       const symbolInfo = exchangeInfo && Array.isArray(exchangeInfo.symbols) ? exchangeInfo.symbols.find(item => upper(item.symbol) === upper(sym)) : null;
       const positionRow = rows.find(item => upper(item && item.symbol) === upper(sym));
       return {
-        filters: (symbolInfo && symbolInfo.filters) || [],
+        symbol: upper(sym),
+        status: symbolInfo ? "ready" : "error",
+        ...flattenSymbolFilters(symbolInfo),
         positionMode: dual && dual.dualSidePosition === true ? "HEDGE" : "ONE_WAY",
         leverage: n(positionRow && positionRow.leverage) || 1
       };
@@ -107,19 +148,17 @@
     }
     async function orders() {
       const [openOrders, openAlgoOrders] = await Promise.all([
-        signedRequest(credentials(), "/fapi/v1/openOrders", "GET", { symbol: symbol() }).catch(() => []),
-        // Best-effort: this app's algo-order endpoint (/fapi/v1/algoOrder) is used for submit/cancel/
-        // query by exact id; its "list all open" counterpart isn't independently confirmed here, so a
-        // failure degrades to an empty list rather than breaking reconciliation entirely. Verify this
-        // endpoint against your Binance account before relying on it for live algo-order reconciliation.
-        signedRequest(credentials(), "/fapi/v1/openAlgoOrders", "GET", { symbol: symbol() }).catch(() => [])
+        signedRequest(credentials(), "/fapi/v1/openOrders", "GET", { symbol: symbol() }),
+        // The list read must succeed before reconciliation is trusted. A failure is surfaced to the
+        // engine so it cannot mistake an unreadable order list for an empty one.
+        signedRequest(credentials(), "/fapi/v1/openAlgoOrders", "GET", { symbol: symbol() })
       ]);
       const algoList = Array.isArray(openAlgoOrders) ? openAlgoOrders : (openAlgoOrders && Array.isArray(openAlgoOrders.orders) ? openAlgoOrders.orders : []);
       return { orders: Array.isArray(openOrders) ? openOrders : [], algoOrders: algoList };
     }
     async function reconcile() {
-      const [pos, ord] = await Promise.all([position(), orders()]);
-      return { position: pos.position, orders: ord };
+      const [pos, ord] = await Promise.all([positions(), orders()]);
+      return { positions: pos.positions, position: pos.positions.LONG || pos.positions.SHORT || null, orders: ord };
     }
     function submitOrder(params) { return signedRequest(credentials(), "/fapi/v1/order", "POST", params); }
     function cancelOrder(params) { return signedRequest(credentials(), "/fapi/v1/order", "DELETE", params); }
@@ -138,11 +177,11 @@
         getSymbol: symbol,
         getRestBase: () => REST_BASE,
         getWsBase: () => WS_BASE,
-        onPositionFact: () => { refreshPosition().then(current => { if (attachedEngine) attachedEngine.onPosition({ current }); }).catch(() => {}); },
+        onPositionFact: () => { refreshPositions().then(current => { if (attachedEngine) attachedEngine.onPosition({ positions: current, current }); }).catch(() => {}); },
         onOrderFact: payload => { if (attachedEngine) attachedEngine.onOrder(payload); },
         onDirty: () => {},
         onStatus: statusDetail => { setStreamStatus(upper(statusDetail && statusDetail.streamStatus) || "OFFLINE"); if (attachedEngine) attachedEngine.onPrivateStatus(statusDetail); },
-        onAuthoritativeSeed: () => { refreshPosition().then(current => { if (attachedEngine) attachedEngine.onPosition({ current }); }).catch(() => {}); }
+        onAuthoritativeSeed: () => { refreshPositions().then(current => { if (attachedEngine) attachedEngine.onPosition({ positions: current, current }); }).catch(() => {}); }
       });
       stream.start();
     }
@@ -153,11 +192,11 @@
 
     return Object.freeze({
       isAuthenticated, symbol, connection: () => ({ streamStatus }),
-      position, filters, orders, balance, commissionRate, refreshPosition, reconcile,
+      position, positions, filters, orders, balance, commissionRate, refreshPosition, refreshPositions, reconcile,
       submitOrder, cancelOrder, queryOrder, submitAlgoOrder, cancelAlgoOrder, queryAlgoOrder,
       markDirty, attach, detach
     });
   }
 
-  window.BT001ScalpSecondaryGateway = Object.freeze({ create });
+  window.BT001ScalpSecondaryGateway = Object.freeze({ create, normalizePositions, flattenSymbolFilters });
 })();

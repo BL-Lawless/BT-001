@@ -1,43 +1,47 @@
-.scalp-window{z-index:1250}
+.scalp-window{z-index:1250;--scalp-muted:#4b5563;--scalp-label:#374151}
 .scalp-window.is-collapsed{height:auto!important}
 .scalp-body{display:flex;flex-direction:column;align-items:center;gap:4px;padding-right:3px;padding-left:3px;scrollbar-gutter:stable}
 .scalp-status{width:100%;margin-top:0;min-height:14px;font-weight:700}
 .scalp-status:empty{display:none}
 .scalp-section{width:100%;margin:0 auto;padding:5px 6px;background:#fff;border-color:#d9dce1}
+.scalp-tranche-summary{display:grid;grid-template-columns:1fr;gap:2px;color:var(--scalp-label);font-size:11px;font-weight:700;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
 .scalp-section-title{min-height:16px;margin:0 0 3px;font-size:11px;line-height:16px;letter-spacing:.02em}
+.scalp-section-toggle{display:flex;width:100%;align-items:center;justify-content:space-between;padding:0;border:0;background:transparent;text-align:left;cursor:pointer;font-family:inherit}
+.scalp-section-caret{font-size:12px;line-height:1}
+.scalp-detections.is-collapsed{padding-bottom:2px}
+.scalp-detections.is-collapsed .scalp-section-title{margin-bottom:0}
+.scalp-detections.is-collapsed #scalpEventDetectionBody{display:none}
 .scalp-section-body{display:flex;flex-direction:column;gap:3px}
 .scalp-row{display:grid;grid-template-columns:92px minmax(0,1fr);align-items:center;gap:6px;min-height:26px;margin:0;font-size:11px}
-.scalp-label{color:var(--muted);font-size:11px;font-weight:400}
+.scalp-label{color:var(--scalp-muted);font-size:11px;font-weight:400}
 .scalp-segments{display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));gap:4px}
 .scalp-segments button{height:24px;min-width:0;padding:2px 4px;font-size:11px;background:#eef0f2;border:1px solid #d9dce1;color:var(--text)}
 .scalp-segments button.is-active{background:#fff;border-color:#9ca3af;box-shadow:inset 0 0 0 1px #9ca3af}
 .scalp-input{width:100%;min-width:0;height:26px!important;box-sizing:border-box;margin:0;background:#fff;padding:4px 24px!important;border:1px solid #d9dce1;border-radius:5px;font-size:12px;text-align:center;font-variant-numeric:tabular-nums}
 .scalp-trade-grid{--scalp-trade-columns:minmax(72px,1fr) minmax(92px,1.35fr) minmax(82px,1.15fr);display:flex;flex-direction:column;gap:3px;min-width:0}
-.scalp-trade-head,.scalp-trade-row{display:grid;grid-template-columns:var(--scalp-trade-columns);align-items:center;gap:6px;min-width:0}
-.scalp-trade-head{color:var(--muted);font-size:9px;font-weight:700;text-align:center}
+.scalp-trade-row{display:grid;grid-template-columns:var(--scalp-trade-columns);align-items:center;gap:6px;min-width:0}
 .scalp-trade-row{min-height:26px;margin:0;font-size:11px}
-.scalp-trade-label{color:var(--darkgray);font-size:11px;font-weight:400}
+.scalp-trade-label{color:var(--scalp-label);font-size:11px;font-weight:400}
+.scalp-trade-field{display:grid;grid-template-columns:14px minmax(0,1fr);align-items:center;gap:3px;min-width:0}
+.scalp-trade-icon{color:var(--scalp-muted);font-size:11px;font-weight:700;line-height:1;text-align:center}
 .scalp-trade-empty{min-width:0}
-#scalpMaxConcurrentRow,#scalpMaxDailyAutoLossRow{grid-template-columns:minmax(0,2.15fr) minmax(92px,1.35fr);gap:12px}
-#scalpMaxConcurrentRow .scalp-label,#scalpMaxDailyAutoLossRow .scalp-label{white-space:nowrap}
-.scalp-trade-note{margin-top:4px;color:var(--muted);font-size:10px;line-height:1.3;text-align:center;white-space:normal}
-.scalp-rank-control{display:grid;grid-template-columns:minmax(0,1fr) 54px;align-items:center;gap:5px}.scalp-rank-control input{width:100%;margin:0}.scalp-rank-control output{font-size:10px;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}.scalp-footer{width:100%;padding:0 4px 2px}.scalp-footer .scalp-trade-note:first-child{margin-top:1px}
-.scalp-cooloff.hidden{display:none}
+.scalp-risk-controls{display:flex;align-items:center;justify-content:center;gap:14px;min-height:26px}
+.scalp-risk-field{display:flex;align-items:center;gap:5px;margin:0;white-space:nowrap}
+.scalp-risk-field .scalp-input{width:58px;min-width:58px;padding:4px 6px!important}
+.scalp-rank-control{display:grid;grid-template-columns:minmax(0,1fr) 54px;align-items:center;gap:5px}.scalp-rank-control input{width:100%;margin:0}.scalp-rank-control output{font-size:10px;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 .scalp-actions{grid-template-columns:1fr 1fr;gap:4px;margin-top:1px}
 .scalp-actions.has-close{grid-template-columns:repeat(3,1fr)}
 .scalp-actions button{height:26px;font-size:11px}
 .scalp-actions .danger{border-color:var(--red);color:#b91c1c;background:#fff}
 .scalp-error{min-height:0;margin-top:0}
 .scalp-error:empty{display:none}
-.scalp-daily-loss-status{margin-top:0;color:var(--muted);font-size:10px;line-height:1.3;text-align:center;white-space:normal}
-.scalp-daily-loss-status.is-warning{color:var(--red)}
 .scalp-detection-head,.scalp-detection-row{display:grid;grid-template-columns:minmax(24px,.55fr) minmax(30px,.65fr) minmax(42px,.9fr) minmax(56px,1.35fr) minmax(32px,.65fr) minmax(84px,2fr);align-items:center;gap:3px;width:100%;min-width:0;text-align:center;white-space:nowrap}
-.scalp-detection-head{padding:1px 3px;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase}
+.scalp-detection-head{padding:1px 3px;color:var(--scalp-muted);font-size:10px;font-weight:700;text-transform:uppercase}
 .scalp-detection-row{min-height:19px;padding:0 3px;border:1px solid transparent;border-radius:5px;color:var(--text);font-size:11px;font-variant-numeric:tabular-nums}
 .scalp-detection-row.is-selected{background:#fff;border-color:#9ca3af}
 .scalp-detection-source{font-weight:700}
 .scalp-detection-row>span{overflow:hidden;text-align:center;text-overflow:ellipsis;white-space:nowrap}
-.scalp-detection-row [data-field="eligibility"]{color:var(--muted)}
+.scalp-detection-row [data-field="eligibility"]{color:var(--scalp-muted)}
 .scalp-toolbar-button{white-space:nowrap}
 .scalp-toolbar-button.is-window-open{box-shadow:inset 0 0 0 1px var(--blue)}
 .scalp-toolbar-button.is-armed{background:rgba(245,158,11,.22);background:color-mix(in srgb,var(--orange) 22%,#fff);border:1px solid var(--orange);color:var(--text)}
@@ -45,7 +49,7 @@
 .scalp-toolbar-button.is-error{background:#fff;border:1px solid var(--red);color:var(--red)}
 .scalp-toolbar-button:active{filter:brightness(.96)}
 .scalp-toolbar-button:disabled{background:#eef0f2;border-color:#d9dce1;color:var(--muted);opacity:.55;cursor:not-allowed}
-@media(max-width:520px){.scalp-window{left:6px!important;top:48px!important;width:calc(100vw - 12px)!important;max-height:calc(100vh - 54px)}.scalp-row{grid-template-columns:84px minmax(0,1fr)}.scalp-detection-head,.scalp-detection-row{gap:2px}.scalp-trade-head,.scalp-trade-row{gap:3px}#scalpMaxConcurrentRow,#scalpMaxDailyAutoLossRow{grid-template-columns:minmax(0,2.15fr) minmax(92px,1.35fr);gap:6px}}
+@media(max-width:520px){.scalp-window{left:6px!important;top:48px!important;width:calc(100vw - 12px)!important;max-height:calc(100vh - 54px)}.scalp-row{grid-template-columns:84px minmax(0,1fr)}.scalp-detection-head,.scalp-detection-row{gap:2px}.scalp-trade-row{gap:3px}.scalp-risk-controls{gap:8px}}
 .api-account-block{margin-top:8px;padding-top:8px;border-top:1px solid #d9dce1}
 .api-account-block:first-of-type{margin-top:6px;padding-top:0;border-top:none}
 .api-account-row{display:flex;align-items:center;gap:10px;margin-bottom:6px}
