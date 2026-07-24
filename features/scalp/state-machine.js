@@ -1,7 +1,7 @@
 (() => {
   "use strict";
-  const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config,calc=root.calculations,tranches=root.tranches;
-  if(!C||!calc||!tranches)throw new Error("SCALP dependencies must load before state machine");
+  const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config,calc=root.calculations,tranches=root.tranches,decisions=root.exitDecisions;
+  if(!C||!calc||!tranches||!decisions)throw new Error("SCALP dependencies must load before state machine");
   const n=calc.n,quoteAsset=calc.quoteAsset,upper=value=>String(value||"").toUpperCase(),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
   function hash(text){let h=2166136261;for(const ch of String(text)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return (h>>>0).toString(36).toUpperCase();}
@@ -29,7 +29,7 @@
       // instead feeds onOrder/onPosition/onPrivateStatus directly via its own independent stream --
       // otherwise a second engine would also react to the FIRST account's order/position events.
       this.useGlobalPrivateEvents=options.useGlobalPrivateEvents!==false;
-      this.state="OFF";this.status="";this.generation=0;this.config=this.loadConfig();this.guide=null;this.rates=calc.feeRates();this.filters=null;this.marketSymbol=this.gateway&&this.gateway.symbol?this.gateway.symbol():null;this.book=this.loadTrancheBook();this.livePositions={LONG:null,SHORT:null};this.externalPosition=null;this.latestBySource=new Map();this.lastQualifiedBySource=new Map();this.baseline=new Set();this.seen=new Set();this.rankRejected=new Set();this.armedAt=0;this.unsubHub=null;this.diagnostics=[];this.fillIdsByTranche=new Map();this.lastPrivateStatus=null;this.reconnectBusy=false;this.reconcileQueued=false;
+      this.state="OFF";this.status="";this.generation=0;this.config=this.loadConfig();this.guide=null;this.rates=calc.feeRates();this.filters=null;this.marketSymbol=this.gateway&&this.gateway.symbol?this.gateway.symbol():null;this.book=this.loadTrancheBook();this.livePositions={LONG:null,SHORT:null};this.externalPosition=null;this.latestBySource=new Map();this.lastQualifiedBySource=new Map();this.baseline=new Set();this.seen=new Set();this.rankRejected=new Set();this.armedAt=0;this.unsubHub=null;this.diagnostics=[];this.fillIdsByTranche=new Map();this.lastPrivateStatus=null;this.reconnectBusy=false;this.reconcileQueued=false;this.initialized=false;this.initializing=false;
       this.cascadeByTf=new Map();this.autoLossState=this.loadAutoLossState();
     }
     loadConfig(){let saved={};try{saved=JSON.parse(this.storage.getItem(C.configKey)||"{}");}catch(_e){}["autoEntryEnabled","autoTradingEnabled","cooloffMinutes"].forEach(key=>delete saved[key]);const nonnegative=(value,fallback,decimals)=>n(value)!=null&&n(value)>=0?Number(value).toFixed(decimals):fallback,minimumRank=Math.round(Math.max(0,Math.min(100,n(saved.minimumRank)??C.defaults.minimumRank))),positiveInt=(value,fallback)=>n(value)!=null&&n(value)>=1?Math.round(n(value)):fallback,nonnegativeNumber=(value,fallback)=>n(value)!=null&&n(value)>=0?n(value):fallback,percentage=(value,fallback,max=100)=>Math.max(1,Math.min(max,n(value)??fallback));return {...C.defaults,...saved,direction:C.directions.includes(saved.direction)?saved.direction:C.defaults.direction,source:C.sources.includes(saved.source)?saved.source:C.defaults.source,entryType:C.entryTypes.includes(saved.entryType)?saved.entryType:C.defaults.entryType,minimumRank,mode:"CONTINUOUS",lot:nonnegative(saved.lot,C.defaults.lot,3),target:nonnegative(saved.target,C.defaults.target,1),tpDelta:nonnegative(saved.tpDelta,C.defaults.tpDelta,0),tpDriver:["NET_TARGET","TP_DELTA"].includes(saved.tpDriver)?saved.tpDriver:C.defaults.tpDriver,stop:nonnegative(saved.stop,C.defaults.stop,1),slDelta:nonnegative(saved.slDelta,C.defaults.slDelta,0),slDriver:["NET_SL","SL_DELTA"].includes(saved.slDriver)?saved.slDriver:C.defaults.slDriver,maxConcurrentAutoPositions:positiveInt(saved.maxConcurrentAutoPositions,C.defaults.maxConcurrentAutoPositions),maxDailyAutoLossUsd:nonnegativeNumber(saved.maxDailyAutoLossUsd,C.defaults.maxDailyAutoLossUsd),profitLockEnabled:saved.profitLockEnabled===true,lockThresholdPct:percentage(saved.lockThresholdPct,C.defaults.lockThresholdPct),lockPortionPct:percentage(saved.lockPortionPct,C.defaults.lockPortionPct,99),rankBoostEnabled:saved.rankBoostEnabled===true,rankBoostThreshold:Math.max(0,Math.min(100,n(saved.rankBoostThreshold)??C.defaults.rankBoostThreshold)),rankBoostPoints:nonnegativeNumber(saved.rankBoostPoints,C.defaults.rankBoostPoints)};}
@@ -55,7 +55,7 @@
     emit(reason="update"){const detail=this.snapshot();this.dispatchEvent(new CustomEvent("change",{detail:{...detail,reason}}));try{window.dispatchEvent(new CustomEvent("bt001:scalp-state",{detail:{...detail,reason}}));}catch(_e){}}
     previewDirection(){if(["LONG","SHORT"].includes(upper(this.config.direction)))return upper(this.config.direction);const latest=this.displayDetection(this.config.source);return latest&&["LONG","SHORT"].includes(upper(latest.direction))?upper(latest.direction):"ANY";}
     outcomePreview(){const outcome=calc.linkedPreview({direction:this.previewDirection(),guide:this.guide,qty:this.config.lot,target:this.config.target,stop:this.config.stop,tpDelta:this.config.tpDelta,slDelta:this.config.slDelta,tpDriver:this.config.tpDriver,slDriver:this.config.slDriver,rates:this.rates,filters:this.filters||{}});if(outcome.available){const patch={};if(this.config.tpDriver==="TP_DELTA")patch.target=calc.formatNumeric(outcome.target,1);else patch.tpDelta=calc.formatNumeric(outcome.tpDelta,0);if(this.config.slDriver==="SL_DELTA")patch.stop=calc.formatNumeric(outcome.stop,1);else patch.slDelta=calc.formatNumeric(outcome.slDelta,0);let changed=false;for(const [key,value] of Object.entries(patch))if(this.config[key]!==value){this.config[key]=value;changed=true;}if(changed)this.saveConfig();}return outcome;}
-    snapshot(){const outcome=this.outcomePreview(),trancheCounts=this.trancheCounts(),trancheQuantities=this.trancheQuantities();return {state:this.state,status:this.status,generation:this.generation,config:{...this.config},guide:this.guide,rates:{...this.rates},filters:this.filters?{...this.filters}:null,latest:this.displayDetection(this.config.source),detections:this.detectionRows(),outcome,trancheBook:tranches.snapshot(this.book),trancheCounts,trancheQuantities,positions:clone(this.livePositions),externalPosition:this.externalPosition?clone(this.externalPosition):null,armBlockedByPosition:!!this.externalPosition,active:trancheCounts.LONG+trancheCounts.SHORT>0,armed:this.state==="ARMED",locked:this.configurationLocked(),cascade:this.cascadeState(),dailyLoss:this.dailyLossSnapshot()};}
+    snapshot(){const outcome=this.outcomePreview(),trancheCounts=this.trancheCounts(),trancheQuantities=this.trancheQuantities();return {state:this.state,status:this.status,generation:this.generation,initialized:this.initialized,initializing:this.initializing,config:{...this.config},guide:this.guide,rates:{...this.rates},filters:this.filters?{...this.filters}:null,latest:this.displayDetection(this.config.source),detections:this.detectionRows(),outcome,trancheBook:tranches.snapshot(this.book),trancheCounts,trancheQuantities,positions:clone(this.livePositions),externalPosition:this.externalPosition?clone(this.externalPosition):null,armBlockedByPosition:!!this.externalPosition,active:trancheCounts.LONG+trancheCounts.SHORT>0,armed:this.state==="ARMED",locked:this.configurationLocked(),cascade:this.cascadeState(),dailyLoss:this.dailyLossSnapshot()};}
     log(action,data={}){this.diagnostics.push({at:this.now(),state:this.state,action,...data});if(this.diagnostics.length>120)this.diagnostics.shift();}
     transition(next,reason){
       if(next===this.state){this.status=reason||this.status;this.emit(reason);return;}const allowed=C.transitions[this.state]||[];if(!allowed.includes(next))throw new Error(`Invalid SCALP transition ${this.state} -> ${next}`);
@@ -122,16 +122,21 @@
       this.marketSymbol=symbol;return !!this.filters;
     }
     async initialize(){
-      if(!this.gateway)throw new Error("Canonical Binance trading gateway unavailable");const hub=window.PUBLIC_MARKET_DATA_HUB;
-      if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,C.timeframes.map(tf=>({tf,count:C.signal.minimumRows})));
-      if(hub&&hub.ensureTimeframeBuffer)await Promise.all(C.timeframes.map(tf=>hub.ensureTimeframeBuffer(tf,C.signal.minimumRows).catch(()=>null)));
-      if(hub&&hub.subscribe)this.unsubHub=hub.subscribe(event=>this.onMarket(event));
-      if(this.useGlobalPrivateEvents){window.addEventListener("bt001:binance-order-update",this._orderListener=event=>this.onOrder(event.detail));window.addEventListener("v13:open-position-change",this._positionListener=event=>this.onPosition(event.detail));window.addEventListener("bt001:binance-private-status",this._privateStatusListener=event=>this.onPrivateStatus(event.detail));}
-      this.lastPrivateStatus=upper(this.gateway.connection()&&this.gateway.connection().streamStatus);
-      C.timeframes.forEach(tf=>this.acceptDetection(tf,this.detector.evaluateTf(tf,null,this.now()),false));
-      const p=window.PUBLIC_MARKET_DATA_HUB&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice();if(p&&p.price)this.guide=p.price;
-      await this.refreshPreviewSettings().catch(()=>null);
-      await this.recover();this.emit("initialized");return this;
+      if(this.initialized)return this;
+      if(this.initializing)throw new Error("SCALP initialization is already in progress");
+      this.initializing=true;this.emit("initializing");
+      try{
+        if(!this.gateway)throw new Error("Canonical Binance trading gateway unavailable");const hub=window.PUBLIC_MARKET_DATA_HUB;
+        if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,C.timeframes.map(tf=>({tf,count:C.signal.minimumRows})));
+        if(hub&&hub.ensureTimeframeBuffer)await Promise.all(C.timeframes.map(tf=>hub.ensureTimeframeBuffer(tf,C.signal.minimumRows).catch(()=>null)));
+        if(hub&&hub.subscribe)this.unsubHub=hub.subscribe(event=>this.onMarket(event));
+        if(this.useGlobalPrivateEvents){window.addEventListener("bt001:binance-order-update",this._orderListener=event=>this.onOrder(event.detail));window.addEventListener("v13:open-position-change",this._positionListener=event=>this.onPosition(event.detail));window.addEventListener("bt001:binance-private-status",this._privateStatusListener=event=>this.onPrivateStatus(event.detail));}
+        this.lastPrivateStatus=upper(this.gateway.connection()&&this.gateway.connection().streamStatus);
+        C.timeframes.forEach(tf=>this.acceptDetection(tf,this.detector.evaluateTf(tf,null,this.now()),{notify:false,suppressEntry:true}));
+        const p=window.PUBLIC_MARKET_DATA_HUB&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice&&window.PUBLIC_MARKET_DATA_HUB.getLatestPrice();if(p&&p.price)this.guide=p.price;
+        await this.refreshPreviewSettings().catch(()=>null);
+        await this.recover();this.initialized=true;return this;
+      }finally{this.initializing=false;this.emit(this.initialized?"initialized":"initialization-failed");}
     }
     destroy(){if(this.unsubHub)this.unsubHub();const hub=window.PUBLIC_MARKET_DATA_HUB;if(hub&&hub.setTimeframeRequirements)hub.setTimeframeRequirements(C.consumerId,[]);if(this.useGlobalPrivateEvents){window.removeEventListener("bt001:binance-order-update",this._orderListener);window.removeEventListener("v13:open-position-change",this._positionListener);window.removeEventListener("bt001:binance-private-status",this._privateStatusListener);}}
     updateConfig(patch){
@@ -142,11 +147,14 @@
     rebase(reason){this.generation+=1;this.armedAt=this.now();this.baseline.clear();this.seen.clear();this.rankRejected.clear();const latest=this.displayDetection(this.config.source);if(latest)this.baseline.add(latest.freshnessKey||latest.eventId);this.status=`ARMED · waiting for a new event (${reason})`;this.log("rebase",{reason,generation:this.generation});}
     sourceReady(){const hub=window.PUBLIC_MARKET_DATA_HUB,periods=root.detectorTools&&root.detectorTools.fixedPeriods?root.detectorTools.fixedPeriods():[C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast,C.signal.emaSlow,C.signal.emaFast],snap=hub&&hub.getAuthoritativeMaSnapshot&&hub.getAuthoritativeMaSnapshot(this.config.source,{includeForming:true,periods,requiredRows:C.signal.minimumRows});return !!(snap&&snap.reliable);}
     async arm(){
+      if(!this.initialized){const failed={ok:false,errors:["SCALP initialization is not complete"]};this.status=failed.errors[0];this.emit("arm-refused");return failed;}
       if(this.state!=="OFF"&&this.state!=="ERROR")return {ok:false,errors:[`Cannot arm from ${this.state}`]};
       const connection=this.gateway.connection(),streamHealthy=connection&&upper(connection.streamStatus)==="LIVE",symbol=this.gateway.symbol(),rawSettings=await this.gateway.filters(symbol),filtersReady=rawSettings&&rawSettings.status!=="error"&&n(rawSettings.tickSize)>0&&n(rawSettings.stepSize)>0,settings=normalizedFilters(rawSettings);this.filters=settings;
       let balance=null,facts=null;try{[balance,facts]=await Promise.all([this.gateway.balance(),this.readExchangeFacts()]);}catch(error){const failed={ok:false,errors:[`Binance reconciliation failed: ${error&&error.message||error}`]};this.status=failed.errors[0];this.emit("arm-refused");return failed;}
       const owned=snapshotOrders(facts&&facts.orders).filter(isOwned);if(!this.isActive()&&owned.length)this.adoptOrphanedTranches(owned);
-      const knownIds=new Set(tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction).flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.profitLockClientId,row.exitClientId].filter(Boolean)))),unresolved=owned.filter(order=>!knownIds.has(orderClient(order)));
+      const ownedIds=new Set(owned.map(orderClient));let active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));
+      await this.reconcileExternalActiveReduction(active,ownedIds);active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));
+      const knownIds=new Set(active.flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.profitLockClientId,row.exitClientId].filter(Boolean))),unresolved=owned.filter(order=>ownedIds.has(orderClient(order))&&!knownIds.has(orderClient(order)));
       if(unresolved.length){const failed={ok:false,errors:["Unresolved SCALP-owned orders exist"]};this.status=failed.errors[0];this.emit("arm-refused");return failed;}
       for(const direction of tranches.DIRECTIONS){const live=this.position(direction),tracked=tranches.activeQuantity(this.book,direction);if(live&&Math.abs((n(live.qty)||0)-tracked)>1e-8){this.setExternalPosition(live);const failed={ok:false,errors:[this.externalPositionText(live)]};this.emit("arm-refused");return failed;}}
       this.setExternalPosition(null);
@@ -262,7 +270,8 @@
       const side=upper(direction),agreeing=[...this.cascadeByTf.values()].filter(record=>record.direction===side);
       return {direction:side,count:agreeing.length,timeframes:agreeing.map(record=>record.timeframe),records:agreeing.map(record=>({...record}))};
     }
-    acceptDetection(source,result,notify=true){
+    acceptDetection(source,result,control=true){
+      const options=control&&typeof control==="object"?control:{notify:control!==false},notify=options.notify!==false,suppressEntry=options.suppressEntry===true;
       if(!result)return;const event=result.event||result.detection||{source,eventType:"NONE",direction:null,eventState:"NONE",qualified:false,projected:false,publishedAt:this.now(),status:result.status},emitted=result.emittedEvent||(result.event&&result.event.qualified&&!result.event.projected?result.event:null);this.latestBySource.set(source,{...event,source,status:result.status});if(emitted&&emitted.qualified&&!emitted.projected)this.lastQualifiedBySource.set(source,{...emitted,source,status:result.status});
       // Cascade tracking is a booster/informational signal only (see cascadeState()/cascadeAgreement()):
       // it is recorded for every watched timeframe here, never gated on this.config.source or this.state,
@@ -272,7 +281,7 @@
       // cross changes its direction; a same-direction cross/bounce just refreshes it), never by another
       // timeframe and never by a timer/staleness check.
       if(emitted&&emitted.qualified&&!emitted.projected){this.recordCascade(source,emitted);this.logActivity("DETECTION_QUALIFIED",{sourceTimeframe:source,detectorState:emitted,cascadeAgreement:this.cascadeAgreement(emitted.direction)});}
-      if(source===this.config.source&&this.state==="ARMED"&&emitted)this.considerEntry(emitted);
+      if(!suppressEntry&&source===this.config.source&&this.state==="ARMED"&&emitted)this.considerEntry(emitted);
       this.status=this.state==="ARMED"?(event&&event.direction&&!this.directionAllowed(event.direction)?`ARMED · ${event.direction} ${event.eventType||"event"} ignored by DIR ${this.config.direction}`:`ARMED · ${result.status}`):this.status;if(notify)this.emit("signal");
     }
     directionAllowed(direction){return this.config.direction==="ANY"||this.config.direction===upper(direction);}
@@ -365,6 +374,37 @@
       }finally{branch.executionLock=null;this.persistTrancheBook();}
     }
     async queryEntry(tranche){try{const order=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.entryClientId});if(order&&order.orderId!=null)tranche.entryOrderId=order.orderId;return order||null;}catch(_e){return null;}}
+    async verifyRecoveryEntry(tranche){
+      const expectedClientId=String(tranche&&tranche.entryClientId||"");
+      if(!expectedClientId)return {ok:false,reason:"tranche has no entry client ID"};
+      let order=null;
+      try{order=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:expectedClientId});}
+      catch(error){return {ok:false,reason:`matching entry order query failed: ${error&&error.message||error}`};}
+      if(!order)return {ok:false,reason:`matching entry order ${expectedClientId} was not found`};
+      const actualClientId=orderClient(order);
+      if(actualClientId!==expectedClientId)return {ok:false,reason:`entry client ID mismatch (${actualClientId||"missing"} vs ${expectedClientId})`};
+      if(order.orderId==null)return {ok:false,reason:`matching entry order ${expectedClientId} has no Binance order ID`};
+      if(tranche.entryOrderId!=null&&String(tranche.entryOrderId)!==String(order.orderId))return {ok:false,reason:`entry order ID mismatch (${order.orderId} vs ${tranche.entryOrderId})`};
+      const executedQty=n(order.executedQty??order.z)||0,claimedQty=Math.max(n(tranche.filledQty)||0,n(tranche.remainingQty)||0),tolerance=Math.max(1e-8,(n(this.filters&&this.filters.stepSize)||0)*1e-6);
+      if(!(executedQty>0))return {ok:false,reason:`matching entry order ${expectedClientId} has no confirmed fill`};
+      if(executedQty+tolerance<claimedQty)return {ok:false,reason:`matching entry fill ${this.quantityText(executedQty)} is smaller than tranche quantity ${this.quantityText(claimedQty)}`};
+      const entryPrice=n(order.avgPrice),quote=n(order.cumQuote);
+      if(!(n(tranche.entryPrice)>0)&&!(entryPrice>0)&&!(quote>0))return {ok:false,reason:`matching entry order ${expectedClientId} has no confirmed fill price`};
+      tranche.entryOrderId=order.orderId;
+      if(!(n(tranche.filledQty)>0))tranche.filledQty=this.normalizedOrderQuantity(executedQty);
+      if(!(n(tranche.remainingQty)>0))tranche.remainingQty=tranche.filledQty;
+      if(!(n(tranche.entryPrice)>0))tranche.entryPrice=entryPrice>0?entryPrice:quote/executedQty;
+      tranche.recoveryEntryVerifiedAt=this.now();this.persistTrancheBook();
+      return {ok:true,orderId:order.orderId,clientOrderId:actualClientId,executedQty,status:upper(order.status??order.orderStatus)};
+    }
+    recoveryProtectionDetail(tranche,extra={}){return {sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,entryClientId:tranche.entryClientId,entryOrderId:tranche.entryOrderId,remainingQuantity:n(tranche.remainingQty)||0,...extra,...clone(tranche)}};}
+    refuseRecoveryProtection(tranche,reason){
+      tranche.recoveryProtectionFailure={at:this.now(),reason};this.persistTrancheBook();
+      this.logActivity("PROTECTION_REBUILD_REFUSED",this.recoveryProtectionDetail(tranche,{reason}));
+      const message=`ERROR · recovery protection refused for ${tranche.direction} tranche ${tranche.trancheId}: ${reason}. No protection order was submitted.`;
+      if(this.state!=="ERROR"&&C.transitions[this.state]&&C.transitions[this.state].includes("ERROR"))this.transition("ERROR",message);else{this.status=message;this.emit("recovery-protection-refused");}
+      return {ok:false,reason};
+    }
     async reconcileUncertainEntry(tranche){
       for(const delay of [300,700,1500,3000]){await sleep(delay);const found=await this.queryEntry(tranche);if(found)return found;try{await this.refreshLivePositions();const live=this.position(tranche.direction);if(live&&n(live.qty)>0)return {avgPrice:String(n(live.avg)||0)};}catch(_e){}}
       throw new Error("Entry outcome remains ambiguous after reconciliation");
@@ -393,23 +433,14 @@
       this.emit("position-fact");if(!tranches.DIRECTIONS.some(direction=>tranches.directionBook(this.book,direction).executionLock))this.reconcileLive({positionUpdate:true}).catch(error=>this.fail(error,"Position reconciliation failed"));
     }
     applyRankBoost(tranche,event){
-      if(!tranche)return tranche;const rank=event&&event.rankValue==null?n(tranche.triggerRank):n(event&&event.rankValue);tranche.triggerRank=rank;tranche.rankBoostApplied=false;
-      if(!tranche.rankBoostEnabled||rank==null||!(rank>n(tranche.rankBoostThreshold))||!(n(tranche.rankBoostPoints)>0))return tranche;
-      const normal=this.protectionPrices(tranche).tp,points=n(tranche.rankBoostPoints),tick=n(this.filters&&this.filters.tickSize)||.01,extended=calc.roundStep(tranche.direction==="LONG"?normal+points:normal-points,tick,tranche.direction==="LONG"?"up":"down");
-      tranche.basePartialTpPrice=normal;tranche.partialTpPrice=extended;tranche.rankBoostApplied=true;tranche.rankBoostAppliedAt=this.now();return tranche;
+      if(!tranche)return tranche;const result=decisions.rankBoost({tranche,eventRank:event&&event.rankValue,normalTp:this.protectionPrices(tranche).tp,tickSize:this.filters&&this.filters.tickSize});
+      tranche.triggerRank=result.triggerRank;tranche.rankBoostApplied=result.applied;
+      if(!result.applied)return tranche;
+      tranche.basePartialTpPrice=result.normalTp;tranche.partialTpPrice=result.tpPrice;tranche.rankBoostAppliedAt=this.now();return tranche;
     }
-    profitLockLevel(tranche){
-      const entry=n(tranche&&tranche.entryPrice),tp=n(tranche&&tranche.partialTpPrice),pct=n(tranche&&tranche.lockThresholdPct);
-      if(!(entry>0)||!(tp>0)||!(pct>0))return null;
-      return calc.roundStep(entry+(tp-entry)*(pct/100),n(this.filters&&this.filters.tickSize)||.01,tranche.direction==="LONG"?"up":"down");
-    }
-    profitLockQuantity(tranche){
-      const remaining=n(tranche&&tranche.remainingQty)||0,step=n(this.filters&&this.filters.stepSize)||.001,requested=calc.normalizeLot(remaining*((n(tranche&&tranche.lockPortionPct)||0)/100),this.filters||{}),maximum=calc.normalizeLot(Math.max(0,remaining-step),this.filters||{});
-      return Math.min(requested,maximum);
-    }
-    profitLockReached(tranche,price){
-      const level=this.profitLockLevel(tranche),current=n(price);return !!(tranche&&tranche.profitLockEnabled&&!tranche.profitLockTriggered&&!tranche.profitLockPending&&upper(tranche.status)==="ACTIVE"&&level>0&&current>0&&(tranche.direction==="LONG"?current>=level:current<=level));
-    }
+    profitLockLevel(tranche){return decisions.profitLockLevel({tranche,tickSize:this.filters&&this.filters.tickSize});}
+    profitLockQuantity(tranche){return decisions.profitLockQuantity({tranche,filters:this.filters||{}});}
+    profitLockReached(tranche,price){return decisions.profitLockReached({tranche,price,tickSize:this.filters&&this.filters.tickSize});}
     maybeProfitLocks(price=this.guide){
       if(this.state==="ERROR"||this.state==="POSITION_MISMATCH")return;
       for(const direction of tranches.DIRECTIONS){
@@ -502,12 +533,16 @@
         // Binance exposes one net hedge-mode quantity, so an external reduction cannot identify
         // which local add was closed. Reconcile deterministically newest-first, preserving the
         // oldest tranche coverage and its designated protection for as long as possible.
-        const candidates=directional.filter(row=>upper(row.status)==="ACTIVE").map((row,index)=>({row,index})).sort((a,b)=>(n(b.row.createdAt)||0)-(n(a.row.createdAt)||0)||b.index-a.index);
+        // Every status returned by activeTranches represents claimed backing exposure. Transitional
+        // records (especially PROTECTION_PENDING persisted just before a failed/reloaded submit)
+        // must be reconciled too; otherwise a flat exchange can leave a phantom tranche that the
+        // later protection-rebuild pass mistakes for real exposure.
+        const candidates=directional.map((row,index)=>({row,index})).sort((a,b)=>(n(b.row.createdAt)||0)-(n(a.row.createdAt)||0)||b.index-a.index);
         for(const {row:tranche} of candidates){
           if(excess<=tolerance)break;const before=n(tranche.remainingQty)||0;if(!(before>0))continue;
-          const ids=[tranche.pslClientId,tranche.partialTpClientId].filter(Boolean);ids.forEach(id=>{reconciledIds.add(id);if(ownedIds)ownedIds.delete(id);});
+          const ids=[tranche.pslClientId,tranche.partialTpClientId].filter(Boolean),skipCancel=!!ownedIds&&!ids.some(id=>ownedIds.has(id));ids.forEach(id=>{reconciledIds.add(id);if(ownedIds)ownedIds.delete(id);});
           if(excess+tolerance>=before){
-            tranche.externalCloseQuantity=before;tranche.closedQty=before;tranche.closedPrice=n(this.guide);await this.finishTranche(tranche,"MANUAL_EXTERNAL_CLOSE");excess=Math.max(0,excess-before);continue;
+            tranche.externalCloseQuantity=before;tranche.closedQty=before;tranche.closedPrice=n(this.guide);await this.finishTranche(tranche,"MANUAL_EXTERNAL_CLOSE",{skipCancel});excess=Math.max(0,excess-before);continue;
           }
           await this.cancelTrancheProtection(tranche);const remaining=calc.normalizeLot(Math.max(0,before-excess),this.filters||{}),closed=Math.max(0,before-remaining);
           tranche.remainingQty=remaining;tranche.externalCloseQuantity=(n(tranche.externalCloseQuantity)||0)+closed;tranche.lastExternalReductionAt=this.now();tranche.pslOrderId=null;tranche.partialTpOrderId=null;tranche.status="ACTIVE";this.persistTrancheBook();
@@ -559,8 +594,25 @@
         }
       }
       active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));await this.reconcileExternalActiveReduction(active,ownedIds);active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));
-      // Only genuine residual exposure reaches protection rebuilding.
-      for(const tranche of active){const hasPsl=ownedIds.has(tranche.pslClientId),hasTp=ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}if(!hasPsl)tranche.pslOrderId=null;if(!hasTp)tranche.partialTpOrderId=null;await this.ensureTrancheProtection(tranche,{psl:!hasPsl,tp:!hasTp});}
+      // Directional coverage alone cannot authorize a protection rebuild: another browser or manual
+      // trade can contribute to the same hedge-mode net position. Require Binance to confirm the
+      // exact SCALP entry order and its executed quantity before submitting any replacement order.
+      for(const tranche of active){
+        const hasPsl=ownedIds.has(tranche.pslClientId),hasTp=ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}
+        const verification=await this.verifyRecoveryEntry(tranche);
+        if(!verification.ok){this.refuseRecoveryProtection(tranche,verification.reason);return;}
+        if(!hasPsl)tranche.pslOrderId=null;if(!hasTp)tranche.partialTpOrderId=null;
+        const requested={psl:!hasPsl,tp:!hasTp},detail={verification,requested};
+        this.logActivity("PROTECTION_REBUILD_STARTED",this.recoveryProtectionDetail(tranche,detail));
+        try{
+          await this.ensureTrancheProtection(tranche,requested);
+          this.logActivity("PROTECTION_REBUILD_SUCCEEDED",this.recoveryProtectionDetail(tranche,detail));
+        }catch(error){
+          tranche.recoveryProtectionFailure={at:this.now(),reason:error&&error.message||String(error)};this.persistTrancheBook();
+          this.logActivity("PROTECTION_REBUILD_FAILED",this.recoveryProtectionDetail(tranche,{...detail,error:tranche.recoveryProtectionFailure.reason}));
+          throw error;
+        }
+      }
       for(const direction of tranches.DIRECTIONS){const expected=tranches.activeQuantity(this.book,direction),live=n(this.position(direction)&&this.position(direction).qty)||0;if(Math.abs(expected-live)>1e-8){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH",`POSITION MISMATCH · ${direction} exchange ${live} vs tranches ${expected}`);return;}}
       this.setExternalPosition(null);this.persistTrancheBook();const counts=this.trancheCounts(),message=counts.LONG+counts.SHORT>0?`ACTIVE · recovered LONG ${counts.LONG} SHORT ${counts.SHORT} · manual ARM required for adds`:"Exchange position reconciled · manual ARM required";if(this.state==="ERROR"||this.state==="POSITION_MISMATCH")this.transition("OFF",message);else{if(this.state!=="ARMED")this.status=message;this.emit(options.reconnect?"reconnected":"recovered");}
     }

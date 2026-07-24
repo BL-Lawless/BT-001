@@ -99,7 +99,7 @@ async function run(){
     get:async url=>url.includes("/exchangeInfo")?exchangeInfoPayload:{serverTime:Date.now()},
     requestJson:async url=>{filterRequests.push(url);if(url.includes("/positionSide/dual"))return {dualSidePosition:true};if(url.includes("/positionRisk"))return [{symbol:"BTCUSDT",positionAmt:"0",positionSide:"LONG",entryPrice:"0",leverage:"20"}];if(url.includes("/balance"))return [{asset:"USDT",availableBalance:"1000"}];if(url.includes("/openOrders")||url.includes("/openAlgoOrders"))return [];throw new Error(`Unexpected signed request ${url}`);}
   };
-  const filterRuntime=load(["features/scalp/config.js","features/scalp/calculations.js","features/scalp/tranche-book.js","features/scalp/signal-detector.js","features/scalp/state-machine.js","features/scalp/secondary-gateway.module.js"],{
+  const filterRuntime=load(["features/scalp/config.js","features/scalp/calculations.js","features/scalp/tranche-book.js","features/scalp/exit-decisions.js","features/scalp/signal-detector.js","features/scalp/state-machine.js","features/scalp/secondary-gateway.module.js"],{
     EventTarget:TestEventTarget,CustomEvent:TestEvent,setTimeout,clearTimeout,Uint8Array,
     crypto:{subtle:{importKey:async()=>({}),sign:async()=>new Uint8Array([1,2,3]).buffer}},
     restService:filterRest,BT001ScalpAccount:{getCredentials:()=>({key:"scalper-key",secret:"scalper-secret"}),reportConnectionStatus:()=>{}},
@@ -109,9 +109,9 @@ async function run(){
   filterRuntime.dispatchEvent=()=>true;filterRuntime.addEventListener=()=>{};filterRuntime.removeEventListener=()=>{};
   const filterGateway=filterRuntime.BT001ScalpSecondaryGateway.create("scalper"),flatFilters=await filterGateway.filters("BTCUSDT");
   assert.equal(typeof flatFilters.tickSize,"number");assert.equal(flatFilters.tickSize,.1);assert.equal(typeof flatFilters.stepSize,"number");assert.equal(flatFilters.stepSize,.005);assert.equal(flatFilters.minNotional,5);assert.equal(flatFilters.minQty,.005);assert.equal(flatFilters.maxQty,50);assert(Array.isArray(flatFilters.filters));
-  const filterEngine=new filterRuntime.__BT001_SCALP_BUILD__.ScalpEngine({gateway:filterGateway,storage:filterRuntime.localStorage,accountSlot:"scalper",useGlobalPrivateEvents:false});filterEngine.guide=100;filterEngine.config={...filterEngine.config,lot:"0.100",target:"1",stop:"1"};filterGateway.attach(filterEngine);const filterArmResult=await filterEngine.arm();assert.equal(filterArmResult.ok,true,filterArmResult.errors&&filterArmResult.errors.join("; "));assert(!filterArmResult.errors.includes("Current symbol trading filters are unavailable"));assert.equal(filterEngine.state,"ARMED");filterGateway.detach();assert(filterRequests.some(url=>url.includes("/positionSide/dual")));
+  const filterEngine=new filterRuntime.__BT001_SCALP_BUILD__.ScalpEngine({gateway:filterGateway,storage:filterRuntime.localStorage,accountSlot:"scalper",useGlobalPrivateEvents:false});filterEngine.initialized=true;filterEngine.guide=100;filterEngine.config={...filterEngine.config,lot:"0.100",target:"1",stop:"1"};filterGateway.attach(filterEngine);const filterArmResult=await filterEngine.arm();assert.equal(filterArmResult.ok,true,filterArmResult.errors&&filterArmResult.errors.join("; "));assert(!filterArmResult.errors.includes("Current symbol trading filters are unavailable"));assert.equal(filterEngine.state,"ARMED");filterGateway.detach();assert(filterRequests.some(url=>url.includes("/positionSide/dual")));
 
-  const logs=[],runtime=load(["features/scalp/config.js","features/scalp/calculations.js","features/scalp/tranche-book.js","features/scalp/signal-detector.js","features/scalp/state-machine.js"],{
+  const logs=[],runtime=load(["features/scalp/config.js","features/scalp/calculations.js","features/scalp/tranche-book.js","features/scalp/exit-decisions.js","features/scalp/signal-detector.js","features/scalp/state-machine.js"],{
     EventTarget:TestEventTarget,CustomEvent:TestEvent,setTimeout,clearTimeout,
     BT001Supabase:{log:async(table,row)=>{logs.push({table,row});return true;},getDeviceId:()=>"test"}
   });
@@ -149,7 +149,7 @@ async function run(){
   engine.guide=100;engine.filters={tickSize:.1,stepSize:.001,minQty:.001,minNotional:5,leverage:10,positionMode:"HEDGE"};engine.config={...engine.config,lot:"0.100",target:"1",stop:"1",maxConcurrentAutoPositions:2};engine.state="ARMED";engine.armedAt=Date.now()-10;
   const firstLong=await engine.executeEntry(signal("LONG","long-1")),secondLong=await engine.executeEntry(signal("LONG","long-2"));
   assert(firstLong&&secondLong);assert.deepEqual(JSON.parse(JSON.stringify(engine.trancheCounts())),{LONG:2,SHORT:0});assert.equal(gateway.positions.LONG.qty,.2);
-  assert.equal(gateway.algo.filter(row=>row.positionSide==="LONG").length,2);assert.equal(gateway.normal.filter(row=>row.positionSide==="LONG").length,2);
+  assert.equal(gateway.algo.filter(row=>row.positionSide==="LONG").length,2);assert.equal(gateway.normal.filter(row=>row.positionSide==="LONG").length,2);const hedgePslCalls=gateway.calls.filter(([kind])=>kind==="algo").map(([,params])=>params);assert(hedgePslCalls.every(params=>params.positionSide==="LONG"&&params.side==="SELL"&&!Object.prototype.hasOwnProperty.call(params,"reduceOnly")),"hedge-mode PSL must use the reducing side plus positionSide; Binance does not accept reduceOnly in this mode");
   const short=await engine.executeEntry(signal("SHORT","short-1"));assert(short);assert.deepEqual(JSON.parse(JSON.stringify(engine.trancheCounts())),{LONG:2,SHORT:1});assert.equal(gateway.positions.SHORT.qty,.1);
   const blocked=await engine.executeEntry(signal("LONG","long-blocked"));assert.equal(blocked,null);assert.equal(engine.trancheCounts().LONG,2);
   const filledPsl=gateway.fill(firstLong.pslClientId,"LONG",.1);engine.onOrder({order:filledPsl});await new Promise(resolve=>setTimeout(resolve,0));
