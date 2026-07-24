@@ -3,7 +3,7 @@
 
   const root=window.__BT001_SCALP_BUILD__ ||= {};
   const DIRECTIONS=Object.freeze(["LONG","SHORT"]);
-  const ACTIVE_STATUSES=new Set(["ENTRY_PENDING","PROTECTION_PENDING","ACTIVE","EXIT_PENDING"]);
+  const ACTIVE_STATUSES=new Set(["ENTRY_PENDING","PROTECTION_PENDING","ACTIVE","EXIT_PENDING","UNPROTECTED"]);
   const upper=value=>String(value||"").toUpperCase();
   const number=value=>{const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;};
   const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;

@@ -32,6 +32,7 @@
 .scalp-actions{grid-template-columns:1fr 1fr;gap:4px;margin-top:1px}
 .scalp-actions.has-close{grid-template-columns:repeat(3,1fr)}
 .scalp-actions button{height:26px;font-size:11px}
+.scalp-actions button.is-active{background:#fff;border-color:#9ca3af;box-shadow:inset 0 0 0 1px #9ca3af}
 .scalp-actions .danger{border-color:var(--red);color:#b91c1c;background:#fff}
 .scalp-error{min-height:0;margin-top:0}
 .scalp-error:empty{display:none}
