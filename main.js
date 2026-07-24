@@ -2172,15 +2172,10 @@ function hasKeys(){
   return !!(key&&secret);
 }
 
-function gptKeyReady(){
-  const el = document.getElementById("v13GptKey");
-  return !!(el && el.value && el.value.trim());
-}
-
 function updateSettingsStatus(){
-  const needsAttention = !hasKeys() || !gptKeyReady();
+  const needsAttention = !hasKeys();
   apiKeysBtn.classList.toggle("needs-attention", needsAttention);
-  apiKeysBtn.title = needsAttention ? "Settings need attention" : "Settings";
+  apiKeysBtn.title = needsAttention ? "Binance API credentials required" : "Settings";
 }
 
 window.v13UpdateSettingsStatus = updateSettingsStatus;

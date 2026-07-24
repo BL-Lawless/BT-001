@@ -131,6 +131,20 @@ async function run(){
   assert(scalpIndex.includes("BT001ScalpSecondaryGateway.create(slot)")&&scalpIndex.includes("accountSlot:slot")&&secondary.includes("getCredentials(slot)")&&secondary.includes("normalizePositions"));
   cases.mainAndCalculatorsUseActiveAccountWhileScalpCanUseEitherIndependentSlot=true;
 
+  const settingsStatusFunction=(main.match(/function updateSettingsStatus\(\)\{[\s\S]*?\n\}/)||[])[0];
+  assert(settingsStatusFunction,"updateSettingsStatus function must remain available");
+  const settingsButton={classList:new ClassList(),title:""};
+  const settingsContext={apiKeysBtn:settingsButton,hasKeys:()=>true};
+  vm.runInNewContext(`${settingsStatusFunction};updateSettingsStatus();`,settingsContext);
+  assert.equal(settingsButton.classList.contains("needs-attention"),false,"a configured Binance API must keep the Settings icon normal even when no GPT integration is present");
+  assert.equal(settingsButton.title,"Settings");
+  settingsContext.hasKeys=()=>false;
+  vm.runInNewContext("updateSettingsStatus();",settingsContext);
+  assert.equal(settingsButton.classList.contains("needs-attention"),true,"missing Binance credentials must turn the Settings icon red");
+  assert.equal(settingsButton.title,"Binance API credentials required");
+  assert(!settingsStatusFunction.includes("gptKeyReady")&&!main.includes("function gptKeyReady()"),"non-Binance integrations must not participate in the Settings warning state");
+  cases.settingsAttentionDependsOnlyOnBinanceCredentials=true;
+
   const titleFunction=(main.match(/function updateTabTitle\(\)\{[\s\S]*?\n\}/)||[])[0];
   assert(titleFunction,"updateTabTitle function must remain available");
   const titleContext={document:{title:""},candles:[{close:100}],lastMarkPrice:null,openPositionBoxes:[{qty:.25}],openBoxesFloating:()=>5,titlePrice:value=>String(value),titlePL:value=>`+${value}`,window:{BT001ScalpAccount:{getInterfaceSlot:()=>"main"}}};

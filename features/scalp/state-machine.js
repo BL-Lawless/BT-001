@@ -494,6 +494,28 @@
     async queryProtectionStatus(tranche){
       const result={tp:null,psl:null};try{result.tp=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.partialTpClientId});}catch(_e){}try{result.psl=await this.gateway.queryAlgoOrder({symbol:this.gateway.symbol(),clientAlgoId:tranche.pslClientId});}catch(_e){}return result;
     }
+    async reconcileExternalActiveReduction(active,ownedIds){
+      const reconciledIds=new Set(),tolerance=Math.max(1e-8,(n(this.filters&&this.filters.stepSize)||0)*1e-6);
+      for(const direction of tranches.DIRECTIONS){
+        const directional=active.filter(row=>row.direction===direction),trackedQty=directional.reduce((sum,row)=>sum+(n(row.remainingQty)||0),0),liveQty=n(this.position(direction)&&this.position(direction).qty)||0;
+        let excess=Math.max(0,trackedQty-liveQty);if(excess<=tolerance)continue;
+        // Binance exposes one net hedge-mode quantity, so an external reduction cannot identify
+        // which local add was closed. Reconcile deterministically newest-first, preserving the
+        // oldest tranche coverage and its designated protection for as long as possible.
+        const candidates=directional.filter(row=>upper(row.status)==="ACTIVE").map((row,index)=>({row,index})).sort((a,b)=>(n(b.row.createdAt)||0)-(n(a.row.createdAt)||0)||b.index-a.index);
+        for(const {row:tranche} of candidates){
+          if(excess<=tolerance)break;const before=n(tranche.remainingQty)||0;if(!(before>0))continue;
+          const ids=[tranche.pslClientId,tranche.partialTpClientId].filter(Boolean);ids.forEach(id=>{reconciledIds.add(id);if(ownedIds)ownedIds.delete(id);});
+          if(excess+tolerance>=before){
+            tranche.externalCloseQuantity=before;tranche.closedQty=before;tranche.closedPrice=n(this.guide);await this.finishTranche(tranche,"MANUAL_EXTERNAL_CLOSE");excess=Math.max(0,excess-before);continue;
+          }
+          await this.cancelTrancheProtection(tranche);const remaining=calc.normalizeLot(Math.max(0,before-excess),this.filters||{}),closed=Math.max(0,before-remaining);
+          tranche.remainingQty=remaining;tranche.externalCloseQuantity=(n(tranche.externalCloseQuantity)||0)+closed;tranche.lastExternalReductionAt=this.now();tranche.pslOrderId=null;tranche.partialTpOrderId=null;tranche.status="ACTIVE";this.persistTrancheBook();
+          this.logActivity("TRANCHE_EXTERNALLY_REDUCED",{sourceTimeframe:tranche.source,positionState:{direction,trancheId:tranche.trancheId,closedQuantity:closed,remainingQuantity:remaining,...clone(tranche)}});excess=Math.max(0,excess-closed);
+        }
+      }
+      return reconciledIds;
+    }
     async recover(options={}){
       let facts;try{facts=await this.readExchangeFacts();}catch(error){this.status=`ERROR · recovery read failed: ${error&&error.message||error}`;if(this.state!=="ERROR"&&C.transitions[this.state]&&C.transitions[this.state].includes("ERROR"))this.transition("ERROR",this.status);else this.emit("recovery-read-failed");throw error;}
       if(!this.filters){const raw=await this.gateway.filters(this.gateway.symbol());this.filters=normalizedFilters(raw);}
@@ -522,6 +544,8 @@
         return;
       }
       const knownIds=new Set(active.flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.profitLockClientId,row.exitClientId].filter(Boolean))),unknown=owned.filter(order=>!knownIds.has(orderClient(order)));if(unknown.length){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH","POSITION MISMATCH · unknown SCALP orders found");return;}
+      // Resolve known exchange fills before treating any remaining directional deficit as an
+      // external manual close. Otherwise a legitimate tranche PSL/TP fill could be misclassified.
       for(const tranche of active){
         const hasPsl=ownedIds.has(tranche.pslClientId),hasTp=ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}
         const status=await this.queryProtectionStatus(tranche),tpStatus=upper(status.tp&&(status.tp.status??status.tp.orderStatus)),pslStatus=upper(status.psl&&(status.psl.status??status.psl.orderStatus));
@@ -531,10 +555,12 @@
         if(partialExecuted>0){
           tranche.exitExecutedQty=Math.max(n(tranche.exitExecutedQty)||0,partialExecuted);tranche.remainingQty=Math.max(0,(n(tranche.filledQty)||0)-tranche.exitExecutedQty);
           if(!(tranche.remainingQty>0)){tranche.closedPrice=tpExecuted>=pslExecuted?n(status.tp&&status.tp.avgPrice)||n(tranche.partialTpPrice):n(status.psl&&status.psl.avgPrice)||n(tranche.pslPrice);tranche.closedQty=n(tranche.filledQty)||partialExecuted;await this.finishTranche(tranche,tpExecuted>=pslExecuted?"PARTIAL_TP":"PSL");continue;}
-          await this.cancelTrancheProtection(tranche);tranche.pslOrderId=null;tranche.partialTpOrderId=null;await this.ensureTrancheProtection(tranche);continue;
+          await this.cancelTrancheProtection(tranche);ownedIds.delete(tranche.pslClientId);ownedIds.delete(tranche.partialTpClientId);tranche.pslOrderId=null;tranche.partialTpOrderId=null;this.persistTrancheBook();
         }
-        if(!hasPsl)tranche.pslOrderId=null;if(!hasTp)tranche.partialTpOrderId=null;await this.ensureTrancheProtection(tranche,{psl:!hasPsl,tp:!hasTp});
       }
+      active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));await this.reconcileExternalActiveReduction(active,ownedIds);active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));
+      // Only genuine residual exposure reaches protection rebuilding.
+      for(const tranche of active){const hasPsl=ownedIds.has(tranche.pslClientId),hasTp=ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}if(!hasPsl)tranche.pslOrderId=null;if(!hasTp)tranche.partialTpOrderId=null;await this.ensureTrancheProtection(tranche,{psl:!hasPsl,tp:!hasTp});}
       for(const direction of tranches.DIRECTIONS){const expected=tranches.activeQuantity(this.book,direction),live=n(this.position(direction)&&this.position(direction).qty)||0;if(Math.abs(expected-live)>1e-8){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH",`POSITION MISMATCH · ${direction} exchange ${live} vs tranches ${expected}`);return;}}
       this.setExternalPosition(null);this.persistTrancheBook();const counts=this.trancheCounts(),message=counts.LONG+counts.SHORT>0?`ACTIVE · recovered LONG ${counts.LONG} SHORT ${counts.SHORT} · manual ARM required for adds`:"Exchange position reconciled · manual ARM required";if(this.state==="ERROR"||this.state==="POSITION_MISMATCH")this.transition("OFF",message);else{if(this.state!=="ARMED")this.status=message;this.emit(options.reconnect?"reconnected":"recovered");}
     }
