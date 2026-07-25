@@ -93,15 +93,15 @@
   async function testConnection(){
     if(!configured())return {ok:false,reason:"NOT_CONFIGURED",message:"Enter a project URL and anon key, then Save, before testing"};
     if(!getRest())return {ok:false,reason:"REST_UNAVAILABLE",message:"services/rest.service.js (window.restService) is unavailable"};
-    const row={created_at:new Date().toISOString(),symbol:null,action:"CONNECTION_TEST",source_timeframe:null,auto_entered:null,detector_state:null,cascade_agreement:null,position_state:null,device_id:getDeviceId()};
+    const row={created_at:new Date().toISOString(),symbol:null,action:"CONNECTION_TEST",source_timeframe:null,auto_entered:null,detector_state:null,cascade_agreement:null,position_state:null,machine_id:getDeviceId()};
     try{
-      await insertRow("scalp_activity_log",row);
-      return {ok:true,reason:"OK",message:"Success: a test row was written to scalp_activity_log"};
+      await insertRow("scalp_operational",row);
+      return {ok:true,reason:"OK",message:"Success: a test row was written to scalp_operational"};
     }catch(error){
       const status=error&&error.status,data=error&&error.data,detail=data&&typeof data==="object"?(data.message||data.msg||data.hint):null;
       if(status===401)return {ok:false,reason:"UNAUTHORIZED",message:"Rejected (HTTP 401): the anon key is invalid, or was pasted for a different project"};
-      if(status===403)return {ok:false,reason:"FORBIDDEN",message:`Rejected (HTTP 403): reached the project, but its row-level security policy blocked the insert${detail?` — ${detail}`:" -- check the anon INSERT grant on scalp_activity_log"}`};
-      if(status===404)return {ok:false,reason:"NOT_FOUND",message:"Reached the project, but table \"scalp_activity_log\" was not found (HTTP 404) -- check the URL points at the right project"};
+      if(status===403)return {ok:false,reason:"FORBIDDEN",message:`Rejected (HTTP 403): reached the project, but its row-level security policy blocked the insert${detail?` — ${detail}`:" -- check the anon INSERT grant on scalp_operational"}`};
+      if(status===404)return {ok:false,reason:"NOT_FOUND",message:"Reached the project, but table \"scalp_operational\" was not found (HTTP 404) -- check the URL points at the right project"};
       if(Number.isFinite(status))return {ok:false,reason:"HTTP_ERROR",message:`Rejected (HTTP ${status})${detail?`: ${detail}`:""}`};
       return {ok:false,reason:"NETWORK_ERROR",message:`Could not reach ${getUrl()||"the configured URL"} -- check the Project URL for typos (${error&&error.message||String(error)})`};
     }

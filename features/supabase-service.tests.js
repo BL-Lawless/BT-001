@@ -63,12 +63,14 @@ const run=(async()=>{
     assert.equal(result.reason,"OK");
     assert.equal(fetchImpl.calls.length,1);
     const {url,options}=fetchImpl.calls[0];
-    assert.equal(url,"https://myproject.supabase.co/rest/v1/scalp_activity_log");
+    assert.equal(url,"https://myproject.supabase.co/rest/v1/scalp_operational");
     assert.equal(options.method,"POST");
     assert.equal(options.headers.apikey,"anon-key-correct");
     assert.equal(options.headers.Authorization,"Bearer anon-key-correct");
     const sentRow=JSON.parse(options.body);
     assert.equal(sentRow.action,"CONNECTION_TEST");
+    assert.equal(sentRow.machine_id,context.BT001Supabase.getDeviceId());
+    assert(!Object.prototype.hasOwnProperty.call(sentRow,"device_id"));
     assert.equal(context.BT001Supabase.pendingCount(),0,"a successful test must not touch the retry queue");
   }
 
@@ -106,7 +108,7 @@ const run=(async()=>{
     const result=await context.BT001Supabase.testConnection();
     assert.equal(result.ok,false);
     assert.equal(result.reason,"NOT_FOUND");
-    assert(/scalp_activity_log/.test(result.message));
+    assert(/scalp_operational/.test(result.message));
   }
 
   // Typo'd/unreachable URL: fetch itself throws (DNS failure, refused connection, etc).
@@ -129,7 +131,7 @@ const run=(async()=>{
     const {context}=runtime({fetchImpl});
     context.BT001Supabase.saveUrlFromInput({value:"https://myproject.supabase.co"});
     context.BT001Supabase.saveKeyFromInput({value:"anon-key"});
-    const ok=await context.BT001Supabase.log("scalp_activity_log",{action:"ARMED"});
+    const ok=await context.BT001Supabase.log("scalp_operational",{action:"ARMED",machine_id:context.BT001Supabase.getDeviceId()});
     assert.equal(ok,false);
     assert.equal(context.BT001Supabase.pendingCount(),1,"log() must still queue failed rows for retry, unlike testConnection()");
   }

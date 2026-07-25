@@ -220,14 +220,19 @@
       // affect engine state -- a missing/misconfigured Supabase credential, or a network failure
       // (buffered/retried inside services/supabase.service.js), must not change trading behaviour.
       if(typeof window==="undefined"||!window.BT001Supabase||typeof window.BT001Supabase.log!=="function")return;
+      const signalActions=new Set(["DETECTION_QUALIFIED","RANK_REJECTED"]);
+      const positionActions=new Set(["TRANCHE_ADDED","TRANCHE_CLOSED","TRANCHE_RECOVERED","ENTRY_FAILED","EMERGENCY_CLOSE_FAILED","EMERGENCY_CLOSE_SUCCEEDED","PROTECTION_REBUILD_STARTED","PROTECTION_REBUILD_SUCCEEDED","PROTECTION_REBUILD_FAILED","PROTECTION_REBUILD_REFUSED","TRANCHE_EXTERNALLY_REDUCED","PROFIT_LOCK_APPLIED","PROFIT_LOCK_FAILED"]);
+      const operationalActions=new Set(["ARMED","DISARMED","CONNECTION_TEST","DAILY_LOSS_CAP_BREACHED"]);
+      const table=signalActions.has(action)?"scalp_v1_signals":positionActions.has(action)?"scalp_positions":operationalActions.has(action)?"scalp_operational":null;
+      if(!table)return;
       const row={
         created_at:new Date(this.now()).toISOString(),
         symbol:this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null,
         action,source_timeframe:detail.sourceTimeframe??null,auto_entered:false,
         detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),position_state:clone(detail.positionState??null),
-        device_id:typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null
+        machine_id:typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null
       };
-      try{window.BT001Supabase.log("scalp_activity_log",row).catch(()=>{});}catch(_e){}
+      try{window.BT001Supabase.log(table,row).catch(()=>{});}catch(_e){}
     }
     dailyLossSnapshot(){
       const cap=n(this.config.maxDailyAutoLossUsd),accumulatedUsd=this.autoLossState.accumulatedUsd;

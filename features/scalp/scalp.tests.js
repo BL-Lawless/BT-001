@@ -9,6 +9,18 @@ function fakeGateway(overrides={}){let position=null;const calls=[];return {call
 function event(direction="LONG",type="CROSS",id="new-1"){return {source:"1m",eventId:id,freshnessKey:id,eventType:type,direction,eventState:type==="CROSS"?"COMMITTED":"CONFIRMED",qualified:true,projected:false,publishedAt:Date.now()+5};}
 async function run(){
   const {context,build,storage}=runtime(),calc=build.calculations,C=build.config,cases={};
+  const routedLogs=[];context.BT001Supabase={getDeviceId:()=>"machine-routing-test",log:async(table,row)=>{routedLogs.push({table,row});return true;}};
+  const routingEngine=new build.ScalpEngine({gateway:fakeGateway(),storage:new MemoryStorage()});
+  const expectedRoutes={
+    scalp_v1_signals:["DETECTION_QUALIFIED","RANK_REJECTED"],
+    scalp_positions:["TRANCHE_ADDED","TRANCHE_CLOSED","TRANCHE_RECOVERED","ENTRY_FAILED","EMERGENCY_CLOSE_FAILED","EMERGENCY_CLOSE_SUCCEEDED","PROTECTION_REBUILD_STARTED","PROTECTION_REBUILD_SUCCEEDED","PROTECTION_REBUILD_FAILED","PROTECTION_REBUILD_REFUSED","TRANCHE_EXTERNALLY_REDUCED","PROFIT_LOCK_APPLIED","PROFIT_LOCK_FAILED"],
+    scalp_operational:["ARMED","DISARMED","CONNECTION_TEST","DAILY_LOSS_CAP_BREACHED"]
+  };
+  for(const [table,actions]of Object.entries(expectedRoutes))for(const action of actions)routingEngine.logActivity(action);
+  routingEngine.logActivity("UNROUTED_ACTION");
+  assert.equal(routedLogs.length,Object.values(expectedRoutes).flat().length);
+  for(const {table,row}of routedLogs){assert(expectedRoutes[table].includes(row.action));assert.equal(row.machine_id,"machine-routing-test");assert(!Object.prototype.hasOwnProperty.call(row,"device_id"));}
+  assert(!routedLogs.some(item=>item.table==="scalp_activity_log"||item.table==="scalp_v2_signals"));cases.supabaseActivityRoutesByActionWithMachineId=true;
   assert.equal(C.defaults.direction,"ANY");cases.defaultDirAny=true;
   assert.equal(C.defaults.profitLockEnabled,false);assert.equal(C.defaults.lockThresholdPct,50);assert.equal(C.defaults.lockPortionPct,50);cases.profitLockDefaultsOff=true;
   assert.equal(C.defaults.rankBoostEnabled,false);assert.equal(C.defaults.rankBoostThreshold,90);assert.equal(C.defaults.rankBoostPoints,0);cases.rankBoostDefaultsOff=true;
