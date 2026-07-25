@@ -4,7 +4,8 @@ const fs=require("fs");
 const path=require("path");
 
 const repo=path.resolve(__dirname,"..","..");
-const source=fs.readFileSync(path.join(repo,"main.js"),"utf8");
+const source=fs.readFileSync(path.join(repo,"features","pressure-signal","sssc","orchestration.js"),"utf8");
+const mainSource=fs.readFileSync(path.join(repo,"main.js"),"utf8");
 
 function ema(rows,period){
   const alpha=2/(period+1);
@@ -28,8 +29,9 @@ assert(source.includes("Math.ceil(longestPeriod*5)"),"full convergence target mu
 assert(source.includes("privateCandlesByTf"),"SSSC must own private candle state");
 assert(source.includes("fetchPrivateWindow(tf,targets.full)"),"SSSC must fetch its dynamic window directly");
 assert(!source.includes("SHARED_HUB_DEPTH_CLAMP"),"the temporary Stage 2 clamp must be removed");
-const ssscSection=source.slice(source.indexOf("const MODULE='R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3'"),source.indexOf("window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={"));
-assert(!ssscSection.includes("setTimeframeRequirements("),"SSSC must not register shared-hub retention");
-assert(!ssscSection.includes("getAuthoritativeMaSnapshot("),"SSSC must not calculate from shared-hub snapshots");
+assert(!source.includes("setTimeframeRequirements("),"SSSC must not register shared-hub retention");
+assert(!source.includes("getAuthoritativeMaSnapshot("),"SSSC must not calculate from shared-hub snapshots");
+assert(!source.includes("getClosedBuffer(")&&!source.includes("getChartBuffer("),"SSSC orchestration must remain independent of shared buffers");
+assert(!mainSource.includes("function buildDiagnosticSet("),"SSSC diagnostic construction must be extracted from main.js");
 
 console.log("sssc input sizing tests: PASS");

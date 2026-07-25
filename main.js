@@ -22260,24 +22260,12 @@ If there is NO open position, use this Section 2 instead:
   const $=id=>document.getElementById(id);
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,Number(v)||0));
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
-  let visible=false, calcTimer=null, drag=null, privateSocket=null, privateGeneration=0;
-  let data={}, lastFullFetch=0, lastRender=0, currentSymbol='';
-  let privateCandlesByTf={},privateFormingByTf={};
+  let visible=false, drag=null;
+  let data={}, lastFullFetch=0, lastRender=0, pipeline=null;
   let previousMomentumByTf={}, lastRenderedMomentumByTf={}, previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
   let hadCanonicalMaSlots=false;
   function calc(){return window.BT001_SSSC_CALC||null;}
   function hub(){ return window.PUBLIC_MARKET_DATA_HUB || null; }
-  function wsBase(){
-    const raw = String((typeof cfg==="function" && cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream").replace(/\/+$/,"");
-    if(/\/market\/stream$/i.test(raw)) return raw;
-    if(/\/market\/ws$/i.test(raw)) return raw.replace(/\/market\/ws$/i,"/market/stream");
-    if(/\/(?:public|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|private)\/stream$/i,"/market/stream");
-    if(/\/(?:public|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|private)\/ws$/i,"/market/stream");
-    if(/\/stream$/i.test(raw)) return raw.replace(/\/stream$/i,"/market/stream");
-    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/market/stream");
-    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/market/stream");
-    return raw + "/market/stream";
-  }
   function tfLabelToInterval(label){
     const key = String(label || "").trim().toUpperCase();
     const map = {"1M":"1m","3M":"3m","5M":"5m","15M":"15m","1H":"1h","4H":"4h","1D":"1d"};
@@ -22318,15 +22306,6 @@ If there is NO open position, use this Section 2 instead:
   function currentMaPeriods(opts){
     const slots = currentMaSlots(opts);
     return Array.isArray(slots) && slots.length === 5 ? slots.map(slot => slot.period) : null;
-  }
-  function warmupTargets(slots){
-    const periods = Array.isArray(slots) ? slots.map(slot=>Math.max(1,Math.round(Number(slot&&slot.period)||0))).filter(Number.isFinite) : [];
-    const longestPeriod = periods.length ? Math.max(...periods) : Math.max(...DEFAULT_MA_PERIODS);
-    return {
-      longestPeriod,
-      minimum:Math.max(longestPeriod+16,Math.ceil(longestPeriod*3)),
-      full:Math.max(longestPeriod+16,Math.ceil(longestPeriod*5))
-    };
   }
   function pairSlots(slots){
     return [
@@ -22508,41 +22487,6 @@ If there is NO open position, use this Section 2 instead:
     if(!hints.length) return null;
     return {label:hints[0],trial:live};
   }
-  function liveRows(closedRows,formingRow){ if(!Array.isArray(closedRows)||!closedRows.length) return []; if(!formingRow||!Number.isFinite(Number(formingRow.time))) return closedRows.slice(); const out=closedRows.slice(); const last=out[out.length-1]; if(last&&Number(formingRow.time)<=Number(last.time)) return out; out.push({...formingRow}); return out; }
-  function decorateDiagnostic(core,rows){
-    if(!core||!core.available)return core;
-    const vw=vwapCalc(rows),vwapEvent=vw==null?'Unavailable':core.price>vw?(core.direction>=0?'Hold':'Reclaim'):(core.direction>=0?'Loss':'Below');
-    return {...core,vwap:vw,events:{...core.events,vwap:vwapEvent,earlyWarning:'None'}};
-  }
-  function buildDiagnosticSet(label,tf){
-    const slots = currentMaSlots({allowStartupFallback:true});
-    if(!Array.isArray(slots) || slots.length !== 5){
-      return {tf:label,interval:tf,available:false,reason:'ma-slots-unavailable',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
-    }
-    const engine=calc();
-    if(!engine)return {tf:label,interval:tf,available:false,reason:'calculation-module-unavailable'};
-    const targets=warmupTargets(slots);
-    const requested=targets.full;
-    const closedRows=(privateCandlesByTf[tf]||[]).slice(-requested);
-    const forming=privateFormingByTf[tf],liveRowsForTf=LIVE_DIAG_TFS.has(tf)&&forming?closedRows.concat({...forming}).slice(-requested):closedRows.slice();
-    const input={label,interval:tf,slots,minimumRows:targets.minimum,fullRows:targets.full};
-    const confirmedDiagnostic=decorateDiagnostic(engine.calculateTimeframe({...input,rows:closedRows}),closedRows);
-    const liveDiagnostic=decorateDiagnostic(engine.calculateTimeframe({...input,rows:liveRowsForTf}),liveRowsForTf);
-    const warning=engine.deriveEarlyWarning(confirmedDiagnostic,liveDiagnostic);
-    const mode = LIVE_DIAG_TFS.has(tf) && liveRowsForTf.length > closedRows.length ? 'live' : 'confirmed';
-    const active = (LIVE_DIAG_TFS.has(tf) && liveDiagnostic && liveDiagnostic.available) ? liveDiagnostic : confirmedDiagnostic;
-    if(active && active.available){
-      return {
-        ...active,
-        mode:LIVE_DIAG_TFS.has(tf) ? mode : 'confirmed',
-        confirmedDiagnostic,
-        liveDiagnostic,
-        earlyWarning:warning,
-        events:{...active.events,earlyWarning:warning ? warning.label : 'None'}
-      };
-    }
-    return active;
-  }
   function action(dir,pow,clarity,risk){ let hasOpen=false, side=''; try{hasOpen=Array.isArray(openPositionBoxes)&&openPositionBoxes.length>0; side=openPositionBoxes[0]?.side||'';}catch(_e){} if(hasOpen){ if(side==='SHORT'){ if(dir>30)return 'EXIT SHORT'; if(dir>8)return 'TRIM SHORT'; if(dir< -35 && pow>20)return 'ADD SHORT'; return 'HOLD SHORT'; } else { if(dir<-30)return 'EXIT LONG'; if(dir<-8)return 'TRIM LONG'; if(dir>35&&pow>20)return 'ADD LONG'; return 'HOLD LONG'; }} if(clarity<52||risk>72)return 'WAIT'; if(dir>45&&pow>5)return 'FRESH LONG'; if(dir<-45&&pow>5)return 'FRESH SHORT'; return 'WAIT'; }
   function scorePos(score,c){ score=clamp(score,0,100); if(c==='red')return 50-score/2; if(c==='blue')return 50+score/2; return 50; }
   function segStrength(d){ const ratio=Math.min(1,d/32); if(ratio<.25)return 's1'; if(ratio<.50)return 's2'; if(ratio<.80)return 's3'; return 's4'; }
@@ -22610,78 +22554,8 @@ If there is NO open position, use this Section 2 instead:
     grid.innerHTML=`<div class="sssc-ui-detail-box"><b>Values</b>\nPrice: ${fmt(d.price,2)}\nVWAP: ${d.vwap==null?'Unavailable':fmt(d.vwap,2)}\n${emaLines}</div><div class="sssc-ui-detail-box"><b>SSSC</b>\nDirection: ${signed(d.direction)}\nMomentum: ${signed(d.magnitude)}\nStack: ${fmt(d.stackDir,0)}\nSlope dir: ${fmt(d.slopeDir,0)}\nSpread dir: ${fmt(d.sprDir,0)}\nSlope momentum: ${fmt(d.slopePow,0)}\nSpread momentum: ${fmt(d.sprPow,0)}</div><div class="sssc-ui-detail-box"><b>Spreads / Crosses</b>\n${spreadLines}\n\n${crossLines}</div><div class="sssc-ui-detail-box"><b>Events</b>\n${eventLines}</div><div class="sssc-ui-detail-box"><b>Phase</b>\nState: ${d.state}\nPhase: ${d.phase}\nMomentum: ${d.magState}\nRows: ${d.rows}</div><div class="sssc-ui-detail-box"><b>Implication</b>\n${d.direction>35?'Bullish side favored.':d.direction<-35?'Bearish side favored.':'Mixed / wait for acceptance.'}\n${d.magnitude>25?'Current directional force strengthening.':d.magnitude<-25?'Current direction fading.':'Momentum stable / low signal.'}\n3M/1M warnings do not override 15M/1H/4H unless confirming failure/rejection/acceptance.</div>`;
   }
   function bindRows(){ document.querySelectorAll('#ssscDash [data-tf]').forEach(el=>{ if(el.__ssscBound)return; el.__ssscBound=true; el.addEventListener('click',()=>detail(el.dataset.tf)); }); }
-  function privateIntervalSeconds(tf){return {"1m":60,"3m":180,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400}[tf]||60;}
-  function replacePrivateRows(tf,rows,target){
-    const ordered=(Array.isArray(rows)?rows:[]).filter(row=>row&&Number.isFinite(Number(row.time))).sort((a,b)=>Number(a.time)-Number(b.time));
-    const unique=[];for(const row of ordered){if(unique.length&&Number(unique.at(-1).time)===Number(row.time))unique[unique.length-1]={...row};else unique.push({...row});}
-    const last=unique.at(-1),forming=last&&Number(last.time)*1000+privateIntervalSeconds(tf)*1000>Date.now();
-    if(forming)privateFormingByTf[tf]={...unique.pop(),final:false};else delete privateFormingByTf[tf];
-    privateCandlesByTf[tf]=unique.slice(-target);
-  }
-  function upsertPrivateKline(tf,row,closed,target){
-    if(!row)return;
-    if(!closed){privateFormingByTf[tf]={...row,final:false};return;}
-    const rows=privateCandlesByTf[tf]||(privateCandlesByTf[tf]=[]),index=rows.findIndex(item=>Number(item.time)===Number(row.time));
-    if(index>=0)rows[index]={...row,final:true};else rows.push({...row,final:true});
-    rows.sort((a,b)=>Number(a.time)-Number(b.time));while(rows.length>target)rows.shift();
-    if(privateFormingByTf[tf]&&Number(privateFormingByTf[tf].time)<=Number(row.time))delete privateFormingByTf[tf];
-  }
-  async function fetchPrivateWindow(tf,target){
-    let rows=[],cursor=Date.now();
-    while(rows.length<target+1){
-      const remaining=target+1-rows.length,batch=await klinesForInterval(tf,cursor,Math.min(KLINE_LIMIT,remaining),sym());
-      if(!batch.length)break;rows=batch.concat(rows);
-      const oldest=batch[0];if(batch.length<Math.min(KLINE_LIMIT,remaining)||!oldest)break;
-      cursor=Number(oldest.openTime||Number(oldest.time)*1000)-1;
-    }
-    replacePrivateRows(tf,rows,target);
-  }
-  function closePrivateSocket(){if(!privateSocket)return;try{if(typeof privateSocket.disconnect==="function")privateSocket.disconnect();else if(typeof privateSocket.close==="function")privateSocket.close();}catch(_e){}privateSocket=null;}
-  function connectPrivateSocket(target){
-    closePrivateSocket();const token=++privateGeneration,streams=TFS.map(([,tf])=>sym().toLowerCase()+"@kline_"+tf);
-    privateSocket=API.connectWebSocket(wsBase()+"?streams="+streams.join("/"),{reconnect:true,onMessage:event=>{
-      if(token!==privateGeneration)return;let message;try{message=JSON.parse(event.data);message=message&&message.data?message.data:message;}catch(_e){return;}
-      if(!message||message.e!=="kline"||!message.k||message.s!==sym())return;
-      const k=message.k,row={time:Math.floor(Number(k.t)/1000),open:Number(k.o),high:Number(k.h),low:Number(k.l),close:Number(k.c),volume:Number(k.v),baseVolume:Number(k.v),quoteVolume:Number(k.q),openTime:Number(k.t),closeTime:Number(k.T),source:"sssc-ws"};
-      upsertPrivateKline(k.i,row,k.x===true,target);calculate();
-    }});
-  }
-  function calculate(){ const liveSymbol=sym(); if(currentSymbol&&currentSymbol!==liveSymbol){ data={};privateCandlesByTf={};privateFormingByTf={};seedFromHub(true).catch(()=>{});return; } currentSymbol=liveSymbol; for(const [label,tf] of TFS){ const diagnostic=buildDiagnosticSet(label,tf); data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No private data',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; } render(); }
-  async function seedFromHub(_full=false){
-    currentSymbol=sym();
-    const slots=currentMaSlots({allowStartupFallback:true});
-    const targets=warmupTargets(slots);
-    try{
-      await Promise.all(TFS.map(([,tf])=>fetchPrivateWindow(tf,targets.full)));
-    }catch(e){
-      console.warn(MODULE+' private seed failed',e);
-    }
-    for(const [label,tf] of TFS){
-      const diagnostic=buildDiagnosticSet(label,tf);
-      data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
-    }
-    lastFullFetch=Date.now();
-    calculate();
-    connectPrivateSocket(targets.full);
-  }
-  function startLive(){
-    stopLive(false);
-    visible=true;
-    const liveSymbol=sym();
-    if(currentSymbol&&currentSymbol!==liveSymbol){ data={}; }
-    currentSymbol=liveSymbol;
-    seedFromHub(false).catch(e=>console.warn(MODULE+' seed failed',e));
-    if(Object.keys(data).length) render(true);
-    calculate();
-    calcTimer=setInterval(()=>visible&&calculate(),500);
-  }
-  function stopLive(closeWs=true){
-    if(calcTimer) clearInterval(calcTimer);
-    calcTimer=null;
-    if(closeWs){privateGeneration++;closePrivateSocket();}
-  }
-  function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); startLive(); render(true); syncSsscToolbarButton(); }
-  function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); syncSsscToolbarButton(); }
+  function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); render(true); syncSsscToolbarButton(); }
+  function hide(){ visible=false; $('ssscDash').classList.add('hidden'); syncSsscToolbarButton(); }
   function savePanel(){ const p=$('ssscDash'); if(!p)return; const r=p.getBoundingClientRect(); localStorage.setItem(STORE+'panel',JSON.stringify({left:r.left,top:r.top,width:r.width,height:r.height})); }
   function restorePanel(){ const p=$('ssscDash'); if(!p)return; try{ const v=JSON.parse(localStorage.getItem(STORE+'panel')||'null'); if(v){p.style.left=Math.max(6,Math.min(window.innerWidth-100,v.left))+'px';p.style.top=Math.max(6,Math.min(window.innerHeight-80,v.top))+'px';p.style.bottom='auto';p.style.width=Math.max(840,v.width)+'px';p.style.height=Math.max(500,v.height)+'px';} }catch(_e){} }
   function syncSsscToolbarButton(){
@@ -22700,7 +22574,26 @@ If there is NO open position, use this Section 2 instead:
   function installResizeGuard(){ installResizeHandles(); }
   function installResizeHandles(){ const p=$('ssscDash'); if(!p||p.__ssscResizeHandles)return; p.__ssscResizeHandles=true; ['n','s','e','w','ne','nw','se','sw'].forEach(dir=>{ const h=document.createElement('div'); h.className='sssc-resize-handle sssc-resize-'+dir; h.dataset.dir=dir; p.appendChild(h); h.addEventListener('pointerdown',e=>{ e.preventDefault(); e.stopPropagation(); const r=p.getBoundingClientRect(); const start={x:e.clientX,y:e.clientY,left:r.left,top:r.top,w:r.width,h:r.height,dir}; p.classList.add('sssc-resizing'); try{h.setPointerCapture(e.pointerId)}catch(_e){} const move=ev=>{ const dx=ev.clientX-start.x, dy=ev.clientY-start.y; let left=start.left, top=start.top, w=start.w, hgt=start.h; const minW=760,minH=440; if(start.dir.includes('e')) w=start.w+dx; if(start.dir.includes('s')) hgt=start.h+dy; if(start.dir.includes('w')){ w=start.w-dx; left=start.left+dx; } if(start.dir.includes('n')){ hgt=start.h-dy; top=start.top+dy; } if(w<minW){ if(start.dir.includes('w')) left-=minW-w; w=minW; } if(hgt<minH){ if(start.dir.includes('n')) top-=minH-hgt; hgt=minH; } left=clamp(left,6,window.innerWidth-80); top=clamp(top,6,window.innerHeight-60); w=Math.min(w,window.innerWidth-left-6); hgt=Math.min(hgt,window.innerHeight-top-6); p.style.left=left+'px'; p.style.top=top+'px'; p.style.bottom='auto'; p.style.width=w+'px'; p.style.height=hgt+'px'; }; const up=ev=>{ document.removeEventListener('pointermove',move,true); document.removeEventListener('pointerup',up,true); document.removeEventListener('pointercancel',up,true); p.classList.remove('sssc-resizing'); try{h.releasePointerCapture(ev.pointerId)}catch(_e){} savePanel(); }; document.addEventListener('pointermove',move,true); document.addEventListener('pointerup',up,true); document.addEventListener('pointercancel',up,true); },true); }); }
   function installDrag(){ const p=$('ssscDash'), h=$('ssscDashHead'); if(!p||!h||h.__ssscDrag)return; h.__ssscDrag=true; h.addEventListener('pointerdown',e=>{ if(e.target.closest('button')||e.target.closest('.sssc-resize-handle'))return; const r=p.getBoundingClientRect(); drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top}; h.setPointerCapture(e.pointerId); e.preventDefault(); }); h.addEventListener('pointermove',e=>{ if(!drag)return; p.style.left=clamp(drag.left+e.clientX-drag.x,6,window.innerWidth-80)+'px'; p.style.top=clamp(drag.top+e.clientY-drag.y,6,window.innerHeight-60)+'px'; p.style.bottom='auto'; }); const end=e=>{ if(drag){drag=null; savePanel(); try{h.releasePointerCapture(e.pointerId)}catch(_e){}}}; h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end); if(typeof ResizeObserver!=='undefined'){ new ResizeObserver(()=>visible&&savePanel()).observe(p); } }
-  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>seedFromHub(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); restorePanel(); }
+  function ensurePipeline(){
+    if(pipeline)return pipeline;
+    const orchestration=window.BT001_SSSC_ORCHESTRATION;
+    if(!orchestration||typeof orchestration.createOrchestration!=='function'){console.warn(MODULE+' orchestration module unavailable');return null;}
+    pipeline=orchestration.createOrchestration({
+      tfs:TFS,
+      liveTfs:[...LIVE_DIAG_TFS],
+      getSlots:currentMaSlots,
+      getCalculation:calc,
+      getSymbol:sym,
+      fetchKlines:(tf,cursor,limit,symbol)=>klinesForInterval(tf,cursor,Math.min(KLINE_LIMIT,limit),symbol),
+      connectWebSocket:(url,options)=>API.connectWebSocket(url,options),
+      getWsUrl:()=>String((typeof cfg==="function"&&cfg()&&cfg().ws)||"wss://fstream.binance.com/market/stream"),
+      klineLimit:KLINE_LIMIT,
+      onUpdate:state=>{data=state.data;lastFullFetch=state.lastFullFetch;render();},
+      warn:(message,error)=>console.warn(MODULE+' '+message,error)
+    });
+    return pipeline;
+  }
+  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); }
 
   if(window.BT001SettingsTabs&&!window.__ssscR3SettingsOpenBound){ window.__ssscR3SettingsOpenBound=true; window.BT001SettingsTabs.subscribe(event=>{ if(event.type==="opened") syncSsscToolbarButton(); }); }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
@@ -22708,10 +22601,10 @@ If there is NO open position, use this Section 2 instead:
     version:MODULE,
     show,
     hide,
-    refresh:()=>seedFromHub(true),
+    refresh:()=>ensurePipeline()?.refresh(true),
     diagnose(label,tf,rows){
-      const slots=currentMaSlots({allowStartupFallback:true}),targets=warmupTargets(slots),fixedRows=(Array.isArray(rows)?rows:[]).slice(-targets.full);
-      return decorateDiagnostic(calc().calculateTimeframe({label,interval:tf,rows:fixedRows,slots,minimumRows:targets.minimum,fullRows:targets.full}),fixedRows);
+      const slots=currentMaSlots({allowStartupFallback:true}),targets=window.BT001_SSSC_ORCHESTRATION.warmupTargets(slots),fixedRows=(Array.isArray(rows)?rows:[]).slice(-targets.full);
+      return calc().calculateTimeframe({label,interval:tf,rows:fixedRows,slots,minimumRows:targets.minimum,fullRows:targets.full});
     },
     getDiagnosticForTf(tfKey){
       const label = intervalToTfLabel(tfLabelToInterval(tfKey) || String(tfKey || "").toLowerCase());
