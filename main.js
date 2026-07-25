@@ -3691,9 +3691,12 @@ const marketDataHub = (() => {
       Number.isFinite(Number(options.requiredRows)) ? Math.max(1,Math.round(Number(options.requiredRows))) : 0,
       maxPeriod + 10
     );
+    const maxRows = Number.isFinite(Number(options.maxRows))
+      ? Math.max(requiredRows,Math.round(Number(options.maxRows)))
+      : 0;
     const includeForming = options.includeForming !== false;
     const revisions = getTimeframeRevisions(interval);
-    const cacheKey = [revisions.symbol,interval,includeForming ? "live" : "closed",periods.join("-"),requiredRows,revisions.closedRevision,includeForming ? revisions.formingRevision : "-"].join("|");
+    const cacheKey = [revisions.symbol,interval,includeForming ? "live" : "closed",periods.join("-"),requiredRows,maxRows || "all",revisions.closedRevision,includeForming ? revisions.formingRevision : "-"].join("|");
     const bypassCache = options.bypassCache === true;
     const cached = bypassCache ? null : state.maSnapshotCache.get(cacheKey);
     if(cached){
@@ -3707,10 +3710,11 @@ const marketDataHub = (() => {
     }
     const sourceType = includeForming ? "getChartBuffer" : "getClosedBuffer";
     const sourceRows = includeForming ? getChartBuffer(interval) : getClosedBuffer(interval);
-    const rows = (Array.isArray(sourceRows) ? sourceRows : [])
+    const normalizedRows = (Array.isArray(sourceRows) ? sourceRows : [])
       .filter(row => row && Number.isFinite(Number(row.time)) && Number.isFinite(Number(row.close)))
       .map(cloneRow)
       .sort((a,b) => Number(a.time) - Number(b.time));
+    const rows = maxRows ? normalizedRows.slice(-maxRows) : normalizedRows;
     const seriesBySlot = {};
     const alignedBySlot = {};
     const valuesBySlot = {};
@@ -3754,6 +3758,7 @@ const marketDataHub = (() => {
       valuesValid,
       warmupCount,
       requiredRows,
+      maxRows:maxRows || null,
       reliable,
       reason
     };
@@ -8556,24 +8561,17 @@ startTradeAuto();
 
 
   /* =======================================================
-     V13_01 — TOPBAR BUTTON INJECTION
+     V13_01 — SETTINGS ENTRY
   ======================================================= */
 
-  function v13InstallTopButtons(){
-    const topbar = document.querySelector(".topbar");
-    const apiBtn = document.getElementById("apiKeysBtn");
-
-    if(!topbar || !apiBtn) return;
-
-    v13LabBtn = document.createElement("button");
-    v13LabBtn.id = "v13LabBtn";
-    v13LabBtn.className = "v13-btn";
-    v13LabBtn.textContent = "Strategy Lab";
-    v13LabBtn.title = "Open Strategy Lab";
-
-    apiBtn.insertAdjacentElement("afterend", v13LabBtn);
-
-    v13LabBtn.addEventListener("click", v13OpenLab);
+  function v13InstallSettingsButton(){
+    v13LabBtn = q("v13LabBtn");
+    if(!v13LabBtn || v13LabBtn.__v13Bound) return;
+    v13LabBtn.__v13Bound = true;
+    v13LabBtn.addEventListener("click", () => {
+      try{ if(typeof closeSettings === "function") closeSettings(); }catch(_e){}
+      v13OpenLab();
+    });
   }
 
 
@@ -9675,7 +9673,7 @@ startTradeAuto();
      V13_01 — STARTUP
   ======================================================= */
 
-  v13InstallTopButtons();
+  v13InstallSettingsButton();
   v13RestoreGpt();
   v13RestoreStrategy();
   v13BindEvents();
@@ -22542,17 +22540,30 @@ If there is NO open position, use this Section 2 instead:
   'use strict';
   const MODULE='R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3';
   const STORE='btc_futures_chart_r13_sssc_proto_v1_';
-  const TFS=[['1D','1d',SSSC_TARGET_CLOSED_CANDLES],['4H','4h',SSSC_TARGET_CLOSED_CANDLES],['1H','1h',SSSC_TARGET_CLOSED_CANDLES],['15M','15m',SSSC_TARGET_CLOSED_CANDLES],['5M','5m',SSSC_TARGET_CLOSED_CANDLES],['3M','3m',SSSC_TARGET_CLOSED_CANDLES],['1M','1m',SSSC_TARGET_CLOSED_CANDLES]];
+  const TFS=[['1D','1d'],['4H','4h'],['1H','1h'],['15M','15m'],['5M','5m'],['3M','3m'],['1M','1m']];
   const LIVE_DIAG_TFS=new Set(['15m','5m','3m','1m']);
   const DEFAULT_MA_PERIODS=[9,21,55,100,200];
   const $=id=>document.getElementById(id);
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,Number(v)||0));
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
-  let visible=false, calcTimer=null, drag=null;
+  let visible=false, calcTimer=null, drag=null, privateSocket=null, privateGeneration=0;
   let data={}, lastFullFetch=0, lastRender=0, currentSymbol='';
+  let privateCandlesByTf={},privateFormingByTf={};
   let previousMomentumByTf={}, lastRenderedMomentumByTf={}, previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
   let hadCanonicalMaSlots=false;
+  function calc(){return window.BT001_SSSC_CALC||null;}
   function hub(){ return window.PUBLIC_MARKET_DATA_HUB || null; }
+  function wsBase(){
+    const raw = String((typeof cfg==="function" && cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream").replace(/\/+$/,"");
+    if(/\/market\/stream$/i.test(raw)) return raw;
+    if(/\/market\/ws$/i.test(raw)) return raw.replace(/\/market\/ws$/i,"/market/stream");
+    if(/\/(?:public|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|private)\/stream$/i,"/market/stream");
+    if(/\/(?:public|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|private)\/ws$/i,"/market/stream");
+    if(/\/stream$/i.test(raw)) return raw.replace(/\/stream$/i,"/market/stream");
+    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/market/stream");
+    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/market/stream");
+    return raw + "/market/stream";
+  }
   function tfLabelToInterval(label){
     const key = String(label || "").trim().toUpperCase();
     const map = {"1M":"1m","3M":"3m","5M":"5m","15M":"15m","1H":"1h","4H":"4h","1D":"1d"};
@@ -22593,6 +22604,15 @@ If there is NO open position, use this Section 2 instead:
   function currentMaPeriods(opts){
     const slots = currentMaSlots(opts);
     return Array.isArray(slots) && slots.length === 5 ? slots.map(slot => slot.period) : null;
+  }
+  function warmupTargets(slots){
+    const periods = Array.isArray(slots) ? slots.map(slot=>Math.max(1,Math.round(Number(slot&&slot.period)||0))).filter(Number.isFinite) : [];
+    const longestPeriod = periods.length ? Math.max(...periods) : Math.max(...DEFAULT_MA_PERIODS);
+    return {
+      longestPeriod,
+      minimum:Math.max(longestPeriod+16,Math.ceil(longestPeriod*3)),
+      full:Math.max(longestPeriod+16,Math.ceil(longestPeriod*5))
+    };
   }
   function pairSlots(slots){
     return [
@@ -22656,13 +22676,14 @@ If there is NO open position, use this Section 2 instead:
   function crossState(fast,slow){ const len=Math.min(fast.length,slow.length); if(len<3)return {label:'None',age:null,dir:0,quality:0,forming:false}; const fa=fast[fast.length-1].value, sa=slow[slow.length-1].value, fp=fast[fast.length-2].value, sp=slow[slow.length-2].value; const dist=(fa-sa); let lastCross=null; for(let i=1;i<len;i++){const a0=fast[fast.length-len+i-1].value-slow[slow.length-len+i-1].value; const a1=fast[fast.length-len+i].value-slow[slow.length-len+i].value; if(a0<=0&&a1>0)lastCross={age:len-i-1,dir:1}; if(a0>=0&&a1<0)lastCross={age:len-i-1,dir:-1};} if(fp<=sp&&fa>sa)return {label:'Bull X Fresh',age:0,dir:1,quality:85}; if(fp>=sp&&fa<sa)return {label:'Bear X Fresh',age:0,dir:-1,quality:85}; if(Math.abs(dist/((sa||1)))<0.00035)return {label:(dist>=0?'Bull':'Bear')+' forming',age:null,dir:dist>=0?1:-1,quality:35,forming:true}; if(lastCross){const stale=lastCross.age>24;return {label:(lastCross.dir>0?'Bull X ':'Bear X ')+(stale?'Old':'Confirmed'),age:lastCross.age,dir:lastCross.dir,quality:stale?25:60};} return {label:'None',age:null,dir:0,quality:0}; }
   function eventForLevel(price,emaVal,dir){ if(price==null||emaVal==null)return 'n/a'; const d=(price-emaVal)/price*10000; if(Math.abs(d)<8)return 'Retest'; if(dir>=0&&price>emaVal)return 'Hold'; if(dir<0&&price<emaVal)return 'Reject'; return dir>=0?'Loss':'Reclaim'; }
   function clusterState(vals,price){ const spread=(Math.max(...vals)-Math.min(...vals))/(price||vals[0])*10000; if(spread<18)return 'Chop'; if(spread<42)return 'Compressing'; return 'Expanded'; }
-  function diagnose(label,tf,rows,snapshot){
+  function diagnose(label,tf,rows,snapshot,targets){
     if(!rows||!rows.length) return {tf:label,interval:tf,available:false,reason:'Unavailable'};
     const slots = currentMaSlots({allowStartupFallback:true});
     if(!Array.isArray(slots) || slots.length !== 5){
       return {tf:label,interval:tf,available:false,reason:'ma-slots-unavailable'};
     }
-    if(rows.length<SSSC_MIN_CLOSED_CANDLES){
+    const warmup=targets||warmupTargets(slots);
+    if(rows.length<warmup.minimum){
       return {tf:label,interval:tf,available:false,reason:'warmup-limited',rows:rows.length,reliability:'insufficient-warmup',warmupLimited:true};
     }
     if(!snapshot){
@@ -22747,7 +22768,7 @@ If there is NO open position, use this Section 2 instead:
       pairs,
       events,
       earlyWarning:null,
-      reliability:rows.length>=SSSC_TARGET_CLOSED_CANDLES?'full-warmup':'minimum-warmup',
+      reliability:rows.length>=warmup.full?'full-warmup':'minimum-warmup',
       warmupLimited:false,
       maSource:snapshot ? {
         sourceType:snapshot.sourceType,
@@ -22774,39 +22795,37 @@ If there is NO open position, use this Section 2 instead:
     return {label:hints[0],trial:live};
   }
   function liveRows(closedRows,formingRow){ if(!Array.isArray(closedRows)||!closedRows.length) return []; if(!formingRow||!Number.isFinite(Number(formingRow.time))) return closedRows.slice(); const out=closedRows.slice(); const last=out[out.length-1]; if(last&&Number(formingRow.time)<=Number(last.time)) return out; out.push({...formingRow}); return out; }
-  function buildDiagnosticSet(label,tf,count,h){
-    const requested = Math.max(count || 0,SSSC_MIN_CLOSED_CANDLES);
+  function decorateDiagnostic(core,rows){
+    if(!core||!core.available)return core;
+    const vw=vwapCalc(rows),vwapEvent=vw==null?'Unavailable':core.price>vw?(core.direction>=0?'Hold':'Reclaim'):(core.direction>=0?'Loss':'Below');
+    return {...core,vwap:vw,events:{...core.events,vwap:vwapEvent,earlyWarning:'None'}};
+  }
+  function buildDiagnosticSet(label,tf){
     const slots = currentMaSlots({allowStartupFallback:true});
     if(!Array.isArray(slots) || slots.length !== 5){
       return {tf:label,interval:tf,available:false,reason:'ma-slots-unavailable',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
     }
-    const useSnapshot = h && typeof h.getAuthoritativeMaSnapshot === "function";
-    const confirmedSnapshot = useSnapshot
-      ? h.getAuthoritativeMaSnapshot(tf,{slots,includeForming:false,requiredRows:requested})
-      : null;
-    if(!confirmedSnapshot || !Array.isArray(confirmedSnapshot.rows) || !confirmedSnapshot.rows.length){
-      return {tf:label,interval:tf,available:false,reason:'ma-snapshot-unavailable',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
-    }
-    const closedRows = confirmedSnapshot.rows.slice(-requested);
-
-    const liveSnapshot = LIVE_DIAG_TFS.has(tf) && useSnapshot
-      ? h.getAuthoritativeMaSnapshot(tf,{slots,includeForming:true,requiredRows:requested})
-      : null;
-    const liveRowsForTf = LIVE_DIAG_TFS.has(tf)
-      ? (liveSnapshot && Array.isArray(liveSnapshot.rows) ? liveSnapshot.rows.slice(-requested) : closedRows.slice())
-      : closedRows.slice();
-
-    const confirmedDiagnostic = diagnose(label,tf,closedRows,confirmedSnapshot);
-    const liveDiagnostic = diagnose(label,tf,liveRowsForTf,liveSnapshot || confirmedSnapshot);
-    const warning = deriveEarlyWarning(confirmedDiagnostic,liveDiagnostic);
+    const engine=calc();
+    if(!engine)return {tf:label,interval:tf,available:false,reason:'calculation-module-unavailable'};
+    const targets=warmupTargets(slots);
+    const requested=targets.full;
+    const closedRows=(privateCandlesByTf[tf]||[]).slice(-requested);
+    const forming=privateFormingByTf[tf],liveRowsForTf=LIVE_DIAG_TFS.has(tf)&&forming?closedRows.concat({...forming}).slice(-requested):closedRows.slice();
+    const input={label,interval:tf,slots,minimumRows:targets.minimum,fullRows:targets.full};
+    const confirmedDiagnostic=decorateDiagnostic(engine.calculateTimeframe({...input,rows:closedRows}),closedRows);
+    const liveDiagnostic=decorateDiagnostic(engine.calculateTimeframe({...input,rows:liveRowsForTf}),liveRowsForTf);
+    const warning=engine.deriveEarlyWarning(confirmedDiagnostic,liveDiagnostic);
     const mode = LIVE_DIAG_TFS.has(tf) && liveRowsForTf.length > closedRows.length ? 'live' : 'confirmed';
     const active = (LIVE_DIAG_TFS.has(tf) && liveDiagnostic && liveDiagnostic.available) ? liveDiagnostic : confirmedDiagnostic;
     if(active && active.available){
-      active.mode = LIVE_DIAG_TFS.has(tf) ? mode : 'confirmed';
-      active.confirmedDiagnostic = confirmedDiagnostic;
-      active.liveDiagnostic = liveDiagnostic;
-      active.earlyWarning = warning;
-      active.events.earlyWarning = warning ? warning.label : 'None';
+      return {
+        ...active,
+        mode:LIVE_DIAG_TFS.has(tf) ? mode : 'confirmed',
+        confirmedDiagnostic,
+        liveDiagnostic,
+        earlyWarning:warning,
+        events:{...active.events,earlyWarning:warning ? warning.label : 'None'}
+      };
     }
     return active;
   }
@@ -22841,7 +22860,18 @@ If there is NO open position, use this Section 2 instead:
   function settleScoreRoll(items){ for(const it of items){ if(!it||!it.available) continue; const tf=it.tf; previousScoreValueByTf[tf]=lastRenderedScoreByTf[tf]; pendingScoreRollByTf[tf]=false; } }
   function magClass(v){ return v>20?'sssc-ui-blue':v<-20?'sssc-ui-red':'sssc-ui-gray'; }
   function rowHtml(d){ if(!d||!d.available)return `<div class="sssc-ui-row"><div class="sssc-ui-tf">${d?d.tf:'-'}</div><div class="sssc-ui-dir">Unavailable</div><div>-</div><div>-</div><div class="sssc-ui-score">-</div><div class="sssc-ui-power-state">${d?.reason||'-'}</div></div>`; const strCls=strengthClass(d.direction); const scCls=scoreClass(d.direction); const phCls=phaseClass(d.phase); const scoreVal=Math.abs(Math.round(d.direction)); const fromScore=pendingScoreRollByTf[d.tf]?previousScoreValueByTf[d.tf]:scoreVal; return `<div class="sssc-ui-row" data-tf="${d.tf}"><div class="sssc-ui-tf">${d.tf}</div><div><div class="sssc-ui-dir"><span class="sssc-dir-state">${dirLabel(d.direction)}</span> | <span class="sssc-dir-value ${strCls}">${scoreVal}</span></div><div class="sssc-ui-phase ${phCls}">${d.phase}</div></div><div class="sssc-ribbon">${ribbonSegments(d.direction)}</div><div class="sssc-gauge-wrap">${powerGauge(d.magnitude,d.tf)}</div><div class="sssc-ui-score ${scCls}">${rollingDigits(scoreVal,fromScore,'score','',{width:2})}</div><div><div class="sssc-ui-power-state ${magClass(d.magnitude)}">${d.magState}</div></div></div>`; }
-  function render(force=false){ if(!force && Date.now()-lastRender<500)return; lastRender=Date.now(); const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'}); updatePreviousMomentum(items); updatePreviousScores(items); const avail=items.filter(x=>x.available); const dir=avg(avail,'direction'); const pow=avg(avail,'magnitude'); const align=avail.length/items.length; const clarity=clamp(Math.abs(dir)*0.42+(100-Math.abs(pow))*0.12+align*42,0,100); const risk=clamp(100-clarity+(avail.slice(-2).some(x=>x.available&&Math.sign(x.direction)!==Math.sign(dir))?14:0),0,100); const act=action(dir,pow,clarity,risk); const dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED'; const dirCls=strengthClass(dir); const powCls=pow>20?'blue':pow<-20?'red':'gray'; const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`, momVal=signed(pow), clarityVal=Math.round(clarity)+'%', riskVal=Math.round(risk)+'%'; const topNode=$('ssscDashTop'); const rowsNode=$('ssscDashRows'); topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('MOMENTUM',`<span class="${blinkClass('kpi_mom',momVal)}">${momVal}</span>`,pow>20?'Expansion improving':pow<-20?'Momentum fading':'Neutral',powCls)+kpi('CLARITY',`<span class="${blinkClass('kpi_clarity',clarityVal)}">${clarityVal}</span>`,clarity>62?'Clean enough to read':'Signal needs caution',clarity>62?'green':'gray')+kpi('EXECUTION RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('ACTION',act,actionComment(act),'', 'action'); rowsNode.innerHTML=items.map(rowHtml).join(''); $('ssscDashEvents').innerHTML=eventRows(items); animateRollingDigits(rowsNode); settleScoreRoll(items); bindRows(); const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable')); const h=hub(); const wsTick=h&&h.diag?h.diag.lastWsTickTime:0; const wsAge=wsTick?Math.round((Date.now()-wsTick)/1000)+'s':'never'; $('ssscDashFooter').innerHTML=`Module: ${MODULE} | WS age: ${wsAge} | REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500-1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`; }
+  function render(force=false){
+    if(!force&&Date.now()-lastRender<500)return;lastRender=Date.now();
+    const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'});updatePreviousMomentum(items);updatePreviousScores(items);
+    const summary=calc()?.aggregate(items)||{direction:0,magnitude:0,clarity:0,risk:100},dir=summary.direction,pow=summary.magnitude,clarity=summary.clarity,risk=summary.risk;
+    // Position-aware orchestration intentionally stays outside the pure SSSC calculation module.
+    const act=action(dir,pow,clarity,risk),dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED',dirCls=strengthClass(dir),powCls=pow>20?'blue':pow<-20?'red':'gray';
+    const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`,momVal=signed(pow),clarityVal=Math.round(clarity)+'%',riskVal=Math.round(risk)+'%',topNode=$('ssscDashTop'),rowsNode=$('ssscDashRows');
+    topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('MOMENTUM',`<span class="${blinkClass('kpi_mom',momVal)}">${momVal}</span>`,pow>20?'Expansion improving':pow<-20?'Momentum fading':'Neutral',powCls)+kpi('CLARITY',`<span class="${blinkClass('kpi_clarity',clarityVal)}">${clarityVal}</span>`,clarity>62?'Clean enough to read':'Signal needs caution',clarity>62?'green':'gray')+kpi('EXECUTION RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('ACTION',act,actionComment(act),'','action');
+    rowsNode.innerHTML=items.map(rowHtml).join('');$('ssscDashEvents').innerHTML=eventRows(items);animateRollingDigits(rowsNode);settleScoreRoll(items);bindRows();
+    const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable'));
+    $('ssscDashFooter').innerHTML=`Module: ${MODULE} | Private REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500-1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`;
+  }
   function detail(tf){
     const d=data[tf];
     const box=$('ssscDashDetail'), title=$('ssscDashDetailTitle'), grid=$('ssscDashDetailGrid');
@@ -22866,23 +22896,59 @@ If there is NO open position, use this Section 2 instead:
     grid.innerHTML=`<div class="sssc-ui-detail-box"><b>Values</b>\nPrice: ${fmt(d.price,2)}\nVWAP: ${d.vwap==null?'Unavailable':fmt(d.vwap,2)}\n${emaLines}</div><div class="sssc-ui-detail-box"><b>SSSC</b>\nDirection: ${signed(d.direction)}\nMomentum: ${signed(d.magnitude)}\nStack: ${fmt(d.stackDir,0)}\nSlope dir: ${fmt(d.slopeDir,0)}\nSpread dir: ${fmt(d.sprDir,0)}\nSlope momentum: ${fmt(d.slopePow,0)}\nSpread momentum: ${fmt(d.sprPow,0)}</div><div class="sssc-ui-detail-box"><b>Spreads / Crosses</b>\n${spreadLines}\n\n${crossLines}</div><div class="sssc-ui-detail-box"><b>Events</b>\n${eventLines}</div><div class="sssc-ui-detail-box"><b>Phase</b>\nState: ${d.state}\nPhase: ${d.phase}\nMomentum: ${d.magState}\nRows: ${d.rows}</div><div class="sssc-ui-detail-box"><b>Implication</b>\n${d.direction>35?'Bullish side favored.':d.direction<-35?'Bearish side favored.':'Mixed / wait for acceptance.'}\n${d.magnitude>25?'Current directional force strengthening.':d.magnitude<-25?'Current direction fading.':'Momentum stable / low signal.'}\n3M/1M warnings do not override 15M/1H/4H unless confirming failure/rejection/acceptance.</div>`;
   }
   function bindRows(){ document.querySelectorAll('#ssscDash [data-tf]').forEach(el=>{ if(el.__ssscBound)return; el.__ssscBound=true; el.addEventListener('click',()=>detail(el.dataset.tf)); }); }
-  function calculate(){ const h=hub(); const liveSymbol=sym(); if(currentSymbol&&currentSymbol!==liveSymbol){ data={}; } currentSymbol=liveSymbol; for(const [label,tf,count] of TFS){ const diagnostic=buildDiagnosticSet(label,tf,count,h); data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; } render(); }
-  async function seedFromHub(full=false){
-    const h=hub();
-    if(!h) return;
+  function privateIntervalSeconds(tf){return {"1m":60,"3m":180,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400}[tf]||60;}
+  function replacePrivateRows(tf,rows,target){
+    const ordered=(Array.isArray(rows)?rows:[]).filter(row=>row&&Number.isFinite(Number(row.time))).sort((a,b)=>Number(a.time)-Number(b.time));
+    const unique=[];for(const row of ordered){if(unique.length&&Number(unique.at(-1).time)===Number(row.time))unique[unique.length-1]={...row};else unique.push({...row});}
+    const last=unique.at(-1),forming=last&&Number(last.time)*1000+privateIntervalSeconds(tf)*1000>Date.now();
+    if(forming)privateFormingByTf[tf]={...unique.pop(),final:false};else delete privateFormingByTf[tf];
+    privateCandlesByTf[tf]=unique.slice(-target);
+  }
+  function upsertPrivateKline(tf,row,closed,target){
+    if(!row)return;
+    if(!closed){privateFormingByTf[tf]={...row,final:false};return;}
+    const rows=privateCandlesByTf[tf]||(privateCandlesByTf[tf]=[]),index=rows.findIndex(item=>Number(item.time)===Number(row.time));
+    if(index>=0)rows[index]={...row,final:true};else rows.push({...row,final:true});
+    rows.sort((a,b)=>Number(a.time)-Number(b.time));while(rows.length>target)rows.shift();
+    if(privateFormingByTf[tf]&&Number(privateFormingByTf[tf].time)<=Number(row.time))delete privateFormingByTf[tf];
+  }
+  async function fetchPrivateWindow(tf,target){
+    let rows=[],cursor=Date.now();
+    while(rows.length<target+1){
+      const remaining=target+1-rows.length,batch=await klinesForInterval(tf,cursor,Math.min(KLINE_LIMIT,remaining),sym());
+      if(!batch.length)break;rows=batch.concat(rows);
+      const oldest=batch[0];if(batch.length<Math.min(KLINE_LIMIT,remaining)||!oldest)break;
+      cursor=Number(oldest.openTime||Number(oldest.time)*1000)-1;
+    }
+    replacePrivateRows(tf,rows,target);
+  }
+  function closePrivateSocket(){if(!privateSocket)return;try{if(typeof privateSocket.disconnect==="function")privateSocket.disconnect();else if(typeof privateSocket.close==="function")privateSocket.close();}catch(_e){}privateSocket=null;}
+  function connectPrivateSocket(target){
+    closePrivateSocket();const token=++privateGeneration,streams=TFS.map(([,tf])=>sym().toLowerCase()+"@kline_"+tf);
+    privateSocket=API.connectWebSocket(wsBase()+"?streams="+streams.join("/"),{reconnect:true,onMessage:event=>{
+      if(token!==privateGeneration)return;let message;try{message=JSON.parse(event.data);message=message&&message.data?message.data:message;}catch(_e){return;}
+      if(!message||message.e!=="kline"||!message.k||message.s!==sym())return;
+      const k=message.k,row={time:Math.floor(Number(k.t)/1000),open:Number(k.o),high:Number(k.h),low:Number(k.l),close:Number(k.c),volume:Number(k.v),baseVolume:Number(k.v),quoteVolume:Number(k.q),openTime:Number(k.t),closeTime:Number(k.T),source:"sssc-ws"};
+      upsertPrivateKline(k.i,row,k.x===true,target);calculate();
+    }});
+  }
+  function calculate(){ const liveSymbol=sym(); if(currentSymbol&&currentSymbol!==liveSymbol){ data={};privateCandlesByTf={};privateFormingByTf={};seedFromHub(true).catch(()=>{});return; } currentSymbol=liveSymbol; for(const [label,tf] of TFS){ const diagnostic=buildDiagnosticSet(label,tf); data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No private data',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'}; } render(); }
+  async function seedFromHub(_full=false){
     currentSymbol=sym();
+    const slots=currentMaSlots({allowStartupFallback:true});
+    const targets=warmupTargets(slots);
     try{
-      if(typeof h.ensureSsscBuffers==='function') await h.ensureSsscBuffers(full);
-      else for(const [,tf,count] of TFS) await h.seedBuffer(tf,count,full);
+      await Promise.all(TFS.map(([,tf])=>fetchPrivateWindow(tf,targets.full)));
     }catch(e){
-      console.warn(MODULE+' hub seed failed',e);
+      console.warn(MODULE+' private seed failed',e);
     }
     for(const [label,tf] of TFS){
-      const diagnostic=buildDiagnosticSet(label,tf,SSSC_TARGET_CLOSED_CANDLES,h);
+      const diagnostic=buildDiagnosticSet(label,tf);
       data[label]=diagnostic||{tf:label,interval:tf,available:false,reason:'No buffer',mode:LIVE_DIAG_TFS.has(tf)?'live':'confirmed'};
     }
     lastFullFetch=Date.now();
     calculate();
+    connectPrivateSocket(targets.full);
   }
   function startLive(){
     stopLive(false);
@@ -22890,11 +22956,7 @@ If there is NO open position, use this Section 2 instead:
     const liveSymbol=sym();
     if(currentSymbol&&currentSymbol!==liveSymbol){ data={}; }
     currentSymbol=liveSymbol;
-    const h=hub();
-    if(h){
-      h.setSsscVisible(true);
-      seedFromHub(false).catch(e=>console.warn(MODULE+' seed failed',e));
-    }
+    seedFromHub(false).catch(e=>console.warn(MODULE+' seed failed',e));
     if(Object.keys(data).length) render(true);
     calculate();
     calcTimer=setInterval(()=>visible&&calculate(),500);
@@ -22902,44 +22964,41 @@ If there is NO open position, use this Section 2 instead:
   function stopLive(closeWs=true){
     if(calcTimer) clearInterval(calcTimer);
     calcTimer=null;
-    if(closeWs){
-      const h=hub();
-      if(h) h.setSsscVisible(false);
-    }
+    if(closeWs){privateGeneration++;closePrivateSocket();}
   }
-  function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); startLive(); render(true); installSsscSettingsPlaceholder(); }
-  function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); installSsscSettingsPlaceholder(); }
+  function show(){ visible=true; $('ssscDash').classList.remove('hidden'); restorePanel(); startLive(); render(true); syncSsscToolbarButton(); }
+  function hide(){ visible=false; $('ssscDash').classList.add('hidden'); stopLive(true); syncSsscToolbarButton(); }
   function savePanel(){ const p=$('ssscDash'); if(!p)return; const r=p.getBoundingClientRect(); localStorage.setItem(STORE+'panel',JSON.stringify({left:r.left,top:r.top,width:r.width,height:r.height})); }
   function restorePanel(){ const p=$('ssscDash'); if(!p)return; try{ const v=JSON.parse(localStorage.getItem(STORE+'panel')||'null'); if(v){p.style.left=Math.max(6,Math.min(window.innerWidth-100,v.left))+'px';p.style.top=Math.max(6,Math.min(window.innerHeight-80,v.top))+'px';p.style.bottom='auto';p.style.width=Math.max(840,v.width)+'px';p.style.height=Math.max(500,v.height)+'px';} }catch(_e){} }
-  function installSsscSettingsPlaceholder(){
-    const grid=document.querySelector('#settingsModal .settings-grid'); if(!grid) return;
-    const tabs=grid.querySelector(':scope > .v24-settings-tabs'),panelsRoot=grid.querySelector(':scope > .v24-settings-panels');
-    let host=null;
-    if(tabs&&panelsRoot){
-      let tab=document.getElementById('ssscSettingsTab');
-      if(!tab){tab=document.createElement('button');tab.type='button';tab.id='ssscSettingsTab';tab.className='v24-settings-tab';tab.dataset.tab='sssc';tab.textContent='SSSC';tabs.appendChild(tab);tab.addEventListener('click',()=>{grid.querySelectorAll('.v24-settings-tab').forEach(node=>node.classList.toggle('active',node===tab));grid.querySelectorAll('.v24-settings-panel').forEach(node=>node.classList.toggle('active',node.dataset.tab==='sssc'));});}
-      let panel=document.getElementById('ssscSettingsPanel');
-      if(!panel){panel=document.createElement('div');panel.id='ssscSettingsPanel';panel.className='v24-settings-panel';panel.dataset.tab='sssc';panel.innerHTML='<div class="v24-settings-panel-grid"></div>';panelsRoot.appendChild(panel);}
-      host=panel.querySelector('.v24-settings-panel-grid')||panel;
-    }else host=grid;
-    let card=document.getElementById('ssscSettingsControlCard');
-    if(!card){card=document.createElement('div');card.id='ssscSettingsControlCard';card.className='settings-card';card.innerHTML='<div class="settings-card-title">SSSC Dashboard</div><div class="settings-card-desc">Open or hide the existing Stack · Slope · Spread · Crossover dashboard.</div><button class="secondary" id="ssscDashBtn" type="button">Open SSSC</button>';host.appendChild(card);}
-    const button=$('ssscDashBtn');if(button&&!button.__ssscBound){button.__ssscBound=true;button.addEventListener('click',()=>{if(visible)hide();else{try{if(typeof closeSettings==='function')closeSettings();}catch(_e){}show();}});}if(button)button.textContent=visible?'Hide SSSC':'Open SSSC';
+  function syncSsscToolbarButton(){
+    const toolbarButton=document.querySelector('.topbar > #ssscDashBtn');
+    if(toolbarButton){
+      document.getElementById('ssscSettingsControlCard')?.remove();
+      document.getElementById('ssscSettingsPanel')?.remove();
+      document.getElementById('ssscSettingsTab')?.remove();
+      if(!toolbarButton.__ssscBound){toolbarButton.__ssscBound=true;toolbarButton.addEventListener('click',()=>visible?hide():show());}
+      toolbarButton.textContent=visible?'Hide SSSC':'SSSC';
+      toolbarButton.title=visible?'Hide SSSC MA Diagnostic Dashboard':'Open SSSC MA Diagnostic Dashboard';
+      return;
+    }
   }
 
   function installResizeGuard(){ installResizeHandles(); }
   function installResizeHandles(){ const p=$('ssscDash'); if(!p||p.__ssscResizeHandles)return; p.__ssscResizeHandles=true; ['n','s','e','w','ne','nw','se','sw'].forEach(dir=>{ const h=document.createElement('div'); h.className='sssc-resize-handle sssc-resize-'+dir; h.dataset.dir=dir; p.appendChild(h); h.addEventListener('pointerdown',e=>{ e.preventDefault(); e.stopPropagation(); const r=p.getBoundingClientRect(); const start={x:e.clientX,y:e.clientY,left:r.left,top:r.top,w:r.width,h:r.height,dir}; p.classList.add('sssc-resizing'); try{h.setPointerCapture(e.pointerId)}catch(_e){} const move=ev=>{ const dx=ev.clientX-start.x, dy=ev.clientY-start.y; let left=start.left, top=start.top, w=start.w, hgt=start.h; const minW=760,minH=440; if(start.dir.includes('e')) w=start.w+dx; if(start.dir.includes('s')) hgt=start.h+dy; if(start.dir.includes('w')){ w=start.w-dx; left=start.left+dx; } if(start.dir.includes('n')){ hgt=start.h-dy; top=start.top+dy; } if(w<minW){ if(start.dir.includes('w')) left-=minW-w; w=minW; } if(hgt<minH){ if(start.dir.includes('n')) top-=minH-hgt; hgt=minH; } left=clamp(left,6,window.innerWidth-80); top=clamp(top,6,window.innerHeight-60); w=Math.min(w,window.innerWidth-left-6); hgt=Math.min(hgt,window.innerHeight-top-6); p.style.left=left+'px'; p.style.top=top+'px'; p.style.bottom='auto'; p.style.width=w+'px'; p.style.height=hgt+'px'; }; const up=ev=>{ document.removeEventListener('pointermove',move,true); document.removeEventListener('pointerup',up,true); document.removeEventListener('pointercancel',up,true); p.classList.remove('sssc-resizing'); try{h.releasePointerCapture(ev.pointerId)}catch(_e){} savePanel(); }; document.addEventListener('pointermove',move,true); document.addEventListener('pointerup',up,true); document.addEventListener('pointercancel',up,true); },true); }); }
   function installDrag(){ const p=$('ssscDash'), h=$('ssscDashHead'); if(!p||!h||h.__ssscDrag)return; h.__ssscDrag=true; h.addEventListener('pointerdown',e=>{ if(e.target.closest('button')||e.target.closest('.sssc-resize-handle'))return; const r=p.getBoundingClientRect(); drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top}; h.setPointerCapture(e.pointerId); e.preventDefault(); }); h.addEventListener('pointermove',e=>{ if(!drag)return; p.style.left=clamp(drag.left+e.clientX-drag.x,6,window.innerWidth-80)+'px'; p.style.top=clamp(drag.top+e.clientY-drag.y,6,window.innerHeight-60)+'px'; p.style.bottom='auto'; }); const end=e=>{ if(drag){drag=null; savePanel(); try{h.releasePointerCapture(e.pointerId)}catch(_e){}}}; h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end); if(typeof ResizeObserver!=='undefined'){ new ResizeObserver(()=>visible&&savePanel()).observe(p); } }
-  function install(){ const oldTop=document.querySelector('.topbar > #ssscDashBtn');if(oldTop)oldTop.remove(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>seedFromHub(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); installSsscSettingsPlaceholder(); restorePanel(); }
+  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>seedFromHub(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); restorePanel(); }
 
-  if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(installSsscSettingsPlaceholder,0); return r; }; }
+  if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(syncSsscToolbarButton,0); return r; }; }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
   window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={
     version:MODULE,
     show,
     hide,
     refresh:()=>seedFromHub(true),
-    diagnose,
+    diagnose(label,tf,rows){
+      const slots=currentMaSlots({allowStartupFallback:true}),targets=warmupTargets(slots),fixedRows=(Array.isArray(rows)?rows:[]).slice(-targets.full);
+      return decorateDiagnostic(calc().calculateTimeframe({label,interval:tf,rows:fixedRows,slots,minimumRows:targets.minimum,fullRows:targets.full}),fixedRows);
+    },
     getDiagnosticForTf(tfKey){
       const label = intervalToTfLabel(tfLabelToInterval(tfKey) || String(tfKey || "").toLowerCase());
       return data[label] || null;

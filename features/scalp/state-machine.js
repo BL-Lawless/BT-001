@@ -225,12 +225,20 @@
       const operationalActions=new Set(["ARMED","DISARMED","CONNECTION_TEST","DAILY_LOSS_CAP_BREACHED"]);
       const table=signalActions.has(action)?"scalp_v1_signals":positionActions.has(action)?"scalp_positions":operationalActions.has(action)?"scalp_operational":null;
       if(!table)return;
-      const row={
-        created_at:new Date(this.now()).toISOString(),
-        symbol:this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null,
-        action,source_timeframe:detail.sourceTimeframe??null,auto_entered:false,
-        detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),position_state:clone(detail.positionState??null),
-        machine_id:typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null
+      const symbol=this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null;
+      const machineId=typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null;
+      const positionState=clone(detail.positionState??null);
+      // These tables intentionally have different schemas. Keep each payload explicit so a column
+      // belonging to scalp_trades (or another activity table) cannot leak into every insert again.
+      const row=table==="scalp_v1_signals"?{
+        symbol,action,source_timeframe:detail.sourceTimeframe??null,
+        detector_state:clone(detail.detectorState??null),
+        cascade_agreement:clone(detail.cascadeAgreement??null),machine_id:machineId
+      }:table==="scalp_positions"?{
+        symbol,action,direction:positionState?.direction??null,
+        tranche_id:positionState?.trancheId??null,position_state:positionState,machine_id:machineId
+      }:{
+        action,detail:clone(detail),machine_id:machineId
       };
       try{window.BT001Supabase.log(table,row).catch(()=>{});}catch(_e){}
     }

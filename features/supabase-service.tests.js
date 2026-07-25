@@ -6,7 +6,7 @@ const vm=require("vm");
 
 const root=path.resolve(__dirname,"..");
 
-function runtime({fetchImpl}={}){
+function runtime({fetchImpl,consoleImpl=console}={}){
   const store=new Map();
   const localStorage={
     getItem:key=>store.has(key)?store.get(key):null,
@@ -14,7 +14,7 @@ function runtime({fetchImpl}={}){
     removeItem:key=>store.delete(key)
   };
   const context={
-    console,Map,Set,Array,Object,String,Number,Boolean,Date,Promise,JSON,Math,Error,TypeError,
+    console:consoleImpl,Map,Set,Array,Object,String,Number,Boolean,Date,Promise,JSON,Math,Error,TypeError,
     URL,URLSearchParams,Headers,crypto:typeof crypto!=="undefined"?crypto:undefined,
     // Fake, inert timers: these tests only assert the immediate pending-queue push inside log()'s
     // catch, never the retry itself firing -- real timers would leave a live setTimeout chain behind
@@ -68,9 +68,11 @@ const run=(async()=>{
     assert.equal(options.headers.apikey,"anon-key-correct");
     assert.equal(options.headers.Authorization,"Bearer anon-key-correct");
     const sentRow=JSON.parse(options.body);
+    assert.deepEqual(Object.keys(sentRow).sort(),["action","detail","machine_id"]);
     assert.equal(sentRow.action,"CONNECTION_TEST");
+    assert.deepEqual(sentRow.detail,{source:"settings-test"});
     assert.equal(sentRow.machine_id,context.BT001Supabase.getDeviceId());
-    assert(!Object.prototype.hasOwnProperty.call(sentRow,"device_id"));
+    assert(!Object.prototype.hasOwnProperty.call(sentRow,"auto_entered"));
     assert.equal(context.BT001Supabase.pendingCount(),0,"a successful test must not touch the retry queue");
   }
 
@@ -125,15 +127,86 @@ const run=(async()=>{
   }
 
   // Regression: logActivity()'s own log() path (used for real rows) is untouched by this addition --
-  // it still swallows failures into the retry queue instead of throwing, exactly as before.
+  // it still resolves false and queues failures instead of throwing, while warning locally.
   {
     const fetchImpl=recordingFetch(async()=>{throw new Error("network down")});
+    const warnings=[];
+    const consoleImpl={...console,warn:(...args)=>warnings.push(args)};
+    const {context}=runtime({fetchImpl,consoleImpl});
+    context.BT001Supabase.saveUrlFromInput({value:"https://myproject.supabase.co"});
+    context.BT001Supabase.saveKeyFromInput({value:"anon-key"});
+    const ok=await context.BT001Supabase.log("scalp_operational",{action:"ARMED",detail:{}});
+    assert.equal(ok,false);
+    assert.equal(context.BT001Supabase.pendingCount(),1,"log() must still queue failed rows for retry, unlike testConnection()");
+    assert.equal(warnings.length,1,"a failed fire-and-forget write must emit a local warning");
+    assert(String(warnings[0][0]).includes("scalp_operational"));
+  }
+
+  // Full DB access probe: all five real table payloads must include their complete, table-specific
+  // column sets, and every successful row must carry the same leave-in-place test tag.
+  {
+    const fetchImpl=recordingFetch(jsonResponse(201));
     const {context}=runtime({fetchImpl});
     context.BT001Supabase.saveUrlFromInput({value:"https://myproject.supabase.co"});
     context.BT001Supabase.saveKeyFromInput({value:"anon-key"});
-    const ok=await context.BT001Supabase.log("scalp_operational",{action:"ARMED",machine_id:context.BT001Supabase.getDeviceId()});
-    assert.equal(ok,false);
-    assert.equal(context.BT001Supabase.pendingCount(),1,"log() must still queue failed rows for retry, unlike testConnection()");
+    const result=await context.BT001Supabase.testDbAccess();
+    assert.equal(result.ok,true);
+    assert.equal(result.results.length,5);
+    assert.equal(fetchImpl.calls.length,5);
+    const expectedColumns={
+      scalp_v1_signals:["action","cascade_agreement","detector_state","machine_id","source_timeframe","symbol"],
+      scalp_v2_signals:["action","cascade_agreement","detector_state","machine_id","source_timeframe","symbol"],
+      scalp_positions:["action","direction","machine_id","position_state","symbol","tranche_id"],
+      scalp_operational:["action","detail","machine_id"],
+      scalp_trades:[
+        "auto_entered","avg_entry_price","cascade_agreement_at_entry","closed_at","created_at",
+        "device_id","direction","entry_commission","estimated_realized_pnl_usd","event_type",
+        "exit_price","exit_reason","filled_qty","mode","raw_session","requested_qty","source_timeframe","symbol"
+      ]
+    };
+    for(const call of fetchImpl.calls){
+      const table=call.url.split("/").at(-1),row=JSON.parse(call.options.body);
+      assert.deepEqual(Object.keys(row).sort(),expectedColumns[table],`${table} DB test payload must exercise every real column`);
+      if(table!=="scalp_trades")assert.equal(row.machine_id,context.BT001Supabase.getDeviceId());
+      const serialized=JSON.stringify(row);
+      assert(serialized.includes(result.tag),`${table} test row must be tagged for later identification`);
+    }
+    assert.equal(context.BT001Supabase.pendingCount(),0,"DB access probes must never enter the trading retry queue");
+  }
+
+  // A rejection on one table must not stop the remaining probes, and the exact PostgREST column
+  // message/code/details/hint must survive in that table's result.
+  {
+    const fetchImpl=recordingFetch(async url=>{
+      if(url.endsWith("/scalp_v2_signals"))return new Response(JSON.stringify({
+        code:"PGRST204",
+        message:"Could not find the 'cascade_agreement' column of 'scalp_v2_signals' in the schema cache",
+        details:"Rejected test fixture",
+        hint:"Refresh the schema cache"
+      }),{status:400,headers:{"content-type":"application/json"}});
+      return new Response("",{status:201});
+    });
+    const {context}=runtime({fetchImpl});
+    context.BT001Supabase.saveUrlFromInput({value:"https://myproject.supabase.co"});
+    context.BT001Supabase.saveKeyFromInput({value:"anon-key"});
+    const result=await context.BT001Supabase.testDbAccess();
+    assert.equal(result.ok,false);
+    assert.equal(fetchImpl.calls.length,5,"all tables must be attempted even after a failure");
+    const failure=result.results.find(item=>item.table==="scalp_v2_signals");
+    assert.equal(failure.status,400);
+    assert.equal(failure.code,"PGRST204");
+    assert(failure.reason.includes("'cascade_agreement' column"));
+    assert(failure.reason.includes("Rejected test fixture"));
+    assert(failure.reason.includes("Refresh the schema cache"));
+    assert.equal(result.results.filter(item=>item.ok).length,4);
+  }
+
+  {
+    const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
+    const settingsSource=fs.readFileSync(path.join(root,"features/scalp/supabase-settings.module.js"),"utf8");
+    assert(html.includes('id="scalpSupabaseTest"')&&html.includes('id="scalpSupabaseDbTest"'));
+    assert(html.indexOf('id="scalpSupabaseDbTest"')>html.indexOf('id="scalpSupabaseTest"'));
+    assert(settingsSource.includes("supabase.testDbAccess()")&&settingsSource.includes('item.ok?"PASS":"FAIL"'));
   }
 
   console.log("supabase service tests: PASS");

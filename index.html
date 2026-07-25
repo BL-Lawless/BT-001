@@ -21,6 +21,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 
 <div class="topbar">
 <button class="settings-button" id="apiKeysBtn" title="Settings">⚙</button>
+<button id="ssscDashBtn" title="Open SSSC MA Diagnostic Dashboard" type="button">SSSC</button>
 <select id="market">
 <option value="btcusdt">BTCUSDT</option>
 <option selected="" value="btcusdc">BTCUSDC</option>
@@ -174,6 +175,11 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 <button class="secondary" id="openGptFromSettings">Open GPT API</button>
 </div>
 <div class="settings-card">
+<div class="settings-card-title">Strategy Lab</div>
+<div class="settings-card-desc">Build, save, inspect, and analyze strategies using the current chart context.</div>
+<button class="secondary" id="v13LabBtn" title="Open Strategy Lab" type="button">Open Strategy Lab</button>
+</div>
+<div class="settings-card">
 <div class="settings-card-title">EMAs</div>
 <div class="settings-card-desc">Chart indicator periods only.</div>
 <div class="ema-settings">
@@ -197,7 +203,9 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 <button class="secondary" id="scalpSupabaseSave" type="button">Save</button>
 <button class="secondary" id="scalpSupabaseClear" type="button">Clear</button>
 <button class="secondary" id="scalpSupabaseTest" type="button">Test connection</button>
+<button class="secondary" id="scalpSupabaseDbTest" type="button">Test DB Access</button>
 <div class="settings-card-desc" id="scalpSupabaseTestStatus"></div>
+<div class="settings-card-desc" id="scalpSupabaseDbTestStatus"></div>
 </div>
 </div>
 <div class="modal-actions">
@@ -243,6 +251,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/heatmap/renderer.module.js" defer></script>
   <script src="features/heatmap/ui.module.js" defer></script>
   <script src="features/heatmap/index.js" defer></script>
+  <script src="features/pressure-signal/sssc/calculation.js" defer></script>
   <script src="main.js" defer></script>
   <script src="features/smc/smc-overlay.module.js" defer></script>
   <script src="features/pressure-signal/core/config.js" defer></script>
