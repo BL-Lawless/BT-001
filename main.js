@@ -2228,6 +2228,7 @@ function closeApi(){
 function openSettings(){
   settingsModal.classList.remove("hidden");
   updateSettingsStatus();
+  if(window.BT001SettingsTabs) window.BT001SettingsTabs.notifyOpen();
 }
 
 function closeSettings(){
@@ -4571,7 +4572,7 @@ const marketDataHub = (() => {
 (() => {
   "use strict";
 
-  const CHART_TAB_KEY = "overlays";
+  const CHART_TAB_KEY = "chart";
   const CHART_TAB_LABEL = "Chart";
   const CHART_STYLE_KEYS = {
     candleOutline: "btc_futures_chart_v13_chart_candle_outline",
@@ -4646,9 +4647,8 @@ const marketDataHub = (() => {
 
   function ensureChartSettingsCard(){
     renameChartSettingsLabels();
-    const panelGrid = document.querySelector('#settingsModal .v24-settings-panel[data-tab="' + CHART_TAB_KEY + '"] .v24-settings-panel-grid');
-    const fallbackGrid = document.querySelector("#settingsModal .settings-grid");
-    const host = panelGrid || fallbackGrid;
+    const definition = window.BT001SettingsTabs && window.BT001SettingsTabs.get(CHART_TAB_KEY);
+    const host = definition && definition.body;
     if(!host) return;
 
     let card = document.getElementById("chartCandleSettingsCard");
@@ -4666,27 +4666,7 @@ const marketDataHub = (() => {
 
   applyChartCandleStyles();
 
-  if(typeof installSettingsTabs24 === "function" && !window.__chartSettingsTabsRenamed){
-    window.__chartSettingsTabsRenamed = true;
-    const prevInstallSettingsTabs24 = installSettingsTabs24;
-    installSettingsTabs24 = function(){
-      const result = prevInstallSettingsTabs24.apply(this, arguments);
-      ensureChartSettingsCard();
-      return result;
-    };
-  }
-
-  if(typeof openSettings === "function" && !window.__chartSettingsOpenWrapped){
-    window.__chartSettingsOpenWrapped = true;
-    const prevOpenSettings = openSettings;
-    openSettings = function(){
-      const result = prevOpenSettings.apply(this, arguments);
-      setTimeout(ensureChartSettingsCard, 0);
-      return result;
-    };
-  }else{
-    setTimeout(ensureChartSettingsCard, 0);
-  }
+  setTimeout(ensureChartSettingsCard, 0);
 })();
 
 window.PUBLIC_MARKET_DATA_HUB = marketDataHub;
@@ -8212,76 +8192,17 @@ startTradeAuto();
     header.addEventListener("pointercancel", stop);
   }
 
-  if(typeof openSettings === "function" && !window.__v13Patch23OpenSettingsWrapped){
-    window.__v13Patch23OpenSettingsWrapped = true;
-    const prevOpenSettings23 = openSettings;
-    openSettings = function(){
-      const r = prevOpenSettings23.apply(this,arguments);
+  if(window.BT001SettingsTabs && !window.__v13Patch23SettingsOpenBound){
+    window.__v13Patch23SettingsOpenBound = true;
+    window.BT001SettingsTabs.subscribe(event => {
+      if(event.type !== "opened") return;
       applyStoredPosition23();
       installSettingsDrag23();
-      return r;
-    };
+    });
   }
 
   installSettingsDrag23();
   window.addEventListener("resize", applyStoredPosition23);
-})();
-
-(() => {
-  "use strict";
-
-  /* =========================================================
-     V13_UI_V2_PATCH_27_FINAL_UI
-     Scope: final UI toggle only.
-     - Adds independent Settings > Sessions toggle for vertical day separators.
-     - Day separator visibility is independent from sessions overlay visibility.
-     - No strategy/data/fetch/scoring/GPT/accounting changes.
-  ========================================================= */
-
-  const DAY_SEP_KEY27 = "btc_futures_chart_v13_27_day_separator_enabled";
-
-  function daySeparatorEnabled27(){
-    return localStorage.getItem(DAY_SEP_KEY27) !== "0";
-  }
-
-  function installDaySeparatorSetting27(){
-    const card = document.getElementById("v22SessionsCard");
-    if(!card || document.getElementById("v27DaySeparatorRow")) return;
-
-    const row = document.createElement("div");
-    row.className = "v22-session-row";
-    row.id = "v27DaySeparatorRow";
-    row.innerHTML = `
-      <span>Day separator</span>
-      <label><input id="v27DaySeparatorEnabled" type="checkbox" ${daySeparatorEnabled27() ? "checked" : ""}> Show vertical separator</label>
-      <span></span>`;
-
-    const labelsRow = document.getElementById("v22SessionsLabels");
-    const labelsContainer = labelsRow && labelsRow.closest(".v22-session-row");
-    if(labelsContainer && labelsContainer.parentNode === card) labelsContainer.insertAdjacentElement("afterend", row);
-    else card.appendChild(row);
-
-    const input = document.getElementById("v27DaySeparatorEnabled");
-    if(input){
-      input.addEventListener("change", () => {
-        localStorage.setItem(DAY_SEP_KEY27, input.checked ? "1" : "0");
-        try{ if(typeof draw === "function") draw(); }catch(e){}
-      });
-    }
-  }
-
-  if(typeof openSettings === "function" && !window.__v13Patch27OpenSettingsWrapped){
-    window.__v13Patch27OpenSettingsWrapped = true;
-    const prevOpen27 = openSettings;
-    openSettings = function(){
-      const r = prevOpen27.apply(this,arguments);
-      setTimeout(installDaySeparatorSetting27,0);
-      return r;
-    };
-  }
-
-  installDaySeparatorSetting27();
-  setTimeout(installDaySeparatorSetting27,250);
 })();
 
 (() => {
@@ -9760,15 +9681,13 @@ startTradeAuto();
     header.addEventListener("pointercancel", stop);
   }
 
-  if(typeof openSettings === "function" && !window.__v13Patch23OpenSettingsWrapped){
-    window.__v13Patch23OpenSettingsWrapped = true;
-    const prevOpenSettings23 = openSettings;
-    openSettings = function(){
-      const r = prevOpenSettings23.apply(this,arguments);
+  if(window.BT001SettingsTabs && !window.__v13Patch23SettingsOpenBound){
+    window.__v13Patch23SettingsOpenBound = true;
+    window.BT001SettingsTabs.subscribe(event => {
+      if(event.type !== "opened") return;
       applyStoredPosition23();
       installSettingsDrag23();
-      return r;
-    };
+    });
   }
 
   installSettingsDrag23();
@@ -16952,15 +16871,13 @@ startTradeAuto();
     header.addEventListener("pointercancel", stop);
   }
 
-  if(typeof openSettings === "function" && !window.__v13Patch23OpenSettingsWrapped){
-    window.__v13Patch23OpenSettingsWrapped = true;
-    const prevOpenSettings23 = openSettings;
-    openSettings = function(){
-      const r = prevOpenSettings23.apply(this,arguments);
+  if(window.BT001SettingsTabs && !window.__v13Patch23SettingsOpenBound){
+    window.__v13Patch23SettingsOpenBound = true;
+    window.BT001SettingsTabs.subscribe(event => {
+      if(event.type !== "opened") return;
       applyStoredPosition23();
       installSettingsDrag23();
-      return r;
-    };
+    });
   }
 
   installSettingsDrag23();
@@ -16969,7 +16886,6 @@ startTradeAuto();
 
 (() => {
   "use strict";
-  const TAB_KEY24 = "btc_futures_chart_v13_24_settings_tab";
   const SIZE_KEY24 = "btc_futures_chart_v13_24_settings_size";
   const GREEN24 = "#047857";
   const RED24 = "#7f1d1d";
@@ -17018,99 +16934,6 @@ startTradeAuto();
       });
       ro.observe(modal);
     }
-  }
-
-  function cardTitle24(card){
-    const t = card && card.querySelector && card.querySelector(".settings-card-title");
-    return t ? t.textContent.trim() : "";
-  }
-  function tabForCard24(card){
-    const id = String(card.id || "").toLowerCase();
-    const text = String((card.textContent || "") + " " + id).toLowerCase();
-    const title = cardTitle24(card).toLowerCase();
-    if(title.includes("session") || id.includes("session") || text.includes("sessions overlay")) return "sessions";
-    if(title.includes("trackpad") || id.includes("trackpad")) return "control";
-    if(title.includes("api") || text.includes("binance api") || text.includes("gpt api")) return "apis";
-    return "overlays";
-  }
-  function makePanel24(root,key,label){
-    const panel = document.createElement("div");
-    panel.className = "v24-settings-panel";
-    panel.dataset.tab = key;
-    const inner = document.createElement("div");
-    inner.className = "v24-settings-panel-grid";
-    panel.appendChild(inner);
-    root.appendChild(panel);
-    return {panel,inner};
-  }
-  function dedupeMovedCards24(cards){
-    // Only removes exact duplicate cards by normalized title + full text after older patch layers have produced repeats.
-    // Cards with different controls/text are retained.
-    const seen = new Set();
-    for(const card of cards){
-      const sig = (cardTitle24(card) + "|" + (card.textContent || "")).replace(/\s+/g," ").trim().toLowerCase();
-      if(!sig) continue;
-      if(seen.has(sig)) card.remove();
-      else seen.add(sig);
-    }
-  }
-
-  function installSettingsTabs24(){
-    const modal = document.querySelector("#settingsModal .modal");
-    const grid = modal && modal.querySelector(".settings-grid");
-    if(!modal || !grid) return;
-    installResizable24();
-    grid.classList.add("v24-settings-root");
-
-    let tabs = grid.querySelector(":scope > .v24-settings-tabs");
-    let panelsRoot = grid.querySelector(":scope > .v24-settings-panels");
-    const defs = [
-      ["apis","APIs"],
-      ["overlays","Chart"],
-      ["control","Control"],
-      ["sessions","Sessions"]
-    ];
-
-    if(!tabs){
-      tabs = document.createElement("div");
-      tabs.className = "v24-settings-tabs";
-      panelsRoot = document.createElement("div");
-      panelsRoot.className = "v24-settings-panels";
-      grid.prepend(tabs);
-      grid.appendChild(panelsRoot);
-      for(const [key,label] of defs){
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "v24-settings-tab";
-        btn.dataset.tab = key;
-        btn.textContent = label;
-        tabs.appendChild(btn);
-        makePanel24(panelsRoot,key,label);
-        btn.addEventListener("click",() => setActiveTab24(key));
-      }
-    }
-
-    const panels = new Map(Array.from(panelsRoot.querySelectorAll(".v24-settings-panel")).map(p => [p.dataset.tab,p]));
-    const strayCards = Array.from(grid.children).filter(el => el.classList && el.classList.contains("settings-card"));
-    for(const card of strayCards){
-      const tab = tabForCard24(card);
-      const target = panels.get(tab) || panels.get("overlays");
-      const inner = target && target.querySelector(".v24-settings-panel-grid");
-      if(inner) inner.appendChild(card);
-    }
-    dedupeMovedCards24(Array.from(panelsRoot.querySelectorAll(".settings-card")));
-
-    let active = localStorage.getItem(TAB_KEY24) || "apis";
-    if(!panels.has(active)) active = "apis";
-    setActiveTab24(active);
-  }
-
-  function setActiveTab24(key){
-    const root = document.querySelector("#settingsModal .settings-grid.v24-settings-root");
-    if(!root) return;
-    root.querySelectorAll(".v24-settings-tab").forEach(b => b.classList.toggle("active", b.dataset.tab === key));
-    root.querySelectorAll(".v24-settings-panel").forEach(p => p.classList.toggle("active", p.dataset.tab === key));
-    try{ localStorage.setItem(TAB_KEY24,key); }catch(e){}
   }
 
   function coloredTooltip24(lines,x,y){
@@ -17215,18 +17038,8 @@ startTradeAuto();
   }
 
   function init24(){
-    installSettingsTabs24();
+    installResizable24();
     installOpenTooltip24();
-  }
-
-  if(typeof openSettings === "function" && !window.__v13Patch24OpenSettingsWrapped){
-    window.__v13Patch24OpenSettingsWrapped = true;
-    const prevOpen = openSettings;
-    openSettings = function(){
-      const r = prevOpen.apply(this,arguments);
-      setTimeout(init24,0);
-      return r;
-    };
   }
 
   init24();
@@ -17426,7 +17239,7 @@ startTradeAuto();
     }
   }
   function ensureApiCapabilityCard(){
-    const grid = document.querySelector(GRID_SELECTOR) || document.querySelector("#settingsModal .settings-grid");
+    const grid = document.querySelector(GRID_SELECTOR);
     if(!grid) return null;
     let card = document.getElementById(CARD_ID);
     if(card && card.parentNode !== grid) grid.prepend(card);
@@ -17582,18 +17395,7 @@ startTradeAuto();
       },false);
     }
   }
-  if(typeof openSettings === "function" && !window.__apiCapabilityOpenSettingsWrapped){
-    window.__apiCapabilityOpenSettingsWrapped = true;
-    const prevOpenSettings = openSettings;
-    openSettings = function(){
-      const result = prevOpenSettings.apply(this,arguments);
-      setTimeout(() => {
-        install();
-        refreshApiCapabilityInfo({force:false}).catch(() => {});
-      },0);
-      return result;
-    };
-  }
+  window.BT001RefreshApiCapabilityInfo = refreshApiCapabilityInfo;
   if(saveApiKeys && !saveApiKeys.__apiCapabilityBound){
     saveApiKeys.__apiCapabilityBound = true;
     saveApiKeys.addEventListener("click",() => {
@@ -18479,10 +18281,11 @@ startTradeAuto();
     if(!modal.style.width || modal.style.width === "") modal.style.width = "min(925px, calc(100vw - 32px))";
     if(!modal.style.height || modal.style.height === "") modal.style.height = "min(710px, calc(100vh - 28px))";
   }
-  if(typeof openSettings === "function" && !window.__v13Patch26OpenSettingsWrapped){
-    window.__v13Patch26OpenSettingsWrapped = true;
-    const prevOpen26 = openSettings;
-    openSettings = function(){ const r = prevOpen26.apply(this,arguments); setTimeout(applySettingsDefault26,0); return r; };
+  if(window.BT001SettingsTabs && !window.__v13Patch26SettingsOpenBound){
+    window.__v13Patch26SettingsOpenBound = true;
+    window.BT001SettingsTabs.subscribe(event => {
+      if(event.type === "opened") applySettingsDefault26();
+    });
   }
 
   if(reportWeeksEl){
@@ -18551,16 +18354,6 @@ startTradeAuto();
     setTimeout(installDaySeparatorToggle,0);
     setTimeout(installDaySeparatorToggle,80);
     setTimeout(installDaySeparatorToggle,250);
-  }
-
-  if(typeof openSettings === "function" && !window.__v13Patch27R1OpenSettingsWrapped){
-    window.__v13Patch27R1OpenSettingsWrapped = true;
-    const prevOpen = openSettings;
-    openSettings = function(){
-      const r = prevOpen.apply(this,arguments);
-      installSoon();
-      return r;
-    };
   }
 
   document.addEventListener("click",(e) => {
@@ -18797,18 +18590,20 @@ If there is NO open position, use this Section 2 instead:
   function ensureWarningModal(){ let modal=q("v29AssessWarningModal"); if(modal) return modal; modal=document.createElement("div"); modal.className="modal-backdrop hidden"; modal.id="v29AssessWarningModal"; modal.innerHTML=`<div class="modal"><h3>Assessment data warning</h3><div class="v29-modal-subtitle">Some datasets failed or timed out. Choose how to proceed.</div><textarea id="v29AssessWarningText" readonly></textarea><div class="modal-actions"><button class="secondary" id="v29WarnCancel" type="button">Cancel</button><button class="secondary" id="v29WarnRetry" type="button">Retry</button><button class="secondary" id="v29WarnWait" type="button">Wait More</button><button id="v29WarnProceed" type="button">Proceed</button></div></div>`; document.body.appendChild(modal); return modal; }
   function showWarningModal(report){ const modal=ensureWarningModal(); const ta=q("v29AssessWarningText"); if(ta) ta.value=report; modal.classList.remove("hidden"); return new Promise(resolve=>{ const done=v=>{modal.classList.add("hidden"); resolve(v);}; q("v29WarnCancel").onclick=()=>done("cancel"); q("v29WarnRetry").onclick=()=>done("retry"); q("v29WarnWait").onclick=()=>done("wait"); q("v29WarnProceed").onclick=()=>done("proceed"); }); }
 
-  function installAssessSettingsTab(){
-    const modal=document.querySelector("#settingsModal .modal");
-    const grid=modal&&modal.querySelector(".settings-grid.v24-settings-root, .settings-grid");
-    if(!modal||!grid) return false;
-    const tabs=grid.querySelector(":scope > .v24-settings-tabs");
-    const panelsRoot=grid.querySelector(":scope > .v24-settings-panels");
-    if(!tabs||!panelsRoot) return false;
-    if(!q("v29AssessSettingsTab")){ const btn=document.createElement("button"); btn.type="button"; btn.id="v29AssessSettingsTab"; btn.className="v24-settings-tab"; btn.dataset.tab="assess"; btn.textContent="Assess"; tabs.appendChild(btn); btn.addEventListener("click",()=>setAssessTabActive()); }
-    if(!q("v29AssessSettingsPanel")){ const panel=document.createElement("div"); panel.id="v29AssessSettingsPanel"; panel.className="v24-settings-panel"; panel.dataset.tab="assess"; const inner=document.createElement("div"); inner.className="v24-settings-panel-grid"; inner.innerHTML=`<div class="settings-card v29-assess-settings-card"><div class="settings-card-title">Assess Prompt Templates</div><div class="settings-card-desc">Manual local prompt templates used before the generated data packet. No GPT API call is made.</div><div class="v29-assess-settings-row"><label>Saved prompt <select id="v29AssessPromptSelect"></select></label><label>Name <input id="v29AssessPromptName" type="text" placeholder="Prompt name"></label></div><textarea id="v29AssessPromptText" spellcheck="false"></textarea><div class="v29-assess-settings-actions"><button class="secondary" id="v29AssessPromptNew" type="button">New</button><button id="v29AssessPromptSave" type="button">Save</button><button class="secondary" id="v29AssessPromptSaveAs" type="button">Save As</button><button class="secondary" id="v29AssessPromptLoad" type="button">Load</button><button class="secondary" id="v29AssessPromptDelete" type="button">Delete</button></div><div class="v29-assess-small-note">Saved locally in this browser. The generated data packet is appended under --- DATA PACKET ---.</div></div>`; panel.appendChild(inner); panelsRoot.appendChild(panel); bindPromptControls(); }
-    refreshPromptControls(); return true;
+  function mountAssessSettings(body){
+    if(!body) return false;
+    let card=q("v29AssessSettingsCard");
+    if(!card){
+      card=document.createElement("div");
+      card.id="v29AssessSettingsCard";
+      card.className="settings-card v29-assess-settings-card";
+      card.innerHTML=`<div class="settings-card-title">Assess Prompt Templates</div><div class="settings-card-desc">Manual local prompt templates used before the generated data packet. No GPT API call is made.</div><div class="v29-assess-settings-row"><label>Saved prompt <select id="v29AssessPromptSelect"></select></label><label>Name <input id="v29AssessPromptName" type="text" placeholder="Prompt name"></label></div><textarea id="v29AssessPromptText" spellcheck="false"></textarea><div class="v29-assess-settings-actions"><button class="secondary" id="v29AssessPromptNew" type="button">New</button><button id="v29AssessPromptSave" type="button">Save</button><button class="secondary" id="v29AssessPromptSaveAs" type="button">Save As</button><button class="secondary" id="v29AssessPromptLoad" type="button">Load</button><button class="secondary" id="v29AssessPromptDelete" type="button">Delete</button></div><div class="v29-assess-small-note">Saved locally in this browser. The generated data packet is appended under --- DATA PACKET ---.</div>`;
+    }
+    if(card.parentNode!==body) body.appendChild(card);
+    bindPromptControls();
+    refreshPromptControls();
+    return true;
   }
-  function setAssessTabActive(){ const root=document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid"); if(!root) return; root.querySelectorAll(".v24-settings-tab").forEach(b=>b.classList.toggle("active",b.dataset.tab==="assess")); root.querySelectorAll(".v24-settings-panel").forEach(p=>p.classList.toggle("active",p.dataset.tab==="assess")); try{localStorage.setItem("btc_futures_chart_v13_24_settings_tab","assess");}catch(_e){} }
   function bindPromptControls(){ const sel=q("v29AssessPromptSelect"), save=q("v29AssessPromptSave"), saveAs=q("v29AssessPromptSaveAs"), load=q("v29AssessPromptLoad"), del=q("v29AssessPromptDelete"), addNew=q("v29AssessPromptNew"); if(sel && !sel.__v29PromptBound){ sel.__v29PromptBound=true; sel.addEventListener("change",()=>loadSelectedPromptIntoEditor()); } if(addNew && !addNew.__v29PromptBound){ addNew.__v29PromptBound=true; addNew.addEventListener("click",()=>{ const selEl=q("v29AssessPromptSelect"); if(selEl) selEl.value="__new__"; setPromptDraft("new",null); showToast("New Assess prompt"); }); } if(load && !load.__v29PromptBound){ load.__v29PromptBound=true; load.addEventListener("click",()=>{ loadSelectedPromptIntoEditor(); showToast("Assess prompt loaded"); }); } if(save && !save.__v29PromptBound){ save.__v29PromptBound=true; save.addEventListener("click",()=>{ const item=upsertPrompt({saveAs:false}); showToast(item ? "Assess prompt saved" : "Assess prompt save failed"); }); } if(saveAs && !saveAs.__v29PromptBound){ saveAs.__v29PromptBound=true; saveAs.addEventListener("click",()=>{ const item=upsertPrompt({saveAs:true}); showToast(item ? "Assess prompt saved as new" : "Assess prompt save failed"); }); } if(del && !del.__v29PromptBound){ del.__v29PromptBound=true; del.addEventListener("click",()=>{ const store=loadPromptStore(); const id=selectedPromptId(); if(!id) return; store.items=store.items.filter(x=>x.id!==id); store.selectedId="default"; savePromptStore(store); promptDraftMode="selected"; refreshPromptControls(); showToast("Assess prompt deleted"); }); } }
   function refreshPromptControls(){ const sel=q("v29AssessPromptSelect"), name=q("v29AssessPromptName"), text=q("v29AssessPromptText"); if(!sel||!name||!text) return; const store=loadPromptStore(); if(!store.items.find(x=>x.id===store.selectedId)) store.selectedId="default"; savePromptStore(store); sel.innerHTML=`<option value="default">Default prompt</option><option value="__new__">New unsaved prompt</option>`+store.items.map((it,idx)=>`<option value="${esc(it.id)}">${idx+1}. ${esc(it.name||it.id)}</option>`).join(""); if(promptDraftMode==="new"){ sel.value="__new__"; if(!name.value && !text.value) setPromptDraft("new",null); return; } sel.value=store.selectedId||"default"; const item=store.items.find(x=>x.id===sel.value); if(item) setPromptDraft("selected",item); else setPromptDraft("selected",{name:"Default prompt",text:DEFAULT_PROMPT}); }
 
@@ -18837,10 +18632,8 @@ If there is NO open position, use this Section 2 instead:
   function buildFullPackage(market,useFallback){ const symbol=currentSymbol(); const prompt=activePrompt().replaceAll("[SYMBOL]",symbol); const packet=buildDataPacket(market,useFallback); return prompt.trim()+"\n\n--- DATA PACKET ---\n"+packet; }
   async function onAssessClick(){ setBusy(true); try{ let market=await loadMarketData(TIMEOUT_MS); while(market.missing&&market.missing.length){ const choice=await showWarningModal(failureReport(market)); if(choice==="cancel") return; if(choice==="proceed") break; if(choice==="retry"||choice==="wait") market=await loadMarketData(TIMEOUT_MS); } let text=buildFullPackage(market,false); if(text.length>PACKET_FULL_LIMIT) text=buildFullPackage(market,true); try{ await copyText(text); showToast("Assessment package copied"); }catch(_e){ showPackageModal(text); } }catch(e){ showPackageModal("ASSESS FAILED\n\n"+(e&&e.stack?e.stack:String(e))); }finally{ setBusy(false); } }
 
-  function installSoon(){ try{installButton(); installAssessSettingsTab();}catch(e){try{console.error("Assess install failed",e);}catch(_e){}} }
-  const prevOpenSettings=(typeof openSettings==="function")?openSettings:null;
-  if(prevOpenSettings&&!window.__AssessModuleOpenSettingsWrapped29R1){ window.__AssessModuleOpenSettingsWrapped29R1=true; openSettings=function(){ const r=prevOpenSettings.apply(this,arguments); setTimeout(installAssessSettingsTab,0); setTimeout(installAssessSettingsTab,120); return r; }; }
-  window.AssessClipboardModule={version:MODULE,install:installSoon,buildDefaultPrompt:()=>DEFAULT_PROMPT,buildPackagePreview:async()=>buildFullPackage(await loadMarketData(TIMEOUT_MS),false)};
+  function installSoon(){ try{installButton();}catch(e){try{console.error("Assess install failed",e);}catch(_e){}} }
+  window.AssessClipboardModule={version:MODULE,install:installSoon,mountSettings:mountAssessSettings,buildDefaultPrompt:()=>DEFAULT_PROMPT,buildPackagePreview:async()=>buildFullPackage(await loadMarketData(TIMEOUT_MS),false)};
   installSoon();
   setTimeout(installSoon,0);
   setTimeout(installSoon,300);
@@ -19032,17 +18825,6 @@ If there is NO open position, use this Section 2 instead:
       if(!direct){ e.stopImmediatePropagation(); }
     },true);
   }
-
-
-  function installSsscSettingsPlaceholder(){
-    const grid=document.querySelector('#settingsModal .settings-grid'); if(!grid) return;
-    const oldCard=document.getElementById('ssscSettingsPlaceholderCard'); if(oldCard) oldCard.remove();
-    const tabs=grid.querySelector(':scope > .v24-settings-tabs'); const panelsRoot=grid.querySelector(':scope > .v24-settings-panels');
-    if(!tabs||!panelsRoot) return;
-    if(!document.getElementById('ssscSettingsTab')){ const btn=document.createElement('button'); btn.type='button'; btn.id='ssscSettingsTab'; btn.className='v24-settings-tab'; btn.dataset.tab='sssc'; btn.textContent='SSSC'; tabs.appendChild(btn); btn.addEventListener('click',()=>setSsscTabActive()); }
-    if(!document.getElementById('ssscSettingsPanel')){ const panel=document.createElement('div'); panel.id='ssscSettingsPanel'; panel.className='v24-settings-panel'; panel.dataset.tab='sssc'; const inner=document.createElement('div'); inner.className='v24-settings-panel-grid'; inner.innerHTML='<div class="settings-card"><div class="settings-card-title">SSSC</div><div class="settings-card-desc">SSSC dashboard settings placeholder. Controls will be added in a later pass.</div></div>'; panel.appendChild(inner); panelsRoot.appendChild(panel); }
-  }
-  function setSsscTabActive(){ const root=document.querySelector('#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid'); if(!root) return; root.querySelectorAll('.v24-settings-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab==='sssc')); root.querySelectorAll('.v24-settings-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab==='sssc')); try{localStorage.setItem('btc_futures_chart_v13_24_settings_tab','sssc');}catch(_e){} }
   function install(){
     installReportOptions(); installDatePickers(); installReportHandlers();
     if(!window.MA_FEATURE){ installMAToggles(); installMASettings(); calcExtraMAs(); }
@@ -19050,8 +18832,7 @@ If there is NO open position, use this Section 2 instead:
     try{ if(typeof updateReportControls==='function') updateReportControls(); }catch(_e){}
     try{ draw(); }catch(_e){}
   }
-  const prevOpenSettings=typeof openSettings==='function'?openSettings:null;
-  if(prevOpenSettings&&!window.__v32r1OpenSettingsWrapped){ window.__v32r1OpenSettingsWrapped=true; openSettings=function(){ const r=prevOpenSettings.apply(this,arguments); setTimeout(installMASettings,0); setTimeout(installMASettings,150); setTimeout(installMASettings,450); return r; }; }
+  if(window.BT001SettingsTabs&&!window.__v32r1SettingsOpenBound){ window.__v32r1SettingsOpenBound=true; window.BT001SettingsTabs.subscribe(event=>{ if(event.type==="opened") installMASettings(); }); }
   install(); setTimeout(install,0); setTimeout(install,300); setTimeout(install,900); window.addEventListener('load',()=>setTimeout(install,0),{once:true});
   window.Patch32ReportMaUiRebuildR1={version:MODULE,install};
 })();
@@ -19182,8 +18963,7 @@ If there is NO open position, use this Section 2 instead:
     canvas.addEventListener('click',e=>{ const moved=down?Math.hypot(e.clientX-down.x,e.clientY-down.y):999; const upTarget=isoTargetAt(e); if(!down||moved>4||!down.target||!upTarget||down.target!==upTarget){ e.stopImmediatePropagation(); e.preventDefault(); } down=null; },true);
   }
   function install(){ if(!window.MA_FEATURE){ ensureToggles(); calcExtraMAs(); rebuildIndicatorSettings(); } installIsolateGuard(); try{draw();}catch(_e){} }
-  const prevOpenSettings=typeof openSettings==='function'?openSettings:null;
-  if(prevOpenSettings&&!window.__v32r2OpenSettingsWrapped){ window.__v32r2OpenSettingsWrapped=true; openSettings=function(){ const r=prevOpenSettings.apply(this,arguments); setTimeout(install,0); setTimeout(rebuildIndicatorSettings,150); return r; }; }
+  if(window.BT001SettingsTabs&&!window.__v32r2SettingsOpenBound){ window.__v32r2SettingsOpenBound=true; window.BT001SettingsTabs.subscribe(event=>{ if(event.type==="opened"){ install(); rebuildIndicatorSettings(); } }); }
   install(); setTimeout(install,0); setTimeout(install,300); setTimeout(install,900); window.addEventListener('load',()=>setTimeout(install,0),{once:true});
   window.Patch32ReportMaUiRebuildR2={version:MODULE,install};
 })();
@@ -21065,40 +20845,24 @@ If there is NO open position, use this Section 2 instead:
         };
       }
     }
-    function installSettings(){
-      const grid = document.querySelector("#settingsModal .settings-grid");
-      if(!grid) return;
-      const tabs = grid.querySelector(":scope > .v24-settings-tabs");
-      const panelsRoot = grid.querySelector(":scope > .v24-settings-panels");
-      if(!tabs || !panelsRoot) return;
-      if(!$id("maStackMarkersSettingsTab")){
-        const btn=document.createElement("button");
-        btn.type="button"; btn.id="maStackMarkersSettingsTab"; btn.className="v24-settings-tab"; btn.dataset.tab="ma-stack-markers"; btn.textContent="MAs Event Lab";
-        tabs.appendChild(btn);
-        btn.addEventListener("click",()=>activateSettings(),false);
-      }else{
-        $id("maStackMarkersSettingsTab").textContent = "MAs Event Lab";
+    function mountSettings(body){
+      if(!body && window.BT001SettingsTabs){
+        const record=window.BT001SettingsTabs.get("ma-event-lab");
+        body=record&&record.body;
       }
-      if(!$id("maStackMarkersSettingsPanel")){
-        const panel=document.createElement("div");
-        panel.id="maStackMarkersSettingsPanel"; panel.className="v24-settings-panel"; panel.dataset.tab="ma-stack-markers";
-        const inner=document.createElement("div"); inner.className="v24-settings-panel-grid";
-        inner.innerHTML = settingsHtml();
-        panel.appendChild(inner); panelsRoot.appendChild(panel);
-      }else{
-        const inner = $id("maStackMarkersSettingsPanel").querySelector(".v24-settings-panel-grid");
-        if(inner && !inner.__maStackLabFocused) inner.innerHTML = settingsHtml();
+      if(!body) return false;
+      let card=$id("maStackMarkersSettingsCard");
+      if(!card){
+        const holder=document.createElement("div");
+        holder.innerHTML=settingsHtml();
+        card=holder.firstElementChild;
+        if(!card) return false;
+        card.id="maStackMarkersSettingsCard";
       }
+      if(card.parentNode!==body) body.appendChild(card);
       bindSettings();
       installHover();
-      if(get("last_tab","") === "1") activateSettings();
-    }
-    function activateSettings(){
-      const root=document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid");
-      if(!root) return;
-      root.querySelectorAll(".v24-settings-tab").forEach(btn=>btn.classList.toggle("active",btn.dataset.tab==="ma-stack-markers"));
-      root.querySelectorAll(".v24-settings-panel").forEach(panel=>panel.classList.toggle("active",panel.dataset.tab==="ma-stack-markers"));
-      set("last_tab","1");
+      return true;
     }
     function cb(id,label,checked){ return `<label class="ma-stack-marker-check"><input id="${id}" type="checkbox"${checked?" checked":""}>${label}</label>`; }
     function section(title,body){ return `<section class="ma-stack-marker-section"><h4>${title}</h4>${body}</section>`; }
@@ -21253,7 +21017,7 @@ If there is NO open position, use this Section 2 instead:
       bind("maStackLabelMode","label",el=>el.value);
       bindEventPanels();
     }
-    return {installSettings,draw,settings};
+    return {mountSettings,draw,settings};
   })();
   window.MA_STACK_MARKERS = MA_STACK_MARKERS;
 
@@ -21263,7 +21027,7 @@ If there is NO open position, use this Section 2 instead:
       ensureMaToggles();
       rebuildMaSettings();
     }
-    MA_STACK_MARKERS.installSettings();
+    MA_STACK_MARKERS.mountSettings();
     installClosedLinksRow();
     updateFinalExTotals();
     MA_STACK_STRIP.start();
@@ -21273,11 +21037,6 @@ If there is NO open position, use this Section 2 instead:
     const prevDraw = draw;
     window.__v33DrawWrapped = true;
     draw = window.draw = function(){ const r = prevDraw.apply(this,arguments); updateFinalExTotals(); try{ MA_STACK_STRIP.refreshSoon(); }catch(_e){} try{ MA_STACK_MARKERS.draw(); }catch(_e){} return r; };
-  }
-  if(typeof openSettings === "function" && !window.__v33OpenSettingsWrapped){
-    const prevOpenSettings = openSettings;
-    window.__v33OpenSettingsWrapped = true;
-    openSettings = window.openSettings = function(){ const r = prevOpenSettings.apply(this,arguments); setTimeout(installAll,0); setTimeout(()=>{rebuildMaSettings();MA_STACK_MARKERS.installSettings();installClosedLinksRow();},150); return r; };
   }
   ["market","interval"].forEach(id=>{ const el=$id(id); if(el && !el.__v33MaStackBound){ el.__v33MaStackBound=true; el.addEventListener("change",()=>MA_STACK_STRIP.refreshSoon(),false); } });
 
@@ -21382,13 +21141,6 @@ If there is NO open position, use this Section 2 instead:
     }
     return input;
   }
-  function setPriceLevelsTabActive(){
-    const root = document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid");
-    if(!root) return;
-    root.querySelectorAll(".v24-settings-tab").forEach(btn => btn.classList.toggle("active",btn.dataset.tab === "price-levels"));
-    root.querySelectorAll(".v24-settings-panel").forEach(panel => panel.classList.toggle("active",panel.dataset.tab === "price-levels"));
-    try{ localStorage.setItem("btc_futures_chart_v13_24_settings_tab","price-levels"); }catch(_e){}
-  }
   function bindControl(id,key,normalizer){
     const el = $id(id);
     if(!el || el.__priceLevelsBound) return;
@@ -21409,59 +21161,42 @@ If there is NO open position, use this Section 2 instead:
     el.addEventListener("input",sync,false);
     el.addEventListener("change",sync,false);
   }
-  function installSettings(){
-    const grid = document.querySelector("#settingsModal .settings-grid");
-    if(!grid) return;
-    const tabs = grid.querySelector(":scope > .v24-settings-tabs");
-    const panelsRoot = grid.querySelector(":scope > .v24-settings-panels");
-    if(!tabs || !panelsRoot) return;
-
-    if(!$id("priceLevelsSettingsTab")){
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.id = "priceLevelsSettingsTab";
-      btn.className = "v24-settings-tab";
-      btn.dataset.tab = "price-levels";
-      btn.textContent = "Key levels";
-      tabs.appendChild(btn);
-      btn.addEventListener("click",setPriceLevelsTabActive,false);
-    }else{
-      $id("priceLevelsSettingsTab").textContent = "Key levels";
+  function mountSettings(panel){
+    if(!panel && window.BT001SettingsTabs){
+      const definition = window.BT001SettingsTabs.get("key-levels");
+      panel = definition && definition.body;
     }
+    if(!panel) return false;
 
-    if(!$id("priceLevelsSettingsPanel")){
-      const panel = document.createElement("div");
-      panel.id = "priceLevelsSettingsPanel";
-      panel.className = "v24-settings-panel";
-      panel.dataset.tab = "price-levels";
+    let card = $id("priceLevelsSettingsCard");
+    if(!card){
+      card = document.createElement("div");
+      card.id = "priceLevelsSettingsCard";
+      card.className = "settings-card price-levels-card";
       const inner = document.createElement("div");
-      inner.className = "v24-settings-panel-grid";
+      inner.className = "price-levels-settings-content";
       inner.innerHTML = `
-        <div class="settings-card price-levels-card">
-          <div class="settings-card-title">Key levels</div>
-          <div class="settings-card-desc">One price per line, or paste any plain text containing prices.</div>
-          <textarea id="priceLevelsText" spellcheck="false" placeholder="77000&#10;78500&#10;80125.5">${escapeHtml(levelsText())}</textarea>
-          <div class="price-levels-style-row">
-            <span>Levels</span>
-            <input id="priceLevelsColor" type="color" value="${escapeHtml(color())}">
-            <input id="priceLevelsAlpha" type="range" min="0" max="100" step="1" value="${alpha()}">
-            <span id="priceLevelsAlphaVal">${alpha()}</span>
-            <input id="priceLevelsWidth" type="range" min="0.5" max="10" step="0.5" value="${width()}">
-          </div>
+        <div class="settings-card-title">Key levels</div>
+        <div class="settings-card-desc">One price per line, or paste any plain text containing prices.</div>
+        <textarea id="priceLevelsText" spellcheck="false" placeholder="77000&#10;78500&#10;80125.5">${escapeHtml(levelsText())}</textarea>
+        <div class="price-levels-style-row">
+          <span>Levels</span>
+          <input id="priceLevelsColor" type="color" value="${escapeHtml(color())}">
+          <input id="priceLevelsAlpha" type="range" min="0" max="100" step="1" value="${alpha()}">
+          <span id="priceLevelsAlphaVal">${alpha()}</span>
+          <input id="priceLevelsWidth" type="range" min="0.5" max="10" step="0.5" value="${width()}">
         </div>`;
-      panel.appendChild(inner);
-      panelsRoot.appendChild(panel);
+      card.appendChild(inner);
     }
-    const title = document.querySelector("#priceLevelsSettingsPanel .settings-card-title");
+    panel.appendChild(card);
+    const title = card.querySelector(".settings-card-title");
     if(title) title.textContent = "Key levels";
 
     bindControl("priceLevelsText",KEY_TEXT);
     bindControl("priceLevelsColor",KEY_COLOR);
     bindControl("priceLevelsAlpha",KEY_ALPHA,v => clamp(Math.round(num(v,85)),0,100));
     bindControl("priceLevelsWidth",KEY_WIDTH,v => clamp(num(v,1.5),0.5,10));
-    try{
-      if(localStorage.getItem("btc_futures_chart_v13_24_settings_tab") === "price-levels") setPriceLevelsTabActive();
-    }catch(_e){}
+    return true;
   }
   function drawPriceLevels(){
     if(!levelsEnabled() || !indicatorVisibilityOn()) return;
@@ -21584,22 +21319,10 @@ If there is NO open position, use this Section 2 instead:
       return result;
     };
   }
-  if(typeof openSettings === "function" && !window.__priceLevelsOpenSettingsWrapped){
-    const prevOpen = openSettings;
-    window.__priceLevelsOpenSettingsWrapped = true;
-    openSettings = window.openSettings = function(){
-      const result = prevOpen.apply(this,arguments);
-      setTimeout(installSettings,0);
-      setTimeout(installSettings,150);
-      return result;
-    };
-  }
   ensureKeyLevelsToggle();
-  installSettings();
   setTimeout(ensureKeyLevelsToggle,120);
   setTimeout(ensureKeyLevelsToggle,700);
-  setTimeout(installSettings,300);
-  window.PRICE_LEVELS_OVERLAY = {version:MODULE,parseLevels,installSettings,ensureKeyLevelsToggle};
+  window.PRICE_LEVELS_OVERLAY = {version:MODULE,parseLevels,mountSettings,ensureKeyLevelsToggle};
 })();
 
 (() => {
@@ -21726,11 +21449,12 @@ If there is NO open position, use this Section 2 instead:
     el.addEventListener("input",sync,false);
     el.addEventListener("change",sync,false);
   }
-  function installSettings(){
-    const panel = $id("priceLevelsSettingsPanel");
-    if(!panel) return;
-    const root = panel.querySelector(".v24-settings-panel-grid");
-    if(!root) return;
+  function mountSettings(root){
+    if(!root && window.BT001SettingsTabs){
+      const definition = window.BT001SettingsTabs.get("key-levels");
+      root = definition && definition.body;
+    }
+    if(!root) return false;
     const s100 = styleFor(100);
     const s200 = styleFor(200);
     let card = $id("dsmaSettingsCard");
@@ -21760,6 +21484,7 @@ If there is NO open position, use this Section 2 instead:
     bindStyleControl("dsma200Color",KEYS.color200);
     bindStyleControl("dsma200Alpha",KEYS.alpha200,v => clamp(Math.round(num(v,75)),0,100),"dsma200AlphaVal");
     bindStyleControl("dsma200Width",KEYS.width200,v => clamp(num(v,1.5),0.5,10),"dsma200WidthVal");
+    return true;
   }
   function dailyCloseRows(){
     const hub = window.PUBLIC_MARKET_DATA_HUB || null;
@@ -21923,7 +21648,6 @@ If there is NO open position, use this Section 2 instead:
   }
   function install(){
     ensureToggle();
-    installSettings();
     if(enabled()) ensureDailyDepth();
     try{ draw(); }catch(_e){}
   }
@@ -21933,16 +21657,6 @@ If there is NO open position, use this Section 2 instead:
     draw = window.draw = function(){
       const result = prevDraw.apply(this,arguments);
       try{ drawDsma(); }catch(e){ console.warn(MODULE + " draw failed",e); }
-      return result;
-    };
-  }
-  if(typeof openSettings === "function" && !window.__dsmaLevelsOpenSettingsWrapped){
-    const prevOpenSettings = openSettings;
-    window.__dsmaLevelsOpenSettingsWrapped = true;
-    openSettings = window.openSettings = function(){
-      const result = prevOpenSettings.apply(this,arguments);
-      setTimeout(installSettings,0);
-      setTimeout(installSettings,150);
       return result;
     };
   }
@@ -21959,7 +21673,7 @@ If there is NO open position, use this Section 2 instead:
   setTimeout(install,120);
   setTimeout(install,700);
   window.addEventListener("load",() => setTimeout(install,0),{once:true});
-  window.DSMA_LEVELS_OVERLAY = {version:MODULE,draw:drawDsma,install};
+  window.DSMA_LEVELS_OVERLAY = {version:MODULE,draw:drawDsma,install,mountSettings};
 })();
 
 (() => {
@@ -22988,7 +22702,7 @@ If there is NO open position, use this Section 2 instead:
   function installDrag(){ const p=$('ssscDash'), h=$('ssscDashHead'); if(!p||!h||h.__ssscDrag)return; h.__ssscDrag=true; h.addEventListener('pointerdown',e=>{ if(e.target.closest('button')||e.target.closest('.sssc-resize-handle'))return; const r=p.getBoundingClientRect(); drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top}; h.setPointerCapture(e.pointerId); e.preventDefault(); }); h.addEventListener('pointermove',e=>{ if(!drag)return; p.style.left=clamp(drag.left+e.clientX-drag.x,6,window.innerWidth-80)+'px'; p.style.top=clamp(drag.top+e.clientY-drag.y,6,window.innerHeight-60)+'px'; p.style.bottom='auto'; }); const end=e=>{ if(drag){drag=null; savePanel(); try{h.releasePointerCapture(e.pointerId)}catch(_e){}}}; h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end); if(typeof ResizeObserver!=='undefined'){ new ResizeObserver(()=>visible&&savePanel()).observe(p); } }
   function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>seedFromHub(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); restorePanel(); }
 
-  if(typeof openSettings==='function' && !window.__ssscR3SettingsWrapped){ window.__ssscR3SettingsWrapped=true; const prevOpenSssc=openSettings; openSettings=function(){ const r=prevOpenSssc.apply(this,arguments); setTimeout(syncSsscToolbarButton,0); return r; }; }
+  if(window.BT001SettingsTabs&&!window.__ssscR3SettingsOpenBound){ window.__ssscR3SettingsOpenBound=true; window.BT001SettingsTabs.subscribe(event=>{ if(event.type==="opened") syncSsscToolbarButton(); }); }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
   window.R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3={
     version:MODULE,

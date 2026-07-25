@@ -4,7 +4,6 @@
   const MODULE = "SMC_SETTINGS_STYLE_01";
   const TOGGLE_KEY = "btc_futures_chart_v13_smc_toggle";
   const SETTINGS_KEY = "btc_futures_chart_v13_smc_settings_v2";
-  const TAB_KEY = "btc_futures_chart_v13_24_settings_tab";
   const DEFAULTS = {
     mode: "historical",
     styleMode: "colored",
@@ -970,54 +969,24 @@
     bindControl("smcLineOpacityInternal", "input", (e) => updateSettings({ lineOpacityInternal: e.target.value }));
   }
 
-  function activateSettingsTab() {
-    const root = document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid");
-    if (!root) return;
-    root.querySelectorAll(".v24-settings-tab").forEach((button) => button.classList.toggle("active", button.dataset.tab === "smc"));
-    root.querySelectorAll(".v24-settings-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.tab === "smc"));
-    try {
-      localStorage.setItem(TAB_KEY, "smc");
-    } catch (_e) {}
-  }
-
-  function installSettingsPanel() {
-    const grid = document.querySelector("#settingsModal .settings-grid");
-    if (!grid) return;
-    const tabs = grid.querySelector(":scope > .v24-settings-tabs");
-    const panelsRoot = grid.querySelector(":scope > .v24-settings-panels");
-    if (!tabs || !panelsRoot) return;
-
-    let tab = document.getElementById("smcSettingsTab");
-    if (!tab) {
-      tab = document.createElement("button");
-      tab.type = "button";
-      tab.id = "smcSettingsTab";
-      tab.className = "v24-settings-tab";
-      tab.dataset.tab = "smc";
-      tab.textContent = "SMC";
-      tabs.appendChild(tab);
+  function mountSettings(body) {
+    if (!body && window.BT001SettingsTabs) {
+      const definition = window.BT001SettingsTabs.get("smc");
+      body = definition && definition.body;
     }
-    if (!tab.dataset.smcBound) {
-      tab.dataset.smcBound = "1";
-      tab.addEventListener("click", activateSettingsTab, false);
+    if (!body) return false;
+    let card = document.getElementById("smcSettingsCard");
+    if (!card) {
+      const holder = document.createElement("div");
+      holder.innerHTML = settingsCardHtml();
+      card = holder.firstElementChild;
+      if (!card) throw new Error("SMC settings markup did not produce a card");
+      card.id = "smcSettingsCard";
     }
-
-    let panel = document.getElementById("smcSettingsPanel");
-    if (!panel) {
-      panel = document.createElement("div");
-      panel.id = "smcSettingsPanel";
-      panel.className = "v24-settings-panel";
-      panel.dataset.tab = "smc";
-      const inner = document.createElement("div");
-      inner.className = "v24-settings-panel-grid";
-      inner.id = "smcSettingsPanelGrid";
-      panel.appendChild(inner);
-      panelsRoot.appendChild(panel);
-    }
-    const inner = panel.querySelector(".v24-settings-panel-grid");
-    if (inner) inner.innerHTML = settingsCardHtml();
+    body.appendChild(card);
     installSettingsBindings();
     syncSettingsControls();
+    return true;
   }
 
   function installSettingsStyles() {
@@ -1066,27 +1035,10 @@
     };
   }
 
-  function installOpenSettingsHook() {
-    if (typeof openSettings !== "function" || window.__smcOpenSettingsWrappedV2) return;
-    window.__smcOpenSettingsWrappedV2 = true;
-    const previous = openSettings;
-    openSettings = window.openSettings = function () {
-      const result = previous.apply(this, arguments);
-      setTimeout(() => {
-        installSettingsStyles();
-        installSettingsPanel();
-      }, 0);
-      setTimeout(installSettingsPanel, 160);
-      return result;
-    };
-  }
-
   function install() {
     installToggle();
     installDrawHook();
-    installOpenSettingsHook();
     installSettingsStyles();
-    installSettingsPanel();
     if (state.enabled) safeDraw();
   }
 
@@ -1104,7 +1056,7 @@
     getSettings() { return { ...state.settings }; },
     setEnabled,
     updateSettings,
-    activateSettingsTab,
+    mountSettings,
     getStructureSnapshot(rows, options) {
       return calculateStructureSnapshot(rows, options);
     },

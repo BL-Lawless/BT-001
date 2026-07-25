@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const $=id=>document.getElementById(id),TAB_KEY="heatmap",SETTINGS_TAB_STORE="btc_futures_chart_v13_24_settings_tab";
+  const $=id=>document.getElementById(id);
   const statusText=status=>({NOT_LOADED:"NOT LOADED",REFRESH_REQUIRED:"REFRESH REQUIRED",STARTING_REQUEST:"STARTING ACTOR",LOADING:"LOADING",READY:"READY",UPDATE_FAILED:"UPDATE FAILED",UNAVAILABLE:"UNAVAILABLE"})[status]||status;
   const date=value=>value?new Date(value).toLocaleString():"--";
   const sourceDate=value=>Number.isFinite(Number(value))?new Date(Number(value)*1000).toLocaleString():"--";
@@ -8,17 +8,6 @@
   const text=(id,value)=>{const element=$(id);if(element)element.textContent=value==null||value===""?"--":String(value);};
   function manualRefresh(){return window.BT001HeatmapFeature.refresh();}
   function retryDatasetRetrieval(){return window.BT001HeatmapState.retryDatasetRetrieval();}
-  function activateHeatmapTab(){const root=document.querySelector("#settingsModal .settings-grid.v24-settings-root, #settingsModal .settings-grid");if(!root)return false;root.querySelectorAll(".v24-settings-tab").forEach(button=>button.classList.toggle("active",button.dataset.tab===TAB_KEY));root.querySelectorAll(".v24-settings-panel").forEach(panel=>panel.classList.toggle("active",panel.dataset.tab===TAB_KEY));try{localStorage.setItem(SETTINGS_TAB_STORE,TAB_KEY);}catch(_error){}return true;}
-  function ensureHeatmapPanel(){
-    const grid=document.querySelector("#settingsModal .settings-grid");if(!grid)return null;
-    const tabs=grid.querySelector(":scope > .v24-settings-tabs"),panelsRoot=grid.querySelector(":scope > .v24-settings-panels");
-    if(!tabs||!panelsRoot)return {grid,panelGrid:grid};
-    let tab=tabs.querySelector('.v24-settings-tab[data-tab="heatmap"]');
-    if(!tab){tab=document.createElement("button");tab.type="button";tab.className="v24-settings-tab";tab.dataset.tab=TAB_KEY;tab.textContent="Heatmap";tabs.appendChild(tab);tab.addEventListener("click",activateHeatmapTab);}
-    let panel=panelsRoot.querySelector('.v24-settings-panel[data-tab="heatmap"]');
-    if(!panel){panel=document.createElement("div");panel.className="v24-settings-panel";panel.dataset.tab=TAB_KEY;const inner=document.createElement("div");inner.className="v24-settings-panel-grid";panel.appendChild(inner);panelsRoot.appendChild(panel);}
-    return {grid,panel,panelGrid:panel.querySelector(".v24-settings-panel-grid")};
-  }
   const CONTROL_ORDER=["liq","otf","orders"];
   let layoutFrame=0,layoutDiscoveryObserver=null,stackObserver=null,layoutResizeObserver=null,observedStackMetric=null,observedWrap=null,dprQuery=null;
   function ensureOverlayGroup(){
@@ -97,8 +86,9 @@
     if(overlayToggle()||overlayObserver||typeof MutationObserver!=="function"||!document.body)return;
     overlayObserver=new MutationObserver(()=>overlayToggle());overlayObserver.observe(document.body,{childList:true,subtree:true});
   }
-  function settings(){
-    const location=ensureHeatmapPanel();if(!location)return null;let card=$("heatmapSettingsCard");if(card){if(location.panelGrid&&card.parentNode!==location.panelGrid)location.panelGrid.appendChild(card);return card;}
+  function settings(panelGrid){
+    if(!panelGrid&&window.BT001SettingsTabs){const definition=window.BT001SettingsTabs.get("heatmap");panelGrid=definition&&definition.body;}
+    if(!panelGrid)return null;let card=$("heatmapSettingsCard");if(card){if(card.parentNode!==panelGrid)panelGrid.appendChild(card);return card;}
     card=document.createElement("div");card.id="heatmapSettingsCard";card.className="settings-card heatmap-settings-card";
     card.innerHTML=`<div class="settings-card-title">Heatmap</div><div class="settings-card-desc">BTCUSDT liquidation levels shown as visual context only. Refresh is always manual.</div>
       <h4 class="heatmap-section-heading">Display</h4><div class="heatmap-settings-grid">
@@ -122,7 +112,7 @@
       <span>Canvas CSS / backing</span><span id="heatmapCanvasSize">--</span><span>Plot rectangle</span><span id="heatmapPlotRect">--</span><span>Layer insertion</span><span id="heatmapLayer">--</span><span>Parsed object</span><span id="heatmapSelectedObject">--</span><span>Payload structure</span><span id="heatmapPayloadStructure">--</span><span>Decoded JSON paths</span><span id="heatmapDecodedPaths">none</span><span>Inspected candidates</span><span id="heatmapCandidatePaths">none</span><span>Required / missing fields</span><span id="heatmapFields">--</span><span>Rejection summary</span><span id="heatmapRejections">--</span></div>
       <div class="heatmap-fixed"><span>Automatic refresh: OFF</span><span>Refresh on app load: OFF</span><span>Refresh on enable: OFF</span><span>Refresh on duration change: OFF</span><span>Chart timeframe controls duration: OFF</span><span>Retain previous dataset during refresh: ON</span></div>
       <div class="heatmap-settings-actions"><button id="heatmapSettingsRefresh" type="button">Refresh BTCUSDT heatmap</button><button id="heatmapRetryDataset" type="button" class="secondary hidden">Retry dataset retrieval</button></div>`;
-    location.panelGrid.appendChild(card);
+    panelGrid.appendChild(card);
     const bind=(id,name,event="change",readValue=element=>element.type==="checkbox"?element.checked:element.value)=>$(id).addEventListener(event,()=>window.BT001HeatmapState.setPreference(name,readValue($(id))));
     bind("heatmapEnabled","enabled");bind("heatmapOpacity","opacity","input",element=>Number(element.value));bind("heatmapStrength","strength","input",element=>Number(element.value));bind("heatmapMode","mode");bind("heatmapClipping","maxClipping","input",element=>Number(element.value));bind("heatmapSmoothing","smoothing");bind("heatmapLegend","showLegend");bind("heatmapSourceLabel","showSourceLabel");bind("heatmapDuration","selectedDuration");
     $("heatmapProviderSave").addEventListener("click",()=>{const input=$("heatmapProviderSecret"),saved=window.BT001HeatmapAuth.saveFromInput(input);text("heatmapProviderTestResult",saved?"Saved locally":"Enter an API key before saving");if(!saved)input.focus();});
@@ -147,5 +137,5 @@
     renderDiagnostics(state);const refresh=$("heatmapSettingsRefresh"),retry=$("heatmapRetryDataset");if(refresh)refresh.disabled=state.loading;if(retry){retry.disabled=state.loading;retry.classList.toggle("hidden",!state.recovery.retryEligible);retry.textContent=state.recovery.hasNormalizedCandidate?"Retry rendering":state.recovery.hasParsedCandidate?"Retry validation":state.recovery.hasRawPayload?"Retry parsing":"Retry dataset retrieval";}scheduleOverlayAlignment();try{if(typeof window.draw==="function")window.draw();}catch(_error){}
   }
   function init(){watchOverlayToggle();settings();installLayoutObservers();watchDevicePixelRatio();scheduleOverlayAlignment();window.BT001HeatmapState.subscribe(render);window.BT001HeatmapAuth.subscribe(renderAuth);window.addEventListener("resize",scheduleOverlayAlignment);if(document.fonts&&document.fonts.ready){document.fonts.ready.then(scheduleOverlayAlignment).catch(()=>{});if(typeof document.fonts.addEventListener==="function")document.fonts.addEventListener("loadingdone",scheduleOverlayAlignment);}window.addEventListener("heatmap:diagnostics",event=>renderDiagnostics(event.detail));}
-  window.BT001HeatmapUI=Object.freeze({init,statusText,settings,activateHeatmapTab,manualRefresh,retryDatasetRetrieval});
+  window.BT001HeatmapUI=Object.freeze({init,statusText,settings,manualRefresh,retryDatasetRetrieval});
 })();

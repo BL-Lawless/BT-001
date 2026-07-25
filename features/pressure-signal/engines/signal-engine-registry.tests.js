@@ -90,7 +90,8 @@ const run=(async()=>{
   for(const visibleTf of ["1m","5m","15m","1h","4h"])assert.equal(windowOne.selector.getSelectedId(),"B",`chart TF ${visibleTf} changed the engine`);
   assert(source.includes("signalEngineRegistry.accepts(output,{directionMode:state.direction,publicationGeneration:generation})")&&windows.includes("left.engineId===right.engineId")&&windows.includes("left.engineVersion===right.engineVersion"),"tooltip/report publication isolation is not engine-aware");
   assert(source.includes("engineId:output.engineId,signalId:output.signalId||output.engineId,engineVersion:output.engineVersion,directionMode:displayedSignal.mode,publicationGeneration:generation"),"publication tags are missing");
-  assert(selectorSource.includes('tab.dataset.tab="signals"')&&selectorSource.includes('tab.textContent="Signals"'),"dedicated Signals settings tab is missing");
+  const settingsManifest=fs.readFileSync(path.join(root,"features/settings/tab-manifest.js"),"utf8");
+  assert(selectorSource.includes('card.id="signalEngineSettingsCard"')&&settingsManifest.includes('id: "signals", label: "Signals", order: 900'),"registry-owned Signals settings tab is missing");
   assert(selectorSource.includes('A:"Signal A — Current"')&&selectorSource.includes('B:"Signal B — Refined blend"')&&selectorSource.includes('C:"Signal C — 9/55"'),"Signal choices do not match the specification");
   assert(selectorSource.includes("input.disabled=!available")&&selectorSource.includes('status.textContent=available ?'),"unavailable choices are not visibly disabled");
   assert(!selectorSource.includes("pressureSignalToolbar"),"selector added a toolbar control");

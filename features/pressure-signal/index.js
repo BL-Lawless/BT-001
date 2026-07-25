@@ -198,6 +198,7 @@
     }
   }
   signalEngineSelector=window.createSignalEngineSelector({registry:signalEngineRegistry,onChange:onSignalEngineSelection37});
+  window.mountSignalEngineSettings=body=>window.installSignalEngineSettings({registry:signalEngineRegistry,selector:signalEngineSelector,body});
   signalEngineRegistry.subscribe(()=>{if(state.initialized&&typeof window.installSignalEngineSettings==="function")window.installSignalEngineSettings({registry:signalEngineRegistry,selector:signalEngineSelector});});
   const uiPerf = () => window.BT001_UI_PERFORMANCE || null;
   const timed37 = (name,work,fingerprint=null) => {

@@ -50,10 +50,12 @@ function fixture(duration="3D"){
 
 module.exports=(async()=>{
   const uiSource=fs.readFileSync(path.join(root,"ui.module.js"),"utf8");
+  const settingsManifest=fs.readFileSync(path.join(root,"..","settings","tab-manifest.js"),"utf8");
   const calculatorSource=fs.readFileSync(path.join(root,"..","calculator","presentation","calculatorModule.js"),"utf8");
   const styleSource=fs.readFileSync(path.join(root,"..","..","style.css"),"utf8");
-  assert(uiSource.includes('tab.dataset.tab=TAB_KEY'),"Heatmap Settings tab must be registered");
-  assert(uiSource.includes('panel.dataset.tab=TAB_KEY'),"Heatmap Settings panel must be registered");
+  assert(settingsManifest.includes('id: "heatmap", label: "Heatmap", order: 1000'),"Heatmap Settings tab must be registered");
+  assert(settingsManifest.includes("window.BT001HeatmapUI.settings(context.body)"),"Heatmap Settings content must mount through the registry");
+  assert(!uiSource.includes('className="v24-settings-tab"')&&!uiSource.includes('className="v24-settings-panel"'),"Heatmap must not create registry-owned tab DOM");
   assert.equal((uiSource.match(/addEventListener\("click",manualRefresh\)/g)||[]).length,1,"Refresh must exist only in Settings");
   assert(uiSource.includes('button.id="heatmapOverlayToggle"'),"standard chart overlay toggle must be installed");
   assert(uiSource.includes('const CONTROL_ORDER=["liq","otf","orders"]'),"shared group order must be LIQ, OTF, Orders");
