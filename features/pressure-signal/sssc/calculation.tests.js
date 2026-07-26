@@ -17,6 +17,8 @@ assert.equal(diagnostic.available,true);
 assert.equal(diagnostic.reliability,"full-warmup");
 assert(diagnostic.directionalStrength>0,"the steadily rising audit fixture must report positive current strength");
 assert(diagnostic.acceleration<0,"the audit fixture must continue to identify deceleration separately from positive strength");
+assert.equal(diagnostic.expansionContraction,diagnostic.acceleration,"the existing unsigned value must remain available under its explicit name");
+assert(Number.isFinite(diagnostic.signedAcceleration)&&Number.isFinite(diagnostic.directionalAcceleration));
 assert.equal(diagnostic.strengthState,"Bullish Strength");
 assert.equal(diagnostic.accelerationState,"Strong Contraction");
 assert.equal(diagnostic.normalization.status,"available");

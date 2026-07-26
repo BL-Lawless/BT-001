@@ -4,9 +4,9 @@
   const clamp=(value,min,max)=>Math.max(min,Math.min(max,Number(value)||0));
 
   function directionRelativeAcceleration(diagnostic){
-    const direction=Number(diagnostic&&diagnostic.direction),acceleration=Number(diagnostic&&diagnostic.acceleration);
-    if(!Number.isFinite(direction)||!Number.isFinite(acceleration))return null;
-    return clamp(acceleration*Math.sign(direction),-100,100);
+    const acceleration=Number(diagnostic&&diagnostic.directionalAcceleration);
+    if(!Number.isFinite(acceleration))return null;
+    return clamp(acceleration,-100,100);
   }
 
   function createGaugeTracker(){

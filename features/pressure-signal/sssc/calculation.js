@@ -160,6 +160,15 @@
     const prior=Math.abs(recentAnchor.value-priorAnchor.value)/context.RV.priorPriceVolatility;
     return clamp((recent-prior)*100,-100,100);
   }
+  function signedSlopeAcceleration(series,context){
+    const latest=series&&series.at(-1),nowMs=timestampMs(latest&&latest.time);
+    const recentAnchor=nowMs==null?null:pointAtTime(series,nowMs-context.horizonMs,context.intervalMs);
+    const priorAnchor=nowMs==null?null:pointAtTime(series,nowMs-context.horizonMs*2,context.intervalMs);
+    if(!latest||!recentAnchor||!priorAnchor||!context.RV.recentPriceVolatility||!context.RV.priorPriceVolatility)return null;
+    const recentVelocity=(latest.value-recentAnchor.value)/context.RV.recentPriceVolatility;
+    const priorVelocity=(recentAnchor.value-priorAnchor.value)/context.RV.priorPriceVolatility;
+    return clamp((recentVelocity-priorVelocity)*100,-100,100);
+  }
   function spreadDir(values,atr){
     if(!Array.isArray(values)||values.length<2||isNearZero(atr))return null;
     let sum=0,pairs=0;for(let i=0;i<values.length-1;i++){const a=Number(values[i]),b=Number(values[i+1]);if(Number.isFinite(a)&&Number.isFinite(b)){sum+=clamp((a-b)/(.50*atr)*100,-100,100);pairs++;}}
@@ -176,6 +185,21 @@
         const currentGap=Math.abs(fastLatest.value-slowLatest.value)/context.atr;
         const priorGap=Math.abs(fastPrior.value-slowPrior.value)/context.atrAtHorizon;
         sum+=clamp((currentGap-priorGap)/.50*100,-100,100);count++;
+      }
+    }
+    return count===slots.length-1?sum/count:null;
+  }
+  function signedSpreadAcceleration(seriesBySlot,slots,context){
+    if(isNearZero(context.atr)||isNearZero(context.atrAtHorizon))return null;
+    let sum=0,count=0;
+    for(let i=0;i<slots.length-1;i++){
+      const fast=seriesBySlot[slots[i].slotId],slow=seriesBySlot[slots[i+1].slotId],fastLatest=fast&&fast.at(-1),slowLatest=slow&&slow.at(-1);
+      const nowMs=timestampMs(fastLatest&&fastLatest.time),targetMs=nowMs==null?null:nowMs-context.horizonMs;
+      const fastPrior=targetMs==null?null:pointAtTime(fast,targetMs,context.intervalMs),slowPrior=targetMs==null?null:pointAtTime(slow,targetMs,context.intervalMs);
+      if(fastLatest&&slowLatest&&fastPrior&&slowPrior){
+        const currentSignedGap=(fastLatest.value-slowLatest.value)/context.atr;
+        const priorSignedGap=(fastPrior.value-slowPrior.value)/context.atrAtHorizon;
+        sum+=clamp((currentSignedGap-priorSignedGap)/.50*100,-100,100);count++;
       }
     }
     return count===slots.length-1?sum/count:null;
@@ -253,21 +277,26 @@
     const crossoverWeight=crossWeight(c12),crossoverContribution=c12.dir*6*crossoverWeight;
     const direction=clamp(stackDir*.44+slopeDir*.30+sprDir*.20+crossoverContribution,-100,100);
     const slopePowers={MA2:slopePower(seriesBySlot.MA2,context),MA3:slopePower(seriesBySlot.MA3,context),MA4:slopePower(seriesBySlot.MA4,context)};
-    const sprPow=spreadPower(seriesBySlot,normalizedSlots,context);
-    if(Object.values(slopePowers).some(value=>value==null)||sprPow==null)return freeze({tf:label,interval,available:false,reason:"normalization-unavailable",rows:fixedRows.length,reliability:"normalization-unavailable",warmupLimited:false,normalization:freeze({status:"unavailable",unavailable:["power-anchor-unavailable"],atr:normalization.atr,atrInBps:normalization.atrInBps,RV:normalization.RV,resolvedElapsedHorizons:normalization.resolvedElapsedHorizons})});
-    const slopePow=.55*slopePowers.MA2+.30*slopePowers.MA3+.15*slopePowers.MA4,acceleration=clamp(slopePow*.52+sprPow*.42,-100,100);
+    const signedSlopeAccelerations={MA2:signedSlopeAcceleration(seriesBySlot.MA2,context),MA3:signedSlopeAcceleration(seriesBySlot.MA3,context),MA4:signedSlopeAcceleration(seriesBySlot.MA4,context)};
+    const sprPow=spreadPower(seriesBySlot,normalizedSlots,context),signedSprAcceleration=signedSpreadAcceleration(seriesBySlot,normalizedSlots,context);
+    if(Object.values(slopePowers).some(value=>value==null)||Object.values(signedSlopeAccelerations).some(value=>value==null)||sprPow==null||signedSprAcceleration==null)return freeze({tf:label,interval,available:false,reason:"normalization-unavailable",rows:fixedRows.length,reliability:"normalization-unavailable",warmupLimited:false,normalization:freeze({status:"unavailable",unavailable:["power-anchor-unavailable"],atr:normalization.atr,atrInBps:normalization.atrInBps,RV:normalization.RV,resolvedElapsedHorizons:normalization.resolvedElapsedHorizons})});
+    const slopePow=.55*slopePowers.MA2+.30*slopePowers.MA3+.15*slopePowers.MA4;
+    const signedSlopeAccelerationValue=.55*signedSlopeAccelerations.MA2+.30*signedSlopeAccelerations.MA3+.15*signedSlopeAccelerations.MA4;
+    const expansionContraction=clamp(slopePow*.52+sprPow*.42,-100,100),acceleration=expansionContraction;
     const rawStrength=clamp(slopeDir*.52+sprDir*.42,-100,100);
     const compressionPenalty=18*(1-separation.compressionFactor);
     const directionalStrength=Math.sign(rawStrength)*Math.max(0,Math.abs(rawStrength)-compressionPenalty);
+    const signedAcceleration=clamp(signedSlopeAccelerationValue*.52+signedSprAcceleration*.42,-100,100);
+    const directionalAcceleration=clamp(Math.sign(direction)*signedAcceleration,-100,100);
     const state=direction>55?"Bullish":direction>18?"Mixed Bullish":direction<-55?"Bearish":direction<-18?"Mixed Bearish":"Mixed";
-    const phase=phaseLabel({compressionFactor:separation.compressionFactor,directionalStrength,direction,acceleration});
+    const phase=phaseLabel({compressionFactor:separation.compressionFactor,directionalStrength,direction,acceleration:expansionContraction});
     const strengthState=directionalStrength>35?"Bullish Strength":directionalStrength>10?"Strong Bullish":directionalStrength<-35?"Bearish Strength":directionalStrength<-10?"Strong Bearish":"Neutral";
-    const accelerationState=acceleration>35?"Strong Expansion":acceleration>10?"Mild Expansion":acceleration<-35?"Strong Contraction":acceleration<-10?"Mild Contraction":"Stable";
+    const accelerationState=expansionContraction>35?"Strong Expansion":expansionContraction>10?"Mild Expansion":expansionContraction<-35?"Strong Contraction":expansionContraction<-10?"Mild Contraction":"Stable";
     const priceToEma=values.map(value=>Math.abs(price-value)/normalization.atr),clusterSpan=(Math.max(...values)-Math.min(...values))/normalization.atr;
     const normalizedDistances=freeze({adjacentGaps:separation.spreads.slice(),averageAdjacentGap:separation.average,minimumAdjacentGap:separation.minimum,priceToEma,clusterSpan,unit:"atr"});
     const telemetry=freeze({status:"available",unavailable:[],atrPeriod:SSSC_ATR_PERIOD,atr:normalization.atr,atrInBps:normalization.atrInBps,RV:normalization.RV,normalizedDistances,resolvedElapsedHorizons:normalization.resolvedElapsedHorizons});
     const events={x12:c12.label,x23:c23.label,x34:c34.label,x45:c45.label,ma1:eventForLevel(price,values[0],normalization.atr),ma2:eventForLevel(price,values[1],normalization.atr),ma3:eventForLevel(price,values[2],normalization.atr),cluster:clusterState(values,normalization.atr)};
-    return freeze({tf:label,interval,available:true,rows:fixedRows.length,price,emasBySlot:seriesBySlot,emaVals:values,direction,directionalStrength,acceleration,state,phase,strengthState,accelerationState,stackDir,clean,separation,compressionFactor:separation.compressionFactor,compressionPenalty,rawStrength,slopeDir,sprDir,slopePow,sprPow,crossoverWeight,crossoverContribution,crosses:{c12,c23,c34,c45},slots:normalizedSlots,periods:normalizedSlots.map(slot=>slot.period),pairs:[[normalizedSlots[0],normalizedSlots[1]],[normalizedSlots[1],normalizedSlots[2]],[normalizedSlots[2],normalizedSlots[3]],[normalizedSlots[3],normalizedSlots[4]]],events,reliability:fixedRows.length>=fullRows?"full-warmup":"minimum-warmup",warmupLimited:false,normalization:telemetry,atr:telemetry.atr,atrInBps:telemetry.atrInBps,RV:telemetry.RV,normalizedDistances,resolvedElapsedHorizons:telemetry.resolvedElapsedHorizons});
+    return freeze({tf:label,interval,available:true,rows:fixedRows.length,price,emasBySlot:seriesBySlot,emaVals:values,direction,directionalStrength,acceleration,expansionContraction,signedAcceleration,directionalAcceleration,state,phase,strengthState,accelerationState,stackDir,clean,separation,compressionFactor:separation.compressionFactor,compressionPenalty,rawStrength,slopeDir,sprDir,slopePow,sprPow,signedSlopeAcceleration:signedSlopeAccelerationValue,signedSpreadAcceleration:signedSprAcceleration,crossoverWeight,crossoverContribution,crosses:{c12,c23,c34,c45},slots:normalizedSlots,periods:normalizedSlots.map(slot=>slot.period),pairs:[[normalizedSlots[0],normalizedSlots[1]],[normalizedSlots[1],normalizedSlots[2]],[normalizedSlots[2],normalizedSlots[3]],[normalizedSlots[3],normalizedSlots[4]]],events,reliability:fixedRows.length>=fullRows?"full-warmup":"minimum-warmup",warmupLimited:false,normalization:telemetry,atr:telemetry.atr,atrInBps:telemetry.atrInBps,RV:telemetry.RV,normalizedDistances,resolvedElapsedHorizons:telemetry.resolvedElapsedHorizons});
   }
   function timeframeInterval(item){
     const interval=String(item&&item.interval||"").toLowerCase();
@@ -393,7 +422,7 @@
     }
     return freeze({positionAction:"HOLD",positionSide,reason:"No LONG position adjustment threshold met"});
   }
-  const api=freeze({TIMEFRAME_ROLES,ROLE_ORDER,SSSC_ATR_PERIOD,INTERVAL_MS,ema,atrSeries,realizedVolatility,buildNormalization,separationMetrics,rawStackDirection,stackDirection,stackClean,slopeScore,slopePower,spreadDir,spreadPower,crossState,crossWeight,eventForLevel,clusterState,phaseLabel,deriveEarlyWarning,calculateTimeframe,aggregate,evaluateMarketSetup,evaluatePositionAction});
+  const api=freeze({TIMEFRAME_ROLES,ROLE_ORDER,SSSC_ATR_PERIOD,INTERVAL_MS,ema,atrSeries,realizedVolatility,buildNormalization,separationMetrics,rawStackDirection,stackDirection,stackClean,slopeScore,slopePower,signedSlopeAcceleration,spreadDir,spreadPower,signedSpreadAcceleration,crossState,crossWeight,eventForLevel,clusterState,phaseLabel,deriveEarlyWarning,calculateTimeframe,aggregate,evaluateMarketSetup,evaluatePositionAction});
   if(typeof module!=="undefined"&&module.exports)module.exports=api;
   if(typeof window!=="undefined")window.BT001_SSSC_CALC=api;
 })();

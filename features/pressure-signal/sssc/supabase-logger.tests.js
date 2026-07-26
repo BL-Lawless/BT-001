@@ -8,6 +8,7 @@ const {SNAPSHOT_INTERVAL_MS,LOGGED_INTERVALS,buildSnapshotPayload,createSnapshot
 const diagnostic=(interval,index)=>({
   tf:interval.toUpperCase(),interval,available:true,direction:50-index,directionalStrength:30-index,
   acceleration:10-index,stackDir:20,slopeDir:21,sprDir:22,crossoverContribution:3,
+  expansionContraction:10-index,signedAcceleration:8-index,directionalAcceleration:7-index,
   atr:100+index,atrInBps:12+index,RV:{recent:.01+index/1000,prior:.02+index/1000},
   resolvedElapsedHorizons:{slopeMs:480000,crossoverStaleMs:1440000},
   reliability:"full-warmup",phase:"Transition",state:"Mixed Bullish",
@@ -28,6 +29,14 @@ assert.equal(payload.timeframes["1h"].role,"structure");
 assert.equal(payload.timeframes["1m"].available,true);
 assert.equal(payload.timeframes["15m"].atrBps,data["15M"].atrInBps);
 assert.equal(payload.timeframes["5m"].recentRV,data["5M"].RV.recent);
+assert.equal(payload.timeframes["1m"].expansionContraction,data["1M"].expansionContraction);
+assert.equal(payload.timeframes["1m"].directionalAcceleration,data["1M"].directionalAcceleration);
+
+const nullStrengthData={...data,"1M":{...data["1M"],directionalStrength:null}};
+const nullStrengthPayload=buildSnapshotPayload({
+  snapshot:{started:true,data:nullStrengthData},calculation,symbol:"BTCUSDT",machineId:"machine-sssc-test"
+});
+assert.equal(nullStrengthPayload.timeframes["1m"].directionalStrength,null,"missing strength must never be coerced into a fake zero");
 assert.deepEqual(payload.aggregate.missingTimeframes,[]);
 
 const partialData={...data};
@@ -98,9 +107,54 @@ assert.equal(missingMachineWrites,0,"blank machine_id must prevent the Supabase 
 assert.equal(missingMachineWarnings.length,1,"blank machine_id must produce an explicit warning");
 assert.match(missingMachineWarnings[0],/machine_id is unavailable/);
 
+// End-to-end regression: calculate real metrics from OHLC, pass the resulting diagnostic through
+// capture(), and inspect the exact object handed to the Supabase service.
+const slots=[9,21,55,100,200].map((period,index)=>({slot:index+1,slotId:`MA${index+1}`,period}));
+let calculatedClose=200,calculatedPrevious=calculatedClose;
+const calculatedRows=[];
+for(let index=0;index<1000;index++){
+  const step=index<984
+    ?-.03+Math.sin(index*.7)*.01
+    :index<992
+      ?-.05+Math.sin(index*1.1)*.01
+      :.06+Math.sin(index*1.3)*.01;
+  calculatedClose+=step;
+  calculatedRows.push({
+    time:1700000000+index*60,open:calculatedPrevious,close:calculatedClose,
+    high:Math.max(calculatedPrevious,calculatedClose)+.05,low:Math.min(calculatedPrevious,calculatedClose)-.05,final:true
+  });
+  calculatedPrevious=calculatedClose;
+}
+const calculatedDiagnostic=calculation.calculateTimeframe({
+  label:"1M",interval:"1m",rows:calculatedRows,slots,minimumRows:600,fullRows:1000
+});
+assert(calculatedDiagnostic.directionalStrength!==0);
+assert(calculatedDiagnostic.directionalAcceleration!==0);
+const calculatedData=Object.fromEntries(intervals.map(interval=>[
+  interval.toUpperCase(),{...calculatedDiagnostic,tf:interval.toUpperCase(),interval}
+]));
+let calculatedOutbound=null;
+const calculatedLogger=createSnapshotLogger({
+  getSnapshot:()=>({started:true,data:calculatedData}),
+  getCalculation:()=>calculation,
+  getSymbol:()=>"BTCUSDT",
+  getSupabase:()=>({
+    configured:()=>true,
+    getDeviceId:()=>"machine-calculated-boundary",
+    log(table,row){calculatedOutbound={table,row};return Promise.resolve(true);}
+  })
+});
+assert.equal(calculatedLogger.capture(),true);
+assert.equal(calculatedOutbound.table,"sssc_snapshots");
+assert.equal(calculatedOutbound.row.timeframes["1m"].directionalStrength,calculatedDiagnostic.directionalStrength);
+assert.equal(calculatedOutbound.row.timeframes["1m"].directionalAcceleration,calculatedDiagnostic.directionalAcceleration);
+assert.equal(calculatedOutbound.row.timeframes["1m"].expansionContraction,calculatedDiagnostic.expansionContraction);
+assert.equal(calculatedOutbound.row.aggregate.marketStrength,calculatedDiagnostic.directionalStrength);
+
 const main=fs.readFileSync(path.resolve(__dirname,"..","..","..","main.js"),"utf8");
 const html=fs.readFileSync(path.resolve(__dirname,"..","..","..","index.html"),"utf8");
 assert(html.indexOf("features/pressure-signal/sssc/supabase-logger.js")<html.indexOf('src="main.js"'));
+assert(html.includes("supabase-logger.js?v=20260726-strength-fields-v2"),"logger asset must be cache-busted after its field contract changes");
 assert(main.includes("ensureSnapshotLogger()?.start()"),"always-on install must start SSSC logging without opening the dashboard");
 
 console.log("sssc Supabase logger tests: PASS");

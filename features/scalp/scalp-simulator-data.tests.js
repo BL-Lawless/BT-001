@@ -14,7 +14,7 @@ function runtime(extra={}){
 }
 function eventRow({time,rank=50,direction="LONG",source="1m",eventType="CROSS",symbol="BTCUSDT",id,metrics=null}){
   const detector_state={source,direction,eventType,candleTime:time,rankValue:rank,eventId:id||`${source}|${direction}|${eventType}|${time}|${rank}`};
-  if(metrics){detector_state.raw={fastSlope:metrics.fastSlope,slowSlope:metrics.slowSlope,separation:metrics.separation,previousFastSlope:metrics.previousFastSlope,previousGap:metrics.previousGap};detector_state.rankDiagnostics={relativeVolume:metrics.relativeVolume};}
+  if(metrics){detector_state.raw={fastSlope:metrics.fastSlope,slowSlope:metrics.slowSlope,separation:metrics.separation,previousFastSlope:metrics.previousFastSlope,previousGap:metrics.previousGap,atr:metrics.atr,priorAtr:metrics.priorAtr,atrChange:metrics.atrChange,directionalAccelerationAtr:metrics.directionalAccelerationAtr};detector_state.rankDiagnostics={relativeVolume:metrics.relativeVolume};}
   return {action:"DETECTION_QUALIFIED",symbol,source_timeframe:source,detector_state};
 }
 function candle(openTime,{open=100,high=101,low=99,close=100}={}){
@@ -36,7 +36,7 @@ async function run(){
   assert(deduped.every(row=>!Object.prototype.hasOwnProperty.call(row,"symbol")),"BTCUSDT/BTCUSDC must not split the event stream");
   cases.candleTimeToleranceDedupeKeepsHighestRank=true;
 
-  const rawMetrics={fastSlope:.2,slowSlope:.05,separation:.1,previousFastSlope:.12,previousGap:-.03,relativeVolume:.5},metricEvent=data.normalizeEvent(eventRow({time:0,rank:80,id:"metric-event",metrics:rawMetrics}));
+  const rawMetrics={fastSlope:.2,slowSlope:.05,separation:.1,previousFastSlope:.12,previousGap:-.03,atr:2.5,priorAtr:2,atrChange:.25,directionalAccelerationAtr:.08,relativeVolume:.5},metricEvent=data.normalizeEvent(eventRow({time:0,rank:80,id:"metric-event",metrics:rawMetrics}));
   for(const [key,value] of Object.entries(rawMetrics))assert.equal(metricEvent[key],value,`${key} must be normalized from detector_state without recomputation`);
   const metricConfig=data.simulationConfig({slopeWeight:2,volumeGateThreshold:1}),computed=data.exploratoryMetrics(metricEvent,metricConfig);assert(Math.abs(computed.effectiveSeparation-.5)<1e-12);assert(Math.abs(computed.volumeGatedAngle-.1)<1e-12);
   const metricCandles=data.normalizeCandles([candle(0),candle(60000,{high:106,low:94})]),metricBase={lot:1,target:5,stop:5,minimumRank:70,direction:"LONG",eventType:"CROSS",sourceTimeframe:"1m",rates:{maker:0,taker:0},filters:{tickSize:.1,stepSize:.001}};

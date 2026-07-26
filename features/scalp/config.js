@@ -17,7 +17,7 @@
     directions:Object.freeze(["SHORT","LONG","ANY"]),entryTypes:Object.freeze(["BOUNCE","CROSS","ANY"]),modes:Object.freeze(["CONTINUOUS"]),
     defaults:Object.freeze({direction:"ANY",source:"1m",entryType:"ANY",minimumRank:0,lot:"0.000",target:"5.0",tpDelta:"0",tpDriver:"NET_TARGET",stop:"3.0",slDelta:"0",slDriver:"NET_SL",mode:"CONTINUOUS",maxConcurrentAutoPositions:1,maxDailyAutoLossUsd:25,profitLockEnabled:false,lockThresholdPct:50,lockPortionPct:50,rankBoostEnabled:false,rankBoostThreshold:90,rankBoostPoints:0}),
     fees:Object.freeze({fallbackMaker:0.0002,fallbackTaker:0.0004}),
-    signal:Object.freeze({emaFast:9,emaSlow:55,minimumRows:80,atrPeriod:14,pressureBaseline:20,crossMeaningfulGapAtr:0.10,toleranceAtr:0.12,approachAtr:0.24,bounceExpansionAtr:0.005,maxOppositeSlowSlopeAtr:0.12,minFastSlopeAtr:0.006,projectedBandAtr:0.36,staleMs:Object.freeze({"1m":120000,"3m":360000,"5m":600000,"15m":1800000})}),
+    signal:Object.freeze({emaFast:9,emaSlow:55,minimumRows:80,atrPeriod:14,atrTrajectoryLookbackBars:8,atrTrajectoryFullChange:0.25,velocityConvictionAtrPerBar:1.5,accelerationConvictionAtrPerBar:0.5,pressureBaseline:20,crossMeaningfulGapAtr:0.10,toleranceAtr:0.12,approachAtr:0.24,bounceWindowBars:12,bounceExpansionAtr:0.005,maxOppositeSlowSlopeAtr:0.12,minFastSlopeAtr:0.006,projectedBandAtr:0.36,staleMs:Object.freeze({"1m":120000,"3m":360000,"5m":600000,"15m":1800000})}),
     order:Object.freeze({namespace:"SCALP",entryPrefix:"SCALP-E",tpPrefix:"SCALP-T",slPrefix:"SCALP-S",exitPrefix:"SCALP-X",reconcileDelayMs:250,protectionRetry:1,tpRetry:2}),
     ui:Object.freeze({minWidth:370,minHeight:350,defaultWidth:430,defaultHeight:420})
   });

@@ -5,6 +5,7 @@
   const LOGGED_INTERVALS=Object.freeze(["1m","3m","5m","15m","1h"]);
 
   const finiteOrNull=value=>{
+    if(value==null||typeof value==="string"&&!value.trim())return null;
     const parsed=Number(value);
     return Number.isFinite(parsed)?parsed:null;
   };
@@ -26,6 +27,9 @@
       direction:finiteOrNull(diagnostic.direction),
       directionalStrength:finiteOrNull(diagnostic.directionalStrength),
       acceleration:finiteOrNull(diagnostic.acceleration),
+      expansionContraction:finiteOrNull(diagnostic.expansionContraction),
+      signedAcceleration:finiteOrNull(diagnostic.signedAcceleration),
+      directionalAcceleration:finiteOrNull(diagnostic.directionalAcceleration),
       stackDir:finiteOrNull(diagnostic.stackDir),
       slopeDir:finiteOrNull(diagnostic.slopeDir),
       sprDir:finiteOrNull(diagnostic.sprDir),
