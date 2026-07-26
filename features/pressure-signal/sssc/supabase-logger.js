@@ -22,6 +22,7 @@
   function timeframePayload(diagnostic,interval,calculation){
     const role=calculation&&calculation.TIMEFRAME_ROLES&&calculation.TIMEFRAME_ROLES[interval]?.role||null;
     return {
+      available:true,
       direction:finiteOrNull(diagnostic.direction),
       directionalStrength:finiteOrNull(diagnostic.directionalStrength),
       acceleration:finiteOrNull(diagnostic.acceleration),
@@ -41,13 +42,31 @@
     };
   }
 
+  function unavailableTimeframePayload(diagnostic,interval,calculation){
+    const role=calculation&&calculation.TIMEFRAME_ROLES&&calculation.TIMEFRAME_ROLES[interval]?.role||null;
+    return {
+      available:false,
+      reason:String(diagnostic&&diagnostic.reason||"diagnostic-unavailable"),
+      role,
+      reliability:diagnostic&&diagnostic.reliability||null
+    };
+  }
+
   function buildSnapshotPayload({snapshot,calculation,symbol,machineId}={}){
     if(!snapshot||snapshot.started!==true||!calculation)return null;
+    const resolvedMachineId=String(machineId||"").trim();
+    if(!resolvedMachineId)return null;
     const indexed=diagnosticsByInterval(snapshot);
-    if(LOGGED_INTERVALS.some(interval=>!indexed[interval]||indexed[interval].available!==true))return null;
 
-    const timeframes={};
-    for(const interval of LOGGED_INTERVALS)timeframes[interval]=timeframePayload(indexed[interval],interval,calculation);
+    const timeframes={},missingTimeframes=[];
+    for(const interval of LOGGED_INTERVALS){
+      const diagnostic=indexed[interval];
+      if(diagnostic&&diagnostic.available===true)timeframes[interval]=timeframePayload(diagnostic,interval,calculation);
+      else{
+        missingTimeframes.push(interval);
+        timeframes[interval]=unavailableTimeframePayload(diagnostic,interval,calculation);
+      }
+    }
 
     // Preserve the dashboard's aggregate meaning: it consumes every tracked timeframe, while the
     // raw per-timeframe calibration payload intentionally contains only LOGGED_INTERVALS.
@@ -65,9 +84,10 @@
       alignment:finiteOrNull(summary.alignment),
       coverage:finiteOrNull(summary.coverage),
       reason:marketRead.reason||null,
-      unanimousStrongOpposition:summary.triggerRisk&&summary.triggerRisk.unanimousStrongOpposition===true
+      unanimousStrongOpposition:summary.triggerRisk&&summary.triggerRisk.unanimousStrongOpposition===true,
+      missingTimeframes
     };
-    return {machine_id:machineId||null,symbol:String(symbol||""),timeframes,aggregate};
+    return {machine_id:resolvedMachineId,symbol:String(symbol||""),timeframes,aggregate};
   }
 
   function createSnapshotLogger(options={}){
@@ -77,6 +97,9 @@
     const getSupabase=options.getSupabase;
     const setIntervalFn=options.setIntervalFn||setInterval;
     const clearIntervalFn=options.clearIntervalFn||clearInterval;
+    const warn=typeof options.warn==="function"?options.warn:(...args)=>{
+      if(typeof console!=="undefined"&&typeof console.warn==="function")console.warn(...args);
+    };
     let timer=null;
 
     function capture(){
@@ -87,6 +110,10 @@
         const snapshot=typeof getSnapshot==="function"?getSnapshot():null;
         const calculation=typeof getCalculation==="function"?getCalculation():null;
         const machineId=typeof supabase.getDeviceId==="function"?supabase.getDeviceId():null;
+        if(!String(machineId||"").trim()){
+          warn("[SSSC Supabase] Snapshot skipped: machine_id is unavailable.");
+          return false;
+        }
         const payload=buildSnapshotPayload({
           snapshot,calculation,symbol:typeof getSymbol==="function"?getSymbol():"",machineId
         });

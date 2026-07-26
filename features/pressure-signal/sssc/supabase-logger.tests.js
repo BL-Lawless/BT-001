@@ -25,8 +25,28 @@ assert.equal(payload.machine_id,"machine-sssc-test");
 assert.equal(payload.symbol,"BTCUSDT");
 assert.equal(payload.timeframes["1m"].role,"trigger");
 assert.equal(payload.timeframes["1h"].role,"structure");
+assert.equal(payload.timeframes["1m"].available,true);
 assert.equal(payload.timeframes["15m"].atrBps,data["15M"].atrInBps);
 assert.equal(payload.timeframes["5m"].recentRV,data["5M"].RV.recent);
+assert.deepEqual(payload.aggregate.missingTimeframes,[]);
+
+const partialData={...data};
+partialData["3M"]={...partialData["3M"],available:false,reason:"persistent-gap"};
+delete partialData["15M"];
+const partialPayload=buildSnapshotPayload({
+  snapshot:{started:true,data:partialData},calculation,symbol:"BTCUSDT",machineId:"machine-sssc-test"
+});
+assert(partialPayload,"one unavailable timeframe must not suppress the entire snapshot");
+assert.equal(partialPayload.timeframes["1m"].available,true);
+assert.equal(partialPayload.timeframes["3m"].available,false);
+assert.equal(partialPayload.timeframes["3m"].reason,"persistent-gap");
+assert.equal(partialPayload.timeframes["15m"].available,false);
+assert.equal(partialPayload.timeframes["15m"].reason,"diagnostic-unavailable");
+assert.deepEqual(partialPayload.aggregate.missingTimeframes,["3m","15m"]);
+
+for(const invalidMachineId of [null,"","   "]){
+  assert.equal(buildSnapshotPayload({snapshot,calculation,symbol:"BTCUSDT",machineId:invalidMachineId}),null);
+}
 
 const serialized=JSON.stringify(payload);
 for(const forbidden of ["positionAction","vwap","events","Near","Above","Below","cluster","Tight","Moderate Separation","Wide Separation"]){
@@ -37,7 +57,7 @@ assert(Object.prototype.hasOwnProperty.call(payload.aggregate,"coverage"));
 assert(Object.prototype.hasOwnProperty.call(payload.aggregate,"unanimousStrongOpposition"));
 assert(!Object.prototype.hasOwnProperty.call(payload.aggregate,"positionAction"));
 
-let timerCallback=null,timerDelay=null,writes=0,pipelineLive=false,continued=true;
+let timerCallback=null,timerDelay=null,writes=0,pipelineLive=false,continued=true,outboundRow=null;
 const failingLogger=createSnapshotLogger({
   getSnapshot:()=>({...snapshot,started:pipelineLive}),
   getCalculation:()=>calculation,
@@ -45,7 +65,7 @@ const failingLogger=createSnapshotLogger({
   getSupabase:()=>({
     configured:()=>true,
     getDeviceId:()=>"machine-sssc-test",
-    log(){writes++;return Promise.reject(new Error("network down"));}
+    log(_table,row){writes++;outboundRow=row;return Promise.reject(new Error("network down"));}
   }),
   setIntervalFn:(callback,delay)=>{timerCallback=callback;timerDelay=delay;return 7;},
   clearIntervalFn:()=>{}
@@ -56,8 +76,27 @@ assert.equal(timerCallback(),false,"logging must not run before the pipeline is 
 pipelineLive=true;
 assert.doesNotThrow(()=>timerCallback());
 assert.equal(writes,1);
+assert.equal(outboundRow.machine_id,"machine-sssc-test","machine_id must reach the outbound write row");
 continued=true;
 assert.equal(continued,true,"a rejected fire-and-forget write must not block subsequent application work");
+
+let missingMachineWrites=0;
+const missingMachineWarnings=[];
+const missingMachineLogger=createSnapshotLogger({
+  getSnapshot:()=>snapshot,
+  getCalculation:()=>calculation,
+  getSymbol:()=>"BTCUSDT",
+  getSupabase:()=>({
+    configured:()=>true,
+    getDeviceId:()=>"   ",
+    log(){missingMachineWrites++;return Promise.resolve(true);}
+  }),
+  warn:message=>missingMachineWarnings.push(message)
+});
+assert.equal(missingMachineLogger.capture(),false);
+assert.equal(missingMachineWrites,0,"blank machine_id must prevent the Supabase write");
+assert.equal(missingMachineWarnings.length,1,"blank machine_id must produce an explicit warning");
+assert.match(missingMachineWarnings[0],/machine_id is unavailable/);
 
 const main=fs.readFileSync(path.resolve(__dirname,"..","..","..","main.js"),"utf8");
 const html=fs.readFileSync(path.resolve(__dirname,"..","..","..","index.html"),"utf8");
