@@ -254,6 +254,8 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/heatmap/index.js" defer></script>
   <script src="features/pressure-signal/sssc/calculation.js" defer></script>
   <script src="features/pressure-signal/sssc/orchestration.js" defer></script>
+  <script src="features/pressure-signal/sssc/gauge-presentation.js" defer></script>
+  <script src="features/pressure-signal/sssc/supabase-logger.js" defer></script>
   <script src="main.js" defer></script>
   <script src="features/smc/smc-overlay.module.js" defer></script>
   <script src="features/pressure-signal/core/config.js" defer></script>
@@ -426,7 +428,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   </div>
   <div class="sssc-ui-body">
     <div class="sssc-ui-top" id="ssscDashTop"></div>
-    <div class="sssc-ui-table-head"><div>TF</div><div>State / Phase</div><div></div><div>STRENGTH</div><div>SCORE</div><div>Strength State</div></div>
+    <div class="sssc-ui-table-head"><div>TF</div><div>State / Phase</div><div></div><div>MOMENTUM</div><div>SCORE</div><div>Strength State</div></div>
     <div class="sssc-ui-rows" id="ssscDashRows"></div>
     <div class="sssc-ui-event"><h4><span>Event Strip</span><button id="ssscEventToggle" type="button">Expand</button></h4><div id="ssscDashEvents" class="sssc-collapse-body hidden"></div></div>
     <div class="sssc-ui-detail hidden" id="ssscDashDetail"><h4><span id="ssscDashDetailTitle">TF Detail</span><button id="ssscDetailToggle" type="button">Collapse</button></h4><div class="sssc-ui-detail-grid" id="ssscDashDetailGrid"></div></div>
