@@ -62,5 +62,40 @@ const {createOrchestration,warmupTargets}=require("./orchestration.js");
   assert.equal(capturedRows[0].length,100,"closed rows must be sliced to 5x longest period before calculation");
   assert.equal(capturedRows[0][0].time,41);
 
+  // REST parsing marks every row final:false. Seeding must retain only the active tail as
+  // forming and stamp the time-confirmed history final:true before normalization consumes it.
+  const hour=60*60,seedStart=1700000000,seedNow=(seedStart+1000*hour)*1000+hour*500;
+  const standardSlots=[9,21,55,100,200].map((period,index)=>({slotId:`MA${index+1}`,period}));
+  const restShapedRows=Array.from({length:1001},(_,index)=>{
+    const close=30000+index*2+Math.sin(index/9)*20;
+    return {
+      time:seedStart+index*hour,openTime:(seedStart+index*hour)*1000,closeTime:(seedStart+(index+1)*hour)*1000-1,
+      open:close-2,high:close+15,low:close-15,close,volume:10,baseVolume:10,quoteVolume:close*10,final:false
+    };
+  });
+  let restFetches=0;
+  const seededPipeline=createOrchestration({
+    tfs:[["1H","1h"]],liveTfs:["1h"],getSlots:()=>standardSlots,getCalculation:()=>calculation,
+    getSymbol:()=>"BTCUSDT",now:()=>seedNow,
+    fetchKlines:async()=>{restFetches++;return restShapedRows;},
+    connectWebSocket:()=>({disconnect(){}}),getWsUrl:()=>"wss://example/ws"
+  });
+  await seededPipeline.refresh();
+  const seededSnapshot=seededPipeline.getSnapshot(),storedHistory=seededSnapshot.privateCandlesByTf["1h"],storedForming=seededSnapshot.privateFormingByTf["1h"];
+  assert.equal(restFetches,1);
+  assert.equal(storedHistory.length,1000);
+  assert(storedHistory.every(row=>row.final===true),"all time-confirmed REST history must be stamped final:true");
+  assert.equal(storedForming.time,restShapedRows.at(-1).time);
+  assert.equal(storedForming.final,false,"only the genuinely active tail may remain forming");
+  const normalizedHistory=calculation.calculateTimeframe({
+    label:"1H",interval:"1h",rows:storedHistory,slots:standardSlots,minimumRows:600,fullRows:1000
+  });
+  assert.equal(normalizedHistory.available,true,"REST-seeded history must survive finalizedRows and produce a diagnostic");
+  assert.equal(normalizedHistory.normalization.status,"available");
+  assert(normalizedHistory.atr>0,"atrSeries must receive the finalized REST history");
+  assert(normalizedHistory.RV.recent>0&&normalizedHistory.RV.prior>0,"buildNormalization must retain both RV windows");
+  assert.equal(seededSnapshot.data["1H"].available,true,"the orchestration-to-calculation live diagnostic must be available");
+  assert(seededSnapshot.data["1H"].atr>0&&seededSnapshot.data["1H"].RV.recent>0);
+
   console.log("sssc always-on orchestration tests: PASS");
 })().catch(error=>{console.error(error);process.exitCode=1;});

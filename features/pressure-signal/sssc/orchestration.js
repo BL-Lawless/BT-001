@@ -63,7 +63,7 @@
     function decorateDiagnostic(core,rows){
       if(!core||!core.available)return core;
       const value=vwap(rows);
-      const event=value==null?"Unavailable":core.price>value?(core.direction>=0?"Hold":"Reclaim"):(core.direction>=0?"Loss":"Below");
+      const event=value==null?"Unavailable":core.price>value?"Above":"Below";
       return {...core,vwap:value,events:{...core.events,vwap:event,earlyWarning:"None"}};
     }
     function buildDiagnosticSet(label,tf){
@@ -113,7 +113,7 @@
       }
       const last=unique.at(-1),forming=last&&Number(last.time)*1000+intervalSeconds(tf)*1000>now();
       if(forming)privateFormingByTf[tf]={...unique.pop(),final:false};else delete privateFormingByTf[tf];
-      privateCandlesByTf[tf]=unique.slice(-target);
+      privateCandlesByTf[tf]=unique.map(row=>({...row,final:true})).slice(-target);
     }
     function upsertPrivateKline(tf,row,closed,target){
       if(!row)return;

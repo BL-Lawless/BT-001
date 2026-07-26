@@ -4,13 +4,13 @@ const calculation=require("./calculation.js");
 const {createOrchestration}=require("./orchestration.js");
 
 const confirmed=Object.freeze({
-  tf:"15M",interval:"15m",available:true,direction:25,magnitude:30,price:100,
-  phase:"Pullback / Retest",clean:25,crosses:{c12:{forming:false}},
-  events:Object.freeze({vwap:"Hold",earlyWarning:"None"})
+  tf:"15M",interval:"15m",available:true,direction:25,directionalStrength:30,price:100,
+  phase:"Transition",clean:25,crosses:{c12:{forming:false}},
+  events:Object.freeze({vwap:"Above",earlyWarning:"None"})
 });
 const live=Object.freeze({
-  ...confirmed,direction:-10,magnitude:5,phase:"Bearish Transition",
-  crosses:{c12:{forming:true}},events:Object.freeze({vwap:"Loss",earlyWarning:"None"})
+  ...confirmed,direction:-10,directionalStrength:5,phase:"Directionally Mixed",
+  crosses:{c12:{forming:true}},events:Object.freeze({vwap:"Below",earlyWarning:"None"})
 });
 let calls=0;
 const pipeline=createOrchestration({
