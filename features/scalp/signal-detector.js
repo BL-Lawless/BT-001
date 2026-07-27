@@ -272,8 +272,9 @@
         return {ready:false,status,event:null,emittedEvent:null,oppositeCross:null,detection:noneDetection(tf,status,now)};
       }
 
-      const row=rows[analysis.i],price=n(row&&row.close),currentSign=sign(analysis.gap),direction=directionForSign(currentSign),previous=this.liveGapByTf.get(tf)||null,previousObservedSign=previous&&previous.sign||0,previousNonZeroSign=previous&&previous.lastNonZeroSign||0;
-      const crossed=!!previous&&currentSign!==0&&previousNonZeroSign!==0&&currentSign!==previousNonZeroSign;
+      const row=rows[analysis.i],price=n(row&&row.close),currentSign=sign(analysis.gap),direction=directionForSign(currentSign),previous=this.liveGapByTf.get(tf)||null,previousObservedSign=previous&&previous.sign||0,previousNonZeroSign=previous&&previous.lastNonZeroSign||0,priorBarSign=sign(analysis.previousGap);
+      const crossed=currentSign!==0&&priorBarSign!==0&&currentSign!==priorBarSign;
+      const isClosedUpdate=hubUpdate&&hubUpdate.type==="kline"&&hubUpdate.tf===tf&&hubUpdate.closed===true;
       let event=null,emittedEvent=null,oppositeCross=null,projectedEvent=null,bounceEvent=null;
       const qualifyCross=(crossTrack,reason)=>{
         crossTrack.phase="CROSS";crossTrack.separation=analysis.separation;this.crossByTf.set(tf,crossTrack);
@@ -283,14 +284,17 @@
       };
 
       if(crossed){
-        const significant=analysis.separation>=S.crossMeaningfulGapAtr,crossTrack={direction,phase:significant?"CROSS":"PENDING_SIGNIFICANCE",at:now,candleTime:n(row&&row.time)||0,fromSign:previousNonZeroSign,toSign:currentSign,gap:analysis.gap,separation:analysis.separation,crossingSeparation:0,closedReferenceSeparation:analysis.closedReferenceSeparation};
+        const significant=analysis.separation>=S.crossMeaningfulGapAtr,crossTrack={direction,phase:significant?(isClosedUpdate?"CROSS":"PENDING_CLOSE"):"PENDING_SIGNIFICANCE",at:now,candleTime:n(row&&row.time)||0,fromSign:priorBarSign,toSign:currentSign,gap:analysis.gap,separation:analysis.separation,crossingSeparation:0,closedReferenceSeparation:analysis.closedReferenceSeparation};
         this.crossByTf.set(tf,crossTrack);
-        if(significant){
+        if(significant&&isClosedUpdate){
           emittedEvent=qualifyCross(crossTrack,"Observed live EMA9/EMA55 sign transition with meaningful displacement");
           event=emittedEvent;oppositeCross=emittedEvent;
+        }else if(significant){
+          rejectionReason="cross-awaiting-closed-candle";
+          event=makeEvent({tf,type:"CROSS",direction,state:"CONFIRMING",qualified:false,row,revision:n(revisions.formingRevision)||0,reason:"EMA9/EMA55 crossed with meaningful ATR-relative displacement and is waiting for the candle close",rejectionReason,now,raw:{...analysis,previousObservedGap:previous&&previous.gap,previousObservedSign:previousNonZeroSign,priorBarSign,significance:separationSignificance([analysis.separation])}});
         }else{
           rejectionReason="cross-separation-below-significance";
-          event=makeEvent({tf,type:"CROSS",direction,state:"PENDING SIGNIFICANCE",qualified:false,row,revision:n(revisions.formingRevision)||0,reason:"EMA9/EMA55 sign transitioned but displacement is below the ATR significance gate",now,raw:{...analysis,previousObservedGap:previous.gap,previousObservedSign:previousNonZeroSign,significance:separationSignificance([analysis.separation])}});
+          event=makeEvent({tf,type:"CROSS",direction,state:"PENDING SIGNIFICANCE",qualified:false,row,revision:isClosedUpdate?n(revisions.closedRevision)||0:n(revisions.formingRevision)||0,reason:"EMA9/EMA55 sign transitioned but displacement is below the ATR significance gate",rejectionReason,now,raw:{...analysis,previousObservedGap:previous&&previous.gap,previousObservedSign:previousNonZeroSign,priorBarSign,significance:separationSignificance([analysis.separation])}});
         }
       }else{
         const sameSide=!!previous&&currentSign!==0&&previousNonZeroSign===currentSign;
@@ -301,12 +305,21 @@
         let crossTrack=this.crossByTf.get(tf)||null;
         if(crossTrack&&crossTrack.phase==="PENDING_SIGNIFICANCE"&&crossTrack.direction===direction){
           if(analysis.separation>=S.crossMeaningfulGapAtr){
-            emittedEvent=qualifyCross(crossTrack,"EMA9/EMA55 cross expanded beyond the ATR significance gate");
-            event=emittedEvent;oppositeCross=emittedEvent;
+            if(isClosedUpdate){
+              emittedEvent=qualifyCross(crossTrack,"EMA9/EMA55 cross expanded beyond the ATR significance gate on a closed candle");
+              event=emittedEvent;oppositeCross=emittedEvent;
+            }else{
+              crossTrack.phase="PENDING_CLOSE";this.crossByTf.set(tf,crossTrack);
+              rejectionReason="cross-awaiting-closed-candle";
+              event=makeEvent({tf,type:"CROSS",direction,state:"CONFIRMING",qualified:false,row,revision:n(revisions.formingRevision)||0,reason:"EMA9/EMA55 cross cleared the ATR significance gate and is waiting for the candle close",rejectionReason,now,raw:{...analysis,previousObservedGap:previous&&previous.gap,previousObservedSign:previousNonZeroSign,significance:separationSignificance([analysis.separation])}});
+            }
           }else{
             rejectionReason="cross-separation-below-significance";
-            event=makeEvent({tf,type:"CROSS",direction,state:"PENDING SIGNIFICANCE",qualified:false,row,revision:n(revisions.formingRevision)||0,reason:"EMA9/EMA55 cross is waiting for meaningful ATR-relative displacement",now,raw:{...analysis,previousObservedGap:previous.gap,previousObservedSign:previousNonZeroSign,significance:separationSignificance([analysis.separation])}});
+            event=makeEvent({tf,type:"CROSS",direction,state:"PENDING SIGNIFICANCE",qualified:false,row,revision:isClosedUpdate?n(revisions.closedRevision)||0:n(revisions.formingRevision)||0,reason:"EMA9/EMA55 cross is waiting for meaningful ATR-relative displacement",rejectionReason,now,raw:{...analysis,previousObservedGap:previous&&previous.gap,previousObservedSign:previousNonZeroSign,significance:separationSignificance([analysis.separation])}});
           }
+        }else if(crossTrack&&crossTrack.phase==="PENDING_CLOSE"){
+          this.crossByTf.delete(tf);
+          rejectionReason="cross-did-not-close-across";
         }else if(sameSide&&contracting&&movingToward&&fastMovingToward&&analysis.separation<=S.projectedBandAtr&&Math.abs(gapVelocity)>=S.minFastSlopeAtr){
           const projectedDirection=currentSign>0?"SHORT":"LONG";
           crossTrack={direction:projectedDirection,phase:"PROJECTED",at:crossTrack&&crossTrack.phase==="PROJECTED"?crossTrack.at:now,candleTime:n(row&&row.time)||0,lastSeparation:analysis.separation,lastGap:analysis.gap};
@@ -321,7 +334,6 @@
 
       }
 
-      const isClosedUpdate=hubUpdate&&hubUpdate.type==="kline"&&hubUpdate.tf===tf&&hubUpdate.closed===true;
       const rebuiltBounce=!crossed&&!event?rebuildBounceWindow(rows,fast,slow,S.bounceWindowBars):null;
       if(rebuiltBounce&&rebuiltBounce.candidate){
         const candidate=rebuiltBounce.candidate,candidateAnalysis=rebuiltBounce.analysis||analysis;
