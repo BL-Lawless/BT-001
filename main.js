@@ -3940,7 +3940,7 @@ const marketDataHub = (() => {
     if(before !== candleContentKey(state.formingKlineByTf[tf])) bumpFormingRevision(tf);
     return state.formingKlineByTf[tf];
   }
-  function upsertClosedBuffer(tf,row,limitOverride,{source="ws"}={}){
+  function upsertClosedBuffer(tf,row,limitOverride,{source="ws",deferRevision=false,deferValidation=false}={}){
     if(!tf || !row || !Number.isFinite(Number(row.time))) return;
     const normalized = normalizeCandleRow(tf,row,{source,final:true});
     if(!normalized) return;
@@ -3965,8 +3965,10 @@ const marketDataHub = (() => {
       bumpFormingRevision(tf);
     }
     trimClosedBuffer(tf,limitOverride);
-    if(before !== closedContentKey(getClosedBuffer(tf))) bumpClosedRevision(tf);
-    validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:`closed-${source}`});
+    const closedChanged=before !== closedContentKey(getClosedBuffer(tf));
+    if(closedChanged&&!deferRevision) bumpClosedRevision(tf);
+    if(!deferValidation)validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:`closed-${source}`});
+    return {closedChanged};
   }
   function prependClosedBuffer(tf,rows,limitOverride,{trimFromRight=false}={}){
     if(!tf || !Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
@@ -4055,13 +4057,16 @@ const marketDataHub = (() => {
     const task = (async () => {
       let fetched = 0;
       let merged = 0;
+      let stale = false;
+      const beforeRepairContent=closedContentKey(getClosedBuffer(tf));
+      const existingTimes=new Set(getClosedBuffer(tf).map(row=>Number(row&&row.time)));
       for(const gap of gaps){
-        if(!isGuardCurrent(guard)) return {fetched,merged,reason,started,stale:true};
+        if(!isGuardCurrent(guard)){stale=true;break;}
         const count = Math.max(1,Math.min(KLINE_LIMIT,Number(gap.missingCount) || 1));
         const endMs = (Number(gap.toTime) + ivSec(tf)) * 1000 - 1;
         if(!Number.isFinite(endMs) || endMs <= 0) continue;
         const rows = await klinesForInterval(tf,endMs,Math.min(KLINE_LIMIT,count + 2),cfg().symbol);
-        if(!isGuardCurrent(guard)) return {fetched,merged,reason,started,stale:true};
+        if(!isGuardCurrent(guard)){stale=true;break;}
         fetched += rows.length;
         const wantedStart = Number(gap.fromTime);
         const wantedEnd = Number(gap.toTime);
@@ -4073,16 +4078,24 @@ const marketDataHub = (() => {
             Number(row.time) <= wantedEnd &&
             !isFormingRow(tf,row)
           );
-        const before = getClosedBuffer(tf).length;
-        for(const row of closedRows) upsertClosedBuffer(tf,row,intervalKeep(tf),{source:"rest"});
-        merged += Math.max(0,getClosedBuffer(tf).length - before);
+        for(const row of closedRows){
+          upsertClosedBuffer(tf,row,intervalKeep(tf),{
+            source:"rest",deferRevision:true,deferValidation:true
+          });
+          if(!existingTimes.has(Number(row.time))){
+            existingTimes.add(Number(row.time));
+            merged+=1;
+          }
+        }
       }
-      state.lastGapRepairMsByTf[tf] = now();
-      if(!suppressRedraw && tf === iv() && merged){
+      const repairChanged=beforeRepairContent!==closedContentKey(getClosedBuffer(tf));
+      if(repairChanged)bumpClosedRevision(tf);
+      if(!suppressRedraw && tf === iv() && repairChanged){
         rehydrateActiveChartFromHub(tf,now(),"rest-gap-repair");
       }
-      validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"post-gap-repair"});
-      return {fetched,merged,reason,started};
+      const unresolvedGaps=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"post-gap-repair"});
+      if(!stale&&!unresolvedGaps.length)state.lastGapRepairMsByTf[tf] = now();
+      return {fetched,merged,changed:repairChanged,resolved:!stale&&!unresolvedGaps.length,unresolvedGaps,reason,started,stale};
     })().finally(() => {
       state.gapRepairInFlightByTf[tf] = null;
     });

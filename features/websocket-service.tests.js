@@ -50,6 +50,18 @@ assert(
 assert(main.includes('scheduleReconnect("stale WebSocket on visibility return",0)'),"foreground recovery must replace an OPEN-but-stale public socket");
 assert(main.includes("diag.gapRepairInFlightByTf = state.gapRepairInFlightByTf")&&main.includes("diag.lastGapRepairMsByTf = state.lastGapRepairMsByTf"),"public diagnostics must expose the repair maps that the repair path actually mutates");
 assert(main.includes("pruneMaCache(tf,{liveOnly:true})")&&main.includes('value.sourceType === "getChartBuffer"'),"forming ticks must preserve still-valid closed-only MA cache entries");
+const formingRevisionCallSites=[...main.matchAll(/bumpFormingRevision\(([^)]+)\)/g)].map(match=>match[1].trim());
+assert(
+  formingRevisionCallSites.length>=4&&formingRevisionCallSites.every(argument=>argument==="tf"),
+  "every forming-revision mutation must remain scoped to the timeframe whose candle changed"
+);
+const repairSource=main.slice(main.indexOf("async function repairMissingClosedCandles"),main.indexOf("function ingestRestRows"));
+assert.equal(
+  (repairSource.match(/bumpClosedRevision\(tf\)/g)||[]).length,1,
+  "a successful bulk gap repair must publish only one closed revision"
+);
+assert(repairSource.includes("if(repairChanged)bumpClosedRevision(tf)"),"a no-op repair must not bump closed revision");
+assert(repairSource.includes("if(!stale&&!unresolvedGaps.length)state.lastGapRepairMsByTf[tf] = now()"),"repair diagnostics must only mark a current gap repaired after continuity validation succeeds");
 assert(main.includes('["connecting","live"].includes(streamStatus)'),"focus/pageshow recovery must not restart an already-connecting private stream");
 assert(main.includes('connectionKey:"public-market-data"')&&main.includes('connectionKey:"main-private-user-data"'));
 
