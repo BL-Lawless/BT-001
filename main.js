@@ -4538,6 +4538,9 @@ const marketDataHub = (() => {
   }
   function handleVisibilityReturn(){
     if(document.hidden) return;
+    if(window.BT001ExchangeClock&&typeof window.BT001ExchangeClock.sync==="function"){
+      window.BT001ExchangeClock.sync(true);
+    }
     diag.hiddenSince = 0;
     diag.lastVisibleAt = now();
     repairKnownClosedGaps("visibility/focus return");

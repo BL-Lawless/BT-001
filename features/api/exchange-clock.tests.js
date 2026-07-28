@@ -44,6 +44,18 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
   assert.equal(synced.fromLocal(1800),1300);
   assert.equal(synced.isReliable(),true);
 
+  local=5000;
+  let forcedFetches=0;
+  const forceable=createExchangeClock({
+    localNow:()=>local,
+    fetchServerTime:async()=>{forcedFetches++;return forcedFetches===1?4900:4700;}
+  });
+  assert.equal(await forceable.sync(),-100);
+  assert.equal(await forceable.sync(),-100,"an ordinary sync must use the reliable cached offset");
+  assert.equal(forcedFetches,1);
+  assert.equal(await forceable.sync(true),-300,"a forced sync must bypass the five-minute cache");
+  assert.equal(forcedFetches,2);
+
   const root=path.resolve(__dirname,"..","..");
   const secondary=fs.readFileSync(path.join(root,"features/scalp/secondary-gateway.module.js"),"utf8");
   const main=fs.readFileSync(path.join(root,"main.js"),"utf8");
@@ -54,5 +66,10 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
   const orderRefresh=main.slice(main.indexOf("async function requestAuthoritativeOrders21"),main.indexOf("async function requestAuthoritativeOrders21")+1800);
   assert(positionRefresh.includes("await timeOffset()")&&positionRefresh.includes("await getPositions("));
   assert(orderRefresh.includes("await timeOffset()")&&orderRefresh.includes("await fetchOpenOrders21("));
+  const visibilityReturn=main.slice(main.indexOf("function handleVisibilityReturn()"),main.indexOf("function scheduleVisibilityRecovery()"));
+  assert(
+    visibilityReturn.includes("window.BT001ExchangeClock.sync(true)"),
+    "visibility recovery must force the shared exchange clock to bypass its five-minute cache"
+  );
   console.log("exchange clock tests: PASS");
 })().catch(error=>{console.error(error);process.exitCode=1;});
