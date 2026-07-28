@@ -58,18 +58,27 @@
   function syncWorkerConfig(){
     if(worker)worker.postMessage({type:"config",url:getUrl(),key:getAnonKey()});
   }
-  function ensureWorker(){
+  function stopFallbackSnapshotTimer(){
+    if(fallbackSnapshotTimer!=null)clearInterval(fallbackSnapshotTimer);
+    fallbackSnapshotTimer=null;
+  }
+  function discardWorker(){
+    const active=worker;
+    worker=null;
+    if(active&&typeof active.terminate==="function")try{active.terminate();}catch(_e){}
+  }
+  function ensureWorker({retry=false}={}){
     if(worker)return worker;
-    if(workerAttempted)return null;
+    if(workerAttempted&&!retry)return null;
     workerAttempted=true;
     if(typeof Worker!=="function")return null;
-    let objectUrl=null;
+    let objectUrl=null,candidate=null;
     try{
       const source=window.BT001_LOGGING_WORKER_SOURCE;
       if(!source)throw new Error("Logging Worker source was not loaded");
       objectUrl=URL.createObjectURL(new Blob([source],{type:"application/javascript"}));
-      worker=new Worker(objectUrl);
-      worker.addEventListener("message",event=>{
+      candidate=new Worker(objectUrl);
+      candidate.addEventListener("message",event=>{
         const message=event&&event.data;
         if(message&&message.type==="status"){
           if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}
@@ -80,10 +89,13 @@
           };
         }
       });
-      syncWorkerConfig();
+      candidate.postMessage({type:"config",url:getUrl(),key:getAnonKey()});
+      worker=candidate;
+      stopFallbackSnapshotTimer();
       return worker;
     }catch(error){
       if(objectUrl)try{URL.revokeObjectURL(objectUrl);}catch(_e){}
+      if(candidate&&typeof candidate.terminate==="function")try{candidate.terminate();}catch(_e){}
       console.warn("[BT001 Supabase] Logging Worker could not start; using the in-page fallback.",error);
       worker=null;return null;
     }
@@ -138,10 +150,14 @@
     return Object.freeze({...workerStatus,workerActive:!!worker,fallbackActive:fallbackSnapshotTimer!=null});
   }
   function writeFallbackSnapshot(){
+    // A cleared interval callback may already be queued when a later Worker attempt succeeds.
+    // Never let that stale callback become a second producer through log()'s Worker routing.
+    if(worker){stopFallbackSnapshotTimer();return;}
     if(!fallbackSnapshot)return;
-    // log() uses the real REST insert/retry path when the Worker is unavailable.
-    try{const result=log("sssc_snapshots",fallbackSnapshot);if(result&&typeof result.catch==="function")result.catch(()=>{});}
-    catch(_error){}
+    insertRow("sssc_snapshots",fallbackSnapshot).catch(error=>{
+      console.warn("[BT001 Supabase] Fallback snapshot write failed; queued for retry.",error);
+      pending.push({table:"sssc_snapshots",row:fallbackSnapshot});scheduleFlush();
+    });
   }
   function setLatestSnapshot(row){
     fallbackSnapshot=row||null;
@@ -150,15 +166,21 @@
     return false;
   }
   function startSnapshotLogging(){
-    try{const activeWorker=ensureWorker();if(activeWorker){activeWorker.postMessage({type:"startSnapshots"});return true;}}
-    catch(_error){}
+    try{
+      const activeWorker=ensureWorker({retry:true});
+      if(activeWorker){
+        stopFallbackSnapshotTimer();
+        activeWorker.postMessage({type:"startSnapshots"});
+        return true;
+      }
+    }
+    catch(_error){discardWorker();}
     if(fallbackSnapshotTimer==null)fallbackSnapshotTimer=setInterval(writeFallbackSnapshot,SNAPSHOT_INTERVAL_MS);
     return false;
   }
   function stopSnapshotLogging(){
     try{if(worker)worker.postMessage({type:"stopSnapshots"});}catch(_error){}
-    if(fallbackSnapshotTimer!=null)clearInterval(fallbackSnapshotTimer);
-    fallbackSnapshotTimer=null;
+    stopFallbackSnapshotTimer();
   }
 
   // Real end-to-end verification for the Settings panel: logActivity() is fire-and-forget and never

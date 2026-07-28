@@ -83,7 +83,45 @@ const run=(async()=>{
     timerCallbacks[0]();await Promise.resolve();await Promise.resolve();
     timerCallbacks[0]();await Promise.resolve();await Promise.resolve();
     assert.equal(fetchImpl.calls.filter(call=>call.url.endsWith("/sssc_snapshots")).length,2,"every fallback tick must attempt a real snapshot insert");
-    assert.equal(warnings.length,1);
+    assert.equal(warnings.length,2,"initialization and the explicit start each report their failed Worker attempt");
+  }
+
+  // A fallback interval left from failed construction must lose ownership atomically when a
+  // later Worker construction succeeds. Even an already-queued fallback callback must not write.
+  {
+    const timerCallbacks=[],clearedTimers=[],instances=[];
+    let constructions=0;
+    class RecoveringWorker{
+      constructor(){
+        constructions++;
+        if(constructions<3)throw new Error("temporary Worker construction failure");
+        this.messages=[];instances.push(this);
+      }
+      addEventListener(){}
+      postMessage(message){this.messages.push(message);}
+      terminate(){this.terminated=true;}
+    }
+    const fetchImpl=recordingFetch(jsonResponse(201));
+    const {context}=runtime({fetchImpl,consoleImpl:{...console,warn:()=>{}},globals:{
+      Worker:RecoveringWorker,Blob:class{},URL:{createObjectURL:()=>"blob:null/recovery",revokeObjectURL:()=>{}},
+      BT001_LOGGING_WORKER_SOURCE:"/* source */",
+      setInterval:callback=>{timerCallbacks.push(callback);return 41;},
+      clearInterval:id=>clearedTimers.push(id)
+    }});
+    context.BT001Supabase.saveUrlFromInput({value:"https://myproject.supabase.co"});
+    context.BT001Supabase.saveKeyFromInput({value:"anon-key"});
+    context.BT001Supabase.setLatestSnapshot({event_at:"2026-07-28T05:37:09.000Z",machine_id:"single-owner"});
+    assert.equal(context.BT001Supabase.startSnapshotLogging(),false);
+    assert.equal(timerCallbacks.length,1,"fallback starts only after Worker construction failed");
+    const staleFallbackTick=timerCallbacks[0];
+    assert.equal(context.BT001Supabase.startSnapshotLogging(),true,"a later start may promote logging back to a Worker");
+    assert.deepEqual(clearedTimers,[41],"Worker promotion must synchronously retire the fallback interval");
+    staleFallbackTick();
+    await Promise.resolve();await Promise.resolve();
+    assert.equal(fetchImpl.calls.filter(call=>call.url.endsWith("/sssc_snapshots")).length,0,"a queued fallback tick must not write after Worker promotion");
+    assert.equal(instances[0].messages.filter(message=>message.type==="startSnapshots").length,1,"only the Worker owns the periodic writer after promotion");
+    assert.equal(context.BT001Supabase.loggingStatus().workerActive,true);
+    assert.equal(context.BT001Supabase.loggingStatus().fallbackActive,false);
   }
 
   // Not configured: must fail fast, before ever touching fetch, with a clear reason.

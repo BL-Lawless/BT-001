@@ -83,6 +83,7 @@ const failingLogger=createSnapshotLogger({
   }),
 });
 failingLogger.start();
+failingLogger.start();
 assert.equal(workerStarts,1,"start must delegate the schedule to the logging worker");
 assert.equal(writes,0,"logging must not run before the pipeline is live");
 pipelineLive=true;
@@ -179,6 +180,9 @@ const html=fs.readFileSync(path.resolve(__dirname,"..","..","..","index.html"),"
 assert(html.indexOf("features/pressure-signal/sssc/supabase-logger.js")<html.indexOf('src="main.js"'));
 assert(html.includes("supabase-logger.js?v=20260727-worker-logging-v1"),"logger asset must be cache-busted after its field contract changes");
 assert(main.includes("ensureSnapshotLogger()?.start()"),"always-on install must start SSSC logging without opening the dashboard");
+const visibilityRecoverySource=main.slice(main.indexOf("function scheduleSsscVisibilityRecovery()"),main.indexOf("function install(){",main.indexOf("function scheduleSsscVisibilityRecovery()")));
+assert(visibilityRecoverySource.includes("livePipeline.calculate()"),"visibility recovery must immediately resume snapshot capture from retained buffers");
+assert(visibilityRecoverySource.includes("livePipeline.refresh(true)"),"visibility recovery must reseed and reconnect the SSSC pipeline");
 const hideSource=main.slice(main.indexOf("function hide(){ visible=false"),main.indexOf("function savePanel()",main.indexOf("function hide(){ visible=false")));
 assert(!hideSource.includes(".stop("),"closing the dashboard must only hide UI and must not stop its background pipeline");
 assert(main.includes("$('ssscDashClose')?.addEventListener('click',hide)"));

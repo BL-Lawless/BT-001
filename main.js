@@ -22668,7 +22668,21 @@ If there is NO open position, use this Section 2 instead:
     });
     return snapshotLogger;
   }
-  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); if(pipeline)ensureSnapshotLogger()?.start(); }
+  let visibilityRecoveryTimer=null;
+  function scheduleSsscVisibilityRecovery(){
+    if(document.hidden)return;
+    if(visibilityRecoveryTimer!=null)clearTimeout(visibilityRecoveryTimer);
+    visibilityRecoveryTimer=setTimeout(()=>{
+      visibilityRecoveryTimer=null;
+      const livePipeline=ensurePipeline();
+      if(!livePipeline)return;
+      // Publish immediately from the retained buffers, then reseed/reconnect so a throttled
+      // background timer or suspended socket cannot leave snapshot capture stalled.
+      livePipeline.calculate();
+      livePipeline.refresh(true).catch(error=>console.warn(MODULE+' visibility recovery failed',error));
+    },80);
+  }
+  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } if(!window.__ssscVisibilityRecoveryBound){window.__ssscVisibilityRecoveryBound=true;["visibilitychange","focus","pageshow"].forEach(name=>window.addEventListener(name,scheduleSsscVisibilityRecovery,true));} installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); if(pipeline)ensureSnapshotLogger()?.start(); }
 
   if(window.BT001SettingsTabs&&!window.__ssscR3SettingsOpenBound){ window.__ssscR3SettingsOpenBound=true; window.BT001SettingsTabs.subscribe(event=>{ if(event.type==="opened") syncSsscToolbarButton(); }); }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);

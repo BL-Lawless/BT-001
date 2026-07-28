@@ -24,6 +24,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
   await runtime.handle({type:"config",url:"https://project.supabase.co",key:"anon"});
   await runtime.handle({type:"latestSnapshot",row:{event_at:"2026-07-27T00:00:00.000Z",machine_id:"m1"}});
   runtime.startSnapshots();
+  runtime.startSnapshots();
   assert.equal(intervalDelay,SNAPSHOT_INTERVAL_MS);
   assert.equal(typeof intervalCallback,"function","the Worker must own the snapshot timer independently of page visibility");
   intervalCallback();
