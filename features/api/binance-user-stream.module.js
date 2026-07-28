@@ -36,6 +36,7 @@
     const onPositionFact = typeof options.onPositionFact === "function" ? options.onPositionFact : () => {};
     const onOrderFact = typeof options.onOrderFact === "function" ? options.onOrderFact : () => {};
     const reportPerformance = options.reportPerformance !== false;
+    const connectionKey=String(options.connectionKey||"").trim();
     const timers = options.timers || window;
     const now = typeof options.now === "function" ? options.now : Date.now;
     const state = {
@@ -163,6 +164,7 @@
         state.starts += 1;
         state.wsEndpoint=String(getWsBase()||"wss://fstream.binance.com/private/ws").replace(/\/+$/,"")+"/{listenKey}";
         state.socket = api.connectWebSocket(streamUrl(state.listenKey),{
+          connectionKey,
           reconnect:false,
           onOpen:() => {
             if(token !== state.generation || !state.desired) return;

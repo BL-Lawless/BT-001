@@ -41,15 +41,25 @@
     const now=typeof options.now==="function"?options.now:Date.now;
     const setIntervalFn=options.setIntervalFn||setInterval;
     const clearIntervalFn=options.clearIntervalFn||clearInterval;
+    const setTimeoutFn=options.setTimeoutFn||setTimeout;
+    const clearTimeoutFn=options.clearTimeoutFn||clearTimeout;
     const klineLimit=Math.max(1,Number(options.klineLimit)||1500);
     const heartbeatMs=Math.max(1,Number(options.heartbeatMs)||500);
 
     let data={},lastFullFetch=0,currentSymbol="";
     let privateCandlesByTf={},privateFormingByTf={};
     let privateSocket=null,privateGeneration=0,calcTimer=null,started=false;
+    let privateEverOpened=false,continuityBlocked=false,repairPromise=null,repairTimer=null;
+    let queuedSocketMessages=[],socketEvents=[],repairAttempts=0,repairSuccesses=0,repairFailures=0;
 
     function snapshot(){
-      return {data:{...data},lastFullFetch,started,privateCandlesByTf,privateFormingByTf};
+      return {
+        data:{...data},lastFullFetch,started,privateCandlesByTf,privateFormingByTf,
+        continuity:{
+          blocked:continuityBlocked,repairing:!!repairPromise,queuedMessages:queuedSocketMessages.length,
+          repairAttempts,repairSuccesses,repairFailures,socketEvents:socketEvents.slice()
+        }
+      };
     }
     function publish(){onUpdate(snapshot());}
     function vwap(rows){
@@ -104,7 +114,7 @@
       publish();
     }
     function intervalSeconds(tf){return {"1m":60,"3m":180,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400}[tf]||60;}
-    function replacePrivateRows(tf,rows,target){
+    function normalizedPrivateRows(tf,rows,target){
       const ordered=(Array.isArray(rows)?rows:[]).filter(row=>row&&Number.isFinite(Number(row.time))).sort((a,b)=>Number(a.time)-Number(b.time));
       const unique=[];
       for(const row of ordered){
@@ -112,8 +122,14 @@
         else unique.push({...row});
       }
       const last=unique.at(-1),forming=last&&Number(last.time)*1000+intervalSeconds(tf)*1000>now();
-      if(forming)privateFormingByTf[tf]={...unique.pop(),final:false};else delete privateFormingByTf[tf];
-      privateCandlesByTf[tf]=unique.map(row=>({...row,final:true})).slice(-target);
+      const formingRow=forming?{...unique.pop(),final:false}:null;
+      return {closed:unique.map(row=>({...row,final:true})).slice(-target),forming:formingRow};
+    }
+    function replacePrivateRows(tf,rows,target){
+      const normalized=normalizedPrivateRows(tf,rows,target);
+      privateCandlesByTf[tf]=normalized.closed;
+      if(normalized.forming)privateFormingByTf[tf]=normalized.forming;else delete privateFormingByTf[tf];
+      return normalized;
     }
     function upsertPrivateKline(tf,row,closed,target){
       if(!row)return;
@@ -125,7 +141,7 @@
       while(rows.length>target)rows.shift();
       if(privateFormingByTf[tf]&&Number(privateFormingByTf[tf].time)<=Number(row.time))delete privateFormingByTf[tf];
     }
-    async function fetchPrivateWindow(tf,target){
+    async function loadPrivateWindow(tf,target){
       let rows=[],cursor=now();
       while(rows.length<target+1){
         const remaining=target+1-rows.length;
@@ -136,7 +152,74 @@
         if(batch.length<Math.min(klineLimit,remaining)||!oldest)break;
         cursor=Number(oldest.openTime||Number(oldest.time)*1000)-1;
       }
-      replacePrivateRows(tf,rows,target);
+      return normalizedPrivateRows(tf,rows,target);
+    }
+    async function fetchPrivateWindow(tf,target){
+      const loaded=await loadPrivateWindow(tf,target);
+      privateCandlesByTf[tf]=loaded.closed;
+      if(loaded.forming)privateFormingByTf[tf]=loaded.forming;else delete privateFormingByTf[tf];
+      return loaded;
+    }
+    function continuityGaps(tf,rows){
+      const source=Array.isArray(rows)?rows:[],step=intervalSeconds(tf),gaps=[];
+      for(let index=1;index<source.length;index++){
+        const previous=Number(source[index-1]&&source[index-1].time),current=Number(source[index]&&source[index].time);
+        if(!Number.isFinite(previous)||!Number.isFinite(current)||current-previous!==step){
+          gaps.push({tf,previousTime:previous,currentTime:current,expectedTime:Number.isFinite(previous)?previous+step:null});
+        }
+      }
+      return gaps;
+    }
+    function recordSocketEvent(type,detail={}){
+      socketEvents.push({type,at:now(),...detail});
+      if(socketEvents.length>100)socketEvents=socketEvents.slice(-100);
+    }
+    function scheduleRepairRetry(target,reason){
+      if(repairTimer!=null)return;
+      repairTimer=setTimeoutFn(()=>{
+        repairTimer=null;
+        repairContinuity(target,`${reason}-retry`).catch(()=>{});
+      },Math.min(30000,4000*Math.max(1,repairFailures)));
+    }
+    async function repairContinuity(target,reason="ws-reconnect"){
+      if(repairPromise)return repairPromise;
+      continuityBlocked=true;repairAttempts+=1;recordSocketEvent("repair-start",{reason});
+      repairPromise=(async()=>{
+        try{
+          const loaded=await Promise.all(tfs.map(async ([,tf])=>[tf,await loadPrivateWindow(tf,target)]));
+          const failures=[];
+          for(const [tf,value] of loaded){
+            const gaps=continuityGaps(tf,value.closed);
+            if(gaps.length)failures.push(...gaps);
+          }
+          if(failures.length)throw Object.assign(new Error("SSSC REST reconnect backfill left candle gaps"),{gaps:failures});
+          // Commit all timeframes atomically so calculations never observe a partially repaired set.
+          const nextClosed={},nextForming={};
+          for(const [tf,value] of loaded){nextClosed[tf]=value.closed;if(value.forming)nextForming[tf]=value.forming;}
+          privateCandlesByTf=nextClosed;privateFormingByTf=nextForming;lastFullFetch=now();
+          continuityBlocked=false;repairSuccesses+=1;recordSocketEvent("repair-success",{reason});
+          const queued=queuedSocketMessages.splice(0);
+          for(const message of queued)applySocketKline(message,target,{publish:false});
+          calculate();
+          return true;
+        }catch(error){
+          repairFailures+=1;
+          const gaps=Array.isArray(error&&error.gaps)?error.gaps:[];
+          recordSocketEvent("repair-failed",{reason,error:error&&error.message||String(error),gaps});
+          warn("SSSC reconnect continuity repair failed",{reason,error,gaps});
+          scheduleRepairRetry(target,reason);
+          return false;
+        }finally{repairPromise=null;}
+      })();
+      return repairPromise;
+    }
+    function applySocketKline(message,target,{publish=true}={}){
+      if(!message||message.e!=="kline"||!message.k||message.s!==getSymbol())return false;
+      const k=message.k;
+      const row={time:Math.floor(Number(k.t)/1000),open:Number(k.o),high:Number(k.h),low:Number(k.l),close:Number(k.c),volume:Number(k.v),baseVolume:Number(k.v),quoteVolume:Number(k.q),openTime:Number(k.t),closeTime:Number(k.T),source:"sssc-ws"};
+      upsertPrivateKline(k.i,row,k.x===true,target);
+      if(publish)calculate();
+      return true;
     }
     function closePrivateSocket(){
       if(!privateSocket)return;
@@ -150,23 +233,37 @@
       closePrivateSocket();
       const token=++privateGeneration;
       const streams=tfs.map(([,tf])=>getSymbol().toLowerCase()+"@kline_"+tf);
-      privateSocket=connectWebSocket(wsBase(getWsUrl())+"?streams="+streams.join("/"),{reconnect:true,onMessage:event=>{
+      privateSocket=connectWebSocket(wsBase(getWsUrl())+"?streams="+streams.join("/"),{
+        connectionKey:"sssc-private-market-data",reconnect:true,
+        onOpen:()=>{
+          const reconnect=privateEverOpened,needsRepair=reconnect||continuityBlocked;privateEverOpened=true;
+          recordSocketEvent(reconnect?"reconnected":"opened");
+          if(needsRepair)return repairContinuity(target,reconnect?"ws-reconnect":"initial-connect-repair");
+          continuityBlocked=false;
+          return Promise.resolve(true);
+        },
+        onClose:event=>{continuityBlocked=true;recordSocketEvent("closed",{code:event&&event.code||null});},
+        onError:()=>recordSocketEvent("error"),
+        onMessage:event=>{
         if(token!==privateGeneration)return;
         let message;
         try{message=JSON.parse(event.data);message=message&&message.data?message.data:message;}catch(_error){return;}
-        if(!message||message.e!=="kline"||!message.k||message.s!==getSymbol())return;
-        const k=message.k;
-        const row={time:Math.floor(Number(k.t)/1000),open:Number(k.o),high:Number(k.h),low:Number(k.l),close:Number(k.c),volume:Number(k.v),baseVolume:Number(k.v),quoteVolume:Number(k.q),openTime:Number(k.t),closeTime:Number(k.T),source:"sssc-ws"};
-        upsertPrivateKline(k.i,row,k.x===true,target);
-        calculate();
+        if(continuityBlocked||repairPromise){queuedSocketMessages.push(message);if(queuedSocketMessages.length>5000)queuedSocketMessages.shift();return;}
+        applySocketKline(message,target);
       }});
     }
     async function refresh(){
       currentSymbol=getSymbol();
       const targets=warmupTargets(getSlots({allowStartupFallback:true}));
-      try{await Promise.all(tfs.map(([,tf])=>fetchPrivateWindow(tf,targets.full)));}
-      catch(error){warn("SSSC private seed failed",error);}
-      lastFullFetch=now();
+      try{
+        const loaded=await Promise.all(tfs.map(async ([,tf])=>[tf,await loadPrivateWindow(tf,targets.full)]));
+        const gaps=loaded.flatMap(([tf,value])=>continuityGaps(tf,value.closed));
+        if(gaps.length)throw Object.assign(new Error("SSSC private seed contains candle gaps"),{gaps});
+        const nextClosed={},nextForming={};
+        for(const [tf,value] of loaded){nextClosed[tf]=value.closed;if(value.forming)nextForming[tf]=value.forming;}
+        privateCandlesByTf=nextClosed;privateFormingByTf=nextForming;continuityBlocked=false;
+      }catch(error){continuityBlocked=true;warn("SSSC private seed failed",{error,gaps:error&&error.gaps||[]});}
+      if(!continuityBlocked)lastFullFetch=now();
       calculate();
       connectPrivateSocket(targets.full);
     }
@@ -183,10 +280,12 @@
       if(calcTimer)clearIntervalFn(calcTimer);
       calcTimer=null;
       privateGeneration++;
+      if(repairTimer!=null)clearTimeoutFn(repairTimer);
+      repairTimer=null;queuedSocketMessages=[];
       closePrivateSocket();
     }
 
-    return {startLive,stop,refresh,calculate,buildDiagnosticSet,upsertPrivateKline,connectPrivateSocket,getSnapshot:snapshot,warmupTargets};
+    return {startLive,stop,refresh,calculate,buildDiagnosticSet,upsertPrivateKline,connectPrivateSocket,getSnapshot:snapshot,warmupTargets,continuityGaps,repairContinuity};
   }
 
   const api={createOrchestration,warmupTargets,wsBase};

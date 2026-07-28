@@ -27,7 +27,7 @@ assert.notEqual(ema(older.concat(recent),period),ema(recent,period),"the regress
 assert(source.includes("Math.ceil(longestPeriod*3)"),"hard minimum must derive from the longest configured MA period");
 assert(source.includes("Math.ceil(longestPeriod*5)"),"full convergence target must derive from the longest configured MA period");
 assert(source.includes("privateCandlesByTf"),"SSSC must own private candle state");
-assert(source.includes("fetchPrivateWindow(tf,targets.full)"),"SSSC must fetch its dynamic window directly");
+assert(source.includes("loadPrivateWindow(tf,targets.full)"),"SSSC must load its dynamic window directly before an atomic continuity-checked commit");
 assert(!source.includes("SHARED_HUB_DEPTH_CLAMP"),"the temporary Stage 2 clamp must be removed");
 assert(!source.includes("setTimeframeRequirements("),"SSSC must not register shared-hub retention");
 assert(!source.includes("getAuthoritativeMaSnapshot("),"SSSC must not calculate from shared-hub snapshots");

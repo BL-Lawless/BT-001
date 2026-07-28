@@ -5,6 +5,7 @@
 <meta charset="utf-8"/>
 <title>BTC Futures Realtime Chart V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1</title>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link rel="icon" href="data:,"/>
 
 <!-- V13_UI_V2_CLEAN_BASE
 Cleanup-only build from V13_UI_V2_PATCH_20.
@@ -20,6 +21,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 
 
 <div class="topbar">
+<span id="exchangeClockStatus" hidden role="status"></span>
 <button class="settings-button" id="apiKeysBtn" title="Settings">⚙</button>
 <button id="ssscDashBtn" title="Open SSSC MA Diagnostic Dashboard" type="button">SSSC</button>
 <select id="market">
@@ -227,7 +229,9 @@ Rollback baseline: V13_UI_V2_PATCH_20.
 
   <script src="features/settings/tab-registry.js" defer></script>
   <script src="services/rest.service.js" defer></script>
+  <script src="features/api/exchange-clock.module.js?v=20260727-exchange-clock-v1" defer></script>
   <script src="services/websocket.service.js" defer></script>
+  <script src="features/pressure-signal/sssc/logging-worker.js?v=20260727-blob-worker-v1" defer></script>
   <script src="services/supabase.service.js" defer></script>
   <script src="apis.js" defer></script>
   <script src="features/api/api-config.module.js" defer></script>
@@ -244,6 +248,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/ma/ma-index.js" defer></script>
   <script src="features/shared/binancePositionGroupTracker.js" defer></script>
   <script src="features/shared/binanceConditionalOrderClassifier.js" defer></script>
+  <script src="features/shared/canonical-candle-series.js?v=20260727-duplicate-integrity-v1" defer></script>
   <script src="features/heatmap/provider-config.module.js" defer></script>
   <script src="features/heatmap/provider-auth.module.js" defer></script>
   <script src="features/heatmap/provider-adapter.module.js" defer></script>
@@ -255,7 +260,7 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/pressure-signal/sssc/calculation.js" defer></script>
   <script src="features/pressure-signal/sssc/orchestration.js" defer></script>
   <script src="features/pressure-signal/sssc/gauge-presentation.js" defer></script>
-  <script src="features/pressure-signal/sssc/supabase-logger.js?v=20260726-strength-fields-v2" defer></script>
+  <script src="features/pressure-signal/sssc/supabase-logger.js?v=20260727-worker-logging-v1" defer></script>
   <script src="main.js" defer></script>
   <script src="features/smc/smc-overlay.module.js" defer></script>
   <script src="features/pressure-signal/core/config.js" defer></script>

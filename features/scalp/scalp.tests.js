@@ -10,7 +10,9 @@ function event(direction="LONG",type="CROSS",id="new-1"){return {source:"1m",eve
 async function run(){
   const {context,build,storage}=runtime(),calc=build.calculations,C=build.config,cases={};
   const routedLogs=[];context.BT001Supabase={getDeviceId:()=>"machine-routing-test",log:async(table,row)=>{routedLogs.push({table,row});return true;}};
-  const routingEngine=new build.ScalpEngine({gateway:fakeGateway(),storage:new MemoryStorage()});
+  const firedAt=1712345678901,rawBrowserNow=firedAt-7000;
+  context.BT001ExchangeClock={now:()=>firedAt,fromLocal:value=>Number(value)+7000};
+  const routingEngine=new build.ScalpEngine({gateway:fakeGateway(),storage:new MemoryStorage(),now:()=>rawBrowserNow});
   const expectedRoutes={
     scalp_v1_signals:["DETECTION_QUALIFIED","RANK_REJECTED"],
     scalp_positions:["TRANCHE_ADDED","TRANCHE_CLOSED","TRANCHE_RECOVERED","ENTRY_FAILED","EMERGENCY_CLOSE_FAILED","EMERGENCY_CLOSE_SUCCEEDED","PROTECTION_REBUILD_STARTED","PROTECTION_REBUILD_SUCCEEDED","PROTECTION_REBUILD_FAILED","PROTECTION_REBUILD_REFUSED","TRANCHE_EXTERNALLY_REDUCED","PROFIT_LOCK_APPLIED","PROFIT_LOCK_FAILED"],
@@ -21,20 +23,22 @@ async function run(){
   routingEngine.logActivity("UNROUTED_ACTION");
   assert.equal(routedLogs.length,Object.values(expectedRoutes).flat().length);
   const expectedColumns={
-    scalp_v1_signals:["action","cascade_agreement","detector_state","machine_id","source_timeframe","symbol"],
-    scalp_positions:["action","direction","machine_id","position_state","symbol","tranche_id"],
-    scalp_operational:["action","detail","machine_id"]
+    scalp_v1_signals:["action","cascade_agreement","detector_state","event_at","machine_id","source_timeframe","symbol"],
+    scalp_positions:["action","direction","event_at","machine_id","position_state","symbol","tranche_id"],
+    scalp_operational:["action","detail","event_at","machine_id"]
   };
   for(const {table,row}of routedLogs){
     assert(expectedRoutes[table].includes(row.action));
     assert.deepEqual(Object.keys(row).sort(),expectedColumns[table],`${table} must receive only its real columns`);
     assert.equal(row.machine_id,"machine-routing-test",`${table} must identify the originating machine`);
+    assert.equal(row.event_at,new Date(firedAt).toISOString(),`${table} event_at must come from the engine clock`);
     assert(!Object.prototype.hasOwnProperty.call(row,"auto_entered"));
   }
   assert.deepEqual(JSON.parse(JSON.stringify(routedLogs.find(item=>item.table==="scalp_v1_signals"&&item.row.action==="DETECTION_QUALIFIED").row.cascade_agreement)),expectedCascadeAgreement,"v1 signal writes must retain the computed cascade agreement");
   assert(!routedLogs.some(item=>item.table==="scalp_activity_log"||item.table==="scalp_v2_signals"));cases.supabaseActivityRoutesWithTableSpecificPayloads=true;
+  const rawTradeCreated=rawBrowserNow-1000,rawTradeClosed=rawBrowserNow;
   routingEngine.recordTradeLedger({
-    createdAt:Date.now()-1000,closedAt:Date.now(),symbol:"BTCUSDT",direction:"LONG",
+    createdAt:rawTradeCreated,closedAt:rawTradeClosed,symbol:"BTCUSDT",direction:"LONG",
     mode:"MANUAL",source:"1m",eventType:"CROSS",requestedQty:.01,filledQty:.01,
     closedQty:.01,entryPrice:100,entryCommission:.001,closedPrice:101,trancheId:"trace-trade"
   },"TP",.009);
@@ -46,6 +50,8 @@ async function run(){
     "exit_price","exit_reason","filled_qty","mode","raw_session","requested_qty","source_timeframe","symbol"
   ]);
   assert.equal(tradeLog.row.auto_entered,false,"auto_entered belongs only to the unchanged scalp_trades payload");
+  assert.equal(tradeLog.row.created_at,new Date(rawTradeCreated+7000).toISOString());
+  assert.equal(tradeLog.row.closed_at,new Date(rawTradeClosed+7000).toISOString());
   cases.supabaseTradeLedgerPayloadRemainsSeparate=true;
   assert.equal(C.defaults.direction,"ANY");cases.defaultDirAny=true;
   assert.equal(C.defaults.profitLockEnabled,false);assert.equal(C.defaults.lockThresholdPct,50);assert.equal(C.defaults.lockPortionPct,50);cases.profitLockDefaultsOff=true;

@@ -2336,7 +2336,9 @@ function parseWsKline(k){
 }
 
 function getExchangeNowMs(){
-  return Date.now() + (Number.isFinite(exchangeTimeOffsetMs) ? exchangeTimeOffsetMs : 0);
+  return window.BT001ExchangeClock&&typeof window.BT001ExchangeClock.now==="function"
+    ? window.BT001ExchangeClock.now()
+    : Date.now() + (Number.isFinite(exchangeTimeOffsetMs) ? exchangeTimeOffsetMs : 0);
 }
 
 function candleCloseBoundaryMs(tf,row){
@@ -3086,7 +3088,13 @@ const marketDataHub = (() => {
     lastChartValidationWarnMs:0,
     integrityWarnMsByKey:{},
     gapRepairInFlightByTf:{},
-    lastGapRepairMsByTf:{}
+    lastGapRepairMsByTf:{},
+    hiddenSince:document.hidden ? Date.now() : 0,
+    lastVisibleAt:document.hidden ? 0 : Date.now(),
+    hiddenMessageCount:0,
+    lastHiddenMessageAt:0,
+    forcedReconnectCount:0,
+    lastForcedReconnectReason:null
   };
   const state = {
     generation:0,
@@ -3117,6 +3125,9 @@ const marketDataHub = (() => {
 
   diag.maCacheHits = 0;
   diag.maCacheMisses = 0;
+  // Diagnostics must reference the live repair maps, not look-alike objects that never mutate.
+  diag.gapRepairInFlightByTf = state.gapRepairInFlightByTf;
+  diag.lastGapRepairMsByTf = state.lastGapRepairMsByTf;
   diag.closedRevisionByTf = state.closedRevisionByTf;
   diag.formingRevisionByTf = state.formingRevisionByTf;
 
@@ -3374,8 +3385,8 @@ const marketDataHub = (() => {
   }
   function currentStreams(){
     const base = cfg().symbol.toLowerCase();
-    const streams = [];
-    requiredKlineTimeframes().forEach(tf => streams.push(base + "@kline_" + tf));
+    const order=["1m","3m","5m","15m","30m","1h","4h","1d"];
+    const streams = [...requiredKlineTimeframes()].sort((a,b)=>order.indexOf(a)-order.indexOf(b)).map(tf=>base+"@kline_"+tf);
     streams.push(base + "@aggTrade");
     streams.push(base + "@markPrice@1s");
     return streams;
@@ -3476,9 +3487,11 @@ const marketDataHub = (() => {
   function closedContentKey(rows){
     return (Array.isArray(rows) ? rows : []).map(candleContentKey).join("|");
   }
-  function pruneMaCache(tf){
+  function pruneMaCache(tf,{liveOnly=false}={}){
     for(const [key,value] of state.maSnapshotCache){
-      if(value && value.interval === tf) state.maSnapshotCache.delete(key);
+      if(value && value.interval === tf && (!liveOnly || value.sourceType === "getChartBuffer")){
+        state.maSnapshotCache.delete(key);
+      }
     }
   }
   function bumpClosedRevision(tf){
@@ -3487,7 +3500,8 @@ const marketDataHub = (() => {
   }
   function bumpFormingRevision(tf){
     state.formingRevisionByTf[tf] = (Number(state.formingRevisionByTf[tf]) || 0) + 1;
-    pruneMaCache(tf);
+    // Closed-only MA snapshots do not include formingRevision in their key and remain valid.
+    pruneMaCache(tf,{liveOnly:true});
   }
   function getTimeframeRevisions(tf){
     const interval = canonicalTfKey(tf);
@@ -3509,7 +3523,9 @@ const marketDataHub = (() => {
     arr.sort((a,b) => Number(a.time) - Number(b.time));
     for(let i=arr.length-1;i>0;i--){
       if(Number(arr[i].time) === Number(arr[i-1].time)){
-        warnIntegrity(`duplicate-closed:${tf}:${arr[i].time}`,"duplicate candle open times detected",{tf,time:arr[i].time});
+        warnIntegrity(`duplicate-closed:${tf}:${arr[i].time}`,"duplicate finalized candles found in canonical storage",{
+          tf,time:arr[i].time,existing:{...arr[i-1]},incoming:{...arr[i]}
+        });
         arr[i-1] = arr[i].source === "ws" ? {...arr[i]} : (arr[i-1].source === "ws" ? arr[i-1] : mergeBufferRow(arr[i-1],arr[i]));
         arr.splice(i,1);
       }
@@ -3555,7 +3571,9 @@ const marketDataHub = (() => {
     for(const row of normalized){
       const last = deduped[deduped.length-1];
       if(last && Number(last.time) === Number(row.time)){
-        warnIntegrity(`duplicate-rebuild:${tf}:${row.time}`,"duplicate candle open times detected",{tf,time:row.time,source});
+        warnIntegrity(`duplicate-rebuild:${tf}:${row.time}`,"duplicate finalized candles returned by rebuild source",{
+          tf,time:row.time,source,existing:{...last},incoming:{...row}
+        });
         deduped[deduped.length-1] = mergeBufferRow(last,row);
       }else{
         deduped.push({...row,final:true});
@@ -3715,6 +3733,18 @@ const marketDataHub = (() => {
       .filter(row => row && Number.isFinite(Number(row.time)) && Number.isFinite(Number(row.close)))
       .map(cloneRow)
       .sort((a,b) => Number(a.time) - Number(b.time));
+    const canonicalSeries=window.BT001CanonicalCandleSeries;
+    if(!canonicalSeries||!canonicalSeries.strictlyIncreasingUnique(normalizedRows)){
+      warnIntegrity(`noncanonical-calculation-input:${interval}`,"non-unique or unsorted candle series rejected before EMA calculation",{
+        tf:interval,rows:normalizedRows.slice(-20)
+      });
+      return {
+        requestedTf:String(tf||interval),interval,sourceType,sourcePath:`PUBLIC_MARKET_DATA_HUB.${sourceType}(${interval})`,
+        sourceIndex:null,candleTime:null,rows:[],slots,periods,seriesBySlot:{},alignedBySlot:{},
+        valuesBySlot:{},seriesByPeriod:{},alignedByPeriod:{},valuesByPeriod:{},valuesValid:false,
+        warmupCount:0,requiredRows,maxRows:maxRows||null,reliable:false,reason:"noncanonical-candle-series"
+      };
+    }
     const rows = maxRows ? normalizedRows.slice(-maxRows) : normalizedRows;
     const seriesBySlot = {};
     const alignedBySlot = {};
@@ -3835,7 +3865,9 @@ const marketDataHub = (() => {
       const row = arr[i];
       const t = Number(row && row.time);
       if(!Number.isFinite(t)) continue;
-      if(seen.has(t)) warnIntegrity(`duplicate-buffer:${tf}:${t}`,"duplicate candle open times detected",{tf,time:t,reason});
+      if(seen.has(t)) warnIntegrity(`duplicate-buffer:${tf}:${t}`,"duplicate finalized candles found during canonical validation",{
+        tf,time:t,reason,existing:{...arr.find(candidate=>Number(candidate&&candidate.time)===t)},incoming:{...row}
+      });
       seen.add(t);
       if(i > 0){
         const prev = Number(arr[i-1] && arr[i-1].time);
@@ -3898,13 +3930,13 @@ const marketDataHub = (() => {
       warnIntegrity(`stale-forming:${tf}:${normalized.time}`,"stale forming kline ignored",{tf,incoming:normalized,existing});
       return existing;
     }
-    const sameOpenTime = existing && Number(existing.time) === Number(normalized.time);
     // Live forming candles must preserve intrabar extremes. Same-open-time kline
     // packets are merged; a different open time starts a fresh forming candle.
     const before = candleContentKey(existing);
-    state.formingKlineByTf[tf] = sameOpenTime
-      ? mergeBufferRow(existing,{...normalized,final:false})
-      : {...normalized,final:false};
+    const canonicalSeries=window.BT001CanonicalCandleSeries;
+    state.formingKlineByTf[tf] = canonicalSeries
+      ? canonicalSeries.upsertForming(existing,{...normalized,final:false},mergeBufferRow)
+      : (existing&&Number(existing.time)===Number(normalized.time)?mergeBufferRow(existing,{...normalized,final:false}):{...normalized,final:false});
     if(before !== candleContentKey(state.formingKlineByTf[tf])) bumpFormingRevision(tf);
     return state.formingKlineByTf[tf];
   }
@@ -3915,15 +3947,17 @@ const marketDataHub = (() => {
     const before = closedContentKey(getClosedBuffer(tf));
     const arr = state.closedKlinesByTf[tf] || (state.closedKlinesByTf[tf] = []);
     const closedRow = {...normalized,final:true};
-    const idx = arr.findIndex(x => Number(x.time) === Number(closedRow.time));
-    if(idx >= 0){
-      warnIntegrity(`duplicate-closed-upsert:${tf}:${closedRow.time}`,"duplicate candle open times detected",{tf,time:closedRow.time,source});
-      if(source === "ws" || arr[idx].source !== "ws") arr[idx] = {...closedRow};
-    }
-    else if(!arr.length || closedRow.time > arr[arr.length-1].time) arr.push(closedRow);
+    const canonicalSeries=window.BT001CanonicalCandleSeries;
+    if(canonicalSeries)canonicalSeries.upsertFinalized(arr,closedRow,{
+      source,merge:mergeBufferRow,
+      warn:detail=>warnIntegrity(`duplicate-closed-upsert:${tf}:${closedRow.time}`,"duplicate finalized candle rejected",{
+        tf,...detail
+      })
+    });
     else{
-      arr.push(closedRow);
-      arr.sort((a,b) => a.time - b.time);
+      const idx=arr.findIndex(x=>Number(x.time)===Number(closedRow.time));
+      if(idx>=0)arr[idx]={...closedRow};
+      else{arr.push(closedRow);arr.sort((a,b)=>a.time-b.time);}
     }
     const forming = state.formingKlineByTf[tf];
     if(forming && Number(forming.time) === Number(closedRow.time)){
@@ -3947,7 +3981,7 @@ const marketDataHub = (() => {
     for(const row of merged){
       const last = deduped[deduped.length-1];
       if(last && Number(last.time) === Number(row.time)){
-        warnIntegrity(`duplicate-prepend:${tf}:${row.time}`,"duplicate candle open times detected",{tf,time:row.time});
+        // Expected overlap between an older REST page and the retained canonical boundary row.
         deduped[deduped.length-1] = row.source === "ws" ? row : (last.source === "ws" ? last : mergeBufferRow(last,row));
       }
       else deduped.push(row);
@@ -4250,6 +4284,10 @@ const marketDataHub = (() => {
     diag.lastWsTickTime = lastWs;
     diag.lastError = null;
     state.lastMessageSource = source;
+    if(document.hidden){
+      diag.hiddenMessageCount += 1;
+      diag.lastHiddenMessageAt = lastWs;
+    }
     syncDiag({lastMessageSource:source});
     markLiveUpdate();
     refreshConnectionStatus();
@@ -4304,7 +4342,7 @@ const marketDataHub = (() => {
     paintStatus("RECONNECTING",reason || "socket reconnect");
     state.reconnectTimer = setTimeout(() => {
       state.reconnectTimer = null;
-      connect();
+      connect({force:true,reason});
     },delay);
   }
   async function restSyncLatest(reason="fallback"){
@@ -4345,9 +4383,16 @@ const marketDataHub = (() => {
       validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason});
     });
   }
-  function connect(){
+  function connect({force=false,reason=""}={}){
     state.desiredLive = true;
     ensureBufferSymbol();
+    const streams = currentStreams();
+    const url = wsBase() + "?streams=" + streams.join("/");
+    if(!force&&ws&&diag.activeUrl===url&&(ws.readyState===WebSocket.CONNECTING||ws.readyState===WebSocket.OPEN))return;
+    if(force){
+      diag.forcedReconnectCount += 1;
+      diag.lastForcedReconnectReason = reason || "forced reconnect";
+    }
     state.generation += 1;
     const token = state.generation;
     if(state.reconnectTimer){
@@ -4355,8 +4400,6 @@ const marketDataHub = (() => {
       state.reconnectTimer = null;
     }
     closeRealtimeSocket();
-    const streams = currentStreams();
-    const url = wsBase() + "?streams=" + streams.join("/");
     state.connectStartedAt = now();
     diag.streams = streams.slice();
     diag.activeUrl = url;
@@ -4365,6 +4408,7 @@ const marketDataHub = (() => {
     paintStatus("RECONNECTING","opening Binance stream");
     try{
       ws = API.connectWebSocket(url,{
+        connectionKey:"public-market-data",
         reconnect:false,
         onOpen:() => {
           if(token !== state.generation || ws == null) return;
@@ -4427,11 +4471,12 @@ const marketDataHub = (() => {
     refreshConnectionStatus();
   }
   function rebuildRequirements(forceReconnect=false){
+    state.desiredLive = true;
     ensureBufferSymbol();
     const nextStreams = currentStreams();
     const changed = diag.streams.join("|") !== nextStreams.join("|");
     if(forceReconnect || changed){
-      connect();
+      scheduleReconnect("stream requirements changed",100);
     }
     if(state.ssscVisible){
       ensureSsscBuffers(false).catch(() => {});
@@ -4493,15 +4538,23 @@ const marketDataHub = (() => {
   }
   function handleVisibilityReturn(){
     if(document.hidden) return;
+    diag.hiddenSince = 0;
+    diag.lastVisibleAt = now();
     repairKnownClosedGaps("visibility/focus return");
     restSyncLatest("visibility/focus return");
     if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
     if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
+    const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     if(!socketOpen()) connect();
+    else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
     else refreshConnectionStatus();
   }
 
   function scheduleVisibilityRecovery(){
+    if(document.hidden){
+      diag.hiddenSince = now();
+      return;
+    }
     if(state.visibilityRecoveryTimer){
       clearTimeout(state.visibilityRecoveryTimer);
     }
@@ -4830,21 +4883,10 @@ async function hmac(secret,msg){
 }
 
 async function serverTime(){
-  try{
-    const r = await API.fetch(cfg().time,{cache:"no-store"});
-    if(!r.ok) throw new Error("time HTTP " + r.status);
-
-    const d = await r.json();
-    if(d && d.serverTime){
-      const serverMs = +d.serverTime;
-      const localNow = Date.now();
-      exchangeTimeOffsetMs = serverMs - localNow;
-      return serverMs;
-    }
-  }catch(e){
-    console.error("Server time failed, using local",e);
+  const clock=window.BT001ExchangeClock;
+  if(clock){
+    try{exchangeTimeOffsetMs=await clock.sync();}catch(_error){exchangeTimeOffsetMs=0;}
   }
-
   return getExchangeNowMs();
 }
 
@@ -4921,10 +4963,16 @@ async function signedGetVerbose(url,p,key,sec,off){
 }
 
 async function timeOffset(){
-  const serverMs = await serverTime();
-  const offset = serverMs - Date.now();
-  if(Number.isFinite(offset)) exchangeTimeOffsetMs = offset;
-  return offset;
+  const clock=window.BT001ExchangeClock;
+  if(clock){
+    exchangeTimeOffsetMs=typeof clock.ensureSynchronized==="function"
+      ? await clock.ensureSynchronized({attempts:3,baseDelayMs:200})
+      : await clock.sync();
+    if(typeof clock.isReliable==="function"&&!clock.isReliable())throw new Error("Binance exchange clock is not synchronized; signed request was not sent");
+    return exchangeTimeOffsetMs;
+  }
+  await serverTime();
+  return Number.isFinite(exchangeTimeOffsetMs)?exchangeTimeOffsetMs:0;
 }
 
 async function signedBinanceRequest(url,method="GET",params={},options={}){
@@ -16092,12 +16140,17 @@ startTradeAuto();
   }
   function startPrivateUserStream21(){
     if(privateStreamRestartTimer21 != null){ clearTimeout(privateStreamRestartTimer21);privateStreamRestartTimer21=null; }
-    if(privateUserStream21){ privateUserStream21.stop();privateUserStream21=null; }
+    if(privateUserStream21){
+      const status=privateUserStream21.diagnostics&&privateUserStream21.diagnostics().streamStatus;
+      if(status==="connecting"||status==="live")return true;
+      privateUserStream21.stop();privateUserStream21=null;
+    }
     if(typeof hasKeys !== "function" || !hasKeys() || typeof window.createBinanceUserDataStream !== "function"){
       applyPrivateStreamStatus21({streamStatus:"disconnected"});
       return false;
     }
     privateUserStream21=window.createBinanceUserDataStream({
+      connectionKey:"main-private-user-data",
       api:window.API,
       getApiKey:() => activeApiCredentials().key,
       getSymbol:currentSymbol21,
@@ -16213,7 +16266,8 @@ startTradeAuto();
   ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {
     if(name==="visibilitychange" && document.hidden) return;
     markPrivateDirty21({positionDirty:true,ordersDirty:true},"focus-visibility-recovery",{immediate:true});
-    if(!privateUserStream21 || privateSnapshot21().userStream.streamStatus!=="live") schedulePrivateStreamRestart21();
+    const streamStatus=privateSnapshot21().userStream.streamStatus;
+    if(!privateUserStream21||!["connecting","live"].includes(streamStatus))schedulePrivateStreamRestart21();
   },true));
   if(marketEl) marketEl.addEventListener("change",() => {
     markPrivateDirty21({positionDirty:true,ordersDirty:true},"symbol-change",{immediate:true});
@@ -22594,7 +22648,7 @@ If there is NO open position, use this Section 2 instead:
       connectWebSocket:(url,options)=>API.connectWebSocket(url,options),
       getWsUrl:()=>String((typeof cfg==="function"&&cfg()&&cfg().ws)||"wss://fstream.binance.com/market/stream"),
       klineLimit:KLINE_LIMIT,
-      onUpdate:state=>{data=state.data;lastFullFetch=state.lastFullFetch;render();},
+      onUpdate:state=>{data=state.data;lastFullFetch=state.lastFullFetch;render();if(snapshotLogger)snapshotLogger.capture();},
       warn:(message,error)=>console.warn(MODULE+' '+message,error)
     });
     return pipeline;

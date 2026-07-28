@@ -4,6 +4,9 @@
   if(!C||!calc||!tranches||!decisions)throw new Error("SCALP dependencies must load before state machine");
   const n=calc.n,quoteAsset=calc.quoteAsset,upper=value=>String(value||"").toUpperCase(),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
+  const exchangeClock=()=>typeof window!=="undefined"&&window.BT001ExchangeClock||null;
+  const exchangeNow=fallback=>{const clock=exchangeClock();try{return clock&&typeof clock.now==="function"?clock.now():fallback;}catch(_error){return fallback;}};
+  const exchangeFromLocal=value=>{const clock=exchangeClock();try{return clock&&typeof clock.fromLocal==="function"?clock.fromLocal(value):value;}catch(_error){return value;}};
   function hash(text){let h=2166136261;for(const ch of String(text)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return (h>>>0).toString(36).toUpperCase();}
   function clientId(kind,eventId,generation){return `${C.order.namespace}-${kind}-${generation}-${hash(eventId)}`.slice(0,36);}
   function trancheId(direction,eventId,generation){return `${upper(direction).slice(0,1)}${Number(generation||0).toString(36).toUpperCase()}${hash(eventId)}`.slice(0,20);}
@@ -204,7 +207,8 @@
       if(typeof window==="undefined"||!window.BT001Supabase||typeof window.BT001Supabase.log!=="function")return;
       const exitPrice=n(tranche.closedPrice)||(reason==="PARTIAL_TP"||reason==="TP"?n(tranche.partialTpPrice):reason==="PSL"||reason==="SL"?n(tranche.pslPrice):n(this.guide));
       const row={
-        created_at:new Date(n(tranche.createdAt)||this.now()).toISOString(),closed_at:new Date(n(tranche.closedAt)||this.now()).toISOString(),
+        created_at:new Date(exchangeFromLocal(n(tranche.createdAt)||this.now())).toISOString(),
+        closed_at:new Date(exchangeFromLocal(n(tranche.closedAt)||this.now())).toISOString(),
         symbol:tranche.symbol||this.marketSymbol||null,direction:tranche.direction||null,mode:tranche.mode||null,source_timeframe:tranche.source||null,event_type:tranche.eventType||null,
         auto_entered:false,cascade_agreement_at_entry:clone(tranche.cascadeAgreementAtEntry||null),
         requested_qty:n(tranche.requestedQty),filled_qty:n(tranche.closedQty)??n(tranche.filledQty),
@@ -230,15 +234,16 @@
       const positionState=clone(detail.positionState??null);
       // These tables intentionally have different schemas. Keep each payload explicit so a column
       // belonging to scalp_trades (or another activity table) cannot leak into every insert again.
+      const event_at=new Date(exchangeNow(this.now())).toISOString();
       const row=table==="scalp_v1_signals"?{
-        symbol,action,source_timeframe:detail.sourceTimeframe??null,
+        event_at,symbol,action,source_timeframe:detail.sourceTimeframe??null,
         detector_state:clone(detail.detectorState??null),
         cascade_agreement:clone(detail.cascadeAgreement??null),machine_id:machineId
       }:table==="scalp_positions"?{
-        symbol,action,direction:positionState?.direction??null,
+        event_at,symbol,action,direction:positionState?.direction??null,
         tranche_id:positionState?.trancheId??null,position_state:positionState,machine_id:machineId
       }:{
-        action,detail:clone(detail),machine_id:machineId
+        event_at,action,detail:clone(detail),machine_id:machineId
       };
       try{window.BT001Supabase.log(table,row).catch(()=>{});}catch(_e){}
     }

@@ -97,5 +97,52 @@ const {createOrchestration,warmupTargets}=require("./orchestration.js");
   assert.equal(seededSnapshot.data["1H"].available,true,"the orchestration-to-calculation live diagnostic must be available");
   assert(seededSnapshot.data["1H"].atr>0&&seededSnapshot.data["1H"].RV.recent>0);
 
+  // A reconnect after several missed closes must REST-reseed every timeframe before queued WS
+  // messages are applied or another calculation can observe the discontinuous series.
+  const reconnectSlots=[5,10,20,7,8].map((period,index)=>({slotId:`MA${index+1}`,period}));
+  const reconnectStart=1800000000,minute=60;
+  const candles=(first,count)=>Array.from({length:count},(_,index)=>{
+    const time=reconnectStart+(first+index)*minute,close=40000+(first+index)*3+Math.sin((first+index)/4)*5;
+    return {time,openTime:time*1000,closeTime:(time+minute)*1000-1,open:close-1,high:close+4,low:close-4,close,volume:10,baseVolume:10,quoteVolume:close*10};
+  });
+  let reconnectRows=candles(0,101),reconnectSocket=null,reconnectWarnings=[],failRepair=false,reconnectUpdates=0;
+  const reconnectPipeline=createOrchestration({
+    tfs:[["1M","1m"]],liveTfs:["1m"],getSlots:()=>reconnectSlots,getCalculation:()=>calculation,
+    getSymbol:()=>"BTCUSDT",now:()=>((reconnectStart+1000*minute)*1000),
+    fetchKlines:async()=>{if(failRepair)throw new Error("REST unavailable");return reconnectRows;},
+    connectWebSocket:(_url,options)=>{reconnectSocket=options;return {disconnect(){}};},
+    getWsUrl:()=>"wss://example/ws",setIntervalFn:()=>1,clearIntervalFn:()=>{},
+    setTimeoutFn:()=>99,clearTimeoutFn:()=>{},warn:(message,detail)=>reconnectWarnings.push({message,detail}),
+    onUpdate:()=>{reconnectUpdates+=1;}
+  });
+  await reconnectPipeline.refresh();
+  await reconnectSocket.onOpen();
+  assert.equal(reconnectPipeline.getSnapshot().data["1M"].available,true);
+  reconnectSocket.onClose({code:1006});
+  reconnectSocket.onMessage({data:JSON.stringify({
+    e:"kline",s:"BTCUSDT",k:{i:"1m",t:(reconnectStart+104*minute)*1000,T:(reconnectStart+105*minute)*1000-1,o:"40300",h:"40305",l:"40295",c:"40302",v:"10",q:"403020",x:true}
+  })});
+  assert.equal(reconnectPipeline.getSnapshot().continuity.queuedMessages,1);
+  reconnectRows=candles(3,101);
+  assert.equal(await reconnectSocket.onOpen(),true);
+  const repairedSnapshot=reconnectPipeline.getSnapshot(),repairedRows=repairedSnapshot.privateCandlesByTf["1m"];
+  assert.equal(repairedSnapshot.continuity.blocked,false);
+  assert.equal(repairedSnapshot.continuity.queuedMessages,0);
+  assert.deepEqual(reconnectPipeline.continuityGaps("1m",repairedRows),[]);
+  assert.equal(repairedSnapshot.data["1M"].available,true);
+  assert.notEqual(repairedSnapshot.data["1M"].reason,"normalization-unavailable");
+  assert(repairedSnapshot.continuity.socketEvents.some(event=>event.type==="repair-success"));
+
+  failRepair=true;
+  reconnectSocket.onClose({code:1006});
+  assert.equal(await reconnectSocket.onOpen(),false);
+  const failedRepairSnapshot=reconnectPipeline.getSnapshot();
+  assert.equal(failedRepairSnapshot.continuity.blocked,true,"failed REST repair must keep discontinuous WS input quarantined");
+  assert(failedRepairSnapshot.continuity.repairFailures>=1);
+  assert(reconnectWarnings.some(entry=>entry.message==="SSSC reconnect continuity repair failed"));
+  const updatesBeforeBlockedCalculate=reconnectUpdates;
+  reconnectPipeline.calculate();
+  assert(reconnectUpdates>updatesBeforeBlockedCalculate,"continuity failures must not suppress the regular publish heartbeat");
+
   console.log("sssc always-on orchestration tests: PASS");
 })().catch(error=>{console.error(error);process.exitCode=1;});

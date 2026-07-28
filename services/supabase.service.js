@@ -18,12 +18,16 @@
   function getUrl(){return readSlot(URL_SLOT).replace(/\/+$/,"");}
   function getAnonKey(){return readSlot(KEY_SLOT);}
   function configured(){return !!getUrl()&&!!getAnonKey();}
-  function saveUrlFromInput(input){const ok=writeSlot(URL_SLOT,input&&input.value);if(ok&&input)input.value="";return ok;}
-  function saveKeyFromInput(input){const ok=writeSlot(KEY_SLOT,input&&input.value);if(ok&&input)input.value="";return ok;}
-  function clearUrl(){clearSlot(URL_SLOT);}
-  function clearKey(){clearSlot(KEY_SLOT);}
+  function saveUrlFromInput(input){const ok=writeSlot(URL_SLOT,input&&input.value);if(ok&&input)input.value="";if(ok)syncWorkerConfig();return ok;}
+  function saveKeyFromInput(input){const ok=writeSlot(KEY_SLOT,input&&input.value);if(ok&&input)input.value="";if(ok)syncWorkerConfig();return ok;}
+  function clearUrl(){clearSlot(URL_SLOT);syncWorkerConfig();}
+  function clearKey(){clearSlot(KEY_SLOT);syncWorkerConfig();}
 
   function getRest(){return window.restService||null;}
+  function exchangeNow(){
+    const clock=window.BT001ExchangeClock;
+    try{return clock&&typeof clock.now==="function"?clock.now():Date.now();}catch(_error){return Date.now();}
+  }
 
   // Stable per-browser identifier attached to every log row so activity from the same machine
   // can be grouped later. Deliberately a clear/readable key -- unlike the credential slots above,
@@ -43,11 +47,47 @@
     }catch(_e){return generateDeviceId();}
   }
 
-  // In-memory retry queue: a transient network failure must not silently drop a decision-log row.
-  // Rows never touch localStorage here -- if the tab closes before a retry succeeds, the row is
-  // lost, which is an accepted tradeoff for a client-only prototype (see PART 4 write-up).
+  // Modern browsers route every production log through a Worker whose queue lives in IndexedDB.
+  // This small fallback is retained for non-Worker test/legacy environments only.
   const pending=[];
   let flushing=false,retryTimer=null;
+  let worker=null,workerAttempted=false,workerStatus={pending:0,succeeded:0,failed:0,latestSnapshotEventAt:null,latestSnapshotAgeMs:null};
+  let fallbackSnapshot=null,fallbackSnapshotTimer=null;
+  const SNAPSHOT_INTERVAL_MS=30000;
+
+  function syncWorkerConfig(){
+    if(worker)worker.postMessage({type:"config",url:getUrl(),key:getAnonKey()});
+  }
+  function ensureWorker(){
+    if(worker)return worker;
+    if(workerAttempted)return null;
+    workerAttempted=true;
+    if(typeof Worker!=="function")return null;
+    let objectUrl=null;
+    try{
+      const source=window.BT001_LOGGING_WORKER_SOURCE;
+      if(!source)throw new Error("Logging Worker source was not loaded");
+      objectUrl=URL.createObjectURL(new Blob([source],{type:"application/javascript"}));
+      worker=new Worker(objectUrl);
+      worker.addEventListener("message",event=>{
+        const message=event&&event.data;
+        if(message&&message.type==="status"){
+          if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}
+          workerStatus={
+            pending:Number(message.pending)||0,succeeded:Number(message.succeeded)||0,failed:Number(message.failed)||0,
+            latestSnapshotEventAt:message.latestSnapshotEventAt||null,
+            latestSnapshotAgeMs:Number.isFinite(Number(message.latestSnapshotAgeMs))?Number(message.latestSnapshotAgeMs):null
+          };
+        }
+      });
+      syncWorkerConfig();
+      return worker;
+    }catch(error){
+      if(objectUrl)try{URL.revokeObjectURL(objectUrl);}catch(_e){}
+      console.warn("[BT001 Supabase] Logging Worker could not start; using the in-page fallback.",error);
+      worker=null;return null;
+    }
+  }
 
   async function insertRow(table,row){
     const rest=getRest();
@@ -65,6 +105,7 @@
   }
 
   async function flushPending(){
+    if(worker){worker.postMessage({type:"flush"});return;}
     if(flushing||!pending.length)return;
     if(!configured()){scheduleFlush(15000);return;}
     flushing=true;
@@ -78,6 +119,11 @@
   }
 
   async function log(table,row){
+    const activeWorker=ensureWorker();
+    if(activeWorker){
+      activeWorker.postMessage({type:"enqueue",table,row});
+      return true;
+    }
     try{await insertRow(table,row);return true;}
     catch(error){
       // Logging remains fire-and-forget for trading callers, but a rejected write must be visible
@@ -87,7 +133,33 @@
     }
   }
 
-  function pendingCount(){return pending.length;}
+  function pendingCount(){return worker?workerStatus.pending:pending.length;}
+  function loggingStatus(){
+    return Object.freeze({...workerStatus,workerActive:!!worker,fallbackActive:fallbackSnapshotTimer!=null});
+  }
+  function writeFallbackSnapshot(){
+    if(!fallbackSnapshot)return;
+    // log() uses the real REST insert/retry path when the Worker is unavailable.
+    try{const result=log("sssc_snapshots",fallbackSnapshot);if(result&&typeof result.catch==="function")result.catch(()=>{});}
+    catch(_error){}
+  }
+  function setLatestSnapshot(row){
+    fallbackSnapshot=row||null;
+    try{const activeWorker=ensureWorker();if(activeWorker){activeWorker.postMessage({type:"latestSnapshot",row});return true;}}
+    catch(_error){}
+    return false;
+  }
+  function startSnapshotLogging(){
+    try{const activeWorker=ensureWorker();if(activeWorker){activeWorker.postMessage({type:"startSnapshots"});return true;}}
+    catch(_error){}
+    if(fallbackSnapshotTimer==null)fallbackSnapshotTimer=setInterval(writeFallbackSnapshot,SNAPSHOT_INTERVAL_MS);
+    return false;
+  }
+  function stopSnapshotLogging(){
+    try{if(worker)worker.postMessage({type:"stopSnapshots"});}catch(_error){}
+    if(fallbackSnapshotTimer!=null)clearInterval(fallbackSnapshotTimer);
+    fallbackSnapshotTimer=null;
+  }
 
   // Real end-to-end verification for the Settings panel: logActivity() is fire-and-forget and never
   // surfaces a failure anywhere (by design, so a bad credential can't affect trading), which means a
@@ -98,7 +170,7 @@
   async function testConnection(){
     if(!configured())return {ok:false,reason:"NOT_CONFIGURED",message:"Enter a project URL and anon key, then Save, before testing"};
     if(!getRest())return {ok:false,reason:"REST_UNAVAILABLE",message:"services/rest.service.js (window.restService) is unavailable"};
-    const row={action:"CONNECTION_TEST",detail:{source:"settings-test"},machine_id:getDeviceId()};
+    const row={event_at:new Date(exchangeNow()).toISOString(),action:"CONNECTION_TEST",detail:{source:"settings-test"},machine_id:getDeviceId()};
     try{
       await insertRow("scalp_operational",row);
       return {ok:true,reason:"OK",message:"Success: a test row was written to scalp_operational"};
@@ -117,12 +189,12 @@
   ]);
 
   function buildDbAccessRows(tag){
-    const now=new Date().toISOString(),symbol="BTCUSDT",machineId=getDeviceId();
+    const now=new Date(exchangeNow()).toISOString(),symbol="BTCUSDT",machineId=getDeviceId();
     const detectorState={test_tag:tag,kind:"DB_ACCESS_TEST",qualified:false};
     const cascadeAgreement={test_tag:tag,kind:"DB_ACCESS_TEST",confirmed:false};
     return {
       scalp_v1_signals:{
-        symbol,action:"DB_ACCESS_TEST",source_timeframe:"1m",detector_state:detectorState,
+        event_at:now,symbol,action:"DB_ACCESS_TEST",source_timeframe:"1m",detector_state:detectorState,
         cascade_agreement:cascadeAgreement,machine_id:machineId
       },
       scalp_v2_signals:{
@@ -130,11 +202,11 @@
         detector_state:detectorState,cascade_agreement:cascadeAgreement,machine_id:machineId
       },
       scalp_positions:{
-        symbol,action:"DB_ACCESS_TEST",direction:"LONG",tranche_id:tag,
+        event_at:now,symbol,action:"DB_ACCESS_TEST",direction:"LONG",tranche_id:tag,
         position_state:{test_tag:tag,kind:"DB_ACCESS_TEST",state:"TEST_ONLY"},machine_id:machineId
       },
       scalp_operational:{
-        action:"DB_ACCESS_TEST",detail:{test_tag:tag,kind:"DB_ACCESS_TEST"},machine_id:machineId
+        event_at:now,action:"DB_ACCESS_TEST",detail:{test_tag:tag,kind:"DB_ACCESS_TEST"},machine_id:machineId
       },
       scalp_trades:{
         created_at:now,closed_at:now,symbol,direction:"LONG",mode:"SINGLE",
@@ -184,6 +256,8 @@
 
   window.BT001Supabase=Object.freeze({
     getUrl,getAnonKey,configured,saveUrlFromInput,saveKeyFromInput,clearUrl,clearKey,
-    log,flushPending,pendingCount,getDeviceId,testConnection,testDbAccess
+    log,flushPending,pendingCount,loggingStatus,setLatestSnapshot,startSnapshotLogging,stopSnapshotLogging,
+    getDeviceId,testConnection,testDbAccess
   });
+  ensureWorker();
 })();

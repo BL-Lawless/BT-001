@@ -10,6 +10,10 @@
     return Number.isFinite(parsed)?parsed:null;
   };
   const copyObject=value=>value&&typeof value==="object"?{...value}:null;
+  const exchangeNow=()=>{
+    const clock=typeof globalThis!=="undefined"&&globalThis.BT001ExchangeClock;
+    try{return clock&&typeof clock.now==="function"?clock.now():Date.now();}catch(_error){return Date.now();}
+  };
 
   function diagnosticsByInterval(snapshot){
     const diagnostics=Object.values(snapshot&&snapshot.data||{}),indexed={};
@@ -91,7 +95,7 @@
       unanimousStrongOpposition:summary.triggerRisk&&summary.triggerRisk.unanimousStrongOpposition===true,
       missingTimeframes
     };
-    return {machine_id:resolvedMachineId,symbol:String(symbol||""),timeframes,aggregate};
+    return {event_at:new Date(exchangeNow()).toISOString(),machine_id:resolvedMachineId,symbol:String(symbol||""),timeframes,aggregate};
   }
 
   function createSnapshotLogger(options={}){
@@ -99,17 +103,15 @@
     const getCalculation=options.getCalculation;
     const getSymbol=options.getSymbol;
     const getSupabase=options.getSupabase;
-    const setIntervalFn=options.setIntervalFn||setInterval;
-    const clearIntervalFn=options.clearIntervalFn||clearInterval;
     const warn=typeof options.warn==="function"?options.warn:(...args)=>{
       if(typeof console!=="undefined"&&typeof console.warn==="function")console.warn(...args);
     };
-    let timer=null;
+    let started=false;
 
     function capture(){
       try{
         const supabase=typeof getSupabase==="function"?getSupabase():null;
-        if(!supabase||typeof supabase.log!=="function")return false;
+        if(!supabase||(typeof supabase.setLatestSnapshot!=="function"&&typeof supabase.log!=="function"))return false;
         if(typeof supabase.configured==="function"&&!supabase.configured())return false;
         const snapshot=typeof getSnapshot==="function"?getSnapshot():null;
         const calculation=typeof getCalculation==="function"?getCalculation():null;
@@ -122,23 +124,28 @@
           snapshot,calculation,symbol:typeof getSymbol==="function"?getSymbol():"",machineId
         });
         if(!payload)return false;
-        try{
-          const write=supabase.log("sssc_snapshots",payload);
-          if(write&&typeof write.catch==="function")write.catch(()=>{});
-        }catch(_error){}
+        try{if(typeof supabase.setLatestSnapshot==="function")supabase.setLatestSnapshot(payload);else supabase.log("sssc_snapshots",payload);}
+        catch(_error){}
         return true;
       }catch(_error){return false;}
     }
 
     function start(){
-      if(timer!=null)return;
-      timer=setIntervalFn(capture,SNAPSHOT_INTERVAL_MS);
+      if(started)return;
+      started=true;capture();
+      try{
+        const supabase=typeof getSupabase==="function"?getSupabase():null;
+        if(supabase&&typeof supabase.startSnapshotLogging==="function")supabase.startSnapshotLogging();
+      }catch(_error){}
     }
     function stop(){
-      if(timer!=null)clearIntervalFn(timer);
-      timer=null;
+      try{
+        const supabase=typeof getSupabase==="function"?getSupabase():null;
+        if(supabase&&typeof supabase.stopSnapshotLogging==="function")supabase.stopSnapshotLogging();
+      }catch(_error){}
+      started=false;
     }
-    function status(){return Object.freeze({started:timer!=null,intervalMs:SNAPSHOT_INTERVAL_MS});}
+    function status(){return Object.freeze({started,intervalMs:SNAPSHOT_INTERVAL_MS});}
 
     return Object.freeze({start,stop,capture,status});
   }

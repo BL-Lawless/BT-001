@@ -21,17 +21,14 @@
     return Array.from(new Uint8Array(signature)).map(byte => byte.toString(16).padStart(2, "0")).join("");
   }
 
-  // Binance server time is a single universal clock-skew value, not account-specific -- fetched
-  // independently here (public, unauthenticated endpoint) rather than reusing any main.js internal.
-  let cachedOffset = 0, offsetFetchedAt = 0;
   async function timeOffset() {
-    if (Date.now() - offsetFetchedAt < 5 * 60 * 1000) return cachedOffset;
-    try {
-      const data = await window.restService.get(`${REST_BASE}/fapi/v1/time`);
-      const serverTime = n(data && data.serverTime);
-      if (serverTime != null) { cachedOffset = serverTime - Date.now(); offsetFetchedAt = Date.now(); }
-    } catch (_e) {}
-    return cachedOffset;
+    const clock=window.BT001ExchangeClock;
+    if(!clock)throw new Error("Binance exchange clock is unavailable");
+    const offset=typeof clock.ensureSynchronized==="function"
+      ? await clock.ensureSynchronized({attempts:3,baseDelayMs:200})
+      : await clock.sync();
+    if(typeof clock.isReliable==="function"&&!clock.isReliable())throw new Error("Binance exchange clock is not synchronized");
+    return offset;
   }
 
   async function signedRequest(credentials, path, method, params = {}) {
@@ -39,7 +36,7 @@
     if (!rest) throw new Error("services/rest.service.js (window.restService) is unavailable");
     if (!credentials || !credentials.key || !credentials.secret) throw new Error("Selected Binance account credentials are required");
     const off = await timeOffset();
-    const query = new URLSearchParams({ ...params, recvWindow: "5000", timestamp: String(Date.now() + off) }).toString();
+    const query = new URLSearchParams({ ...params, recvWindow: "5000", timestamp: String((window.BT001ExchangeClock&&window.BT001ExchangeClock.now())||(Date.now()+off)) }).toString();
     const signature = await hmacHex(credentials.secret, query);
     const url = `${REST_BASE}${path}?${query}&signature=${signature}`;
     return rest.requestJson(url, { method: String(method || "GET").toUpperCase(), cache: "no-store", headers: { "X-MBX-APIKEY": credentials.key } });
@@ -172,6 +169,7 @@
       attachedEngine = engine;
       if (typeof window.createBinanceUserDataStream !== "function") { setStreamStatus("UNAVAILABLE"); return; }
       stream = window.createBinanceUserDataStream({
+        connectionKey: `scalp-private-user-data:${accountSlot}`,
         api: window.API,
         getApiKey: () => credentials().key,
         getSymbol: symbol,

@@ -102,6 +102,7 @@ async function run(){
   const filterRuntime=load(["features/scalp/config.js","features/scalp/calculations.js","features/scalp/tranche-book.js","features/scalp/exit-decisions.js","features/scalp/signal-detector.js","features/scalp/state-machine.js","features/scalp/secondary-gateway.module.js"],{
     EventTarget:TestEventTarget,CustomEvent:TestEvent,setTimeout,clearTimeout,Uint8Array,
     crypto:{subtle:{importKey:async()=>({}),sign:async()=>new Uint8Array([1,2,3]).buffer}},
+    BT001ExchangeClock:{sync:async()=>0,offset:()=>0,now:()=>Date.now(),isReliable:()=>true},
     restService:filterRest,BT001ScalpAccount:{getCredentials:()=>({key:"scalper-key",secret:"scalper-secret"}),reportConnectionStatus:()=>{}},
     BT001_BINANCE_TRADING:{symbol:()=>"BTCUSDT"},PUBLIC_MARKET_DATA_HUB:{getAuthoritativeMaSnapshot:()=>({reliable:true})},
     createBinanceUserDataStream:options=>({start:()=>options.onStatus({streamStatus:"LIVE"}),stop:()=>{}})

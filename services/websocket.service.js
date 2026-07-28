@@ -25,32 +25,45 @@
       this.closedByUser = false;
       this.reconnectTimer = null;
       this.reconnectAttempts = 0;
+      this.connectionGeneration = 0;
+      this.peakConcurrentAttempts = 0;
     }
 
     connect() {
       this.closedByUser = false;
       this.clearReconnectTimer();
+      if (this.socket && (
+        this.socket.readyState === this.WebSocketCtor.CONNECTING ||
+        this.socket.readyState === this.WebSocketCtor.OPEN
+      )) return this.socket;
 
       this.socket = this.protocols
         ? new this.WebSocketCtor(this.url, this.protocols)
         : new this.WebSocketCtor(this.url);
 
       const socket = this.socket;
+      const generation = ++this.connectionGeneration;
+      this.peakConcurrentAttempts = Math.max(this.peakConcurrentAttempts,1);
 
       socket.onopen = event => {
+        if(generation !== this.connectionGeneration || socket !== this.socket)return;
         this.reconnectAttempts = 0;
         if (this.onOpen) this.onOpen(event, this);
       };
 
       socket.onmessage = event => {
+        if(generation !== this.connectionGeneration || socket !== this.socket)return;
         if (this.onMessage) this.onMessage(event, this);
       };
 
       socket.onerror = event => {
+        if(generation !== this.connectionGeneration || socket !== this.socket)return;
         if (this.onError) this.onError(event, this);
       };
 
       socket.onclose = event => {
+        if(generation !== this.connectionGeneration || socket !== this.socket)return;
+        this.socket = null;
         if (this.onClose) this.onClose(event, this);
         if (this.reconnect && !this.closedByUser) {
           this.scheduleReconnect();
@@ -63,26 +76,28 @@
     disconnect(code, reason) {
       this.closedByUser = true;
       this.clearReconnectTimer();
+      this.connectionGeneration += 1;
 
       if (!this.socket) return;
 
-      this.socket.onopen = null;
-      this.socket.onmessage = null;
-      this.socket.onerror = null;
-      this.socket.onclose = null;
+      const socket=this.socket;
+      this.socket=null;
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
 
-      if (
-        this.socket.readyState === WebSocket.CONNECTING ||
-        this.socket.readyState === WebSocket.OPEN
-      ) {
-        this.socket.close(code, reason);
+      if (socket.readyState === this.WebSocketCtor.OPEN) {
+        socket.close(code, reason);
+      }else if(socket.readyState === this.WebSocketCtor.CONNECTING){
+        // Closing a CONNECTING browser socket produces noisy "closed before established" errors.
+        // Let its handshake settle with application handlers detached, then close immediately.
+        socket.onopen=()=>{socket.onopen=null;try{socket.close(code,reason);}catch(_e){}};
       }
-
-      this.socket = null;
     }
 
     send(data) {
-      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) {
         throw new Error("WebSocket is not open");
       }
 
@@ -90,7 +105,11 @@
     }
 
     get readyState() {
-      return this.socket ? this.socket.readyState : WebSocket.CLOSED;
+      return this.socket ? this.socket.readyState : this.WebSocketCtor.CLOSED;
+    }
+
+    diagnostics(){
+      return {url:this.url,readyState:this.readyState,reconnectTimerCount:this.reconnectTimer==null?0:1,activeSocketCount:this.socket?1:0,peakConcurrentAttempts:this.peakConcurrentAttempts};
     }
 
     scheduleReconnect() {
@@ -115,6 +134,7 @@
   class WebSocketService {
     constructor({ WebSocketCtor = WebSocket } = {}) {
       this.WebSocketCtor = WebSocketCtor;
+      this.connectionsByKey = new Map();
     }
 
     createWebSocket(url, protocols) {
@@ -124,13 +144,24 @@
     }
 
     connect(url, options = {}) {
+      const key=String(options.connectionKey||"").trim();
+      const existing=key?this.connectionsByKey.get(key):null;
+      if(existing&&existing.url===url&&(
+        existing.readyState===this.WebSocketCtor.CONNECTING||
+        existing.readyState===this.WebSocketCtor.OPEN
+      ))return existing;
       const connection = new ManagedWebSocket(url, {
         ...options,
         WebSocketCtor: this.WebSocketCtor
       });
 
       connection.connect();
+      if(key)this.connectionsByKey.set(key,connection);
       return connection;
+    }
+
+    diagnostics(){
+      return [...this.connectionsByKey.entries()].map(([key,connection])=>({key,...connection.diagnostics()}));
     }
   }
 

@@ -6,7 +6,7 @@ const vm=require("vm");
 
 const root=path.resolve(__dirname,"..");
 
-function runtime({fetchImpl,consoleImpl=console}={}){
+function runtime({fetchImpl,consoleImpl=console,globals={}}={}){
   const store=new Map();
   const localStorage={
     getItem:key=>store.has(key)?store.get(key):null,
@@ -20,7 +20,7 @@ function runtime({fetchImpl,consoleImpl=console}={}){
     // catch, never the retry itself firing -- real timers would leave a live setTimeout chain behind
     // (log() -> scheduleFlush -> retry -> fails again -> scheduleFlush...) that keeps the process alive.
     setTimeout:()=>({}),clearTimeout:()=>{},
-    localStorage,fetch:fetchImpl
+    localStorage,fetch:fetchImpl,...globals
   };
   context.window=context;
   vm.createContext(context);
@@ -41,6 +41,51 @@ function recordingFetch(handler){
 }
 
 const run=(async()=>{
+  // file:// deployment: the Worker must be constructed from an in-memory Blob URL, never from an
+  // external script path (which browsers reject for opaque/null origins).
+  {
+    const constructed=[],revoked=[],instances=[];
+    class FakeBlob{constructor(parts,options){this.parts=parts;this.options=options;}}
+    class FakeWorker{
+      constructor(url){constructed.push(url);this.listeners={};instances.push(this);}
+      addEventListener(type,fn){this.listeners[type]=fn;}
+      postMessage(){}
+    }
+    const fakeUrl={
+      createObjectURL(blob){assert(blob instanceof FakeBlob);assert.equal(blob.options.type,"application/javascript");assert(blob.parts[0].includes("worker-source-marker"));return "blob:null/bt001-worker";},
+      revokeObjectURL:url=>revoked.push(url)
+    };
+    const {context}=runtime({fetchImpl:recordingFetch(jsonResponse(201)),globals:{
+      Worker:FakeWorker,Blob:FakeBlob,URL:fakeUrl,BT001_LOGGING_WORKER_SOURCE:"/* worker-source-marker */"
+    }});
+    assert.deepEqual(constructed,["blob:null/bt001-worker"]);
+    assert(!constructed[0].includes("logging-worker.js"));
+    instances[0].listeners.message({data:{type:"status",pending:0,succeeded:0,failed:0}});
+    assert.deepEqual(revoked,["blob:null/bt001-worker"],"the Blob URL must be revoked after worker initialization");
+    context.BT001Supabase.setLatestSnapshot({event_at:new Date().toISOString()});
+  }
+
+  // A constructor failure must activate a real repeating main-thread write fallback.
+  {
+    const timerCallbacks=[],warnings=[];
+    class ThrowingWorker{constructor(){throw new Error("file origin denied");}}
+    const fetchImpl=recordingFetch(jsonResponse(201));
+    const {context}=runtime({fetchImpl,consoleImpl:{...console,warn:(...args)=>warnings.push(args)},globals:{
+      Worker:ThrowingWorker,Blob:class{},URL:{createObjectURL:()=>"blob:null/failure",revokeObjectURL:()=>{}},
+      BT001_LOGGING_WORKER_SOURCE:"/* source */",
+      setInterval:callback=>{timerCallbacks.push(callback);return 8;},clearInterval:()=>{}
+    }});
+    context.BT001Supabase.saveUrlFromInput({value:"https://myproject.supabase.co"});
+    context.BT001Supabase.saveKeyFromInput({value:"anon-key"});
+    context.BT001Supabase.setLatestSnapshot({event_at:"2026-07-27T00:00:00.000Z",machine_id:"fallback"});
+    context.BT001Supabase.startSnapshotLogging();
+    assert.equal(timerCallbacks.length,1);
+    timerCallbacks[0]();await Promise.resolve();await Promise.resolve();
+    timerCallbacks[0]();await Promise.resolve();await Promise.resolve();
+    assert.equal(fetchImpl.calls.filter(call=>call.url.endsWith("/sssc_snapshots")).length,2,"every fallback tick must attempt a real snapshot insert");
+    assert.equal(warnings.length,1);
+  }
+
   // Not configured: must fail fast, before ever touching fetch, with a clear reason.
   {
     const fetchImpl=recordingFetch(async()=>{throw new Error("fetch must not be called when unconfigured");});
@@ -68,7 +113,8 @@ const run=(async()=>{
     assert.equal(options.headers.apikey,"anon-key-correct");
     assert.equal(options.headers.Authorization,"Bearer anon-key-correct");
     const sentRow=JSON.parse(options.body);
-    assert.deepEqual(Object.keys(sentRow).sort(),["action","detail","machine_id"]);
+    assert.deepEqual(Object.keys(sentRow).sort(),["action","detail","event_at","machine_id"]);
+    assert.equal(new Date(sentRow.event_at).toISOString(),sentRow.event_at);
     assert.equal(sentRow.action,"CONNECTION_TEST");
     assert.deepEqual(sentRow.detail,{source:"settings-test"});
     assert.equal(sentRow.machine_id,context.BT001Supabase.getDeviceId());
@@ -154,10 +200,10 @@ const run=(async()=>{
     assert.equal(result.results.length,5);
     assert.equal(fetchImpl.calls.length,5);
     const expectedColumns={
-      scalp_v1_signals:["action","cascade_agreement","detector_state","machine_id","source_timeframe","symbol"],
+      scalp_v1_signals:["action","cascade_agreement","detector_state","event_at","machine_id","source_timeframe","symbol"],
       scalp_v2_signals:["action","cascade_agreement","detector_state","machine_id","source_timeframe","symbol"],
-      scalp_positions:["action","direction","machine_id","position_state","symbol","tranche_id"],
-      scalp_operational:["action","detail","machine_id"],
+      scalp_positions:["action","direction","event_at","machine_id","position_state","symbol","tranche_id"],
+      scalp_operational:["action","detail","event_at","machine_id"],
       scalp_trades:[
         "auto_entered","avg_entry_price","cascade_agreement_at_entry","closed_at","created_at",
         "device_id","direction","entry_commission","estimated_realized_pnl_usd","event_type",

@@ -3,6 +3,7 @@ const assert=require("assert");
 const fs=require("fs");
 const path=require("path");
 const calculation=require("./calculation.js");
+const {createOrchestration}=require("./orchestration.js");
 const {SNAPSHOT_INTERVAL_MS,LOGGED_INTERVALS,buildSnapshotPayload,createSnapshotLogger}=require("./supabase-logger.js");
 
 const diagnostic=(interval,index)=>({
@@ -17,6 +18,8 @@ const diagnostic=(interval,index)=>({
 const intervals=["1d","4h","1h","15m","5m","3m","1m"];
 const data=Object.fromEntries(intervals.map((interval,index)=>[interval.toUpperCase(),diagnostic(interval,index)]));
 const snapshot={started:true,data};
+const exchangeTimestamp=1712345678901;
+globalThis.BT001ExchangeClock={now:()=>exchangeTimestamp};
 const payload=buildSnapshotPayload({snapshot,calculation,symbol:"BTCUSDT",machineId:"machine-sssc-test"});
 
 assert.deepEqual(Object.keys(payload.timeframes),LOGGED_INTERVALS);
@@ -24,6 +27,7 @@ assert(!Object.prototype.hasOwnProperty.call(payload.timeframes,"4h"));
 assert(!Object.prototype.hasOwnProperty.call(payload.timeframes,"1d"));
 assert.equal(payload.machine_id,"machine-sssc-test");
 assert.equal(payload.symbol,"BTCUSDT");
+assert.equal(payload.event_at,new Date(exchangeTimestamp).toISOString(),"snapshot event_at must use the shared exchange clock");
 assert.equal(payload.timeframes["1m"].role,"trigger");
 assert.equal(payload.timeframes["1h"].role,"structure");
 assert.equal(payload.timeframes["1m"].available,true);
@@ -66,7 +70,7 @@ assert(Object.prototype.hasOwnProperty.call(payload.aggregate,"coverage"));
 assert(Object.prototype.hasOwnProperty.call(payload.aggregate,"unanimousStrongOpposition"));
 assert(!Object.prototype.hasOwnProperty.call(payload.aggregate,"positionAction"));
 
-let timerCallback=null,timerDelay=null,writes=0,pipelineLive=false,continued=true,outboundRow=null;
+let writes=0,pipelineLive=false,continued=true,outboundRow=null,workerStarts=0;
 const failingLogger=createSnapshotLogger({
   getSnapshot:()=>({...snapshot,started:pipelineLive}),
   getCalculation:()=>calculation,
@@ -74,20 +78,39 @@ const failingLogger=createSnapshotLogger({
   getSupabase:()=>({
     configured:()=>true,
     getDeviceId:()=>"machine-sssc-test",
-    log(_table,row){writes++;outboundRow=row;return Promise.reject(new Error("network down"));}
+    setLatestSnapshot(row){writes++;outboundRow=row;},
+    startSnapshotLogging(){workerStarts++;}
   }),
-  setIntervalFn:(callback,delay)=>{timerCallback=callback;timerDelay=delay;return 7;},
-  clearIntervalFn:()=>{}
 });
 failingLogger.start();
-assert.equal(timerDelay,SNAPSHOT_INTERVAL_MS);
-assert.equal(timerCallback(),false,"logging must not run before the pipeline is live");
+assert.equal(workerStarts,1,"start must delegate the schedule to the logging worker");
+assert.equal(writes,0,"logging must not run before the pipeline is live");
 pipelineLive=true;
-assert.doesNotThrow(()=>timerCallback());
+assert.doesNotThrow(()=>failingLogger.capture());
 assert.equal(writes,1);
 assert.equal(outboundRow.machine_id,"machine-sssc-test","machine_id must reach the outbound write row");
 continued=true;
 assert.equal(continued,true,"a rejected fire-and-forget write must not block subsequent application work");
+
+let failureCaptures=0,publishCycles=0;
+const throwingBoundaryLogger=createSnapshotLogger({
+  getSnapshot:()=>snapshot,getCalculation:()=>calculation,getSymbol:()=>"BTCUSDT",
+  getSupabase:()=>({
+    configured:()=>true,getDeviceId:()=>"machine-throwing-worker",
+    setLatestSnapshot(){failureCaptures++;throw new Error("Worker constructor failed");},
+    startSnapshotLogging(){throw new Error("fallback timer failed");}
+  })
+});
+assert.doesNotThrow(()=>throwingBoundaryLogger.start());
+assert.doesNotThrow(()=>throwingBoundaryLogger.capture());
+const pipelineAfterLoggingFailure=createOrchestration({
+  tfs:[],liveTfs:[],getSlots:()=>[],getCalculation:()=>calculation,getSymbol:()=>"BTCUSDT",
+  fetchKlines:async()=>[],connectWebSocket:()=>({disconnect(){}}),getWsUrl:()=>"wss://example.invalid",
+  onUpdate:()=>{publishCycles++;throwingBoundaryLogger.capture();}
+});
+assert.doesNotThrow(()=>pipelineAfterLoggingFailure.calculate(),"a later calculate/publish cycle must survive logging exceptions");
+assert.equal(publishCycles,1);
+assert(failureCaptures>=3,"repeated captures must keep crossing the logging boundary after a failure");
 
 let missingMachineWrites=0;
 const missingMachineWarnings=[];
@@ -154,7 +177,10 @@ assert.equal(calculatedOutbound.row.aggregate.marketStrength,calculatedDiagnosti
 const main=fs.readFileSync(path.resolve(__dirname,"..","..","..","main.js"),"utf8");
 const html=fs.readFileSync(path.resolve(__dirname,"..","..","..","index.html"),"utf8");
 assert(html.indexOf("features/pressure-signal/sssc/supabase-logger.js")<html.indexOf('src="main.js"'));
-assert(html.includes("supabase-logger.js?v=20260726-strength-fields-v2"),"logger asset must be cache-busted after its field contract changes");
+assert(html.includes("supabase-logger.js?v=20260727-worker-logging-v1"),"logger asset must be cache-busted after its field contract changes");
 assert(main.includes("ensureSnapshotLogger()?.start()"),"always-on install must start SSSC logging without opening the dashboard");
+const hideSource=main.slice(main.indexOf("function hide(){ visible=false"),main.indexOf("function savePanel()",main.indexOf("function hide(){ visible=false")));
+assert(!hideSource.includes(".stop("),"closing the dashboard must only hide UI and must not stop its background pipeline");
+assert(main.includes("$('ssscDashClose')?.addEventListener('click',hide)"));
 
 console.log("sssc Supabase logger tests: PASS");
