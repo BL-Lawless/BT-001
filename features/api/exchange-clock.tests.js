@@ -56,6 +56,30 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
   assert.equal(await forceable.sync(true),-300,"a forced sync must bypass the five-minute cache");
   assert.equal(forcedFetches,2);
 
+  local=10000;
+  let slowFetches=0;
+  const slow=createExchangeClock({
+    localNow:()=>local,
+    maxRoundTripMs:100,
+    fetchServerTime:async()=>{
+      slowFetches++;
+      if(slowFetches===1){local+=20;return 9920;}
+      if(slowFetches===2){local+=500;return 10000;}
+      local+=10;return local-100;
+    }
+  });
+  assert.equal(await slow.sync(),-100);
+  assert.equal(slow.isReliable(),true);
+  assert.equal(await slow.sync(true),-100,"a suspicious measurement must not replace the last usable offset");
+  assert.equal(slow.isReliable(),false,"a background-delayed sync must invalidate reliability");
+  assert.equal(slow.status().lastSyncOk,false);
+  assert.equal(slow.status().lastRoundTripMs,500);
+  assert.match(slow.status().lastError,/round-trip was untrustworthy/);
+  local+=1000;
+  assert.equal(await slow.sync(),-100,"an unreliable slow result must retry instead of entering the five-minute success cache");
+  assert.equal(slowFetches,3);
+  assert.equal(slow.isReliable(),true);
+
   const root=path.resolve(__dirname,"..","..");
   const secondary=fs.readFileSync(path.join(root,"features/scalp/secondary-gateway.module.js"),"utf8");
   const main=fs.readFileSync(path.join(root,"main.js"),"utf8");

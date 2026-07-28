@@ -42,6 +42,11 @@ const main=fs.readFileSync(path.resolve(__dirname,"..","main.js"),"utf8");
 assert(main.includes('scheduleReconnect("stream requirements changed",100)'),"public stream requirement changes must be debounced");
 assert(main.includes("connect({force:true,reason})"),"public stale/error recovery must replace a half-dead socket instead of no-oping while it still reports OPEN");
 assert(main.includes('scheduleReconnect("stale WebSocket",1000)')&&main.includes("diag.hiddenMessageCount += 1"),"public ingestion must watchdog stale sockets without using visibility as its primary trigger and retain evidence of hidden-tab traffic");
+const statusLoop=main.slice(main.indexOf("function runStatusLoop()"),main.indexOf("function startStatusLoop()"));
+assert(
+  statusLoop.indexOf("if(document.hidden) return;")<statusLoop.indexOf('scheduleReconnect("stale WebSocket",1000)'),
+  "background throttling must not make the watchdog force-reconnect an OPEN public socket or race it with REST"
+);
 assert(main.includes('scheduleReconnect("stale WebSocket on visibility return",0)'),"foreground recovery must replace an OPEN-but-stale public socket");
 assert(main.includes("diag.gapRepairInFlightByTf = state.gapRepairInFlightByTf")&&main.includes("diag.lastGapRepairMsByTf = state.lastGapRepairMsByTf"),"public diagnostics must expose the repair maps that the repair path actually mutates");
 assert(main.includes("pruneMaCache(tf,{liveOnly:true})")&&main.includes('value.sourceType === "getChartBuffer"'),"forming ticks must preserve still-valid closed-only MA cache entries");

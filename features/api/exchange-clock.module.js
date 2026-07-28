@@ -1,9 +1,13 @@
 (() => {
   "use strict";
 
-  const CACHE_MS=5*60*1000,MAX_RETRY_MS=15000;
+  const CACHE_MS=5*60*1000,MAX_RETRY_MS=15000,DEFAULT_MAX_ROUND_TRIP_MS=3000;
   function createExchangeClock(options={}){
     const localNow=options.localNow||Date.now;
+    const configuredMaxRoundTripMs=Number(options.maxRoundTripMs);
+    const maxRoundTripMs=Number.isFinite(configuredMaxRoundTripMs)&&configuredMaxRoundTripMs>0
+      ? configuredMaxRoundTripMs
+      : DEFAULT_MAX_ROUND_TRIP_MS;
     const delay=options.delay||(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
     const onStatus=typeof options.onStatus==="function"?options.onStatus:()=>{};
     const fetchServerTime=options.fetchServerTime||(async()=>{
@@ -13,10 +17,10 @@
       return Number(data&&data.serverTime);
     });
     let cachedOffset=0,lastAttemptAt=0,lastSuccessAt=null,lastSyncOk=false,inFlight=null;
-    let consecutiveFailures=0,lastError=null;
+    let consecutiveFailures=0,lastError=null,lastRoundTripMs=null;
 
     function isReliable(){return lastSuccessAt!=null&&localNow()-lastSuccessAt<CACHE_MS;}
-    function status(){return Object.freeze({offsetMs:cachedOffset,lastAttemptAt,lastSuccessAt,lastSyncOk,reliable:isReliable(),consecutiveFailures,lastError});}
+    function status(){return Object.freeze({offsetMs:cachedOffset,lastAttemptAt,lastSuccessAt,lastSyncOk,reliable:isReliable(),consecutiveFailures,lastError,lastRoundTripMs,maxRoundTripMs});}
     function publish(){try{onStatus(status());}catch(_error){}}
 
     async function sync(force=false){
@@ -29,10 +33,19 @@
       inFlight=(async()=>{
         try{
           const before=localNow(),serverTime=Number(await fetchServerTime()),after=localNow();
+          lastRoundTripMs=after-before;
           // Binance's serverTime is sampled before the response reaches us. Using the response
           // arrival time is intentionally conservative; midpoint correction can put signed
           // timestamps ahead of Binance by half the network round-trip.
-          if(Number.isFinite(serverTime)){
+          if(lastRoundTripMs<0||lastRoundTripMs>maxRoundTripMs){
+            // A background-throttled await continuation can run long after the response arrived.
+            // Retain the prior offset only as a fallback value, but invalidate its reliability so
+            // signed callers retry instead of caching a poisoned measurement for five minutes.
+            lastSuccessAt=null;
+            lastSyncOk=false;
+            consecutiveFailures+=1;
+            lastError=`Binance clock round-trip was untrustworthy (${lastRoundTripMs}ms)`;
+          }else if(Number.isFinite(serverTime)){
             cachedOffset=serverTime-after;
             lastSuccessAt=after;
             lastSyncOk=true;
@@ -65,10 +78,10 @@
     function now(){return localNow()+cachedOffset;}
     function fromLocal(localMs){return Number(localMs)+cachedOffset;}
     function offset(){return cachedOffset;}
-    return Object.freeze({now,fromLocal,offset,sync,ensureSynchronized,isReliable,status,CACHE_MS});
+    return Object.freeze({now,fromLocal,offset,sync,ensureSynchronized,isReliable,status,CACHE_MS,maxRoundTripMs});
   }
 
-  const api={createExchangeClock};
+  const api={createExchangeClock,DEFAULT_MAX_ROUND_TRIP_MS};
   if(typeof module!=="undefined"&&module.exports)module.exports=api;
   if(typeof window!=="undefined"){
     let retryTimer=null;

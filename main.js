@@ -4489,6 +4489,12 @@ const marketDataHub = (() => {
   function runStatusLoop(){
     refreshConnectionStatus();
     if(loading || waitingForFirstTick()) return;
+    // Hidden-page timer/message throttling makes delivery age meaningless: an OPEN socket can be
+    // healthy while JavaScript sees neither its messages nor this watchdog on schedule. Replacing
+    // it here caused recurring reconnect/REST races throughout long background sessions. Real
+    // close/error events still schedule recovery, and visibility return performs an explicit
+    // freshness check, REST repair, and forced reconnect when needed.
+    if(document.hidden) return;
     const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     const chartAge = activeChartAge();
     if((!socketOpen() || chartAge > ACTIVE_FEED_STALE_MS) && !state.restInFlight){
