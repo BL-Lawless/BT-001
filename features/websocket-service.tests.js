@@ -39,14 +39,25 @@ pendingSocket.open();
 assert.equal(pendingSocket.closeCalls,1,"a superseded handshake must close immediately after it establishes");
 
 const main=fs.readFileSync(path.resolve(__dirname,"..","main.js"),"utf8");
+const connVisualSource=main.slice(main.indexOf("function connVisual(status)"),main.indexOf("// Legacy status names"));
+const connVisual=Function(`${connVisualSource};return connVisual;`)();
+for(const status of ["WS LIVE","WS WAITING","RECONNECTING","WS STALE"]){
+  assert.deepEqual(connVisual(status),{text:"W",bg:"#0ecb81",glow:"rgba(14,203,129,.45)"});
+}
+assert.deepEqual(connVisual("REST FALLBACK"),{text:"R",bg:"#0ecb81",glow:"rgba(14,203,129,.45)"});
+assert.deepEqual(connVisual("OFFLINE / ERROR"),{text:"X",bg:"#f6465d",glow:"rgba(246,70,93,.42)"});
 assert(main.includes('scheduleReconnect("stream requirements changed",100)'),"public stream requirement changes must be debounced");
 assert(main.includes("connect({force:true,reason})"),"public stale/error recovery must replace a half-dead socket instead of no-oping while it still reports OPEN");
 assert(main.includes('scheduleReconnect("stale WebSocket",1000)')&&main.includes("diag.hiddenMessageCount += 1"),"public ingestion must watchdog stale sockets without using visibility as its primary trigger and retain evidence of hidden-tab traffic");
 const statusLoop=main.slice(main.indexOf("function runStatusLoop()"),main.indexOf("function startStatusLoop()"));
 assert(
+  statusLoop.indexOf("if(document.hidden) return;")<statusLoop.indexOf("refreshConnectionStatus()")&&
   statusLoop.indexOf("if(document.hidden) return;")<statusLoop.indexOf('scheduleReconnect("stale WebSocket",1000)'),
-  "background throttling must not make the watchdog force-reconnect an OPEN public socket or race it with REST"
+  "background throttling must neither paint an OPEN public socket offline nor race it with forced reconnect/REST recovery"
 );
+const connectionStatusSource=main.slice(main.indexOf("function refreshConnectionStatus()"),main.indexOf("function setLegacyConnectionState"));
+assert(!connectionStatusSource.includes("BT001ExchangeClock"),"the public connectivity LED must not misreport exchange-clock/private-account health");
+assert(connectionStatusSource.includes("socketOpen()")&&connectionStatusSource.includes("activeChartAge()"),"the connectivity LED must remain driven by public socket and active-chart freshness");
 assert(main.includes('scheduleReconnect("stale WebSocket on visibility return",0)'),"foreground recovery must replace an OPEN-but-stale public socket");
 assert(main.includes("diag.gapRepairInFlightByTf = state.gapRepairInFlightByTf")&&main.includes("diag.lastGapRepairMsByTf = state.lastGapRepairMsByTf"),"public diagnostics must expose the repair maps that the repair path actually mutates");
 assert(main.includes("pruneMaCache(tf,{liveOnly:true})")&&main.includes('value.sourceType === "getChartBuffer"'),"forming ticks must preserve still-valid closed-only MA cache entries");
