@@ -23,6 +23,11 @@ function restServiceContext() {
   context.window = context;
   vm.createContext(context);
   vm.runInContext(
+    fs.readFileSync(path.join(root, "services", "binance-rest-gate.service.js"), "utf8"),
+    context,
+    { filename: "services/binance-rest-gate.service.js" }
+  );
+  vm.runInContext(
     fs.readFileSync(path.join(root, "services", "rest.service.js"), "utf8"),
     context,
     { filename: "services/rest.service.js" }

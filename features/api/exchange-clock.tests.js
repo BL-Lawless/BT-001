@@ -90,6 +90,20 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
   const orderRefresh=main.slice(main.indexOf("async function requestAuthoritativeOrders21"),main.indexOf("async function requestAuthoritativeOrders21")+1800);
   assert(positionRefresh.includes("await timeOffset()")&&positionRefresh.includes("await getPositions("));
   assert(orderRefresh.includes("await timeOffset()")&&orderRefresh.includes("await fetchOpenOrders21("));
+  const privateOrderReads=main.slice(main.indexOf("async function fetchOpenOrders21"),main.indexOf("function orderStateSig21"));
+  assert(
+    privateOrderReads.includes("Promise.allSettled([")&&
+    privateOrderReads.includes("signedGet(OPEN_ORDERS_URL21")&&
+    privateOrderReads.includes("signedGet(OPEN_ALGO_ORDERS_URL21"),
+    "normal and algo open-order reconciliation reads must start in parallel"
+  );
+  const privateCoordinator=main.slice(main.indexOf("async function reconcilePrivateState21"),main.indexOf("function applyPrivateStreamStatus21"));
+  assert(
+    privateCoordinator.includes("[positionResult,ordersResult]=await Promise.all([")&&
+    privateCoordinator.includes("window.refreshOpenPosition(")&&
+    privateCoordinator.includes("requestAuthoritativeOrders21("),
+    "position and order reconciliation reads must start in parallel"
+  );
   const visibilityReturn=main.slice(main.indexOf("function handleVisibilityReturn()"),main.indexOf("function scheduleVisibilityRecovery()"));
   assert(
     visibilityReturn.includes("window.BT001ExchangeClock.sync(true)"),

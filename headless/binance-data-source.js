@@ -1,6 +1,7 @@
 "use strict";
 
 const WebSocketClient=require("ws");
+const {sharedGate}=require("../services/binance-rest-gate.service.js");
 
 function parseRestKline(row){
   return {
@@ -10,7 +11,7 @@ function parseRestKline(row){
 }
 
 function createBinanceDataSource(options={}){
-  const fetchFn=options.fetch||globalThis.fetch,WebSocketImpl=options.WebSocket||WebSocketClient;
+  const rawFetch=options.fetch||globalThis.fetch,fetchFn=rawFetch&&rawFetch.__bt001BinanceGateWrapped?rawFetch:sharedGate.wrapFetch(rawFetch),WebSocketImpl=options.WebSocket||WebSocketClient;
   if(typeof fetchFn!=="function")throw new Error("A Fetch-compatible function is required for Binance market data");
   const restUrl=String(options.restUrl||"https://fapi.binance.com").replace(/\/+$/,"");
   async function fetchKlines(interval,endMs,limit,symbol){

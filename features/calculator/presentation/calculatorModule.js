@@ -503,6 +503,14 @@
       },{validText}));
       scheduleOpenPositionCloseChsTick();
     }catch(e){
+      const gate=window.BINANCE_REST_GATE;
+      const paused=gate&&typeof gate.state==="function"&&gate.state().paused;
+      if(paused){
+        setStatus("Open Position CHS paused by Binance rate limit.");
+        const resume=gate.beforeRequest(ORDER_WRITE_URL);
+        if(resume)resume.then(()=>runOpenPositionCloseChsTick());
+        return;
+      }
       await finishOpenPositionCloseChs("Open Position CHS failed: " + (e && e.message ? e.message : String(e)),{refresh:true});
     }finally{
       openPositionCloseChs.checking = false;
@@ -2899,6 +2907,11 @@
         scheduleAutoSyncRefresh();
       }
     }catch(_e){
+      const gate=window.BINANCE_REST_GATE;
+      if(gate&&typeof gate.state==="function"&&gate.state().paused){
+        const resume=gate.beforeRequest(OPEN_ORDERS_URL);
+        if(resume)resume.then(()=>checkAutoSyncStructuralState());
+      }
     }finally{
       autoSyncChecking = false;
     }

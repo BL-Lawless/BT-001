@@ -62,6 +62,27 @@ const {createOrchestration,warmupTargets}=require("./orchestration.js");
   assert.equal(capturedRows[0].length,100,"closed rows must be sliced to 5x longest period before calculation");
   assert.equal(capturedRows[0][0].time,41);
 
+  // A refresh must fan all independent timeframe windows out together. Pagination within one
+  // window remains ordered because the next cursor comes from the preceding response.
+  let releaseParallelFetches;
+  const parallelFetchGate=new Promise(resolve=>{releaseParallelFetches=resolve;});
+  const parallelFetchStarts=[];
+  const parallelPipeline=createOrchestration({
+    tfs:[["1M","1m"],["3M","3m"],["5M","5m"]],liveTfs:[],getSlots:()=>dynamic,
+    getCalculation:()=>engine,getSymbol:()=>"BTCUSDT",
+    fetchKlines:async tf=>{parallelFetchStarts.push(tf);await parallelFetchGate;return [];},
+    connectWebSocket:()=>({disconnect(){}}),getWsUrl:()=>"wss://example/ws"
+  });
+  const parallelRefresh=parallelPipeline.refresh();
+  await Promise.resolve();
+  assert.deepEqual(
+    parallelFetchStarts.slice().sort(),
+    ["1m","3m","5m"],
+    "SSSC refresh must start every timeframe fetch before waiting for any one timeframe"
+  );
+  releaseParallelFetches();
+  await parallelRefresh;
+
   // REST parsing marks every row final:false. Seeding must retain only the active tail as
   // forming and stamp the time-confirmed history final:true before normalization consumes it.
   const hour=60*60,seedStart=1700000000,seedNow=(seedStart+1000*hour)*1000+hour*500;

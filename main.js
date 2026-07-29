@@ -9,6 +9,24 @@ const BT001_PERFORMANCE_DIAGNOSTICS = window.BT001_PERFORMANCE_DIAGNOSTICS ||= {
   "accountStreamEvents","chartDrawsFromAccountSync"
 ].forEach(key => { if(!Number.isFinite(Number(BT001_PERFORMANCE_DIAGNOSTICS[key]))) BT001_PERFORMANCE_DIAGNOSTICS[key] = 0; });
 
+function refocusDiagNow(){
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+function refocusDiagValue(key,value){
+  if(typeof value === "number" && Number.isFinite(value) && ["performanceNow","elapsedMs","remainingMs"].includes(key)){
+    return value.toFixed(1);
+  }
+  return typeof value === "string" ? JSON.stringify(value) : String(value);
+}
+function refocusDiag(event,detail={}){
+  if(typeof REFOCUS_DIAG === "undefined" || !REFOCUS_DIAG)return;
+  const fields={performanceNow:refocusDiagNow(),...detail};
+  const suffix=Object.entries(fields)
+    .map(([key,value])=>`${key}=${refocusDiagValue(key,value)}`)
+    .join(" ");
+  console.log(`[REFOCUS-DIAG] ${event}${suffix ? ` ${suffix}` : ""}`);
+}
+
 /* =========================================================
    SECTION 1 — DOM SHORTCUTS
 ========================================================= */
@@ -129,6 +147,7 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const TRADE_CHUNK_MS = WEEK_MS;
 const TRADE_LIMIT = 1000;
 const RECON_LOOKBACK_WEEKS = 26;
+const BINANCE_BACKFILL_PAGE_DELAY_MS = 200;
 const SYMBOL_TRADING_SETTINGS_CACHE_TTL_MS = 30000;
 const API_CAPABILITY_CACHE_TTL_MS = 30000;
 const BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo";
@@ -138,6 +157,12 @@ const BINANCE_SPOT_ACCOUNT_URL = "https://api.binance.com/api/v3/account";
 const BINANCE_FUTURES_ACCOUNT_URL = "https://fapi.binance.com/fapi/v2/account";
 const BINANCE_MULTI_ASSETS_MODE_URL = "https://fapi.binance.com/fapi/v1/multiAssetsMargin";
 const BINANCE_COMMISSION_RATE_URL = "https://fapi.binance.com/fapi/v1/commissionRate";
+
+function paceBinanceBackfill(requestIndex){
+  return requestIndex>0
+    ? new Promise(resolve=>setTimeout(resolve,BINANCE_BACKFILL_PAGE_DELAY_MS))
+    : Promise.resolve();
+}
 
 const STORE = "btc_futures_chart_v12_";
 const SK = STORE + "api_key";
@@ -1922,6 +1947,7 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
     while(hasPeriodUnresolvedClose(rec,win) && start > maxContextStart){
       if(!silent) closedTradeStatus("Resolving WF context...");
       start = Math.max(maxContextStart,start - bounds.step);
+      await paceBinanceBackfill(1);
       rows = await getUserTradesRange(key,sec,off,start,win.end);
       rec = reconstruct(rows,symbol);
     }
@@ -1989,6 +2015,7 @@ async function loadClosedTradesForPeriod(period,opt={}){
     while(hasPeriodUnresolvedClose(full,win) && start > maxBackfillStart){
       closedTradeStatus("Fetching fills...");
       start = Math.max(maxBackfillStart,start - TRADE_CHUNK_MS);
+      await paceBinanceBackfill(1);
       rows = await getUserTradesRange(key,sec,off,start,win.end);
       closedTradeStatus("Reconstructing trades...");
       full = reconstruct(rows,cfg().symbol);
@@ -4359,11 +4386,23 @@ const marketDataHub = (() => {
     },delay);
   }
   async function restSyncLatest(reason="fallback"){
-    if(state.restInFlight) return;
+    const refocusStarted=refocusDiagNow();
+    refocusDiag("restSyncLatest start",{reason,documentHidden:document.hidden});
+    if(state.restInFlight){
+      refocusDiag("restSyncLatest end",{reason,outcome:"skipped-in-flight",elapsedMs:refocusDiagNow()-refocusStarted});
+      return;
+    }
+    const gate=window.BINANCE_REST_GATE;
+    const gateState=gate&&typeof gate.state==="function"?gate.state():{paused:false};
+    if(gateState.paused){
+      refocusDiag("restSyncLatest end",{reason,outcome:"skipped-gate-paused",remainingMs:gateState.remainingMs,elapsedMs:refocusDiagNow()-refocusStarted});
+      return;
+    }
     const requestStarted = now();
     const requestSymbol = cfg().symbol;
     const requestInterval = iv();
     state.restInFlight = true;
+    let refocusOutcome="success";
     diag.restFallbackTimestamp = requestStarted;
     if(!waitingForFirstTick()) paintStatus("REST FALLBACK",reason);
     try{
@@ -4383,11 +4422,13 @@ const marketDataHub = (() => {
       diag.lastRestSyncTime = lastRest;
       refreshConnectionStatus();
     }catch(e){
+      refocusOutcome="error";
       diag.lastError = e && e.message ? e.message : String(e);
       if(!socketOpen()) paintStatus("OFFLINE / ERROR",diag.lastError);
       console.warn(MODULE + " REST fallback failed",e);
     }finally{
       state.restInFlight = false;
+      refocusDiag("restSyncLatest end",{reason,outcome:refocusOutcome,elapsedMs:refocusDiagNow()-refocusStarted});
     }
   }
   function repairKnownClosedGaps(reason="gap-check"){
@@ -4556,23 +4597,30 @@ const marketDataHub = (() => {
     }
   }
   function handleVisibilityReturn(){
-    if(document.hidden) return;
-    if(window.BT001ExchangeClock&&typeof window.BT001ExchangeClock.sync==="function"){
-      window.BT001ExchangeClock.sync(true);
+    const refocusStarted=refocusDiagNow();
+    refocusDiag("handleVisibilityReturn start",{documentHidden:document.hidden});
+    try{
+      if(document.hidden) return;
+      if(window.BT001ExchangeClock&&typeof window.BT001ExchangeClock.sync==="function"){
+        window.BT001ExchangeClock.sync(true);
+      }
+      diag.hiddenSince = 0;
+      diag.lastVisibleAt = now();
+      repairKnownClosedGaps("visibility/focus return");
+      restSyncLatest("visibility/focus return");
+      if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
+      if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
+      const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+      if(!socketOpen()) connect();
+      else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
+      else refreshConnectionStatus();
+    }finally{
+      refocusDiag("handleVisibilityReturn end",{documentHidden:document.hidden,elapsedMs:refocusDiagNow()-refocusStarted});
     }
-    diag.hiddenSince = 0;
-    diag.lastVisibleAt = now();
-    repairKnownClosedGaps("visibility/focus return");
-    restSyncLatest("visibility/focus return");
-    if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
-    if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
-    const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-    if(!socketOpen()) connect();
-    else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
-    else refreshConnectionStatus();
   }
 
-  function scheduleVisibilityRecovery(){
+  function scheduleVisibilityRecovery(event){
+    refocusDiag("browser refocus event",{type:event&&event.type||"unknown",documentHidden:document.hidden});
     if(document.hidden){
       diag.hiddenSince = now();
       return;
@@ -5029,6 +5077,7 @@ async function getTrades(key,sec,off){
   const seen = new Set();
 
   let chunk = start;
+  let requestCount = 0;
 
   while(chunk < end){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,end);
@@ -5036,6 +5085,7 @@ async function getTrades(key,sec,off){
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
+      await paceBinanceBackfill(requestCount++);
       const rows = await signedGet(
         c.userTrades,
         {
@@ -5086,12 +5136,14 @@ async function getUserTradesRange(key,sec,off,start,end){
   const endMs = Math.max(startMs,Math.floor(Number(end) || Date.now()));
 
   let chunk = startMs;
+  let requestCount = 0;
   while(chunk < endMs){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,endMs);
     let page = chunk;
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
+      await paceBinanceBackfill(requestCount++);
       const rows = await signedGet(
         c.userTrades,
         {
@@ -5253,9 +5305,11 @@ async function loadActiveParentReconstruction(key,sec,off,active,guard=null){
   const all = [];
   const seen = new Set();
   let end = now;
+  let lookbackRequests = 0;
   const maxStart = Math.max(0,now - RECON_LOOKBACK_WEEKS * WEEK_MS);
   while(end > maxStart){
     const start = Math.max(maxStart,end - TRADE_CHUNK_MS + 1);
+    await paceBinanceBackfill(lookbackRequests++);
     const rows = await getUserTradesRange(key,sec,off,start,end);
     if(!guardCurrent())return {rows:all,rec:null,discarded:true,reason:"position-generation-changed"};
     for(let i = rows.length - 1; i >= 0; i--){
@@ -5341,12 +5395,14 @@ async function getFundingIncome(key,sec,off){
   const seen = new Set();
 
   let chunk = start;
+  let requestCount = 0;
   while(chunk < end){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,end);
     let page = chunk;
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
+      await paceBinanceBackfill(requestCount++);
       const rows = await signedGet(
         endpoint,
         {
@@ -5413,12 +5469,14 @@ async function getIncomeRowsRange(incomeType,key,sec,off,start,end,symbolOverrid
   const endMs = Math.max(startMs,Math.floor(Number(end) || Date.now()));
 
   let chunk = startMs;
+  let requestCount = 0;
   while(chunk < endMs){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,endMs);
     let page = chunk;
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
+      await paceBinanceBackfill(requestCount++);
       const rows = await signedGet(
         endpoint,
         {
@@ -15627,6 +15685,7 @@ startTradeAuto();
     const stop = Math.max(page,Math.floor(end));
     let guard = 0;
     while(page <= stop && guard < 10){
+      await paceBinanceBackfill(guard);
       const rows = await signedGet(c.userTrades,{
         symbol:c.symbol,
         startTime:String(page),
@@ -15900,21 +15959,23 @@ startTradeAuto();
       let nextAlgo = null;
       window.v13OpenOrdersStatus21 = "pending";
       window.v13OpenOrdersAttemptTs21 = Date.now();
-      try{
-        BT001_PERFORMANCE_DIAGNOSTICS.privateNormalOrderRestReads += 1;
-        const rows = await signedGet(OPEN_ORDERS_URL21,{symbol:sym},key,sec,off);
-        nextNormal = unwrapOrders21(rows);
+      BT001_PERFORMANCE_DIAGNOSTICS.privateNormalOrderRestReads += 1;
+      BT001_PERFORMANCE_DIAGNOSTICS.privateAlgoOrderRestReads += 1;
+      const [normalResult,algoResult] = await Promise.allSettled([
+        signedGet(OPEN_ORDERS_URL21,{symbol:sym},key,sec,off),
+        signedGet(OPEN_ALGO_ORDERS_URL21,{symbol:sym},key,sec,off)
+      ]);
+      if(normalResult.status === "fulfilled"){
+        nextNormal = unwrapOrders21(normalResult.value);
         normalOk = true;
-      }catch(e){
-        console.warn("PATCH_31 normal openOrders refresh failed",e);
+      }else{
+        console.warn("PATCH_31 normal openOrders refresh failed",normalResult.reason);
       }
-      try{
-        BT001_PERFORMANCE_DIAGNOSTICS.privateAlgoOrderRestReads += 1;
-        const algoRows = await signedGet(OPEN_ALGO_ORDERS_URL21,{symbol:sym},key,sec,off);
-        nextAlgo = unwrapOrders21(algoRows);
+      if(algoResult.status === "fulfilled"){
+        nextAlgo = unwrapOrders21(algoResult.value);
         algoOk = true;
-      }catch(e){
-        console.warn("PATCH_31 conditional openAlgoOrders refresh failed",e);
+      }else{
+        console.warn("PATCH_31 conditional openAlgoOrders refresh failed",algoResult.reason);
       }
       if(sym !== currentSymbol21()) return {normalOk:false,algoOk:false,discarded:true,symbol:sym};
       if(normalOk) window.v13OpenOrders21 = nextNormal;
@@ -16099,17 +16160,27 @@ startTradeAuto();
     schedulePrivateReconcile21(options.immediate ? 0 : PRIVATE_DEBOUNCE_MS21);
   }
   async function reconcilePrivateState21(){
-    if(privateReconcilePromise21) return privateReconcilePromise21;
+    const refocusRequested=privateDirty21.reasons.has("focus-visibility-recovery");
+    const refocusStarted=refocusDiagNow();
+    if(refocusRequested)refocusDiag("private focus reconciliation start",{documentHidden:document.hidden});
+    if(privateReconcilePromise21){
+      if(refocusRequested)refocusDiag("private focus reconciliation end",{outcome:"coalesced-with-in-flight",elapsedMs:refocusDiagNow()-refocusStarted});
+      return privateReconcilePromise21;
+    }
     if(typeof hasKeys !== "function" || !hasKeys()){
       privateDirty21.positionDirty=false;
       privateDirty21.ordersDirty=false;
       privateDirty21.reasons.clear();
       BINANCE_PRIVATE_STATE.position.dirty=false;
       BINANCE_PRIVATE_STATE.orders.dirty=false;
+      if(refocusRequested)refocusDiag("private focus reconciliation end",{outcome:"skipped-no-keys",elapsedMs:refocusDiagNow()-refocusStarted});
       return null;
     }
     const requested={positionDirty:privateDirty21.positionDirty,ordersDirty:privateDirty21.ordersDirty,reasons:[...privateDirty21.reasons]};
-    if(!requested.positionDirty && !requested.ordersDirty) return null;
+    if(!requested.positionDirty && !requested.ordersDirty){
+      if(refocusRequested)refocusDiag("private focus reconciliation end",{outcome:"skipped-clean",elapsedMs:refocusDiagNow()-refocusStarted});
+      return null;
+    }
     privateDirty21.positionDirty=false;
     privateDirty21.ordersDirty=false;
     privateDirty21.reasons.clear();
@@ -16119,18 +16190,17 @@ startTradeAuto();
       const previous=lastBinanceStateSig21;
       let positionResult=null;
       let ordersResult=null;
-      let off=null;
+      [positionResult,ordersResult]=await Promise.all([
+        requested.positionDirty
+          ? window.refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true})
+          : Promise.resolve(null),
+        requested.ordersDirty
+          ? requestAuthoritativeOrders21({reason:requested.reasons.join(",") || "user-stream-event",maxAgeMs:0,publish:false,fromCoordinator:true})
+          : Promise.resolve(null)
+      ]);
       if(requested.positionDirty){
-        positionResult=await window.refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true});
-        if(positionResult){
-          off=positionResult.off;
-          lastSig21=sharedPositionSig21();
-        }else{
-          BINANCE_PRIVATE_STATE.position.status="error";
-        }
-      }
-      if(requested.ordersDirty){
-        ordersResult=await requestAuthoritativeOrders21({reason:requested.reasons.join(",") || "user-stream-event",maxAgeMs:0,off,publish:false,fromCoordinator:true});
+        if(positionResult) lastSig21=sharedPositionSig21();
+        else BINANCE_PRIVATE_STATE.position.status="error";
       }
       const next=binanceStateSig21(lastSig21 || "");
       const signatureChanged=previous != null && next!==previous;
@@ -16145,6 +16215,7 @@ startTradeAuto();
     })().finally(() => {
       privateReconcilePromise21=null;
       if(privateDirty21.positionDirty || privateDirty21.ordersDirty) schedulePrivateReconcile21();
+      if(refocusRequested)refocusDiag("private focus reconciliation end",{outcome:"settled",elapsedMs:refocusDiagNow()-refocusStarted});
     });
     return privateReconcilePromise21;
   }
@@ -17283,7 +17354,7 @@ startTradeAuto();
     card.innerHTML = `<div class="settings-card-title">API account status</div>
       <div class="settings-card-desc">Read-only detection for the saved Binance key. Spot trading remains disabled in this build.</div>
       <div class="api-capability-meta"><span class="api-capability-state ${statusClass}">${esc(statusText)}</span><span class="api-capability-symbol">${esc(symbol)}</span></div>
-      <div class="api-capability-actions"><button id="${READ_BTN_ID}" type="button">Read</button></div>
+      <div class="api-capability-actions"><button id="${READ_BTN_ID}" type="button"${state.status==="loading"||state.inFlight?" disabled aria-busy=\"true\"":""}>Read</button></div>
       ${warning}
       <div class="api-capability-grid">
         ${rowHtml("Detected account mode",esc(state.accountMode || "Invalid"))}
@@ -17314,6 +17385,14 @@ startTradeAuto();
       },false);
     }
   }
+  function setApiCapabilityReadBusy(busy){
+    [READ_BTN_ID,MODAL_READ_BTN_ID].forEach(id=>{
+      const button=document.getElementById(id);
+      if(!button)return;
+      button.disabled=!!busy;
+      if(busy)button.setAttribute("aria-busy","true");else button.removeAttribute("aria-busy");
+    });
+  }
   function ensureApiCapabilityCard(){
     const grid = document.querySelector(GRID_SELECTOR);
     if(!grid) return null;
@@ -17334,6 +17413,7 @@ startTradeAuto();
     const force = options.force === true;
     const symbol = symbolText();
     const now = Date.now();
+    if(apiCapabilityState.inFlight) return apiCapabilityState.inFlight;
     if(!hasKeys()){
       apiCapabilityState = {
         ...apiCapabilityState,
@@ -17362,12 +17442,12 @@ startTradeAuto();
       renderApiCapabilityCard();
       return apiCapabilityState;
     }
-    if(!force && apiCapabilityState.inFlight) return apiCapabilityState.inFlight;
     if(!force && apiCapabilityState.symbol === symbol && apiCapabilityState.loadedAt > 0 && (now - apiCapabilityState.loadedAt) < API_CAPABILITY_CACHE_TTL_MS){
       renderApiCapabilityCard();
       return apiCapabilityState;
     }
     apiCapabilityState = {...apiCapabilityState,status:"loading",symbol};
+    setApiCapabilityReadBusy(true);
     renderApiCapabilityCard();
     const request = (async() => {
       const {key,secret:sec} = activeApiCredentials();
@@ -17447,7 +17527,7 @@ startTradeAuto();
       };
       renderApiCapabilityCard();
       return apiCapabilityState;
-    });
+    }).finally(()=>setApiCapabilityReadBusy(false));
     apiCapabilityState = {...apiCapabilityState,inFlight:request};
     return request;
   }
@@ -17785,6 +17865,14 @@ startTradeAuto();
     if(openCommissionCacheCovers25(win)) return Promise.resolve();
     const now = Date.now();
     const {key,secret:sec} = activeApiCredentials();
+    const recentFailedWindow =
+      openCommissionFeeCache.status === "error" &&
+      openCommissionFeeCache.symbol === win.symbol &&
+      openCommissionFeeCache.start <= win.start &&
+      openCommissionFeeCache.end + OPEN_FUNDING_FEE_CACHE_TTL_MS >= win.end &&
+      openCommissionFeeCache.loadedAt > 0 &&
+      now - openCommissionFeeCache.loadedAt < OPEN_FUNDING_FEE_CACHE_TTL_MS;
+    if(recentFailedWindow) return Promise.resolve();
     if(
       openCommissionFeeCache.inFlight &&
       openCommissionFeeCache.symbol === win.symbol &&
@@ -22695,10 +22783,17 @@ If there is NO open position, use this Section 2 instead:
       visibilityRecoveryTimer=null;
       const livePipeline=ensurePipeline();
       if(!livePipeline)return;
+      const refocusStarted=refocusDiagNow();
+      refocusDiag("SSSC refocus refresh start",{documentHidden:document.hidden});
       // Publish immediately from the retained buffers, then reseed/reconnect so a throttled
       // background timer or suspended socket cannot leave snapshot capture stalled.
       livePipeline.calculate();
-      livePipeline.refresh(true).catch(error=>console.warn(MODULE+' visibility recovery failed',error));
+      livePipeline.refresh(true).then(()=>{
+        refocusDiag("SSSC refocus refresh end",{outcome:"success",elapsedMs:refocusDiagNow()-refocusStarted});
+      }).catch(error=>{
+        refocusDiag("SSSC refocus refresh end",{outcome:"error",elapsedMs:refocusDiagNow()-refocusStarted,error:error&&error.message||String(error)});
+        console.warn(MODULE+' visibility recovery failed',error);
+      });
     },80);
   }
   function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } if(!window.__ssscVisibilityRecoveryBound){window.__ssscVisibilityRecoveryBound=true;["visibilitychange","focus","pageshow"].forEach(name=>window.addEventListener(name,scheduleSsscVisibilityRecovery,true));} installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); if(pipeline)ensureSnapshotLogger()?.start(); }
@@ -23100,7 +23195,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       wfSyncState.closeTimer = null;
       wfSyncState.closeSyncBusy = true;
       try{
-        while(wfSyncState.closeRetry < 3){
+        while(wfSyncState.closeRetry < 2){
           const result = await reloadCurrentWfData(period,{silent:true});
           const nextSignature = wfDataMode() === "fast"
             ? closedTradeFastSignature(result)
@@ -23112,7 +23207,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
             return;
           }
           wfSyncState.closeRetry += 1;
-          if(wfSyncState.closeRetry < 3) await new Promise(resolve => setTimeout(resolve,1100));
+          if(wfSyncState.closeRetry < 2) await new Promise(resolve => setTimeout(resolve,3000));
         }
         showWfTradesStatus("Closed trade not ready yet");
       }catch(error){

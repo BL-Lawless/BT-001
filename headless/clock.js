@@ -1,9 +1,11 @@
 "use strict";
 
 const {createExchangeClock}=require("../features/api/exchange-clock.module.js");
+const {sharedGate}=require("../services/binance-rest-gate.service.js");
 
 function createNodeExchangeClock(options={}){
-  const fetchFn=options.fetch||globalThis.fetch;
+  const rawFetch=options.fetch||globalThis.fetch;
+  const fetchFn=rawFetch&&rawFetch.__bt001BinanceGateWrapped?rawFetch:sharedGate.wrapFetch(rawFetch);
   if(typeof fetchFn!=="function")throw new Error("A Fetch-compatible function is required for Binance clock synchronization");
   const baseUrl=String(options.baseUrl||"https://fapi.binance.com").replace(/\/+$/,"");
   return createExchangeClock({

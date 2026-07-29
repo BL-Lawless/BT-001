@@ -4,7 +4,7 @@
   const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config,calc=root.calculations,tranches=root.tranches,decisions=root.exitDecisions;
   if(!C||!calc||!tranches||!decisions)throw new Error("SCALP simulator data dependencies are unavailable");
   const n=calc.n,upper=value=>String(value||"").toUpperCase(),clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
-  const EVENT_ACTION="DETECTION_QUALIFIED",DEDUPE_TOLERANCE_MS=5000,PRICE_INTERVAL="1m",PRICE_SYMBOL="BTCUSDT",PAGE_SIZE=1000,KLINE_PAGE_SIZE=1500;
+  const EVENT_ACTION="DETECTION_QUALIFIED",DEDUPE_TOLERANCE_MS=5000,PRICE_INTERVAL="1m",PRICE_SYMBOL="BTCUSDT",PAGE_SIZE=1000,KLINE_PAGE_SIZE=1500,BINANCE_PAGE_DELAY_MS=200;
 
   function timeMs(value){
     const parsed=n(value);if(parsed==null)return null;
@@ -71,6 +71,7 @@
     if(!events.length)return [];
     const startMs=Math.min(...events.map(event=>event.candleTimeMs)),endMs=Math.max(n(now())||Date.now(),Math.max(...events.map(event=>event.signalCloseTimeMs))),rows=[];let cursor=endMs,pages=0;
     while(cursor>=startMs&&pages<5000){
+      if(pages>0)await new Promise(resolve=>setTimeout(resolve,BINANCE_PAGE_DELAY_MS));
       const batch=await fetchPage(PRICE_INTERVAL,cursor,KLINE_PAGE_SIZE,PRICE_SYMBOL);pages+=1;
       const normalized=normalizeCandles(batch);if(!normalized.length)break;
       rows.push(...normalized);const oldest=normalized[0].openTime;
