@@ -178,7 +178,8 @@ assert.equal(calculatedOutbound.row.aggregate.marketStrength,calculatedDiagnosti
 const main=fs.readFileSync(path.resolve(__dirname,"..","..","..","main.js"),"utf8");
 const html=fs.readFileSync(path.resolve(__dirname,"..","..","..","index.html"),"utf8");
 assert(html.indexOf("features/pressure-signal/sssc/supabase-logger.js")<html.indexOf('src="main.js"'));
-assert(html.includes("supabase-logger.js?v=20260727-worker-logging-v1"),"logger asset must be cache-busted after its field contract changes");
+assert(html.includes("core/snapshot-logger.js?v=20260729-vm-log-p1"));
+assert(html.includes("supabase-logger.js?v=20260729-vm-log-p1"),"logger asset must be cache-busted after extraction");
 assert(main.includes("ensureSnapshotLogger()?.start()"),"always-on install must start SSSC logging without opening the dashboard");
 const visibilityRecoverySource=main.slice(main.indexOf("function scheduleSsscVisibilityRecovery()"),main.indexOf("function install(){",main.indexOf("function scheduleSsscVisibilityRecovery()")));
 assert(visibilityRecoverySource.includes("livePipeline.calculate()"),"visibility recovery must immediately resume snapshot capture from retained buffers");

@@ -1,7 +1,7 @@
 (() => {
   "use strict";
-  const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config,calc=root.calculations,tranches=root.tranches,decisions=root.exitDecisions;
-  if(!C||!calc||!tranches||!decisions)throw new Error("SCALP dependencies must load before state machine");
+  const root=window.__BT001_SCALP_BUILD__ ||= {},C=root.config,calc=root.calculations,tranches=root.tranches,decisions=root.exitDecisions,loggerCore=window.BT001_SCALP_LOGGER_CORE;
+  if(!C||!calc||!tranches||!decisions||!loggerCore)throw new Error("SCALP dependencies must load before state machine");
   const n=calc.n,quoteAsset=calc.quoteAsset,upper=value=>String(value||"").toUpperCase(),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
   const exchangeClock=()=>typeof window!=="undefined"&&window.BT001ExchangeClock||null;
@@ -34,6 +34,12 @@
       this.useGlobalPrivateEvents=options.useGlobalPrivateEvents!==false;
       this.state="OFF";this.status="";this.generation=0;this.config=this.loadConfig();this.guide=null;this.rates=calc.feeRates();this.filters=null;this.marketSymbol=this.gateway&&this.gateway.symbol?this.gateway.symbol():null;this.book=this.loadTrancheBook();this.livePositions={LONG:null,SHORT:null};this.externalPosition=null;this.latestBySource=new Map();this.lastQualifiedBySource=new Map();this.baseline=new Set();this.seen=new Set();this.rankRejected=new Set();this.armedAt=0;this.unsubHub=null;this.diagnostics=[];this.fillIdsByTranche=new Map();this.lastPrivateStatus=null;this.reconnectBusy=false;this.reconcileQueued=false;this.initialized=false;this.initializing=false;
       this.cascadeByTf=new Map();this.autoLossState=this.loadAutoLossState();
+      this.activityLogger=options.activityLogger||loggerCore.createLogger({
+        getSupabase:()=>window.BT001Supabase||null,
+        getSymbol:()=>this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null,
+        now:()=>exchangeNow(this.now()),
+        fromLocal:exchangeFromLocal
+      });
     }
     loadConfig(){let saved={};try{saved=JSON.parse(this.storage.getItem(C.configKey)||"{}");}catch(_e){}["autoEntryEnabled","autoTradingEnabled","cooloffMinutes"].forEach(key=>delete saved[key]);const nonnegative=(value,fallback,decimals)=>n(value)!=null&&n(value)>=0?Number(value).toFixed(decimals):fallback,minimumRank=Math.round(Math.max(0,Math.min(100,n(saved.minimumRank)??C.defaults.minimumRank))),positiveInt=(value,fallback)=>n(value)!=null&&n(value)>=1?Math.round(n(value)):fallback,nonnegativeNumber=(value,fallback)=>n(value)!=null&&n(value)>=0?n(value):fallback,percentage=(value,fallback,max=100)=>Math.max(1,Math.min(max,n(value)??fallback));return {...C.defaults,...saved,direction:C.directions.includes(saved.direction)?saved.direction:C.defaults.direction,source:C.sources.includes(saved.source)?saved.source:C.defaults.source,entryType:C.entryTypes.includes(saved.entryType)?saved.entryType:C.defaults.entryType,minimumRank,mode:"CONTINUOUS",lot:nonnegative(saved.lot,C.defaults.lot,3),target:nonnegative(saved.target,C.defaults.target,1),tpDelta:nonnegative(saved.tpDelta,C.defaults.tpDelta,0),tpDriver:["NET_TARGET","TP_DELTA"].includes(saved.tpDriver)?saved.tpDriver:C.defaults.tpDriver,stop:nonnegative(saved.stop,C.defaults.stop,1),slDelta:nonnegative(saved.slDelta,C.defaults.slDelta,0),slDriver:["NET_SL","SL_DELTA"].includes(saved.slDriver)?saved.slDriver:C.defaults.slDriver,maxConcurrentAutoPositions:positiveInt(saved.maxConcurrentAutoPositions,C.defaults.maxConcurrentAutoPositions),maxDailyAutoLossUsd:nonnegativeNumber(saved.maxDailyAutoLossUsd,C.defaults.maxDailyAutoLossUsd),profitLockEnabled:saved.profitLockEnabled===true,lockThresholdPct:percentage(saved.lockThresholdPct,C.defaults.lockThresholdPct),lockPortionPct:percentage(saved.lockPortionPct,C.defaults.lockPortionPct,99),rankBoostEnabled:saved.rankBoostEnabled===true,rankBoostThreshold:Math.max(0,Math.min(100,n(saved.rankBoostThreshold)??C.defaults.rankBoostThreshold)),rankBoostPoints:nonnegativeNumber(saved.rankBoostPoints,C.defaults.rankBoostPoints)};}
     loadTrancheBook(){
@@ -204,48 +210,13 @@
       // estimated_realized_pnl_usd reuses estimateRealizedPnl() and carries the same caveat as the daily loss
       // cap above: exact realized fees/slippage on the exit leg are not tracked by this engine, so
       // this is an ESTIMATE, not an authoritative fill-derived P&L.
-      if(typeof window==="undefined"||!window.BT001Supabase||typeof window.BT001Supabase.log!=="function")return;
-      const exitPrice=n(tranche.closedPrice)||(reason==="PARTIAL_TP"||reason==="TP"?n(tranche.partialTpPrice):reason==="PSL"||reason==="SL"?n(tranche.pslPrice):n(this.guide));
-      const row={
-        created_at:new Date(exchangeFromLocal(n(tranche.createdAt)||this.now())).toISOString(),
-        closed_at:new Date(exchangeFromLocal(n(tranche.closedAt)||this.now())).toISOString(),
-        symbol:tranche.symbol||this.marketSymbol||null,direction:tranche.direction||null,mode:tranche.mode||null,source_timeframe:tranche.source||null,event_type:tranche.eventType||null,
-        auto_entered:false,cascade_agreement_at_entry:clone(tranche.cascadeAgreementAtEntry||null),
-        requested_qty:n(tranche.requestedQty),filled_qty:n(tranche.closedQty)??n(tranche.filledQty),
-        avg_entry_price:n(tranche.entryPrice),entry_commission:n(tranche.entryCommission),
-        exit_reason:reason||null,exit_price:exitPrice,estimated_realized_pnl_usd:pnl,
-        raw_session:clone({trancheId:tranche.trancheId,...tranche}),
-        device_id:typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null
-      };
-      try{window.BT001Supabase.log("scalp_trades",row).catch(()=>{});}catch(_e){}
+      this.activityLogger.logTrade({...tranche,symbol:tranche.symbol||this.marketSymbol||null},reason,pnl,this.guide);
     }
     logActivity(action,detail={}){
       // Fire-and-forget activity logging (PART 4). Never awaited by callers and never allowed to
       // affect engine state -- a missing/misconfigured Supabase credential, or a network failure
       // (buffered/retried inside services/supabase.service.js), must not change trading behaviour.
-      if(typeof window==="undefined"||!window.BT001Supabase||typeof window.BT001Supabase.log!=="function")return;
-      const signalActions=new Set(["DETECTION_QUALIFIED","RANK_REJECTED"]);
-      const positionActions=new Set(["TRANCHE_ADDED","TRANCHE_CLOSED","TRANCHE_RECOVERED","ENTRY_FAILED","EMERGENCY_CLOSE_FAILED","EMERGENCY_CLOSE_SUCCEEDED","PROTECTION_REBUILD_STARTED","PROTECTION_REBUILD_SUCCEEDED","PROTECTION_REBUILD_FAILED","PROTECTION_REBUILD_REFUSED","TRANCHE_EXTERNALLY_REDUCED","PROFIT_LOCK_APPLIED","PROFIT_LOCK_FAILED"]);
-      const operationalActions=new Set(["ARMED","DISARMED","CONNECTION_TEST","DAILY_LOSS_CAP_BREACHED"]);
-      const table=signalActions.has(action)?"scalp_v1_signals":positionActions.has(action)?"scalp_positions":operationalActions.has(action)?"scalp_operational":null;
-      if(!table)return;
-      const symbol=this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null;
-      const machineId=typeof window.BT001Supabase.getDeviceId==="function"?window.BT001Supabase.getDeviceId():null;
-      const positionState=clone(detail.positionState??null);
-      // These tables intentionally have different schemas. Keep each payload explicit so a column
-      // belonging to scalp_trades (or another activity table) cannot leak into every insert again.
-      const event_at=new Date(exchangeNow(this.now())).toISOString();
-      const row=table==="scalp_v1_signals"?{
-        event_at,symbol,action,source_timeframe:detail.sourceTimeframe??null,
-        detector_state:clone(detail.detectorState??null),
-        cascade_agreement:clone(detail.cascadeAgreement??null),machine_id:machineId
-      }:table==="scalp_positions"?{
-        event_at,symbol,action,direction:positionState?.direction??null,
-        tranche_id:positionState?.trancheId??null,position_state:positionState,machine_id:machineId
-      }:{
-        event_at,action,detail:clone(detail),machine_id:machineId
-      };
-      try{window.BT001Supabase.log(table,row).catch(()=>{});}catch(_e){}
+      this.activityLogger.logActivity(action,detail);
     }
     dailyLossSnapshot(){
       const cap=n(this.config.maxDailyAutoLossUsd),accumulatedUsd=this.autoLossState.accumulatedUsd;

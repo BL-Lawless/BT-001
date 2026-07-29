@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const root=window.__BT001_SCALP_BUILD__ ||= {};
+  const root=typeof window!=="undefined"?(window.__BT001_SCALP_BUILD__ ||= {}):{};
   const STATES=Object.freeze(["OFF","ARMED","ENTRY_LOCKED","ENTRY_SUBMITTED","ENTRY_PARTIAL","ENTRY_FILLED","PROTECTION_SUBMITTING","ACTIVE","EXIT_LOCKED","EXITING","FLAT_RECONCILING","ERROR","POSITION_MISMATCH"]);
   const TRANSITIONS=Object.freeze({
     OFF:["ARMED","ACTIVE","ERROR","POSITION_MISMATCH"],ARMED:["OFF","ENTRY_LOCKED","ERROR","POSITION_MISMATCH"],
@@ -11,7 +11,7 @@
     FLAT_RECONCILING:["OFF","ERROR","POSITION_MISMATCH"],
     ERROR:["OFF","ENTRY_FILLED","ACTIVE","POSITION_MISMATCH"],POSITION_MISMATCH:["OFF","ACTIVE","ERROR"]
   });
-  root.config=Object.freeze({
+  const config=Object.freeze({
     version:"2.0.0",consumerId:"BT001_SCALP",configKey:"bt001_scalp_config_v1",windowKey:"bt001_scalp_window_v1",sessionKey:"bt001_scalp_active_session_v1",trancheSessionKey:"bt001_scalp_tranche_book_v2",autoLossKey:"bt001_scalp_auto_loss_v1",
     states:STATES,transitions:TRANSITIONS,timeframes:Object.freeze(["1m","3m","5m","15m"]),sources:Object.freeze(["1m","3m","5m","15m"]),
     directions:Object.freeze(["SHORT","LONG","ANY"]),entryTypes:Object.freeze(["BOUNCE","CROSS","ANY"]),modes:Object.freeze(["CONTINUOUS"]),
@@ -21,4 +21,6 @@
     order:Object.freeze({namespace:"SCALP",entryPrefix:"SCALP-E",tpPrefix:"SCALP-T",slPrefix:"SCALP-S",exitPrefix:"SCALP-X",reconcileDelayMs:250,protectionRetry:1,tpRetry:2}),
     ui:Object.freeze({minWidth:370,minHeight:350,defaultWidth:430,defaultHeight:420})
   });
+  root.config=config;
+  if(typeof module!=="undefined"&&module.exports)module.exports=config;
 })();

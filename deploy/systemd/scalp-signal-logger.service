@@ -1,0 +1,19 @@
+[Unit]
+Description=BT-001 scalp signal-detection logger
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=btlogger
+Group=btlogger
+WorkingDirectory=/opt/bt-001
+EnvironmentFile=/opt/bt-001/.env
+ExecStart=/usr/bin/node /opt/bt-001/headless/run-scalper-signals.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

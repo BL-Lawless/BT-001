@@ -4,7 +4,7 @@ const fs=require("fs");
 const path=require("path");
 
 const root=path.resolve(__dirname,"..");
-const featuresDir=path.join(root,"features");
+const testDirs=[path.join(root,"features"),path.join(root,"headless")].filter(fs.existsSync);
 
 function findTestFiles(dir){
   const results=[];
@@ -16,9 +16,9 @@ function findTestFiles(dir){
   return results;
 }
 
-const files=findTestFiles(featuresDir).sort();
+const files=testDirs.flatMap(findTestFiles).sort();
 if(files.length===0){
-  console.log("No *.tests.js files found under features/.");
+  console.log("No *.tests.js files found.");
   process.exit(0);
 }
 

@@ -1,0 +1,25 @@
+"use strict";
+const assert=require("assert");
+const fs=require("fs");
+const path=require("path");
+const vm=require("vm");
+
+const context={module:{exports:{}},exports:{},Date,Object,Array,String,Number,Boolean,JSON,Math,Promise};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(path.join(__dirname,"logger.js"),"utf8"),context,{filename:"logger.js"});
+const core=context.module.exports;
+assert(core&&typeof core.createLogger==="function");
+assert.equal(typeof context.window,"undefined");
+const now=1712345678901,writes=[];
+const client={getDeviceId:()=>"node-scalp",log:(table,row)=>{writes.push({table,row});return Promise.resolve(true);}};
+const logger=core.createLogger({getSupabase:()=>client,getSymbol:()=>"BTCUSDT",now:()=>now,fromLocal:value=>value+1000});
+assert.equal(logger.logActivity("DETECTION_QUALIFIED",{sourceTimeframe:"1m",detectorState:{rankValue:88}}),true);
+assert.equal(writes[0].table,"scalp_v1_signals");
+assert.equal(writes[0].row.machine_id,"node-scalp");
+assert.equal(writes[0].row.event_at,new Date(now).toISOString());
+assert.equal(logger.logActivity("UNROUTED_ACTION"),false);
+logger.logTrade({trancheId:"L1",symbol:"BTCUSDT",direction:"LONG",createdAt:now-5000,closedAt:now,requestedQty:.1,filledQty:.1,entryPrice:100,closedPrice:101},"TP",.1,100);
+assert.equal(writes[1].table,"scalp_trades");
+assert.equal(writes[1].row.created_at,new Date(now-4000).toISOString());
+assert.equal(writes[1].row.device_id,"node-scalp");
+console.log("SCALP logger core tests: PASS");

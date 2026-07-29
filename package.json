@@ -1,0 +1,17 @@
+{
+  "name": "bt-001-headless-loggers",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local Node runners for BT-001 logging pipelines",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node scripts/run-tests.js",
+    "headless:sssc": "node headless/run-sssc.js",
+    "headless:scalper": "node headless/run-scalper-signals.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.53.0",
+    "dotenv": "^17.2.1",
+    "ws": "^8.18.3"
+  }
+}
