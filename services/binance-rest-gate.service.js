@@ -1,4 +1,4 @@
-const REFOCUS_DIAG = true; // TEMP: set false to disable all [REFOCUS-DIAG] logging.
+const REFOCUS_DIAG = false;
 
 (function (root, factory) {
   const api = factory();
@@ -115,9 +115,6 @@ const REFOCUS_DIAG = true; // TEMP: set false to disable all [REFOCUS-DIAG] logg
       this.pauseReason = "";
       if (this.exitTimer != null) clearTimeout(this.exitTimer);
       this.exitTimer = null;
-      if (this.pauseLogged && this.logger && typeof this.logger.info === "function") {
-        this.logger.info("[Binance REST gate] Request pause ended", { previousUntil });
-      }
       this.pauseLogged = false;
       refocusDiag("BINANCE_REST_GATE paused state changed",{
         previousPaused:true,
@@ -151,13 +148,6 @@ const REFOCUS_DIAG = true; // TEMP: set false to disable all [REFOCUS-DIAG] logg
       this.pauseReason = details.reason || this.pauseReason || "Binance rate limit";
       if (!wasPaused) {
         this.pauseLogged = true;
-        if (this.logger && typeof this.logger.warn === "function") {
-          this.logger.warn("[Binance REST gate] Pausing all Binance REST requests", {
-            status: this.pauseStatus,
-            pausedUntil: this.pausedUntil,
-            reason: this.pauseReason
-          });
-        }
         refocusDiag("BINANCE_REST_GATE paused state changed",{
           previousPaused:false,
           paused:true,

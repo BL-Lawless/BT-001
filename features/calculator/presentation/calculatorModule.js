@@ -13,6 +13,7 @@
   const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
   const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
   const AUTO_SYNC_POLL_MS = 2000;
+  const SEND_POSITION_MAX_AGE_MS = 5000;
   const AUTO_SYNC_DEBOUNCE_MS = 800;
   const FLAT_CLEANUP_CONFIRM_MS = 700;
   const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1200;
@@ -2342,12 +2343,12 @@
     });
     return qty > 0 ? {side,qty,entry:value / qty,source:"openPositionBoxes"} : null;
   }
-  async function signedPosition(){
+  async function signedPosition(options={}){
     if(typeof hasKeys !== "function" || !hasKeys()) return null;
     const sharedOwner=window.BT001_SHARED_POSITION;
     const expected=sharedOwner&&typeof sharedOwner.captureExpectation==="function"?sharedOwner.captureExpectation():null;
     const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
-    const off = typeof timeOffset === "function" ? await timeOffset() : 0;
+    const off = options.off != null ? Number(options.off) : (typeof timeOffset === "function" ? await timeOffset() : 0);
     const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
     if(sharedOwner&&typeof sharedOwner.ingestRestRisk==="function"){
       const sharedResult=sharedOwner.ingestRestRisk(risk,{source:"calculator-positionRisk",symbol:currentSymbol(),expected,observedAt:Date.now(),allowAdvance:true,ignoreStreamAuthority:!window.BINANCE_PRIVATE_STATE||window.BINANCE_PRIVATE_STATE.streamStatus!=="live"});
@@ -2597,7 +2598,6 @@
   function publishReadDiagnostic(diag){
     lastReadDiagnostic = diag || null;
     window.__calculatorReadDiagnostic = lastReadDiagnostic;
-    try{ console.info(MODULE + " read diagnostic",lastReadDiagnostic); }catch(_e){}
   }
   function publishOverlayDiagnostic(diag){
     lastOverlayDiagnostic = diag || null;
@@ -3121,6 +3121,24 @@
       btn.classList.remove("bt001-send-success-blink");
       btn.__bt001SendBlinkTimer = null;
     },900);
+  }
+  async function waitForSendRestGate(){
+    const gate = window.BINANCE_REST_GATE;
+    if(!gate || typeof gate.beforeRequest !== "function") return;
+    const pause = gate.beforeRequest(ORDER_WRITE_URL);
+    if(!pause) return;
+    const renderPause = () => {
+      const state = typeof gate.state === "function" ? gate.state() : null;
+      const seconds = Math.max(1,Math.ceil(Number(state && state.remainingMs || 0) / 1000));
+      setStatus("Binance rate limit pause active, retrying in " + seconds + "s");
+    };
+    renderPause();
+    const timer = setInterval(renderPause,1000);
+    try{
+      await pause;
+    }finally{
+      clearInterval(timer);
+    }
   }
   function renderSendPlanTable(){
     const box = ensureSendPopup();
@@ -4293,7 +4311,7 @@
       },true);
     }
   }
-  async function readOpenOrdersSnapshot(){
+  async function readOpenOrdersSnapshot(options={}){
     const sym = currentSymbol();
     const snapshot = {
       symbol:sym,
@@ -4304,17 +4322,15 @@
     };
     if(typeof hasKeys === "function" && hasKeys() && typeof signedGet === "function"){
       const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
-      const off = typeof timeOffset === "function" ? await timeOffset() : 0;
-      try{
-        snapshot.normalOrders = unwrapOrders(await signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off));
-      }catch(e){
-        snapshot.normalFetchError = e;
-      }
-      try{
-        snapshot.algoOrders = unwrapOrders(await signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off));
-      }catch(e){
-        snapshot.algoFetchError = e;
-      }
+      const off = options.off != null ? Number(options.off) : (typeof timeOffset === "function" ? await timeOffset() : 0);
+      const [normalResult,algoResult] = await Promise.allSettled([
+        signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off),
+        signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off)
+      ]);
+      if(normalResult.status === "fulfilled") snapshot.normalOrders = unwrapOrders(normalResult.value);
+      else snapshot.normalFetchError = normalResult.reason;
+      if(algoResult.status === "fulfilled") snapshot.algoOrders = unwrapOrders(algoResult.value);
+      else snapshot.algoFetchError = algoResult.reason;
     }
     return snapshot;
   }
@@ -4725,11 +4741,6 @@
           : "Position closed \u2014 protective orders cleared";
         setStatus(summary);
       }
-      if(logRows.length) console.info(MODULE + " flat cleanup",{
-        symbol:target.symbol,
-        positionGroupId:retiredGroupId || "",
-        cancelled:logRows
-      });
       if(window.GRAD_CALCULATOR && typeof window.GRAD_CALCULATOR.readSection === "function"){
         try{
           const ownedRows = typeof window.GRAD_CALCULATOR.getOwnedRows === "function" ? window.GRAD_CALCULATOR.getOwnedRows() : [];
@@ -5673,10 +5684,10 @@
     plan.liveSnapshot = liveSnapshot;
     return plan;
   }
-  async function signedBinanceWrite(url,method,params){
+  async function signedBinanceWrite(url,method,params,options={}){
     if(typeof hasKeys !== "function" || !hasKeys()) throw new Error("API keys are required.");
     const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
-    const off = typeof timeOffset === "function" ? await timeOffset() : 0;
+    const off = options.off != null ? Number(options.off) : (typeof timeOffset === "function" ? await timeOffset() : 0);
     const q = new URLSearchParams({
       ...params,
       recvWindow:"5000",
@@ -5697,14 +5708,14 @@
     }
     return data || {};
   }
-  async function signedOrderWrite(method,params){
-    const result=await signedBinanceWrite(ORDER_WRITE_URL,method,params);
-    try{ const cache=window.BINANCE_OPEN_ORDERS_CACHE;if(cache&&typeof cache.refresh==="function")cache.refresh({reason:"calculator-order-write",maxAgeMs:0}).catch(()=>{}); }catch(_e){}
+  async function signedOrderWrite(method,params,options={}){
+    const result=await signedBinanceWrite(ORDER_WRITE_URL,method,params,options);
+    try{ const cache=window.BINANCE_OPEN_ORDERS_CACHE;if(cache&&typeof cache.refresh==="function")cache.refresh({reason:"calculator-order-write",maxAgeMs:0,off:options.off}).catch(()=>{}); }catch(_e){}
     return result;
   }
-  async function signedAlgoOrderWrite(method,params){
-    const result=await signedBinanceWrite(ALGO_ORDER_WRITE_URL,method,params);
-    try{ const cache=window.BINANCE_OPEN_ORDERS_CACHE;if(cache&&typeof cache.refresh==="function")cache.refresh({reason:"calculator-algo-order-write",maxAgeMs:0}).catch(()=>{}); }catch(_e){}
+  async function signedAlgoOrderWrite(method,params,options={}){
+    const result=await signedBinanceWrite(ALGO_ORDER_WRITE_URL,method,params,options);
+    try{ const cache=window.BINANCE_OPEN_ORDERS_CACHE;if(cache&&typeof cache.refresh==="function")cache.refresh({reason:"calculator-algo-order-write",maxAgeMs:0,off:options.off}).catch(()=>{}); }catch(_e){}
     return result;
   }
   function applyWriteSuccessToRow(row,response,fallback){
@@ -5787,7 +5798,7 @@
       if(p.algoId != null && String(p.algoId).trim() !== "") send.algoId = String(p.algoId);
       else if(p.clientAlgoId) send.clientAlgoId = String(p.clientAlgoId);
       else throw new Error("Missing algoId/clientAlgoId for SL cancel.");
-      const resp = await signedAlgoOrderWrite("DELETE",send);
+      const resp = await signedAlgoOrderWrite("DELETE",send,{off:executionContext && executionContext.off});
       return {ok:true,response:resp};
     }
     if(rowPlan.mode === "psl-create"){
@@ -5814,7 +5825,7 @@
       const ps = toUpper(p.positionSide || "");
       if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
       if(!send.positionSide || send.positionSide === "BOTH") send.reduceOnly = "true";
-      const resp = await signedAlgoOrderWrite("POST",send);
+      const resp = await signedAlgoOrderWrite("POST",send,{off:executionContext && executionContext.off});
       applyWriteSuccessToPartialStopRow(rowPlan.rowRef,resp,{
         symbol:send.symbol,
         side:send.side,
@@ -5863,7 +5874,7 @@
         if(!replaceState || !replaceState.cancelConfirmed){
           throw new Error("Existing Master SL cancel not confirmed. Replacement was not sent.");
         }
-        const refreshedSnapshot = await readOpenOrdersSnapshot();
+        const refreshedSnapshot = await readOpenOrdersSnapshot({off:executionContext && executionContext.off});
         const lingering = findSameDirectionClosePositionConditional(refreshedSnapshot,{
           symbol:send.symbol,
           side:send.side,
@@ -5871,7 +5882,7 @@
         });
         if(lingering) throw new Error("Existing Master SL still active.");
       }
-      const resp = await signedAlgoOrderWrite("POST",send);
+      const resp = await signedAlgoOrderWrite("POST",send,{off:executionContext && executionContext.off});
       currentStopAlgoMeta = buildAlgoOrderMeta(Object.assign({
         symbol:send.symbol,
         side:send.side,
@@ -5911,7 +5922,7 @@
       if(p.orderId != null && String(p.orderId).trim() !== "") send.orderId = String(p.orderId);
       else if(p.origClientOrderId) send.origClientOrderId = String(p.origClientOrderId);
       else throw new Error("Missing orderId/origClientOrderId for LIMIT cancel.");
-      const resp = await signedOrderWrite("DELETE",send);
+      const resp = await signedOrderWrite("DELETE",send,{off:executionContext && executionContext.off});
       return {ok:true,response:resp};
     }
     if(rowPlan.mode === "modify"){
@@ -5930,7 +5941,7 @@
       const ps = toUpper(p.positionSide || "");
       if(ps) send.positionSide = ps;
       if(p.reduceOnly === true || String(p.reduceOnly).toLowerCase() === "true") send.reduceOnly = "true";
-      const resp = await signedOrderWrite("PUT",send);
+      const resp = await signedOrderWrite("PUT",send,{off:executionContext && executionContext.off});
       applyWriteSuccessToRow(rowPlan.rowRef,resp,p.meta && p.meta.rawOrder ? p.meta.rawOrder : p.meta);
       const meta = rowPlan.rowRef && rowPlan.rowRef.__binanceLimitOrderMeta ? rowPlan.rowRef.__binanceLimitOrderMeta : null;
       return {ok:true,response:resp,blinkKey:orderKeyFromMeta(meta)};
@@ -5957,7 +5968,7 @@
       if(ps && ps !== "BOTH") send.positionSide = ps;
       if(p.reduceOnlyOverride === true) send.reduceOnly = "true";
       else if(p.reduceOnlyOverride === false) send.reduceOnly = "false";
-      const resp = await signedOrderWrite("POST",send);
+      const resp = await signedOrderWrite("POST",send,{off:executionContext && executionContext.off});
       applyWriteSuccessToRow(rowPlan.rowRef,resp,{
         symbol:currentSymbol(),
         side:send.side,
@@ -6101,13 +6112,27 @@
   function planNeedsSendResultReview(plan){
     return !!(plan && Array.isArray(plan.rows) && plan.rows.some(rowNeedsSendResultReview));
   }
-  async function validateLivePartialStopQuantity(plan){
+  async function positionForSendValidation(sendContext){
+    const context = sendContext || null;
+    const fetchedAt = Number(context && context.positionFetchedAt);
+    const ageMs = fetchedAt > 0 ? Date.now() - fetchedAt : Infinity;
+    if(context && ageMs >= 0 && ageMs <= SEND_POSITION_MAX_AGE_MS){
+      return context.livePosition || null;
+    }
+    const livePos = await signedPosition({off:context && context.off});
+    if(context){
+      context.livePosition = livePos;
+      context.positionFetchedAt = Date.now();
+    }
+    return livePos;
+  }
+  async function validateLivePartialStopQuantity(plan,sendContext){
     const total = totalPartialStopLots();
     if(total <= 0){
       clearPartialStopLotInvalidState();
       return true;
     }
-    const livePos = await signedPosition();
+    const livePos = await positionForSendValidation(sendContext);
     const liveQty = num(livePos && livePos.qty) || 0;
     if(total <= liveQty + 1e-9){
       refreshLiveStopsValidity(livePos,true);
@@ -6133,13 +6158,13 @@
     refreshLiveStopsValidity(livePos,true);
     return false;
   }
-  async function validateLiveExitQuantity(plan){
+  async function validateLiveExitQuantity(plan,sendContext){
     const total = totalExitLots();
     if(total <= 0){
       clearExitLotInvalidState();
       return true;
     }
-    const livePos = await signedPosition();
+    const livePos = await positionForSendValidation(sendContext);
     const liveQty = num(livePos && livePos.qty) || 0;
     if(total <= liveQty + 1e-9){
       refreshLiveExitsValidity(livePos,true);
@@ -6174,13 +6199,13 @@
       return {ok:false,failed:0,blocked:true,writable:0,confirmed:0,skipped:0};
     }
     try{
-      if(!await validateLiveExitQuantity(plan)){
+      if(!await validateLiveExitQuantity(plan,options.sendContext)){
         if(options.showPopupOnError !== false) plan.showPopup = true;
         setStatus(options.blockedStatus || "Confirm Send blocked. Review Exits.");
         renderSendPlanTable();
         return {ok:false,failed:0,blocked:true,writable:0,confirmed:0,skipped:0};
       }
-      if(!await validateLivePartialStopQuantity(plan)){
+      if(!await validateLivePartialStopQuantity(plan,options.sendContext)){
         if(options.showPopupOnError !== false) plan.showPopup = true;
         setStatus(options.blockedStatus || "Confirm Send blocked. Review Stops.");
         renderSendPlanTable();
@@ -6203,7 +6228,10 @@
     setStatus(options.inProgressStatus || "Confirm Send in progress...");
     const writable = plan.rows.filter(r => r && r.writable);
     await withCalculatorOwnedRefresh("sendConfirm",async() => {
-      const executionContext = {slReplaceState:new Map()};
+      const executionContext = {
+        slReplaceState:new Map(),
+        off:options.sendContext && options.sendContext.off
+      };
       for(const rowPlan of orderedExecutionRows(plan,executionMode)){
         if(!rowPlan) continue;
         if(!rowPlan.writable){
@@ -6278,7 +6306,7 @@
     purgeConfirmedMarkedDeletionRows(plan);
     purgeSuppressedPartialStopRows();
     try{
-      await readBinance({preserveSendPlan:true,source:"postSendRefresh"});
+      await readBinance({preserveSendPlan:true,source:"postSendRefresh",off:options.sendContext && options.sendContext.off});
     }catch(_e){}
     renderSendPlanTable();
     const failed = writable.filter(r => r && r.status === "Failed").length;
@@ -6340,9 +6368,17 @@
     updateSendButtonState(true);
     setStatus("Send: reading live Binance state...");
     try{
+      await waitForSendRestGate();
+      const sendContext = {
+        off:typeof timeOffset === "function" ? await timeOffset() : 0,
+        livePosition:null,
+        positionFetchedAt:0
+      };
       const preflightState = await withCalculatorOwnedRefresh("preflightRead",async() => {
-        const livePos = await signedPosition();
-        const liveSnapshot = await readOpenOrdersSnapshot();
+        const livePos = await signedPosition({off:sendContext.off});
+        sendContext.livePosition = livePos;
+        sendContext.positionFetchedAt = Date.now();
+        const liveSnapshot = await readOpenOrdersSnapshot({off:sendContext.off});
         return {livePos,liveSnapshot};
       });
       const livePos = preflightState.livePos;
@@ -6365,6 +6401,7 @@
         executionMode:"express",
         hidePopupUntilComplete:true,
         contextDirection:inferDirectionForSend(livePos),
+        sendContext,
         blockedStatus:"Send blocked. Review results.",
         inProgressStatus:"Send executing...",
         donePrefix:"Send"
@@ -6759,8 +6796,8 @@
       const preservedEntryRows = snapshotManualRows("calcModuleEntryRows");
       const previousLivePosition = lastKnownOpenPositionContext();
       let pos = (isOwnedRefresh
-        ? await withCalculatorOwnedRefresh(source,async() => ({pos:await signedPosition() || openBoxPosition()}))
-        : {pos:await signedPosition() || openBoxPosition()}).pos;
+        ? await withCalculatorOwnedRefresh(source,async() => ({pos:await signedPosition({off:opts.off}) || openBoxPosition()}))
+        : {pos:await signedPosition({off:opts.off}) || openBoxPosition()}).pos;
       unlockEntryRows();
       if(pos){
         const groupSync = syncPositionGroup(pos);
@@ -6791,8 +6828,8 @@
       let activePartialStopKeys = new Set();
       try{
         snapshot = isOwnedRefresh
-          ? await withCalculatorOwnedRefresh(source,() => readOpenOrdersSnapshot())
-          : await readOpenOrdersSnapshot();
+          ? await withCalculatorOwnedRefresh(source,() => readOpenOrdersSnapshot({off:opts.off}))
+          : await readOpenOrdersSnapshot({off:opts.off});
         const normalErr = !!snapshot.normalFetchError;
         const algoErr = !!snapshot.algoFetchError;
         diag.openOrdersReadStatus = normalErr && algoErr ? "error" : (normalErr || algoErr ? "partial" : "ok");
