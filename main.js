@@ -22682,7 +22682,10 @@ If there is NO open position, use this Section 2 instead:
       return `<div class="sssc-ui-event-row" data-tf="${d.tf}"><b>${d.tf}</b>${chip(e.x12)}${chip(e.x23)}${chip(e.x34)}${chip(e.x45)}${chip(e.ma1)}${chip(e.ma2)}${chip(e.ma3)}${chip(e.vwap)}${chip(e.cluster)}</div>`;
     }).join('');
   }
-  function kpi(label,val,sub,cls='',extra=''){ return `<div class="sssc-ui-kpi ${extra}"><label>${label}</label><div class="val ${cls}">${val}</div><div class="sub">${sub}</div></div>`; }
+  function kpi(label,val,sub,cls='',extra='',tooltip=false){
+    const title=tooltip?` title="${String(sub).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}"`:'';
+    return `<div class="sssc-ui-kpi ${extra}"${title}><label>${label}</label><div class="val ${cls}">${val}</div>${tooltip?'':`<div class="sub">${sub}</div>`}</div>`;
+  }
   function changedValue(key,val){ val=String(val); const old=previousTopValues[key]; const changed=old!==undefined && old!==val; previousTopValues[key]=val; return changed; }
   function blinkClass(key,val){ return changedValue(key,val)?' sssc-value-blink':''; }
   function updatePreviousScores(items){ for(const it of items){ if(!it||!it.available||!Number.isFinite(it.direction)) continue; const cur=Math.abs(Math.round(Number(it.direction)||0)); if(Number.isFinite(lastRenderedScoreByTf[it.tf]) && lastRenderedScoreByTf[it.tf]!==cur){ previousScoreValueByTf[it.tf]=lastRenderedScoreByTf[it.tf]; pendingScoreRollByTf[it.tf]=true; } else { previousScoreValueByTf[it.tf]=cur; pendingScoreRollByTf[it.tf]=false; } lastRenderedScoreByTf[it.tf]=cur; } }
@@ -22693,9 +22696,9 @@ If there is NO open position, use this Section 2 instead:
     if(!force&&Date.now()-lastRender<500)return;lastRender=Date.now();
     const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'});gaugeTracker.update(items);updatePreviousScores(items);
     const engine=calc(),summary=engine?.aggregate(items)||{direction:0,directionalStrength:0,acceleration:0,aggregateConfidence:0,timingRisk:100},marketRead=engine?.evaluateMarketSetup(summary)||{marketBias:0,marketStrength:0,marketAcceleration:0,aggregateConfidence:0,timingRisk:100,setupAction:'WAIT',reason:'Calculation module unavailable'},positionRead=engine?.evaluatePositionAction(marketRead,normalizedSsscPositionContext())||{positionAction:null,positionSide:null,reason:'Calculation module unavailable'},dir=marketRead.marketBias,pow=marketRead.marketStrength,confidence=marketRead.aggregateConfidence,risk=marketRead.timingRisk;
-    const setupAction=marketRead.setupAction,positionAction=positionRead.positionAction?(positionRead.positionAction+' '+positionRead.positionSide):'NO POSITION',dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED',dirCls=strengthClass(dir),powCls=pow>20?'blue':pow<-20?'red':'gray';
-    const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`,strengthVal=signed(pow),confidenceVal=Math.round(confidence)+'%',riskVal=Math.round(risk)+'%',topNode=$('ssscDashTop'),rowsNode=$('ssscDashRows');
-    topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('STRENGTH',`<span class="${blinkClass('kpi_strength',strengthVal)}">${strengthVal}</span>`,pow>20?'Bullish strength':pow<-20?'Bearish strength':'Neutral',powCls)+kpi('AGGREGATE CONFIDENCE',`<span class="${blinkClass('kpi_confidence',confidenceVal)}">${confidenceVal}</span>`,`${summary.confidenceConstraint||'none'} constrained`,confidence>62?'green':'gray')+kpi('TIMING RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('MARKET SETUP',setupAction,marketRead.reason,'','action')+kpi('POSITION ACTION',positionAction,positionRead.reason,'','action');
+    const setupAction=marketRead.setupAction,positionAction=positionRead.positionAction?(positionRead.positionAction+' '+positionRead.positionSide):'NO POSITION',dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED',dirCls=strengthClass(dir),powCls=pow>20?'blue':pow<-20?'red':'gray',accel=marketRead.marketAcceleration,accelCls=accel>20?'blue':accel<-20?'red':'gray';
+    const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`,strengthVal=signed(pow),accelVal=signed(accel),confidenceVal=Math.round(confidence)+'%',riskVal=Math.round(risk)+'%',topNode=$('ssscDashTop'),rowsNode=$('ssscDashRows');
+    topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('STRENGTH',`<span class="${blinkClass('kpi_strength',strengthVal)}">${strengthVal}</span>`,pow>20?'Bullish strength':pow<-20?'Bearish strength':'Neutral',powCls)+kpi('ACCEL',`<span class="${blinkClass('kpi_accel',accelVal)}">${accelVal}</span>`,accel>20?'Expanding':accel<-20?'Contracting':'Stable',accelCls)+kpi('CONFIDENCE',`<span class="${blinkClass('kpi_confidence',confidenceVal)}">${confidenceVal}</span>`,`${summary.confidenceConstraint||'none'} constrained`,confidence>62?'green':'gray','',true)+kpi('TIMING RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('MARKET SETUP',setupAction,marketRead.reason,'','action')+kpi('POSITION ACTION',positionAction,positionRead.reason,'','action',true);
     rowsNode.innerHTML=items.map(rowHtml).join('');$('ssscDashEvents').innerHTML=eventRows(items);animateRollingDigits(rowsNode);settleScoreRoll(items);bindRows();
     const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable'));
     $('ssscDashFooter').innerHTML=`Module: ${MODULE} | Private REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500-1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`;
@@ -22815,6 +22818,24 @@ If there is NO open position, use this Section 2 instead:
     },
     getAllDiagnostics(){ return {...data}; }
   };
+})();
+
+(()=>{
+  "use strict";
+  let signalBSnapshotLogger=null;
+  function ensureSignalBSnapshotLogger(){
+    if(signalBSnapshotLogger)return signalBSnapshotLogger;
+    const api=window.BT001_SIGNAL_B_SUPABASE_LOGGER;
+    if(!api||typeof api.createSnapshotLogger!=="function")return null;
+    signalBSnapshotLogger=api.createSnapshotLogger({
+      getEvaluation:()=>api.getLatestEvaluation(),
+      getSupabase:()=>window.BT001Supabase||null
+    });
+    return signalBSnapshotLogger;
+  }
+  function installSignalBSnapshotLogger(){ensureSignalBSnapshotLogger()?.start();}
+  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",installSignalBSnapshotLogger,{once:true});
+  else installSignalBSnapshotLogger();
 })();
 
 (() => {

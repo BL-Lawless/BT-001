@@ -49,15 +49,17 @@ const run=(async()=>{
     assert.deepStrictEqual(formingResult[key],baseResult[key],`field "${key}" changed when only a forming candle was added`);
   }
   for(const key of Object.keys(baseResult.comparisonDiagnostics)){
-    if(key==="readinessScore")continue;
+    if(key==="readinessScore"||key==="readinessBreakdown")continue;
     assert.deepStrictEqual(formingResult.comparisonDiagnostics[key],baseResult.comparisonDiagnostics[key],`comparisonDiagnostics.${key} changed when only a forming candle was added`);
   }
 
   // ...while readinessScore strictly increases on the strength of the forming-candle evidence alone.
   assert(formingResult.readinessScore>baseResult.readinessScore,`expected readinessScore to rise above ${baseResult.readinessScore}, got ${formingResult.readinessScore}`);
   assert(formingResult.readinessScore<=100);
+  assert(formingResult.comparisonDiagnostics.readinessBreakdown.bonusContribution>baseResult.comparisonDiagnostics.readinessBreakdown.bonusContribution);
 
-  // TRIGGER ACTIVE always forces readinessScore to exactly 100, regardless of the bonus inputs.
+  // TRIGGER ACTIVE is still highly ready, but its score remains quality-sensitive instead of
+  // snapping to 100 solely because every activation gate passed.
   const activeFacts={
     fresh:true,profile:{early:"1m",trigger:"3m",primary:"5m",setups:["3m","5m"],structures:["15m","1h"],boundaries:["4h","1d"],eventWindow:7,chaseAtr:1.35,minNetRr:1.35},
     directionalPermission:{permission:true,direction:"LONG",score:84,longScore:84,shortScore:31,reason:"LONG primary/structural permission",breakdown:{}},
@@ -69,7 +71,8 @@ const run=(async()=>{
   const activeEngine=context.createSignalEngineB();
   const activeResult=activeEngine.evaluateFacts(activeFacts,{horizonId:"quick",symbol:"BTCUSDT",version:1,directionMode:"LONG"});
   assert.equal(activeResult.entryState,"TRIGGER ACTIVE");
-  assert.equal(activeResult.readinessScore,100);
+  assert(activeResult.readinessScore>=80,`expected a strong active trigger to remain highly ready, got ${activeResult.readinessScore}`);
+  assert(activeResult.readinessScore<100,"TRIGGER ACTIVE must not force readinessScore to 100");
 
   // Shared fixture for the chase-distance tests below: identical gates, scores and
   // forming/early/momentum bonus signals throughout; only current.originDistanceAtr varies.
@@ -80,8 +83,8 @@ const run=(async()=>{
     setupComponents:{structuralLocation:90,regimeAlignment:86,eventLevelQuality:84,invalidationTargetGeometry:82,volatilitySuitability:85},
     trigger:{microstructureShift:true,shiftTime:180,displacementQuality:88,wickHeavy:false,flow:{effective:true,absorption:false,ineffectiveHighVolume:false,directionalImbalance:.18,priceProgressAtr:.72,efficiency:1.1,evidence:["Effective directional flow"]},participation:{state:"STRONG",score:88,credibleAbsorption:false,persistence:.75},retestHeld:true,qualifiedFollowThrough:false,freshnessScore:92,evidence:[]},
     // opposition stays effective throughout so the noEffectivePrimaryOpposition gate fails and
-    // the fixture never reaches TRIGGER ACTIVE (which would force readinessScore to a flat 100
-    // and hide the chase-distance effect entirely).
+    // the fixture never reaches TRIGGER ACTIVE, keeping this comparison focused on the same
+    // non-active gate configuration while current-entry distance changes.
     opposition:{effective:true,evidence:["5m opposing flow produced 0.40 ATR progress"],neutral:false},
     volatility:{regime:"Expanding/controlled",controlledAcceptance:true,realizedRangePercentile:78},
     geometry:{netRr:2.1,viable:true},
@@ -105,6 +108,10 @@ const run=(async()=>{
   assert.equal(nearResult.comparisonDiagnostics.triggerScore,farResult.comparisonDiagnostics.triggerScore);
   assert(nearResult.readinessScore>=farResult.readinessScore,`expected nearer setup (originDistanceAtr=0.1) readinessScore ${nearResult.readinessScore} to be >= farther setup (originDistanceAtr=1.2) readinessScore ${farResult.readinessScore}`);
   assert(nearResult.readinessScore>farResult.readinessScore,"expected the chase dampener to strictly separate the two readinessScores given the large distance gap");
+  const nearBreakdown=nearResult.comparisonDiagnostics.readinessBreakdown,farBreakdown=farResult.comparisonDiagnostics.readinessBreakdown;
+  assert(nearBreakdown.currentEntryScoreContribution>farBreakdown.currentEntryScoreContribution);
+  assert(nearBreakdown.bonusContribution>farBreakdown.bonusContribution);
+  assert.equal(nearBreakdown.total,nearResult.readinessScore);
 
   // (b) Crossing the chaseWarning threshold (60% of chaseAtr = 0.81) flips the flag true, while
   // entryState and every one of the 16 hard gates stay exactly as they were.

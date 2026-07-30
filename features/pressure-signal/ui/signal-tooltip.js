@@ -31,6 +31,7 @@
 
   function signalB(output,displayed,horizonLabel){
     const diagnostics=output.comparisonDiagnostics||{},setup=diagnostics.setupEvidence||{},trigger=diagnostics.triggerEvidence||{},entry=diagnostics.entryCondition||{},data=diagnostics.data||{},decision=output.decision||{};
+    const readiness=diagnostics.readinessBreakdown||{};
     const setupReasons=namedScores(diagnostics.setupBreakdown),triggerReasons=namedScores(diagnostics.triggerBreakdown),currentReasons=namedScores(diagnostics.currentEntryBreakdown);
     const supporting=list(diagnostics.supportingEvidence||output.triggerEvidence||output.reasons),opposing=list([...(diagnostics.opposingAutomaticEvidence||[]),...(diagnostics.effectiveOppositionEvidence||[])]);
     return [
@@ -39,6 +40,7 @@
         `Mode: ${unavailable(displayed.mode)} | Evaluated: ${unavailable(displayed.evaluatedDirection||displayed.direction)} | Horizon: ${unavailable(horizonLabel)}`,
         `State: ${unavailable(displayed.visibleState)} | Confidence/alignment: ${number(displayed.confidence,0)}`,
         `Readiness score: ${number(diagnostics.readinessScore,0)}`,
+        `Readiness breakdown: gates ${number(readiness.gateProgressContribution,1)}; trigger ${number(readiness.triggerScoreContribution,1)}; setup ${number(readiness.setupScoreContribution,1)}; current entry ${number(readiness.currentEntryScoreContribution,1)}; bonus ${number(readiness.bonusContribution,1)} (chase dampener ${number(readiness.chaseDampener,2)})`,
         `Publication generation: ${unavailable(displayed.publicationGeneration)}`
       ]),
       section("QUALITY",[
