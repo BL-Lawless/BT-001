@@ -8,21 +8,31 @@ function createSupabaseLogger(options={}){
   if(!machineId)throw new Error("machine_id is required");
   const intervalMs=Math.max(1,Number(options.snapshotIntervalMs)||30000);
   const client=options.client||createClient(url,key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});
-  let latestSnapshot=null,snapshotTimer=null;
+  let latestSnapshot=null,snapshotTimer=null,getSnapshotFreshness=typeof options.getSnapshotFreshness==="function"?options.getSnapshotFreshness:null;
   async function log(table,row){
     const {error}=await client.from(table).insert(row);
     if(error)throw error;
     return true;
   }
   function setLatestSnapshot(row){latestSnapshot=row||null;return true;}
-  function writeLatest(){if(!latestSnapshot)return Promise.resolve(false);return log("sssc_snapshots",latestSnapshot);}
+  function setSnapshotFreshnessProvider(provider){getSnapshotFreshness=typeof provider==="function"?provider:null;return true;}
+  function writeLatest(){
+    if(!latestSnapshot)return Promise.resolve(false);
+    const freshness=getSnapshotFreshness&&getSnapshotFreshness();
+    if(freshness&&freshness.fresh===false){
+      const last=freshness.lastUpdateAt?new Date(freshness.lastUpdateAt).toISOString():"never";
+      (options.warn||console.warn)(`[Headless Supabase] stale data detected, skipping SSSC snapshot write; last market update at ${last}`,freshness);
+      return Promise.resolve(false);
+    }
+    return log("sssc_snapshots",latestSnapshot);
+  }
   function startSnapshotLogging(){
     if(snapshotTimer==null)snapshotTimer=setInterval(()=>{writeLatest().catch(error=>(options.warn||console.warn)("[Headless Supabase] SSSC snapshot write failed",error));},intervalMs);
     return true;
   }
   function stopSnapshotLogging(){if(snapshotTimer!=null)clearInterval(snapshotTimer);snapshotTimer=null;}
   return Object.freeze({
-    configured:()=>true,getDeviceId:()=>machineId,log,setLatestSnapshot,startSnapshotLogging,stopSnapshotLogging,
+    configured:()=>true,getDeviceId:()=>machineId,log,setLatestSnapshot,setSnapshotFreshnessProvider,startSnapshotLogging,stopSnapshotLogging,
     flushSnapshot:writeLatest,close:stopSnapshotLogging
   });
 }

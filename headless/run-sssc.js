@@ -9,15 +9,41 @@ const calculation=require("../features/pressure-signal/sssc/calculation.js");
 const {createOrchestration}=require("../features/pressure-signal/sssc/orchestration.js");
 const {createSnapshotLogger}=require("../features/pressure-signal/sssc/core/snapshot-logger.js");
 
+function marketFingerprint(state){
+  const closed=state&&state.privateCandlesByTf||{},forming=state&&state.privateFormingByTf||{};
+  const fields=row=>row&&["time","open","high","low","close","volume","quoteVolume","openTime","closeTime","final"].map(key=>row[key]??null);
+  return Object.keys({...closed,...forming}).sort()
+    .map(tf=>[tf,fields((closed[tf]||[]).at(-1)),fields(forming[tf])])
+    .filter(([,last,live])=>last||live);
+}
+
+function createMarketFreshnessTracker(options={}){
+  const now=options.now||Date.now,staleAfterMs=Math.max(1,Number(options.staleAfterMs)||90000);
+  let fingerprint="",lastUpdateAt=0;
+  return Object.freeze({
+    observe(state){
+      const next=JSON.stringify(marketFingerprint(state));
+      if(next!=="[]"&&next!==fingerprint){fingerprint=next;lastUpdateAt=now();}
+      return lastUpdateAt;
+    },
+    status(){
+      const ageMs=lastUpdateAt?Math.max(0,now()-lastUpdateAt):Infinity;
+      return {fresh:!!lastUpdateAt&&ageMs<=staleAfterMs,lastUpdateAt:lastUpdateAt||null,ageMs,staleAfterMs};
+    }
+  });
+}
+
 function buildSsscRunner(options={}){
   const config=options.config,clock=options.clock,supabase=options.supabase,dataSource=options.dataSource;
   const slots=config.maPeriods.map((period,index)=>({slot:index+1,slotId:`MA${index+1}`,period}));
+  const freshness=createMarketFreshnessTracker({now:clock.now,staleAfterMs:options.staleAfterMs});
+  if(typeof supabase.setSnapshotFreshnessProvider==="function")supabase.setSnapshotFreshnessProvider(()=>freshness.status());
   let logger=null;
   const pipeline=createOrchestration({
     getSlots:()=>slots,getCalculation:()=>calculation,getSymbol:()=>config.symbol,
     fetchKlines:dataSource.fetchKlines,connectWebSocket:dataSource.connectWebSocket,
     getWsUrl:()=>config.binanceWsUrl,now:clock.now,
-    onUpdate:()=>{if(logger)logger.capture();},
+    onUpdate:state=>{freshness.observe(state);if(logger)logger.capture();},
     warn:(message,error)=>(options.warn||console.warn)(`[Headless SSSC] ${message}`,error)
   });
   logger=createSnapshotLogger({
@@ -44,5 +70,5 @@ async function main(){
   console.log(`[Headless SSSC] Running ${config.symbol} as ${config.machineId}. Press Ctrl+C to stop.`);
 }
 
-module.exports={buildSsscRunner,main};
+module.exports={buildSsscRunner,createMarketFreshnessTracker,marketFingerprint,main};
 if(require.main===module)main().catch(error=>{console.error("[Headless SSSC] Startup failed:",error);process.exitCode=1;});

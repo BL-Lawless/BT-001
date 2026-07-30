@@ -16,7 +16,7 @@ function createScalpMarketHub(options={}){
   const minimumRows=Math.max(80,Number(options.minimumRows)||80),now=options.now||Date.now;
   if(!dataSource||typeof dataSource.fetchKlines!=="function"||typeof dataSource.connectWebSocket!=="function")throw new Error("A Binance data source is required");
   const closed=new Map(),forming=new Map(),revisions=new Map(),listeners=new Set();
-  let socket=null;
+  let socket=null,everOpened=false,reseedPromise=null,queuedMessages=[];
   const intervalSeconds=tf=>({"1m":60,"3m":180,"5m":300,"15m":900}[tf]||60);
   function rows(tf,includeForming){
     const values=[...(closed.get(tf)||[])],live=forming.get(tf);
@@ -45,22 +45,57 @@ function createScalpMarketHub(options={}){
     publish({type:"kline",tf,closed:k.x===true,closedRevision:revision.closedRevision,formingRevision:revision.formingRevision,exchangeTime:Number(message.E)||now()});
     return true;
   }
-  async function start(){
-    await Promise.all(timeframes.map(async tf=>{
+  async function seed(reason){
+    if(reseedPromise)return reseedPromise;
+    (options.log||console.log)(`[Headless scalp] ${reason} REST reseed started`);
+    reseedPromise=(async()=>{
+      const loaded=await Promise.all(timeframes.map(async tf=>{
       const fetched=await dataSource.fetchKlines(tf,now(),minimumRows+1,symbol),step=intervalSeconds(tf),current=[];
+      let live=null;
       for(const row of fetched){
         const isForming=Number(row.time)*1000+step*1000>now();
-        if(isForming)forming.set(tf,{...row,final:false});else current.push({...row,final:true});
+        if(isForming)live={...row,final:false};else current.push({...row,final:true});
       }
-      closed.set(tf,current.slice(-(minimumRows+25)));revisions.set(tf,{closedRevision:current.length,formingRevision:forming.has(tf)?1:0});
-    }));
+      return {tf,current:current.slice(-(minimumRows+25)),live};
+      }));
+      for(const {tf,current,live} of loaded){
+        closed.set(tf,current);
+        if(live)forming.set(tf,live);else forming.delete(tf);
+        revisions.set(tf,{closedRevision:current.length,formingRevision:live?1:0});
+      }
+      for(const {tf} of loaded){
+        publish({type:"reseed",tf,closed:false,...getTimeframeRevisions(tf),exchangeTime:now()});
+      }
+      const pending=queuedMessages.splice(0);
+      for(const message of pending)apply(message);
+      (options.log||console.log)(`[Headless scalp] ${reason} REST reseed complete`);
+      return true;
+    })().catch(error=>{
+      (options.warn||console.warn)(`[Headless scalp] ${reason} REST reseed failed`,error);
+      const pending=queuedMessages.splice(0);
+      for(const message of pending)apply(message);
+      return false;
+    }).finally(()=>{reseedPromise=null;});
+    return reseedPromise;
+  }
+  function consume(event){
+    try{
+      const envelope=JSON.parse(event.data),message=envelope&&envelope.data||envelope;
+      if(reseedPromise){queuedMessages.push(message);if(queuedMessages.length>5000)queuedMessages.shift();}
+      else apply(message);
+    }catch(error){(options.warn||console.warn)("[Headless scalp] invalid websocket message",error);}
+  }
+  async function start(){
+    await seed("initial");
     const streams=timeframes.map(tf=>`${symbol.toLowerCase()}@kline_${tf}`).join("/");
     socket=dataSource.connectWebSocket(`${String(options.wsUrl||"wss://fstream.binance.com/market/stream").replace(/\/+$/,"")}?streams=${streams}`,{
-      reconnect:true,onMessage:event=>{try{const envelope=JSON.parse(event.data),message=envelope&&envelope.data||envelope;apply(message);}catch(_error){}}
+      connectionKey:"scalp-market-data",reconnect:true,
+      onOpen:()=>{if(everOpened)seed("reconnect");everOpened=true;},
+      onMessage:consume
     });
   }
   function stop(){if(socket)socket.disconnect();socket=null;}
-  return Object.freeze({start,stop,subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},getAuthoritativeMaSnapshot,getTimeframeRevisions,apply});
+  return Object.freeze({start,stop,seed,subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},getAuthoritativeMaSnapshot,getTimeframeRevisions,apply});
 }
 
 module.exports={createScalpMarketHub,emaSeries};
