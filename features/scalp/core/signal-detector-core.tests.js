@@ -24,9 +24,8 @@ const pipeline=createSignalPipeline({
 });
 assert.equal(pipeline.handleUpdate({tf:"1m"}),true);
 assert.equal(pipeline.handleUpdate({tf:"1m"}),false,"the same detector event must be written once");
-assert.deepEqual(writes.map(item=>item.table),["scalp_v1_signals","scalp_v2_signals"]);
+assert.deepEqual(writes.map(item=>item.table),["scalp_v1_signals"]);
 assert.equal(writes[0].row.event_at,new Date(2000).toISOString());
-assert(!Object.prototype.hasOwnProperty.call(writes[1].row,"event_at"));
 assert(writes.every(item=>item.row.machine_id==="vm-signal-test"&&item.row.action==="DETECTION_QUALIFIED"));
 assert(!writes.some(item=>["scalp_positions","scalp_trades","scalp_operational"].includes(item.table)));
 console.log("SCALP signal detector core tests: PASS");

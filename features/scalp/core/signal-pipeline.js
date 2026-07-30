@@ -28,8 +28,7 @@
       const cascade_agreement=cascadeAgreement(event.direction),detector_state=clone(event);
       const common={symbol,action:"DETECTION_QUALIFIED",source_timeframe:source,detector_state,cascade_agreement,machine_id};
       return [
-        {table:"scalp_v1_signals",row:{event_at:new Date(now()).toISOString(),...common}},
-        {table:"scalp_v2_signals",row:common}
+        {table:"scalp_v1_signals",row:{event_at:new Date(now()).toISOString(),...common}}
       ];
     }
     function accept(source,result){
