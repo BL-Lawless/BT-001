@@ -1,0 +1,13 @@
+[Unit]
+Description=Run BT-001 VM logger health monitor every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=vm-logger-monitor.service
+
+[Install]
+WantedBy=timers.target
+

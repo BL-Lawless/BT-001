@@ -1,19 +1,14 @@
 [Unit]
-Description=BT-001 scalp signal-detection logger
+Description=BT-001 VM logger health monitor
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
 User=nader_moustafa
 Group=nader_moustafa
 WorkingDirectory=/home/nader_moustafa/BT-001
 EnvironmentFile=/home/nader_moustafa/BT-001/.env
-ExecStart=/usr/bin/node /home/nader_moustafa/BT-001/headless/run-scalper-signals.js
-Restart=always
-RestartSec=5
+ExecStart=/usr/bin/node /home/nader_moustafa/BT-001/headless/monitor-heartbeat.js
 NoNewPrivileges=true
 PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target

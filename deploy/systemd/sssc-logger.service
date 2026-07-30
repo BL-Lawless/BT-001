@@ -5,11 +5,11 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=btlogger
-Group=btlogger
-WorkingDirectory=/opt/bt-001
-EnvironmentFile=/opt/bt-001/.env
-ExecStart=/usr/bin/node /opt/bt-001/headless/run-sssc.js
+User=nader_moustafa
+Group=nader_moustafa
+WorkingDirectory=/home/nader_moustafa/BT-001
+EnvironmentFile=/home/nader_moustafa/BT-001/.env
+ExecStart=/usr/bin/node /home/nader_moustafa/BT-001/headless/run-sssc.js
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
