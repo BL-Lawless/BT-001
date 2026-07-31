@@ -9,6 +9,7 @@ function createSupabaseLogger(options={}){
   const intervalMs=Math.max(1,Number(options.snapshotIntervalMs)||30000);
   const client=options.client||createClient(url,key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});
   let latestSnapshot=null,snapshotTimer=null,getSnapshotFreshness=typeof options.getSnapshotFreshness==="function"?options.getSnapshotFreshness:null;
+  const signalTracker=options.signalTracker||null;
   async function log(table,row){
     const {error}=await client.from(table).insert(row);
     if(error)throw error;
@@ -24,7 +25,20 @@ function createSupabaseLogger(options={}){
       (options.warn||console.warn)(`[Headless Supabase] stale data detected, skipping SSSC snapshot write; last market update at ${last}`,freshness);
       return Promise.resolve(false);
     }
-    return log("sssc_snapshots",latestSnapshot);
+    return writeSnapshotAndSignal(latestSnapshot);
+  }
+  async function writeSnapshotAndSignal(row){
+    let query=client.from("sssc_snapshots").insert(row),result;
+    if(query&&typeof query.select==="function"){
+      query=query.select("id");
+      result=query&&typeof query.single==="function"?await query.single():await query;
+    }else result=await query;
+    if(result&&result.error)throw result.error;
+    const snapshotId=result&&result.data&&(Array.isArray(result.data)?result.data[0]&&result.data[0].id:result.data.id);
+    if(!signalTracker||typeof signalTracker.observe!=="function"||snapshotId==null)return true;
+    const signal=signalTracker.observe({marketRead:row.aggregate,eventAt:row.event_at,machineId:row.machine_id,symbol:row.symbol,snapshotId});
+    if(signal)await log("sssc_signals",signal);
+    return true;
   }
   function startSnapshotLogging(){
     if(snapshotTimer==null)snapshotTimer=setInterval(()=>{writeLatest().catch(error=>(options.warn||console.warn)("[Headless Supabase] SSSC snapshot write failed",error));},intervalMs);

@@ -8,6 +8,7 @@ const {createLoggerRunner,installProcessShutdown}=require("./logger-runner.js");
 const calculation=require("../features/pressure-signal/sssc/calculation.js");
 const {createOrchestration}=require("../features/pressure-signal/sssc/orchestration.js");
 const {createSnapshotLogger}=require("../features/pressure-signal/sssc/core/snapshot-logger.js");
+const {createSignalTransitionTracker}=require("../features/pressure-signal/sssc/core/signal-transition.js");
 const {createFuturesMarketContextLogger}=require("./futures-market-context-logger.js");
 
 function marketFingerprint(state){
@@ -66,7 +67,8 @@ async function main(){
   loadDotEnv();
   const config=readConfig(),clock=createNodeExchangeClock({baseUrl:config.binanceRestUrl});
   await clock.ensureSynchronized({attempts:4,baseDelayMs:300});
-  const supabase=createSupabaseLogger({url:config.supabaseUrl,key:config.supabaseAnonKey,machineId:config.machineId});
+  const signalTracker=createSignalTransitionTracker({calculation});
+  const supabase=createSupabaseLogger({url:config.supabaseUrl,key:config.supabaseAnonKey,machineId:config.machineId,signalTracker});
   const dataSource=createBinanceDataSource({restUrl:config.binanceRestUrl});
   const runner=buildSsscRunner({config,clock,supabase,dataSource});
   installProcessShutdown(runner);
