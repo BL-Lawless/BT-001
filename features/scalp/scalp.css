@@ -9,6 +9,9 @@
 .scalp-status:empty{display:none}
 .scalp-section{width:100%;margin:0 auto;padding:5px 6px;background:#fff;border-color:#d9dce1}
 .scalp-tranche-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center;gap:12px;color:var(--scalp-label);font-size:13px;font-weight:700;line-height:20px;text-align:center;font-variant-numeric:tabular-nums}
+.scalp-engagement-box{padding:5px 8px;border:1px solid #c9cdd3;border-radius:4px;background:#dfe2e6;color:#111}
+.scalp-long-box.is-engaged{background:#ccefd4}
+.scalp-short-box.is-engaged{background:#f4cccc}
 .scalp-section-title,.scalp-feature-toggle{font-size:12px;font-weight:700}
 .scalp-section-title{min-height:16px;margin:0 0 3px;line-height:16px;letter-spacing:.02em}
 .scalp-section-toggle{display:flex;width:100%;align-items:center;justify-content:space-between;padding:0;border:0;background:transparent;text-align:left;cursor:pointer;font-family:inherit}
