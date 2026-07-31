@@ -73,7 +73,7 @@ assert.equal(
 );
 assert(repairSource.includes("if(repairChanged)bumpClosedRevision(tf)"),"a no-op repair must not bump closed revision");
 assert(repairSource.includes("if(!stale&&!unresolvedGaps.length)state.lastGapRepairMsByTf[tf] = now()"),"repair diagnostics must only mark a current gap repaired after continuity validation succeeds");
-assert(main.includes('["connecting","live"].includes(streamStatus)'),"focus/pageshow recovery must not restart an already-connecting private stream");
+assert(main.includes("if(visibilityAccountRecoveryPromise21)return visibilityAccountRecoveryPromise21")&&main.includes("startPrivateUserStream21()"),"focus/pageshow recovery must coalesce and reuse the idempotent private-stream start path");
 assert(main.includes('connectionKey:"public-market-data"')&&main.includes('connectionKey:"main-private-user-data"'));
 
 global.window=originalWindow;global.WebSocket=originalWebSocket;global.setTimeout=originalSetTimeout;global.clearTimeout=originalClearTimeout;

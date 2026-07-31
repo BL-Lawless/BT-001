@@ -70,6 +70,9 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
   });
   assert.equal(await slow.sync(),-100);
   assert.equal(slow.isReliable(),true);
+
+  local=20000;let epoch=1,hidden=false,resolveSuspended;const suspended=createExchangeClock({localNow:()=>local,maxRoundTripMs:100,visibilityState:()=>({hidden,epoch}),fetchServerTime:()=>new Promise(resolve=>{resolveSuspended=resolve;})});const contaminated=suspended.sync(true);hidden=true;local+=21537;epoch++;hidden=false;epoch++;resolveSuspended(19900);await contaminated;assert.equal(suspended.status().discardedContaminatedSamples,1);assert.equal(suspended.status().lastError,null);assert(!/round-trip/.test(String(suspended.status().lastError||"")));
+  for(const suspensionMs of [20000,60000]){local=30000;epoch=10;hidden=false;let release;const clock=createExchangeClock({localNow:()=>local,maxRoundTripMs:100,visibilityState:()=>({hidden,epoch}),fetchServerTime:()=>new Promise(resolve=>{release=resolve;})});const pending=clock.sync(true);hidden=true;local+=suspensionMs;epoch++;hidden=false;epoch++;release(29900);await pending;assert.equal(clock.status().discardedContaminatedSamples,1,`${suspensionMs}ms suspension must be discarded`);assert.equal(clock.status().lastError,null);}
   assert.equal(await slow.sync(true),-100,"a suspicious measurement must not replace the last usable offset");
   assert.equal(slow.isReliable(),false,"a background-delayed sync must invalidate reliability");
   assert.equal(slow.status().lastSyncOk,false);
@@ -104,9 +107,9 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
     privateCoordinator.includes("requestAuthoritativeOrders21("),
     "position and order reconciliation reads must start in parallel"
   );
-  const visibilityReturn=main.slice(main.indexOf("function handleVisibilityReturn()"),main.indexOf("function scheduleVisibilityRecovery()"));
+  const visibilityRecoveryStart=main.indexOf("async function recoverVisibleAccounts21"),visibilityReturn=main.slice(visibilityRecoveryStart,visibilityRecoveryStart+2500);
   assert(
-    visibilityReturn.includes("window.BT001ExchangeClock.sync(true)"),
+    visibilityReturn.includes("await clock.sync(true)"),
     "visibility recovery must force the shared exchange clock to bypass its five-minute cache"
   );
   console.log("exchange clock tests: PASS");

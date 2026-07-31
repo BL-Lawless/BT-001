@@ -85,7 +85,7 @@
 
   function create(accountSlot = "scalper") {
     const slot = accountSlot === "main" ? "main" : "scalper";
-    let streamStatus = "OFFLINE", stream = null, attachedEngine = null;
+    let streamStatus = "OFFLINE", stream = null, attachedEngine = null, recoveryPromise=null;
 
     function credentials() {
       return window.BT001ScalpAccount && window.BT001ScalpAccount.getCredentials ? window.BT001ScalpAccount.getCredentials(slot) : { key: "", secret: "" };
@@ -187,12 +187,16 @@
       if (stream) { try { stream.stop(); } catch (_e) {} }
       stream = null; attachedEngine = null; setStreamStatus("OFFLINE");
     }
+    async function recover(){
+      if(recoveryPromise)return recoveryPromise;
+      recoveryPromise=(async()=>{if(!isAuthenticated())return null;if(attachedEngine&&typeof attachedEngine.setRecoveryBlocked==="function")attachedEngine.setRecoveryBlocked(true,"Authenticated account recovery");try{if(!stream)attach(attachedEngine);else if(!["CONNECTING","LIVE"].includes(streamStatus))await stream.start({reconnect:true});const [facts,account]=await Promise.all([reconcile(),balance()]);if(attachedEngine){attachedEngine.applyPositionFacts(facts.positions);await attachedEngine.recover({reconnect:true});if(typeof attachedEngine.completeRecovery==="function")attachedEngine.completeRecovery();}return {facts,account,streamStatus};}finally{recoveryPromise=null;}})();return recoveryPromise;
+    }
 
     return Object.freeze({
       isAuthenticated, symbol, connection: () => ({ streamStatus }),
       position, positions, filters, orders, balance, commissionRate, refreshPosition, refreshPositions, reconcile,
       submitOrder, cancelOrder, queryOrder, submitAlgoOrder, cancelAlgoOrder, queryAlgoOrder,
-      markDirty, attach, detach
+      markDirty, attach, detach, recover
     });
   }
 

@@ -6,7 +6,8 @@ const BT001_PERFORMANCE_DIAGNOSTICS = window.BT001_PERFORMANCE_DIAGNOSTICS ||= {
 [
   "signalLightCalculations","signalFullEvidenceBuilds","signalFormingEvidenceBuilds","maCacheHits","maCacheMisses",
   "smcCacheHits","smcCacheMisses","privatePositionRestReads","privateNormalOrderRestReads","privateAlgoOrderRestReads",
-  "accountStreamEvents","chartDrawsFromAccountSync"
+  "accountStreamEvents","chartDrawsFromAccountSync","chartRedrawCount","publicWsRestartCount","obsoleteChartLoadsDiscarded",
+  "visibilityFirstChartPaintMs","visibilityInteractiveMs","timeframeFirstPaintMs","restCandleRequestCount"
 ].forEach(key => { if(!Number.isFinite(Number(BT001_PERFORMANCE_DIAGNOSTICS[key]))) BT001_PERFORMANCE_DIAGNOSTICS[key] = 0; });
 
 function refocusDiagNow(){
@@ -2919,8 +2920,17 @@ function scaleY(delta){
    SECTION 10 — DATA DOWNLOAD / REALTIME
 ========================================================= */
 
+const candleRestInFlight=new Map();
 async function klinesForInterval(interval,endMs,limit,symbolOverride){
   const c = cfg();
+  const requestKey=`${String(symbolOverride||c.symbol).toUpperCase()}|${interval}|${Math.floor(endMs)}|${Math.min(KLINE_LIMIT,limit)}`;
+  if(candleRestInFlight.has(requestKey)){
+    BT001_PERFORMANCE_DIAGNOSTICS.restCandleRequestReuseCount=(BT001_PERFORMANCE_DIAGNOSTICS.restCandleRequestReuseCount||0)+1;
+    return candleRestInFlight.get(requestKey);
+  }
+  BT001_PERFORMANCE_DIAGNOSTICS.restCandleRequestCount += 1;
+  const requestCounts=BT001_PERFORMANCE_DIAGNOSTICS.restCandleRequests ||= {};
+  requestCounts[requestKey]=(requestCounts[requestKey]||0)+1;
   const url =
     c.rest +
     "?symbol=" + encodeURIComponent(symbolOverride || c.symbol) +
@@ -2928,17 +2938,15 @@ async function klinesForInterval(interval,endMs,limit,symbolOverride){
     "&limit=" + Math.min(KLINE_LIMIT,limit) +
     "&endTime=" + Math.floor(endMs);
 
-  const r = await API.fetch(url,{
-    cache:"no-store",
-    headers:{"Cache-Control":"no-cache","Pragma":"no-cache"}
-  });
-
-  if(!r.ok) throw new Error("REST klines HTTP " + r.status);
-
-  const d = await r.json();
-  if(!Array.isArray(d)) throw new Error("Invalid Binance klines response");
-
-  return d.map(parseRest);
+  const request=(async()=>{
+    const r = await API.fetch(url,{cache:"no-store",headers:{"Cache-Control":"no-cache","Pragma":"no-cache"}});
+    if(!r.ok) throw new Error("REST klines HTTP " + r.status);
+    const d = await r.json();
+    if(!Array.isArray(d)) throw new Error("Invalid Binance klines response");
+    return d.map(parseRest);
+  })().finally(()=>{if(candleRestInFlight.get(requestKey)===request)candleRestInFlight.delete(requestKey);});
+  candleRestInFlight.set(requestKey,request);
+  return request;
 }
 
 async function klines(endMs,limit){
@@ -3925,6 +3933,18 @@ const marketDataHub = (() => {
     });
     return gaps;
   }
+  function inspectTimeframeBuffer(tf){
+    ensureBufferSymbol();
+    const rows=getClosedBuffer(tf),step=ivSec(tf),seen=new Set();
+    let valid=Array.isArray(rows)&&rows.length>=2,previous=-Infinity;
+    for(const row of rows){
+      const time=Number(row&&row.time),open=Number(row&&row.open),high=Number(row&&row.high),low=Number(row&&row.low),close=Number(row&&row.close);
+      if(!Number.isFinite(time)||time<=previous||seen.has(time)||![open,high,low,close].every(Number.isFinite)||high<Math.max(open,close)||low>Math.min(open,close)){valid=false;break;}
+      seen.add(time);previous=time;
+    }
+    const gaps=valid?validateClosedBuffer(tf,rows,{repair:false,reason:"buffer-inspection"}):[];
+    return {symbol:state.bufferSymbol,timeframe:tf,valid,usable:valid,continuous:valid&&!gaps.length,gaps,rows:getChartBuffer(tf),step};
+  }
   function setFormingCandle(tf,row,{replace=false,source="ws"}={}){
     if(!row){
       const existed = !!state.formingKlineByTf[tf];
@@ -4193,6 +4213,13 @@ const marketDataHub = (() => {
     const keepCfg = sharedTfConfig(tf);
     const retentionCap = Math.max(targetClosed, keepCfg ? keepCfg.cap : intervalKeep(tf));
     const guard = options && options.guard;
+    const retained=inspectTimeframeBuffer(tf);
+    if(options.allowRetained!==false&&retained.usable){
+      const repairPromise=retained.gaps.length
+        ? repairMissingClosedCandles(tf,retained.gaps,"retained-buffer-repair",{guard})
+        : Promise.resolve({fetched:0,merged:0,changed:false,resolved:true});
+      return {closed:getClosedBuffer(tf),chart:getChartBuffer(tf),continuous:retained.continuous,cached:true,gaps:retained.gaps,repairPromise};
+    }
     const liveForming = getFormingCandle(tf);
     const fetchWindow = async (endMs,target) => {
       let rows = [];
@@ -4263,7 +4290,7 @@ const marketDataHub = (() => {
     }
     const symbol = ensureBufferSymbol();
     const guard = () => String((cfg() && cfg().symbol) || "").toUpperCase() === symbol;
-    const promise = prepareTimeframeBuffer(interval,targetClosed,{guard})
+    const promise = prepareTimeframeBuffer(interval,targetClosed,{guard,allowRetained:false})
       .then(result => {
         const gaps = validateClosedBuffer(interval,getClosedBuffer(interval),{repair:false,reason:"consumer-load-verify"});
         if(!result || getClosedBuffer(interval).length < targetClosed || gaps.length){
@@ -4443,6 +4470,7 @@ const marketDataHub = (() => {
     const streams = currentStreams();
     const url = wsBase() + "?streams=" + streams.join("/");
     if(!force&&ws&&diag.activeUrl===url&&(ws.readyState===WebSocket.CONNECTING||ws.readyState===WebSocket.OPEN))return;
+    BT001_PERFORMANCE_DIAGNOSTICS.publicWsRestartCount += 1;
     if(force){
       diag.forcedReconnectCount += 1;
       diag.lastForcedReconnectReason = reason || "forced reconnect";
@@ -4601,19 +4629,26 @@ const marketDataHub = (() => {
     refocusDiag("handleVisibilityReturn start",{documentHidden:document.hidden});
     try{
       if(document.hidden) return;
-      if(window.BT001ExchangeClock&&typeof window.BT001ExchangeClock.sync==="function"){
-        window.BT001ExchangeClock.sync(true);
+      const retained=inspectTimeframeBuffer(iv());
+      if(retained.usable){
+        rehydrateActiveChartFromHub(iv(),now(),"visibility-retained");
+        const firstPaintMs=refocusDiagNow()-refocusStarted;
+        BT001_PERFORMANCE_DIAGNOSTICS.visibilityFirstChartPaintMs=firstPaintMs;
+        BT001_PERFORMANCE_DIAGNOSTICS.visibilityInteractiveMs=firstPaintMs;
       }
+      if(window.BT001VisibilityRecovery&&typeof window.BT001VisibilityRecovery.recover==="function")window.BT001VisibilityRecovery.recover("public-visibility-return").catch(()=>{});
       diag.hiddenSince = 0;
       diag.lastVisibleAt = now();
-      repairKnownClosedGaps("visibility/focus return");
-      restSyncLatest("visibility/focus return");
-      if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
-      if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
-      const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-      if(!socketOpen()) connect();
-      else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
-      else refreshConnectionStatus();
+      setTimeout(()=>{
+        repairKnownClosedGaps("visibility/focus return");
+        restSyncLatest("visibility/focus return");
+        if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
+        if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
+        const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+        if(!socketOpen()) connect();
+        else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
+        else refreshConnectionStatus();
+      },0);
     }finally{
       refocusDiag("handleVisibilityReturn end",{documentHidden:document.hidden,elapsedMs:refocusDiagNow()-refocusStarted});
     }
@@ -4677,6 +4712,7 @@ const marketDataHub = (() => {
     getClosedBuffer,
     getFormingCandle,
     getChartBuffer,
+    inspectTimeframeBuffer,
     getTimeframeRevisions,
     _cacheSelfTest:runRevisionCacheSelfTests,
     canonicalTfKey,
@@ -4817,17 +4853,39 @@ function stopWatch(){
 }
 
 async function loadChart(opt={}){
-  if(loading){
-    queuedChartLoadOptions = {...opt};
-    return;
-  }
   const requestGeneration = ++chartLoadGeneration;
   const requestedInterval = iv();
   const requestedSymbol = cfg().symbol;
-  const guard = () =>
-    requestGeneration === chartLoadGeneration &&
-    requestedInterval === iv() &&
-    requestedSymbol === cfg().symbol;
+  const clickedAt=refocusDiagNow();
+  const guard = () => requestGeneration === chartLoadGeneration && requestedInterval === iv() && requestedSymbol === cfg().symbol;
+  const retained=marketDataHub.inspectTimeframeBuffer(requestedInterval);
+  if(retained.usable){
+    candles=marketDataHub.getChartBuffer(requestedInterval);
+    maSeriesBySlot={1:[],2:[],3:[],4:[],5:[]};
+    setCurrentVWAPSeries([]);
+    noMoreOlder=false;loadingOlder=false;olderFetchArmed=false;olderFetchTargetVisible=0;
+    if(!opt.focus){manualY=false;yMin=null;yMax=null;}
+    indicators();
+    if(opt.focus)applyFocus(opt.focus);else if(!opt.preserveView)resetView({reason:"timeframe-retained-reset"});else clampView();
+    if(candles.length)metrics(candles[candles.length-1]);
+    draw();
+    BT001_PERFORMANCE_DIAGNOSTICS.timeframeFirstPaintMs=refocusDiagNow()-clickedAt;
+    markLiveUpdate();
+    marketDataHub.rebuildRequirements(false);
+    setTimeout(()=>{
+      if(!guard())return;
+      marketDataHub.prepareTimeframeBuffer(requestedInterval,chartDesiredClosedDepth(visibleCount||DEF_VISIBLE),{guard,allowRetained:true})
+        .then(result=>result&&result.repairPromise).catch(error=>console.warn("Retained timeframe repair failed",error));
+      fetchDaily().catch(error=>console.warn("Deferred daily refresh failed",error));
+      marketDataHub.restSyncLatest("timeframe retained background refresh");
+    },0);
+    return;
+  }
+  if(loading){
+    queuedChartLoadOptions = {opt:{...opt},generation:requestGeneration,interval:requestedInterval,symbol:requestedSymbol};
+    BT001_PERFORMANCE_DIAGNOSTICS.obsoleteChartLoadsDiscarded += 1;
+    return;
+  }
   const preserveView = !!opt.preserveView;
   const viewRevisionAtStart = chartViewRevision;
   const keepVisible = preserveView ? visibleCount : DEF_VISIBLE;
@@ -4914,17 +4972,12 @@ async function loadChart(opt={}){
     console.error(e);
     marketDataHub.refreshConnectionStatus();
   }finally{
-    if(requestGeneration === chartLoadGeneration) loading = false;
+    loading = false;
     const queued = queuedChartLoadOptions;
     queuedChartLoadOptions = null;
-    const shouldReplayQueued = !!queued && (
-      requestGeneration !== chartLoadGeneration ||
-      requestedInterval !== iv() ||
-      requestedSymbol !== cfg().symbol
-    );
+    const shouldReplayQueued = !!queued && queued.generation===chartLoadGeneration && queued.interval===iv() && queued.symbol===cfg().symbol;
     if(shouldReplayQueued){
-      loading = false;
-      loadChart(queued);
+      loadChart(queued.opt);
     }
   }
 }
@@ -6896,6 +6949,7 @@ function resizeCanvas(){
 }
 
 function draw(){
+  BT001_PERFORMANCE_DIAGNOSTICS.chartRedrawCount += 1;
   const surface = syncCanvasRenderSurface(false);
   const w = surface.w;
   const h = surface.h;
@@ -16356,12 +16410,13 @@ startTradeAuto();
       markPrivateDirty21({positionDirty:true,ordersDirty:true},"60-second-open-position-safety-check",{immediate:true});
     }
   },PRIVATE_SAFETY_MS21);
-  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {
-    if(name==="visibilitychange" && document.hidden) return;
-    markPrivateDirty21({positionDirty:true,ordersDirty:true},"focus-visibility-recovery",{immediate:true});
-    const streamStatus=privateSnapshot21().userStream.streamStatus;
-    if(!privateUserStream21||!["connecting","live"].includes(streamStatus))schedulePrivateStreamRestart21();
-  },true));
+  let visibilityAccountRecoveryPromise21=null,visibilityRecoveryRuns21=0;
+  async function recoverVisibleAccounts21(reason="visibility-return"){
+    if(document.hidden)return null;if(visibilityAccountRecoveryPromise21)return visibilityAccountRecoveryPromise21;
+    visibilityAccountRecoveryPromise21=(async()=>{visibilityRecoveryRuns21++;const clock=window.BT001ExchangeClock;if(!clock)throw new Error("Binance exchange clock is unavailable");const discardedBefore=Number(clock.status().discardedContaminatedSamples)||0;await clock.sync(true);if((Number(clock.status().discardedContaminatedSamples)||0)>discardedBefore)await clock.sync(true);if(!clock.isReliable())throw new Error("Fresh visible Binance clock synchronization was not trustworthy");startPrivateUserStream21();markPrivateDirty21({positionDirty:true,ordersDirty:true},reason,{schedule:false});const mainFacts=await reconcilePrivateState21();const mainBalance=window.BT001_BINANCE_TRADING&&await window.BT001_BINANCE_TRADING.balance();const scalp=window.BT001_SCALP;const scalpFacts=scalp&&typeof scalp.recoverAuthenticated==="function"?await scalp.recoverAuthenticated():null;return {mainFacts,mainBalance,scalpFacts};})().finally(()=>{visibilityAccountRecoveryPromise21=null;});return visibilityAccountRecoveryPromise21;
+  }
+  window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>({active:!!visibilityAccountRecoveryPromise21,runs:visibilityRecoveryRuns21})});
+  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {if(name==="visibilitychange"&&document.hidden)return;recoverVisibleAccounts21(`focus-visibility-recovery:${name}`).catch(error=>console.warn("Authenticated visibility recovery failed",error));},true));
   if(marketEl) marketEl.addEventListener("change",() => {
     markPrivateDirty21({positionDirty:true,ordersDirty:true},"symbol-change",{immediate:true});
     schedulePrivateStreamRestart21();
