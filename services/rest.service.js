@@ -1,4 +1,13 @@
 (function (global) {
+  // TEMPORARY runtime trace for the Supabase heatmap read. Intentionally records no headers,
+  // because they contain the anon credential. Inspect window.BT001HeatmapWireTrace after a run.
+  function traceHeatmapWire(entry) {
+    if (!String(entry && entry.url || "").includes("/liquidation_heatmap_snapshots")) return;
+    const trace = Object.freeze({ capturedAt: new Date().toISOString(), ...entry });
+    global.BT001HeatmapWireTrace = trace;
+    console.log("[BT001 heatmap wire trace]", trace);
+  }
+
   class RestError extends Error {
     constructor(message, details = {}) {
       super(message || "Request failed");
@@ -71,6 +80,7 @@
       try {
         return await fetch(url, config);
       } catch (error) {
+        traceHeatmapWire({ url: String(url), method: config.method, networkError: error && error.message || String(error) });
         throw new RestError(error.message || "Network request failed", {
           cause: error,
           url,
@@ -82,6 +92,9 @@
 
     async requestJson(url, options = {}) {
       const response = await this.request(url, options);
+      let rawBody = null;
+      try { rawBody = await response.clone().text(); } catch (error) { rawBody = `[body capture failed: ${error && error.message || String(error)}]`; }
+      traceHeatmapWire({ url: String(url), method: options.method || "GET", status: response.status, statusText: response.statusText, body: rawBody });
       const data = await this.parseBody(response);
 
       if (!response.ok) {
