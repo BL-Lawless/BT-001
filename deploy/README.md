@@ -13,6 +13,8 @@ Expected layout:
   `/etc/systemd/system/scalp-signal-logger.service`
 - monitor units: `/etc/systemd/system/vm-logger-monitor.service` and
   `/etc/systemd/system/vm-logger-monitor.timer`
+- heatmap units: `/etc/systemd/system/liquidation-heatmap.service` and
+  `/etc/systemd/system/liquidation-heatmap.timer`
 
 After cloning with the deploy key, install production dependencies with `npm ci --omit=dev`, copy
 `.env.example` to `.env`, and replace all placeholders. The VM must receive a new permanent
@@ -25,6 +27,11 @@ Before enabling futures funding/open-interest collection, run
 `deploy/sql/futures_market_snapshots.sql` once in the Supabase SQL editor. The additive collector
 runs inside `sssc-logger`; restart that service after deploying the code.
 
+Before enabling the heatmap timer, review and manually run
+`deploy/sql/liquidation_heatmap_snapshots.sql` in the Supabase SQL editor. Set `APIFY_API_KEY` in
+the VM's untracked `.env`. The timer uses fixed UTC calendar times (00:00, 07:00, 13:00, 17:00,
+21:00), for exactly five scheduled Actor runs per day.
+
 Install and start the units:
 
 ```bash
@@ -32,6 +39,15 @@ sudo cp deploy/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sssc-logger scalp-signal-logger
 systemctl status sssc-logger scalp-signal-logger
+```
+
+Install the heatmap oneshot/timer after its table exists:
+
+```bash
+sudo cp deploy/systemd/liquidation-heatmap.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now liquidation-heatmap.timer
+systemctl list-timers liquidation-heatmap.timer
 ```
 
 Reboot verification:

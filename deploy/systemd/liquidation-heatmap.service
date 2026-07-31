@@ -1,0 +1,14 @@
+[Unit]
+Description=BT-001 liquidation heatmap pull
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=nader_moustafa
+Group=nader_moustafa
+WorkingDirectory=/home/nader_moustafa/BT-001
+EnvironmentFile=/home/nader_moustafa/BT-001/.env
+ExecStart=/usr/bin/node /home/nader_moustafa/BT-001/headless/pull-liquidation-heatmap.js
+NoNewPrivileges=true
+PrivateTmp=true

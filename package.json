@@ -8,6 +8,7 @@
     "test": "node scripts/run-tests.js",
     "headless:sssc": "node headless/run-sssc.js",
     "headless:scalper": "node headless/run-scalper-signals.js",
+    "headless:heatmap": "node headless/pull-liquidation-heatmap.js",
     "headless:monitor": "node headless/monitor-heartbeat.js"
   },
   "dependencies": {

@@ -17,8 +17,9 @@ assert.equal(logger.logActivity("DETECTION_QUALIFIED",{sourceTimeframe:"1m",dete
 assert.equal(logger.logActivity("RANK_REJECTED",{sourceTimeframe:"1m"}),false);
 assert.equal(writes.length,0);
 assert.equal(logger.logActivity("UNROUTED_ACTION"),false);
-logger.logTrade({trancheId:"L1",symbol:"BTCUSDT",direction:"LONG",createdAt:now-5000,closedAt:now,requestedQty:.1,filledQty:.1,entryPrice:100,closedPrice:101},"TP",.1,100);
+logger.logTrade({trancheId:"L1",symbol:"BTCUSDT",direction:"LONG",engineSource:"V2",createdAt:now-5000,closedAt:now,requestedQty:.1,filledQty:.1,entryPrice:100,closedPrice:101},"TP",.1,100);
 assert.equal(writes[0].table,"scalp_trades");
 assert.equal(writes[0].row.created_at,new Date(now-4000).toISOString());
 assert.equal(writes[0].row.device_id,"node-scalp");
+assert.equal(writes[0].row.engine_source,"V2");
 console.log("SCALP logger core tests: PASS");

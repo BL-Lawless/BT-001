@@ -22426,6 +22426,8 @@ If there is NO open position, use this Section 2 instead:
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
   let visible=false, drag=null;
   let data={}, lastFullFetch=0, lastRender=0, pipeline=null;
+  let futuresContext=null,futuresContextReadAt=0,futuresContextPending=null;
+  const FUTURES_CONTEXT_REFRESH_MS=30000;
   let previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
   const gaugeTracker=window.BT001_SSSC_GAUGE_PRESENTATION?.createGaugeTracker?.()||{update(){},reading(){return {current:0,previous:null};}};
   let hadCanonicalMaSlots=false;
@@ -22686,6 +22688,25 @@ If there is NO open position, use this Section 2 instead:
     const title=tooltip?` title="${String(sub).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}"`:'';
     return `<div class="sssc-ui-kpi ${extra}"${title}><label>${label}</label><div class="val ${cls}">${val}</div>${tooltip?'':`<div class="sub">${sub}</div>`}</div>`;
   }
+  function refreshFuturesContext(){
+    if(futuresContextPending||Date.now()-futuresContextReadAt<FUTURES_CONTEXT_REFRESH_MS)return futuresContextPending;
+    const supabase=window.BT001Supabase;
+    if(!supabase||typeof supabase.getLatestFuturesMarketSnapshot!=='function')return null;
+    futuresContextReadAt=Date.now();
+    futuresContextPending=Promise.resolve(supabase.getLatestFuturesMarketSnapshot(sym())).then(row=>{
+      futuresContext=row||null;renderFuturesContext();return row;
+    }).catch(error=>console.warn(MODULE+' futures market snapshot read failed',error)).finally(()=>{futuresContextPending=null;});
+    return futuresContextPending;
+  }
+  function renderFuturesContext(){
+    const node=$('ssscMarketContext');if(!node)return;
+    if(!futuresContext){node.textContent='Funding rate: — · Open interest: — · As of —';return;}
+    const eventMs=Date.parse(futuresContext.event_at),age=Number.isFinite(eventMs)?Math.max(0,Math.round((Date.now()-eventMs)/1000)):null;
+    const ageText=age==null?'unknown':age<60?`${age}s ago`:age<3600?`${Math.floor(age/60)}m ago`:`${Math.floor(age/3600)}h ago`;
+    const asOf=Number.isFinite(eventMs)&&typeof formatDateTime==='function'?formatDateTime(eventMs):futuresContext.event_at;
+    const funding=num(futuresContext.funding_rate),interest=num(futuresContext.open_interest);
+    node.textContent=`Funding rate: ${funding==null?'—':funding.toFixed(8)} · Open interest: ${interest==null?'—':interest.toLocaleString('en-US',{maximumFractionDigits:3})} · As of ${asOf} (${ageText})`;
+  }
   function changedValue(key,val){ val=String(val); const old=previousTopValues[key]; const changed=old!==undefined && old!==val; previousTopValues[key]=val; return changed; }
   function blinkClass(key,val){ return changedValue(key,val)?' sssc-value-blink':''; }
   function updatePreviousScores(items){ for(const it of items){ if(!it||!it.available||!Number.isFinite(it.direction)) continue; const cur=Math.abs(Math.round(Number(it.direction)||0)); if(Number.isFinite(lastRenderedScoreByTf[it.tf]) && lastRenderedScoreByTf[it.tf]!==cur){ previousScoreValueByTf[it.tf]=lastRenderedScoreByTf[it.tf]; pendingScoreRollByTf[it.tf]=true; } else { previousScoreValueByTf[it.tf]=cur; pendingScoreRollByTf[it.tf]=false; } lastRenderedScoreByTf[it.tf]=cur; } }
@@ -22694,7 +22715,7 @@ If there is NO open position, use this Section 2 instead:
   function rowHtml(d){ if(!d||!d.available)return `<div class="sssc-ui-row"><div class="sssc-ui-tf">${d?d.tf:'-'}</div><div class="sssc-ui-dir">Unavailable</div><div>-</div><div>-</div><div class="sssc-ui-score">-</div><div class="sssc-ui-power-state">${d?.reason||'-'}</div></div>`; const strCls=strengthClass(d.direction); const scCls=scoreClass(d.direction); const phCls=phaseClass(d.phase); const scoreVal=Math.abs(Math.round(d.direction)); const fromScore=pendingScoreRollByTf[d.tf]?previousScoreValueByTf[d.tf]:scoreVal; return `<div class="sssc-ui-row" data-tf="${d.tf}"><div class="sssc-ui-tf">${d.tf}</div><div><div class="sssc-ui-dir"><span class="sssc-dir-state">${dirLabel(d.direction)}</span> | <span class="sssc-dir-value ${strCls}">${scoreVal}</span></div><div class="sssc-ui-phase ${phCls}">${d.phase}</div></div><div class="sssc-ribbon">${ribbonSegments(d.direction)}</div><div class="sssc-gauge-wrap">${powerGauge(gaugeTracker.reading(d.tf))}</div><div class="sssc-ui-score ${scCls}">${rollingDigits(scoreVal,fromScore,'score','',{width:2})}</div><div><div class="sssc-ui-power-state ${magClass(d.directionalStrength)}">${d.strengthState}</div></div></div>`; }
   function render(force=false){
     if(!force&&Date.now()-lastRender<500)return;lastRender=Date.now();
-    const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'});gaugeTracker.update(items);updatePreviousScores(items);
+    const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'});gaugeTracker.update(items);updatePreviousScores(items);refreshFuturesContext();renderFuturesContext();
     const engine=calc(),summary=engine?.aggregate(items)||{direction:0,directionalStrength:0,acceleration:0,aggregateConfidence:0,timingRisk:100},marketRead=engine?.evaluateMarketSetup(summary)||{marketBias:0,marketStrength:0,marketAcceleration:0,aggregateConfidence:0,timingRisk:100,setupAction:'WAIT',reason:'Calculation module unavailable'},positionRead=engine?.evaluatePositionAction(marketRead,normalizedSsscPositionContext())||{positionAction:null,positionSide:null,reason:'Calculation module unavailable'},dir=marketRead.marketBias,pow=marketRead.marketStrength,confidence=marketRead.aggregateConfidence,risk=marketRead.timingRisk;
     const setupAction=marketRead.setupAction,positionAction=positionRead.positionAction?(positionRead.positionAction+' '+positionRead.positionSide):'NO POSITION',readyLong=setupAction==='FRESH LONG',readyShort=setupAction==='FRESH SHORT',entryReady=readyLong||readyShort,buildingLong=!entryReady&&(dir>18||pow>20),buildingShort=!entryReady&&(dir< -18||pow< -20),setupStage=entryReady?'READY':buildingLong||buildingShort?'BUILDING':'NEUTRAL',dirSide=readyLong?'READY LONG':readyShort?'READY SHORT':buildingLong?'BUILDING BULLISH':buildingShort?'BUILDING BEARISH':'MIXED',dirCls=entryReady?(readyLong?'blue':'red'):(buildingLong||buildingShort?'amber':'gray'),powCls=entryReady?(readyLong?'blue':'red'):(buildingLong||buildingShort?'amber':'gray'),accel=marketRead.marketAcceleration,accelCls=accel>20?'blue':accel<-20?'red':'gray';
     const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`,strengthVal=signed(pow),accelVal=signed(accel),confidenceVal=Math.round(confidence)+'%',riskVal=Math.round(risk)+'%',topNode=$('ssscDashTop'),rowsNode=$('ssscDashRows');

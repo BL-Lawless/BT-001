@@ -250,8 +250,6 @@ Rollback baseline: V13_UI_V2_PATCH_20.
   <script src="features/shared/binancePositionGroupTracker.js" defer></script>
   <script src="features/shared/binanceConditionalOrderClassifier.js" defer></script>
   <script src="features/shared/canonical-candle-series.js?v=20260727-duplicate-integrity-v1" defer></script>
-  <script src="features/heatmap/provider-config.module.js" defer></script>
-  <script src="features/heatmap/provider-auth.module.js" defer></script>
   <script src="features/heatmap/provider-adapter.module.js" defer></script>
   <script src="features/heatmap/dataset.module.js" defer></script>
   <script src="features/heatmap/state.module.js" defer></script>
@@ -438,6 +436,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   </div>
   <div class="sssc-ui-body">
     <div class="sssc-ui-top" id="ssscDashTop"></div>
+    <div class="sssc-market-context" id="ssscMarketContext">Funding rate: — · Open interest: — · As of —</div>
     <div class="sssc-ui-table-head"><div>TF</div><div>State / Phase</div><div></div><div>MOMENTUM</div><div>SCORE</div><div>Strength State</div></div>
     <div class="sssc-ui-rows" id="ssscDashRows"></div>
     <div class="sssc-ui-event"><h4><span>Event Strip</span><button id="ssscEventToggle" type="button">Expand</button></h4><div id="ssscDashEvents" class="sssc-collapse-body hidden"></div></div>

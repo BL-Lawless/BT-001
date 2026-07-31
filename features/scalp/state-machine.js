@@ -37,6 +37,7 @@
       this.activityLogger=options.activityLogger||loggerCore.createLogger({
         getSupabase:()=>window.BT001Supabase||null,
         getSymbol:()=>this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null,
+        getEngineSource:()=>this.config.engineProfile,
         now:()=>exchangeNow(this.now()),
         fromLocal:exchangeFromLocal
       });
@@ -305,7 +306,7 @@
     makeTranche(event){
       const direction=upper(event.direction),id=trancheId(direction,event.eventId,this.generation),qty=calc.normalizeLot(this.config.lot,this.filters);
       return {
-        trancheId:id,symbol:this.gateway.symbol(),quoteAsset:quoteAsset(this.gateway.symbol()),direction,source:event.source,eventId:event.eventId,eventType:event.eventType,generation:this.generation,
+        trancheId:id,symbol:this.gateway.symbol(),quoteAsset:quoteAsset(this.gateway.symbol()),direction,source:event.source,eventId:event.eventId,eventType:event.eventType,engineSource:this.config.engineProfile,generation:this.generation,
         entryClientId:trancheClientId("E",id),partialTpClientId:trancheClientId("T",id),pslClientId:trancheClientId("S",id),profitLockClientId:trancheClientId("L",id),exitClientId:trancheClientId("X",id),
         requestedQty:qty,filledQty:0,remainingQty:qty,entryPrice:0,entryCommission:0,entryCommissionActual:false,entryCommissionFills:[],
         fundingCost:0,fundingStatus:"no-known-settlement",mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),tpDelta:n(this.config.tpDelta),slDelta:n(this.config.slDelta),tpDriver:this.config.tpDriver,slDriver:this.config.slDriver,

@@ -18,13 +18,14 @@
     }:{event_at,action,detail:clone(detail),machine_id:machineId};
     return {table,row};
   }
-  function buildTradeLog({tranche,reason,pnl,guide,machineId=null,now=Date.now,fromLocal=value=>value}={}){
+  function buildTradeLog({tranche,reason,pnl,guide,machineId=null,engineSource=null,now=Date.now,fromLocal=value=>value}={}){
     if(!tranche)return null;
     const exitPrice=number(tranche.closedPrice)||(["PARTIAL_TP","TP"].includes(reason)?number(tranche.partialTpPrice):["PSL","SL"].includes(reason)?number(tranche.pslPrice):number(guide));
     return {table:"scalp_trades",row:{
       created_at:new Date(fromLocal(number(tranche.createdAt)||now())).toISOString(),
       closed_at:new Date(fromLocal(number(tranche.closedAt)||now())).toISOString(),
       symbol:tranche.symbol||null,direction:tranche.direction||null,mode:tranche.mode||null,
+      engine_source:["V1","V2"].includes(tranche.engineSource)?tranche.engineSource:engineSource,
       source_timeframe:tranche.source||null,event_type:tranche.eventType||null,auto_entered:false,
       cascade_agreement_at_entry:clone(tranche.cascadeAgreementAtEntry||null),
       requested_qty:number(tranche.requestedQty),filled_qty:number(tranche.closedQty)??number(tranche.filledQty),
@@ -34,7 +35,7 @@
     }};
   }
   function createLogger(options={}){
-    const getSupabase=options.getSupabase,getSymbol=options.getSymbol;
+    const getSupabase=options.getSupabase,getSymbol=options.getSymbol,getEngineSource=options.getEngineSource;
     const now=typeof options.now==="function"?options.now:Date.now;
     const fromLocal=typeof options.fromLocal==="function"?options.fromLocal:value=>value;
     function publish(client,result){
@@ -54,7 +55,8 @@
         const client=typeof getSupabase==="function"?getSupabase():null;
         if(!client||typeof client.log!=="function")return false;
         const machineId=typeof client.getDeviceId==="function"?client.getDeviceId():null;
-        return publish(client,buildTradeLog({tranche,reason,pnl,guide,machineId,now,fromLocal}));
+        const engineSource=typeof getEngineSource==="function"?getEngineSource():null;
+        return publish(client,buildTradeLog({tranche,reason,pnl,guide,machineId,engineSource,now,fromLocal}));
       }
     });
   }

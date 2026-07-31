@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  /* Opaque slot names by design, matching features/heatmap/provider-auth.module.js: must not
-     reveal the stored value's purpose in diagnostics, copied settings, or DOM. Local storage only. */
+  /* Opaque Supabase credential slots must not reveal stored values in diagnostics, copied settings,
+     or DOM. Local storage only. */
   const URL_SLOT="bt001_scalp_sb_u_v1",KEY_SLOT="bt001_scalp_sb_k_v1";
 
   function readSlot(slot){
@@ -136,6 +136,34 @@
     }
   }
 
+  async function getLatestFuturesMarketSnapshot(symbol){
+    if(!configured())return null;
+    const rest=getRest();
+    if(!rest)throw new Error("services/rest.service.js (window.restService) is unavailable");
+    const query=new URLSearchParams({
+      select:"event_at,symbol,funding_rate,open_interest",
+      symbol:`eq.${String(symbol||"").trim().toUpperCase()}`,order:"event_at.desc",limit:"1"
+    }),key=getAnonKey();
+    const rows=await rest.get(`${getUrl()}/rest/v1/futures_market_snapshots?${query}`,{
+      headers:{apikey:key,Authorization:`Bearer ${key}`}
+    });
+    return Array.isArray(rows)&&rows.length?rows[0]:null;
+  }
+
+  async function getLatestHeatmapSnapshot(symbol){
+    if(!configured())return null;
+    const rest=getRest();
+    if(!rest)throw new Error("services/rest.service.js (window.restService) is unavailable");
+    const query=new URLSearchParams({
+      select:"id,event_at,symbol,duration,tick_size,chart_interval_seconds,cells,metadata,provider_run_id,provider_dataset_id",
+      symbol:`eq.${String(symbol||"").trim().toUpperCase()}`,order:"event_at.desc",limit:"1"
+    }),key=getAnonKey();
+    const rows=await rest.get(`${getUrl()}/rest/v1/liquidation_heatmap_snapshots?${query}`,{
+      headers:{apikey:key,Authorization:`Bearer ${key}`}
+    });
+    return Array.isArray(rows)&&rows.length?rows[0]:null;
+  }
+
   function pendingCount(){return worker?workerStatus.pending:pending.length;}
   function loggingStatus(){
     return Object.freeze({...workerStatus,workerActive:!!worker});
@@ -190,6 +218,7 @@
       },
       scalp_trades:{
         created_at:now,closed_at:now,symbol,direction:"LONG",mode:"SINGLE",
+        engine_source:"V1",
         source_timeframe:"1m",event_type:"DB_ACCESS_TEST",auto_entered:false,
         cascade_agreement_at_entry:cascadeAgreement,requested_qty:0.001,filled_qty:0.001,
         avg_entry_price:1,entry_commission:0,exit_reason:"DB_ACCESS_TEST",exit_price:1,
@@ -236,7 +265,7 @@
 
   window.BT001Supabase=Object.freeze({
     getUrl,getAnonKey,configured,saveUrlFromInput,saveKeyFromInput,clearUrl,clearKey,
-    log,flushPending,pendingCount,loggingStatus,
+    log,flushPending,pendingCount,loggingStatus,getLatestFuturesMarketSnapshot,getLatestHeatmapSnapshot,
     getDeviceId,testConnection,testDbAccess
   });
   ensureWorker();

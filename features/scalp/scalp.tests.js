@@ -46,7 +46,7 @@ async function run(){
   assert(!routedLogs.some(item=>["scalp_activity_log","scalp_v1_signals","scalp_v2_signals"].includes(item.table)));cases.supabaseActivityRoutesWithTableSpecificPayloads=true;
   const rawTradeCreated=rawBrowserNow-1000,rawTradeClosed=rawBrowserNow;
   routingEngine.recordTradeLedger({
-    createdAt:rawTradeCreated,closedAt:rawTradeClosed,symbol:"BTCUSDT",direction:"LONG",
+    createdAt:rawTradeCreated,closedAt:rawTradeClosed,symbol:"BTCUSDT",direction:"LONG",engineSource:"V2",
     mode:"MANUAL",source:"1m",eventType:"CROSS",requestedQty:.01,filledQty:.01,
     closedQty:.01,entryPrice:100,entryCommission:.001,closedPrice:101,trancheId:"trace-trade"
   },"TP",.009);
@@ -54,10 +54,11 @@ async function run(){
   assert.equal(tradeLog.table,"scalp_trades");
   assert.deepEqual(Object.keys(tradeLog.row).sort(),[
     "auto_entered","avg_entry_price","cascade_agreement_at_entry","closed_at","created_at",
-    "device_id","direction","entry_commission","estimated_realized_pnl_usd","event_type",
+    "device_id","direction","engine_source","entry_commission","estimated_realized_pnl_usd","event_type",
     "exit_price","exit_reason","filled_qty","mode","raw_session","requested_qty","source_timeframe","symbol"
   ]);
   assert.equal(tradeLog.row.auto_entered,false,"auto_entered belongs only to the unchanged scalp_trades payload");
+  assert.equal(tradeLog.row.engine_source,"V2");
   assert.equal(tradeLog.row.created_at,new Date(rawTradeCreated+7000).toISOString());
   assert.equal(tradeLog.row.closed_at,new Date(rawTradeClosed+7000).toISOString());
   cases.supabaseTradeLedgerPayloadRemainsSeparate=true;

@@ -8,7 +8,7 @@
     if(typeof dprQuery.addEventListener==="function") dprQuery.addEventListener("change",watchDevicePixelRatio,{once:true});
     try{if(typeof window.resizeCanvas==="function")window.resizeCanvas();else if(typeof window.draw==="function")window.draw();}catch(_e){}
   }
-  function init(){ window.BT001HeatmapUI.init(); watchDevicePixelRatio(); }
+  function init(){ window.BT001HeatmapUI.init(); window.BT001HeatmapState.startScheduledReads(); watchDevicePixelRatio(); }
   window.BT001HeatmapFeature=Object.freeze({
     init,
     draw(ctx,view){

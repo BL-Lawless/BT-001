@@ -187,7 +187,7 @@ const run=(async()=>{
       scalp_operational:["action","detail","event_at","machine_id"],
       scalp_trades:[
         "auto_entered","avg_entry_price","cascade_agreement_at_entry","closed_at","created_at",
-        "device_id","direction","entry_commission","estimated_realized_pnl_usd","event_type",
+        "device_id","direction","engine_source","entry_commission","estimated_realized_pnl_usd","event_type",
         "exit_price","exit_reason","filled_qty","mode","raw_session","requested_qty","source_timeframe","symbol"
       ]
     };

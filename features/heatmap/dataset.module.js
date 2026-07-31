@@ -224,5 +224,7 @@
     return Object.freeze({cells:Object.freeze(cells),metadata:Object.freeze({sourceSymbol,sourceInterval:String(source.sourceInterval??source.chartInterval??""),chartIntervalSeconds:timeStep,tickSize,datasetStart,datasetEnd,validCellCount:cells.length,rejectedCellCount:rejected,maxLiqValue:rawMax,p50:percentile(intensities,.50),p90:percentile(intensities,.90),p99:percentile(intensities,.99),rawItemCount,rawCellCount,timestampUnit:detectedUnit,selectedObject:baseDiagnostics.selectedObject,rejectionReasons:Object.freeze(rejectionReasons)}),diagnostics});
   }
 
-  window.BT001HeatmapDataset=Object.freeze({locate,validateAndNormalize,HeatmapDatasetError,_test:{timestamp,timestampUnit,intervalSeconds,percentile,findHeatmapObject,payloadStructure}});
+  const api=Object.freeze({locate,validateAndNormalize,HeatmapDatasetError,_test:{timestamp,timestampUnit,intervalSeconds,percentile,findHeatmapObject,payloadStructure}});
+  if(typeof module!=="undefined"&&module.exports)module.exports=api;
+  if(typeof window!=="undefined")window.BT001HeatmapDataset=api;
 })();

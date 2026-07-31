@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const KEY="btc_futures_chart_heatmap_v1_";
-  const DURATIONS=Object.freeze(["12H","1D","3D","1W","2W","1M"]);
+  const DURATIONS=Object.freeze(["3D"]);
   const DEFAULTS=Object.freeze({enabled:false,selectedDuration:"3D",opacity:45,strength:20,mode:"BALANCED",maxClipping:99,smoothing:false,showLegend:true,showSourceLabel:true});
   const listeners=new Set();
   const read=(name,fallback)=>{try{const value=localStorage.getItem(KEY+name);return value==null?fallback:value;}catch(_error){return fallback;}};
@@ -17,7 +17,7 @@
   function emitDiagnostics(){try{if(typeof window.CustomEvent==="function"&&typeof window.dispatchEvent==="function")window.dispatchEvent(new CustomEvent("heatmap:diagnostics",{detail:snapshot()}));}catch(_error){}}
   function persist(name,value){try{localStorage.setItem(KEY+name,typeof value==="boolean"?(value?"1":"0"):String(value));}catch(_error){}}
   function setPreference(name,value){
-    if(!(name in state.prefs)||name==="selectedDuration"&&!DURATIONS.includes(value))return;
+    if(!(name in state.prefs)||name==="selectedDuration")return;
     state.prefs[name]=value;persist(name,value);
     if(name==="selectedDuration"&&!state.loading)state.status=state.displayedDuration&&state.displayedDuration!==value?"REFRESH_REQUIRED":(state.dataset?"READY":"NOT_LOADED");
     if(name==="enabled"&&state.dataset&&!state.loading){state.diagnostics.currentStage=value?"READY":"READY · OVERLAY OFF";state.diagnostics.zeroDrawReason=value?"Redraw pending":"Heatmap hidden";}
@@ -73,7 +73,7 @@
     state.error=failure.reason;state.status="UPDATE_FAILED";Object.assign(state.diagnostics,{currentStage:failure.stage,reason:failure.reason,httpStatus:failure.httpStatus,runStatus:downstream?"SUCCEEDED":failure.runStatus,elapsedMs:Date.now()-(state.diagnostics.requestStartedAt||Date.now()),datasetRetrievalStatus:state.recovery.datasetRetrievalStatus,displayingPreviousDataset:!!state.dataset});
     if(error&&error.diagnostics)Object.assign(state.diagnostics,error.diagnostics);
   }
-  async function publishNormalized(normalized,duration,requestId){
+  async function publishNormalized(normalized,duration,requestId,eventAt=null){
     if(requestId!==state.requestGeneration)return false;
     retainedNormalizedCandidate=normalized;state.recovery.hasNormalizedCandidate=true;datasetDiagnostics(normalized);
     state.diagnostics.currentStage="NORMALIZING";state.diagnostics.elapsedMs=Date.now()-state.diagnostics.requestStartedAt;notify();
@@ -81,7 +81,7 @@
     const previous={previousDataset:state.dataset,previousDuration:state.displayedDuration,previousUpdate:state.lastSuccessfulUpdate,rendered:false,renderFailure:null};
     pendingPublication=previous;state.dataset=normalized;state.displayedDuration=duration;state.diagnostics.currentStage="RENDERING";state.diagnostics.reason=null;notify();
     if(previous.renderFailure){const error=new Error(previous.renderFailure);error.stage="RENDERING FAILED";throw error;}
-    pendingPublication=null;state.lastSuccessfulUpdate=Date.now();state.error=null;state.recovery.failedStage=null;state.recovery.retryEligible=false;
+    pendingPublication=null;state.lastSuccessfulUpdate=Number.isFinite(Date.parse(eventAt||""))?Date.parse(eventAt):Date.now();state.error=null;state.recovery.failedStage=null;state.recovery.retryEligible=false;
     state.status=state.prefs.selectedDuration===duration?"READY":"REFRESH_REQUIRED";state.diagnostics.currentStage=state.prefs.enabled?"READY":"READY · OVERLAY OFF";state.diagnostics.elapsedMs=Date.now()-state.diagnostics.requestStartedAt;state.diagnostics.displayingPreviousDataset=false;if(!state.prefs.enabled)state.diagnostics.zeroDrawReason="Heatmap hidden";notify();return true;
   }
   async function processPayload(payload,duration,requestId){
@@ -104,12 +104,16 @@
   }
   async function refresh(){
     if(state.loading)return false;
-    const requestId=++state.requestGeneration,requestedDuration=state.prefs.selectedDuration;beginRequest("STARTING ACTOR",requestedDuration);
+    const requestId=++state.requestGeneration,requestedDuration="3D";beginRequest("READING SUPABASE",requestedDuration);
     if(!DURATIONS.includes(requestedDuration)){state.loading=false;markFailure(Object.assign(new Error("Selected duration missing"),{stage:"INPUT VALIDATION"}));notify();return false;}
     try{
       await nextPaint();if(requestId!==state.requestGeneration)return false;
       const payload=await window.BT001HeatmapProvider.run({duration:requestedDuration,requestId,isCurrent:id=>id===state.requestGeneration,onStage:update=>{if(requestId===state.requestGeneration)requestStage(update);}});
       if(requestId!==state.requestGeneration)return false;
+      if(payload&&payload.normalized){
+        retainedNormalizedCandidate=payload.normalized;state.recovery.hasNormalizedCandidate=true;
+        return await publishNormalized(payload.normalized,payload.duration||requestedDuration,requestId,payload.eventAt);
+      }
       retainedRawPayload=payload;state.recovery.hasRawPayload=true;
       return await processPayload(payload,requestedDuration,requestId);
     }catch(error){if(requestId!==state.requestGeneration)return false;markFailure(error);return false;}
@@ -129,6 +133,13 @@
     }catch(error){if(requestId!==state.requestGeneration)return false;markFailure(error);return false;}
     finally{if(requestId===state.requestGeneration){state.loading=false;notify();}}
   }
-  function destroy(){state.requestGeneration++;state.loading=false;state.diagnostics.currentStage="DESTROYED";notify();}
-  window.BT001HeatmapState=Object.freeze({DURATIONS,DEFAULTS,snapshot,setPreference,subscribe,refresh,retryDatasetRetrieval,reportRender,destroy});
+  let refreshTimer=null;
+  function startScheduledReads(intervalMs=30*60*1000){
+    if(refreshTimer!=null)return false;
+    refresh().catch(()=>{});
+    refreshTimer=setInterval(()=>refresh().catch(()=>{}),Math.max(5*60*1000,Number(intervalMs)||30*60*1000));
+    return true;
+  }
+  function destroy(){state.requestGeneration++;state.loading=false;if(refreshTimer!=null)clearInterval(refreshTimer);refreshTimer=null;state.diagnostics.currentStage="DESTROYED";notify();}
+  window.BT001HeatmapState=Object.freeze({DURATIONS,DEFAULTS,snapshot,setPreference,subscribe,refresh,retryDatasetRetrieval,reportRender,startScheduledReads,destroy});
 })();

@@ -44,7 +44,7 @@
   function drawDecorations(ctx,view,state){
     const p=state.prefs,d=state.dataset;if(!p.enabled||!d||!view)return;
     ctx.save();ctx.font="11px Arial";ctx.textBaseline="top";
-    if(p.showSourceLabel){const label=`BTCUSDT liquidation heatmap · ${state.displayedDuration||"—"} · visual context`;const w=ctx.measureText(label).width+12,x=view.left+8,y=view.top+34;ctx.fillStyle="rgba(255,255,255,.88)";ctx.fillRect(x,y,w,20);ctx.strokeStyle="rgba(156,163,175,.65)";ctx.strokeRect(x,y,w,20);ctx.fillStyle="#374151";ctx.fillText(label,x+6,y+5);}
+    if(p.showSourceLabel){const asOf=state.lastSuccessfulUpdate?(typeof window.formatDateTime==="function"?window.formatDateTime(state.lastSuccessfulUpdate):new Date(state.lastSuccessfulUpdate).toLocaleString()):"—";const label=`BTCUSDT liquidation heatmap · ${state.displayedDuration||"3D"} · as of ${asOf}`;const w=ctx.measureText(label).width+12,x=view.left+8,y=view.top+34;ctx.fillStyle="rgba(255,255,255,.88)";ctx.fillRect(x,y,w,20);ctx.strokeStyle="rgba(156,163,175,.65)";ctx.strokeRect(x,y,w,20);ctx.fillStyle="#374151";ctx.fillText(label,x+6,y+5);}
     if(p.showLegend){const labels=["Low","Medium","High","Extreme"],sw=38,gap=2,total=labels.length*sw+(labels.length-1)*gap,x=view.left+view.width-total-10,y=view.top+10;for(let i=0;i<labels.length;i++){ctx.fillStyle=palette((i+1)/labels.length,clamp(p.opacity/100,.05,.8));ctx.fillRect(x+i*(sw+gap),y,sw,8);ctx.fillStyle="#374151";ctx.font="9px Arial";ctx.textAlign="center";ctx.fillText(labels[i],x+i*(sw+gap)+sw/2,y+10);}ctx.textAlign="left";}
     ctx.restore();
   }
