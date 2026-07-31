@@ -38,6 +38,38 @@ const sameDirection=tools.slowContext(nextFast,agreeingSlow,agreeingSlow.length-
 assert.equal(sameDirection.mode,"SAME_DIRECTION");
 assert(sameDirection.wakeUp!=null&&sameDirection.maturity!=null&&sameDirection.age>0);
 
+function candle(index){return {time:(index+1)*60,open:100,high:103,low:97,close:101,volume:100,takerBuyBase:55,final:true};}
+let bounceRows=Array.from({length:90},(_,index)=>candle(index)),bounceSlow=bounceRows.map(()=>100),bounceFast=bounceRows.map(()=>110);
+const firstShape=[110,108,106,104,102,101,104,107,110];firstShape.forEach((value,index)=>{bounceFast[bounceFast.length-firstShape.length+index]=value;});
+let bounceSnapshot=()=>({reliable:true,rows:bounceRows,alignedByPeriod:{9:bounceFast,55:bounceSlow}});
+const bounceHub={getAuthoritativeMaSnapshot:()=>bounceSnapshot()},bounceDetector=new Detector({getHub:()=>bounceHub});
+const firstBounce=bounceDetector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},3000).emittedEvent;
+assert(firstBounce&&firstBounce.eventType==="BOUNCE","fixture must produce the original V2 bounce");
+const firstSetup=bounceDetector.diagnostics().byTimeframe["1m"].lastEmittedSetup,firstIdentity=firstSetup.identity;
+for(let minute=0;minute<4;minute++){
+  bounceRows=bounceRows.concat(candle(bounceRows.length));bounceSlow=bounceSlow.concat(100);bounceFast=bounceFast.concat(112+minute*2);
+  assert.equal(tools.bounceCandidate(bounceRows,bounceFast,bounceSlow).touchCandleTime,firstSetup.anchorCandleTime,"fixture must keep qualifying from the same touch");
+  assert.equal(bounceDetector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},4000+minute).emittedEvent,null,"the same rolling-window touch must not re-emit on a later candle");
+  assert.equal(bounceDetector.diagnostics().byTimeframe["1m"].lastEmittedSetup.identity,firstIdentity);
+}
+
+for(let minute=0;minute<13;minute++){
+  bounceRows=bounceRows.concat(candle(bounceRows.length));bounceSlow=bounceSlow.concat(100);bounceFast=bounceFast.concat(112);
+  bounceDetector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},5000+minute);
+}
+const secondShape=[110,108,106,104,102,101,104];
+for(let index=0;index<secondShape.length;index++){
+  bounceRows=bounceRows.concat(candle(bounceRows.length));bounceSlow=bounceSlow.concat(100);bounceFast=bounceFast.concat(secondShape[index]);
+}
+const secondBounce=bounceDetector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},6000).emittedEvent;
+assert(secondBounce&&secondBounce.eventType==="BOUNCE","a distinct touch after expiry must emit");
+assert.notEqual(bounceDetector.diagnostics().byTimeframe["1m"].lastEmittedSetup.identity,firstIdentity);
+
+const crossGuard=new Detector(),crossEvent={eventType:"CROSS",direction:"LONG",candleTime:100,qualified:true};
+assert.equal(crossGuard.novelEmission("1m",crossEvent,90),crossEvent);
+assert.equal(crossGuard.novelEmission("1m",{...crossEvent,candleTime:101},90),null,"the same crossover anchor must be suppressed");
+assert(crossGuard.novelEmission("1m",{...crossEvent,candleTime:102},91),"a new crossover anchor must emit");
+
 assert.equal(config.signalV2.touchTolerancePrice,5);
 assert.equal(config.signalV2.approachBandPrice,15);
 assert.equal(config.signalV2.minFastSlopePrice,1.5);

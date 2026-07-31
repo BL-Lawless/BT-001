@@ -102,24 +102,42 @@
       if(touch.separation>S.approachBandPrice||touch.separation>S.touchTolerancePrice)return null;
       if(separation<touch.separation+S.bounceExpansionPrice)return null;
       if((dir==="LONG"?1:-1)*current.analysis.fastSlope<=0)return null;
-      return {direction:dir,analysis:current.analysis,closestSeparation:touch.separation,followAnalyses:same.slice(closest+1).map(item=>item.analysis)};
+      return {direction:dir,analysis:current.analysis,closestSeparation:touch.separation,touchCandleTime:n(rows[touch.i]&&rows[touch.i].time)||0,followAnalyses:same.slice(closest+1).map(item=>item.analysis)};
     }
 
     class Detector{
       constructor(options={}){this.getHub=typeof options.getHub==="function"?options.getHub:()=>null;this.pendingCrossByTf=new Map();this.lastEmittedByTf=new Map();this.diagnosticsByTf=new Map();}
       reset(tf=null){if(tf){this.pendingCrossByTf.delete(tf);this.lastEmittedByTf.delete(tf);this.diagnosticsByTf.delete(tf);}else{this.pendingCrossByTf.clear();this.lastEmittedByTf.clear();this.diagnosticsByTf.clear();}}
       diagnostics(){return {byTimeframe:Object.fromEntries([...this.diagnosticsByTf].map(([key,value])=>[key,clone(value)])),recent:[]};}
+      expireNovelty(tf,analysis,rows){
+        const prior=this.lastEmittedByTf.get(tf);if(!prior)return;
+        const currentDirection=direction(sign(analysis&&analysis.gap));
+        if(currentDirection&&currentDirection!==prior.direction){this.lastEmittedByTf.delete(tf);return;}
+        if(prior.type==="BOUNCE"){
+          const activeTouch=(Array.isArray(rows)?rows:[]).slice(-S.bounceWindowBars).some(row=>n(row&&row.time)===prior.anchorCandleTime);
+          if(!activeTouch)this.lastEmittedByTf.delete(tf);
+        }
+      }
+      novelEmission(tf,event,anchorCandleTime){
+        if(!event)return null;
+        const identity=[event.eventType,event.direction,n(anchorCandleTime)||0].join("|");
+        const prior=this.lastEmittedByTf.get(tf);
+        if(prior&&prior.identity===identity)return null;
+        this.lastEmittedByTf.set(tf,{identity,type:event.eventType,direction:event.direction,anchorCandleTime:n(anchorCandleTime)||0,emittedCandleTime:n(event.candleTime)||0});
+        return event;
+      }
       evaluateTf(tf,update=null,now=Date.now()){
         const hub=this.getHub(),closed=!!(update&&update.type==="kline"&&update.tf===tf&&update.closed===true);
         if(!hub||typeof hub.getAuthoritativeMaSnapshot!=="function")return {ready:false,status:"V2 canonical EMA data unavailable",event:null,emittedEvent:null,detection:null};
         const snap=hub.getAuthoritativeMaSnapshot(tf,{includeForming:true,periods:periods(),requiredRows:S.minimumRows}),rows=snap&&snap.rows||[],fast=snap&&snap.alignedByPeriod&&snap.alignedByPeriod[S.emaFast]||[],slow=snap&&snap.alignedByPeriod&&snap.alignedByPeriod[S.emaSlow]||[],analysis=analyze(rows,fast,slow);
         if(!snap||!snap.reliable||!analysis)return {ready:false,status:snap&&snap.reason||"V2 EMA warming up",event:null,emittedEvent:null,detection:null};
+        this.expireNovelty(tf,analysis,rows);
         let emittedEvent=null,event=null;
         if(closed){
           const pending=this.pendingCrossByTf.get(tf),currentTime=n(rows[analysis.i]&&rows[analysis.i].time)||0;
           if(pending&&currentTime>pending.candleTime){
             const base=makeEvent(tf,"CROSS",pending.direction,rows[pending.analysis.i],now,{...pending.analysis,crossQualifiedWithoutSeparationGate:true});
-            emittedEvent=scoreEvent(tf,base,pending.analysis,rows,fast,slow,{hub,followAnalyses:[analysis]});this.pendingCrossByTf.delete(tf);
+            emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,pending.analysis,rows,fast,slow,{hub,followAnalyses:[analysis]}),pending.candleTime);this.pendingCrossByTf.delete(tf);
           }
           if(!emittedEvent&&sign(analysis.gap)&&sign(analysis.previousGap)&&sign(analysis.gap)!==sign(analysis.previousGap)){
             const eventDirection=direction(sign(analysis.gap));this.pendingCrossByTf.set(tf,{direction:eventDirection,candleTime:currentTime,analysis});
@@ -129,12 +147,12 @@
             const bounce=bounceCandidate(rows,fast,slow);
             if(bounce){
               const base=makeEvent(tf,"BOUNCE",bounce.direction,rows[analysis.i],now,{...analysis,closestSeparation:bounce.closestSeparation});
-              emittedEvent=scoreEvent(tf,base,analysis,rows,fast,slow,{hub,closestSeparation:bounce.closestSeparation,followAnalyses:bounce.followAnalyses});
+              emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,analysis,rows,fast,slow,{hub,closestSeparation:bounce.closestSeparation,followAnalyses:bounce.followAnalyses}),bounce.touchCandleTime);
             }
           }
         }
         event=emittedEvent||event;const status=event?`${event.eventState} ${event.direction} ${event.eventType}`:`V2 ${direction(sign(analysis.gap))||"FLAT"} EMA9/EMA55`;
-        this.diagnosticsByTf.set(tf,{tf,profile:"V2",currentGap:analysis.gap,separationPrice:analysis.separation,fastSlopePrice:analysis.fastSlope,emittedEvent:clone(emittedEvent)});
+        this.diagnosticsByTf.set(tf,{tf,profile:"V2",currentGap:analysis.gap,separationPrice:analysis.separation,fastSlopePrice:analysis.fastSlope,emittedEvent:clone(emittedEvent),lastEmittedSetup:clone(this.lastEmittedByTf.get(tf)||null)});
         return {ready:true,status,event,emittedEvent,oppositeCross:emittedEvent&&emittedEvent.eventType==="CROSS"?emittedEvent:null,detection:event,guide:n(rows[analysis.i]&&rows[analysis.i].close),analysis,diagnostics:this.diagnosticsByTf.get(tf)};
       }
     }
