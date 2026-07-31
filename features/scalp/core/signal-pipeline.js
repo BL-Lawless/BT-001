@@ -6,6 +6,7 @@
 
   function createSignalPipeline(options={}){
     const detector=options.detector,getSymbol=options.getSymbol,getMachineId=options.getMachineId,write=options.write;
+    const signalTable=String(options.signalTable||"scalp_v1_signals");
     const timeframes=Object.freeze([...(options.timeframes||["1m","3m","5m","15m"])]);
     const now=typeof options.now==="function"?options.now:Date.now;
     if(!detector||typeof detector.evaluateTf!=="function")throw new Error("A signal detector is required");
@@ -28,7 +29,7 @@
       const cascade_agreement=cascadeAgreement(event.direction),detector_state=clone(event);
       const common={symbol,action:"DETECTION_QUALIFIED",source_timeframe:source,detector_state,cascade_agreement,machine_id};
       return [
-        {table:"scalp_v1_signals",row:{event_at:new Date(now()).toISOString(),...common}}
+        {table:signalTable,row:{event_at:new Date(now()).toISOString(),...common}}
       ];
     }
     function accept(source,result){

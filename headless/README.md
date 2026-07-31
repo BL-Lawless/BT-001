@@ -19,9 +19,11 @@ Run the scalper signal-detection pipeline:
 npm.cmd run headless:scalper
 ```
 
-It seeds the four scalp timeframes, consumes Binance kline streams, runs the extracted cross/bounce
-detector and cascade calculation, and writes qualified detections only to `scalp_v1_signals` and
-`scalp_v2_signals`. It has no account, position, order, trade, or operational logging capability.
+It seeds the four scalp timeframes, consumes Binance kline streams, and runs independent V1 and V2
+cross/bounce detectors and cascade calculations over the same market feed. V1 writes qualified
+detections only to `scalp_v1_signals`; V2 writes qualified detections only to
+`scalp_v2_signals`. Neither detector has account, position, order, trade, operational logging, or
+SSSC integration capability.
 
 Run one independent health check:
 

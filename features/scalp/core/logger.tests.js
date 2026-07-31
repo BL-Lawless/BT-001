@@ -15,6 +15,10 @@ const client={getDeviceId:()=>"node-scalp",log:(table,row)=>{writes.push({table,
 const logger=core.createLogger({getSupabase:()=>client,getSymbol:()=>"BTCUSDT",now:()=>now,fromLocal:value=>value+1000});
 assert.equal(logger.logActivity("DETECTION_QUALIFIED",{sourceTimeframe:"1m",detectorState:{rankValue:88}}),true);
 assert.equal(writes[0].table,"scalp_v1_signals");
+const v2Writes=[],v2Logger=core.createLogger({getSupabase:()=>({getDeviceId:()=>"vm-v2",log:async(table,row)=>v2Writes.push({table,row})}),getSymbol:()=>"BTCUSDT",getSignalTable:()=>"scalp_v2_signals",now:()=>now});
+assert.equal(v2Logger.logActivity("DETECTION_QUALIFIED",{detectorState:{profile:"V2"}}),true);
+assert.equal(v2Writes[0].table,"scalp_v2_signals");
+assert.equal(v2Writes[0].row.detector_state.profile,"V2");
 assert.equal(writes[0].row.machine_id,"node-scalp");
 assert.equal(writes[0].row.event_at,new Date(now).toISOString());
 assert.equal(logger.logActivity("UNROUTED_ACTION"),false);

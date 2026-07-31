@@ -18,6 +18,9 @@ After cloning with the deploy key, install production dependencies with `npm ci 
 `.env.example` to `.env`, and replace all placeholders. The VM must receive a new permanent
 `BT001_MACHINE_ID`; never copy a browser/laptop identifier.
 
+Before deploying the parallel Scalp V2 logger, run `deploy/sql/scalp_v2_signals.sql` once in the
+Supabase SQL editor.
+
 Install and start the units:
 
 ```bash

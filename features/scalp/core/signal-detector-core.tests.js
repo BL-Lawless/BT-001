@@ -28,4 +28,14 @@ assert.deepEqual(writes.map(item=>item.table),["scalp_v1_signals"]);
 assert.equal(writes[0].row.event_at,new Date(2000).toISOString());
 assert(writes.every(item=>item.row.machine_id==="vm-signal-test"&&item.row.action==="DETECTION_QUALIFIED"));
 assert(!writes.some(item=>["scalp_positions","scalp_trades","scalp_operational"].includes(item.table)));
+
+const v2Writes=[],v2Pipeline=createSignalPipeline({
+  detector:{evaluateTf:()=>({emittedEvent:{...event,eventId:"qualified-v2"}}),reset(){},diagnostics:()=>({})},
+  getSymbol:()=>"BTCUSDT",getMachineId:()=>"vm-signal-test",now:()=>2000,signalTable:"scalp_v2_signals",
+  write:(table,row)=>{v2Writes.push({table,row});return Promise.resolve(true);}
+});
+assert.equal(v2Pipeline.handleUpdate({tf:"1m"}),true);
+assert.deepEqual(v2Writes.map(item=>item.table),["scalp_v2_signals"]);
+assert.equal(v2Writes[0].row.event_at,new Date(2000).toISOString());
+assert.deepEqual(Object.keys(v2Writes[0].row).sort(),Object.keys(writes[0].row).sort(),"V2 logging must mirror the V1 signal row shape");
 console.log("SCALP signal detector core tests: PASS");
