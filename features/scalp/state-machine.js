@@ -11,6 +11,10 @@
   function clientId(kind,eventId,generation){return `${C.order.namespace}-${kind}-${generation}-${hash(eventId)}`.slice(0,36);}
   function trancheId(direction,eventId,generation){return `${upper(direction).slice(0,1)}${Number(generation||0).toString(36).toUpperCase()}${hash(eventId)}`.slice(0,20);}
   function trancheClientId(kind,id){return `${C.order.namespace}-${kind}-${id}`.slice(0,36);}
+  function freshProtectionClientId(kind,tranche,now){
+    const sequence=Math.max(0,Math.floor(n(tranche.protectionClientSequence)||0))+1;tranche.protectionClientSequence=sequence;
+    return `${C.order.namespace}-${kind}-${hash(tranche.trancheId)}-R${Number(tranche.protectionBatchSequence||0).toString(36)}-A${sequence.toString(36)}`.toUpperCase().slice(0,36);
+  }
   function filterValue(settings,type,key){const row=Array.isArray(settings&&settings.filters)?settings.filters.find(item=>item&&item.filterType===type):null;return n(row&&row[key]);}
   function normalizedFilters(settings={}){const lotStep=n(settings.stepSize)||filterValue(settings,"LOT_SIZE","stepSize")||0.001,marketStep=filterValue(settings,"MARKET_LOT_SIZE","stepSize")||lotStep,lotMin=filterValue(settings,"LOT_SIZE","minQty")||0,marketMin=filterValue(settings,"MARKET_LOT_SIZE","minQty")||0,maximums=[filterValue(settings,"LOT_SIZE","maxQty"),filterValue(settings,"MARKET_LOT_SIZE","maxQty")].filter(value=>value>0);return {...settings,tickSize:n(settings.tickSize)||filterValue(settings,"PRICE_FILTER","tickSize")||0.01,stepSize:Math.max(lotStep,marketStep),lotStepSize:lotStep,marketStepSize:marketStep,minQty:Math.max(lotMin,marketMin),maxQty:maximums.length?Math.min(...maximums):null,minNotional:filterValue(settings,"MIN_NOTIONAL","notional")||filterValue(settings,"NOTIONAL","minNotional")||0};}
   function orderClient(row){return String(row&&(row.clientOrderId??row.origClientOrderId??row.clientAlgoId??row.c??row.ca)||"");}
@@ -21,7 +25,7 @@
     const explicit=upper(row&&row.positionSide),side=upper(row&&row.side),direction=["LONG","SHORT"].includes(explicit)?explicit:side==="SELL"?"LONG":side==="BUY"?"SHORT":null;
     const original=n(row&&(row.origQty??row.quantity??row.q??row.qty)),executed=n(row&&(row.executedQty??row.z))||0,remaining=original==null?null:Math.max(0,original-executed);
     const level=n(row&&(match[1]==="T"?(row.price??row.p):(row.triggerPrice??row.stopPrice??row.activatePrice??row.sp)));
-    return {id,kind:match[1]==="T"?"PARTIAL_TP":"PSL",suffix:match[2],direction,remaining,level,executed,orderId:row&&(row.orderId??null),algoId:row&&(row.algoId??null),createdAt:n(row&&(row.time??row.updateTime??row.createTime))};
+    return {id,kind:match[1]==="T"?"PARTIAL_TP":"PSL",suffix:match[2].replace(/-A[0-9A-Z]+$/i,""),direction,remaining,level,executed,orderId:row&&(row.orderId??null),algoId:row&&(row.algoId??null),createdAt:n(row&&(row.time??row.updateTime??row.createTime))};
   }
   class ScalpEngine extends EventTarget{
     constructor(options={}){
@@ -310,7 +314,7 @@
         entryClientId:trancheClientId("E",id),partialTpClientId:trancheClientId("T",id),pslClientId:trancheClientId("S",id),profitLockClientId:trancheClientId("L",id),exitClientId:trancheClientId("X",id),
         requestedQty:qty,filledQty:0,remainingQty:qty,entryPrice:0,entryCommission:0,entryCommissionActual:false,entryCommissionFills:[],
         fundingCost:0,fundingStatus:"no-known-settlement",mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),tpDelta:n(this.config.tpDelta),slDelta:n(this.config.slDelta),tpDriver:this.config.tpDriver,slDriver:this.config.slDriver,
-        profitLockEnabled:this.config.profitLockEnabled===true,lockThresholdPct:n(this.config.lockThresholdPct),lockPortionPct:n(this.config.lockPortionPct),profitLockTriggered:false,profitLockPending:false,
+        profitLockEnabled:this.config.profitLockEnabled===true,moveSlToBeEnabled:this.config.moveSlToBeEnabled===true||this.config.profitLockEnabled===true,beThresholdPct:n(this.config.profitLockEnabled===true?this.config.lockThresholdPct:this.config.beThresholdPct),closePortionEnabled:this.config.closePortionEnabled===true||this.config.profitLockEnabled===true,closeThresholdPct:n(this.config.profitLockEnabled===true?this.config.lockThresholdPct:this.config.closeThresholdPct),closePortionPct:n(this.config.profitLockEnabled===true?this.config.lockPortionPct:this.config.closePortionPct),beMoveTriggered:false,closePortionTriggered:false,profitLockTriggered:false,tradeManagementPending:false,
         rankBoostEnabled:this.config.rankBoostEnabled===true,rankBoostThreshold:n(this.config.rankBoostThreshold),rankBoostPoints:n(this.config.rankBoostPoints),triggerRank:event.rankValue==null?null:n(event.rankValue),rankBoostApplied:false,
         createdAt:this.now(),status:"ENTRY_PENDING",cascadeAgreementAtEntry:this.cascadeAgreement(direction)
       };
@@ -431,48 +435,46 @@
     profitLockLevel(tranche){return decisions.profitLockLevel({tranche,tickSize:this.filters&&this.filters.tickSize});}
     profitLockQuantity(tranche){return decisions.profitLockQuantity({tranche,filters:this.filters||{}});}
     profitLockReached(tranche,price){return decisions.profitLockReached({tranche,price,tickSize:this.filters&&this.filters.tickSize});}
+    beMoveReached(tranche,price){return decisions.beReached({tranche,price,tickSize:this.filters&&this.filters.tickSize});}
     maybeProfitLocks(price=this.guide){
       if(this.state==="ERROR"||this.state==="POSITION_MISMATCH")return;
       for(const direction of tranches.DIRECTIONS){
         const branch=tranches.directionBook(this.book,direction);if(!branch||branch.executionLock)continue;
-        const tranche=tranches.activeTranches(this.book,direction).find(row=>this.profitLockReached(row,price));if(!tranche)continue;
-        this.executeProfitLock(tranche,this.profitLockLevel(tranche)).catch(error=>this.fail(error,"Profit lock failed"));
+        const tranche=tranches.activeTranches(this.book,direction).find(row=>this.profitLockReached(row,price)||this.beMoveReached(row,price));if(!tranche)continue;
+        this.executeProfitLock(tranche,price).catch(error=>this.fail(error,"Trade management failed"));
       }
     }
-    async executeProfitLock(tranche,designatedLevel=this.profitLockLevel(tranche)){
-      const branch=tranches.directionBook(this.book,tranche&&tranche.direction),closeQty=this.profitLockQuantity(tranche);if(!branch||branch.executionLock||!(closeQty>0))return null;
-      const lock=`PROFIT_LOCK:${tranche.trancheId}`,beforeQty=n(tranche.remainingQty)||0,originalPslPrice=n(tranche.pslPrice);let completed=false;branch.executionLock=lock;branch.state="EXIT_PENDING";tranche.profitLockPending=true;this.persistTrancheBook();
+    async executeProfitLock(tranche,currentPrice=this.guide){
+      const branch=tranches.directionBook(this.book,tranche&&tranche.direction),doBe=this.beMoveReached(tranche,currentPrice),doClose=this.profitLockReached(tranche,currentPrice),closeQty=doClose?this.profitLockQuantity(tranche):0;if(!branch||branch.executionLock||(!doBe&&!doClose))return null;
+      const lock=`PROFIT_LOCK:${tranche.trancheId}`,beforeQty=n(tranche.remainingQty)||0,originalPslPrice=n(tranche.pslPrice);let completed=false;branch.executionLock=lock;branch.state="EXIT_PENDING";tranche.tradeManagementPending=true;this.persistTrancheBook();
       try{
-        await this.cancelTrancheProtection(tranche);tranche.pslOrderId=null;tranche.partialTpOrderId=null;this.persistTrancheBook();
-        const side=tranche.direction==="LONG"?"SELL":"BUY",response=await this.gateway.submitOrder({...this.orderParams(side,closeQty,{clientId:tranche.profitLockClientId,positionSide:tranche.direction,reduceOnly:true}),newOrderRespType:"RESULT"}),executed=this.normalizedOrderQuantity(n(response&&response.executedQty)||closeQty),remaining=calc.normalizeLot(Math.max(0,beforeQty-executed),this.filters||{});
-        tranche.profitLockOrderId=response&&response.orderId||null;tranche.profitLockPrice=designatedLevel;tranche.profitLockFillPrice=n(response&&response.avgPrice)||designatedLevel;tranche.profitLockClosedQty=executed;tranche.profitLockTriggered=true;tranche.profitLockTriggeredAt=this.now();tranche.remainingQty=remaining;
+        await this.cancelTrancheProtection(tranche,{keep:doClose?null:"TP"});tranche.pslOrderId=null;if(doClose)tranche.partialTpOrderId=null;this.persistTrancheBook();
+        let executed=0,remaining=beforeQty;if(doClose){const validation=calc.validateOrderQuantity(closeQty,currentPrice,this.filters||{});if(!validation.ok)throw new Error(validation.errors.join(" · "));const side=tranche.direction==="LONG"?"SELL":"BUY",response=await this.gateway.submitOrder({...this.orderParams(side,closeQty,{clientId:tranche.profitLockClientId,positionSide:tranche.direction,reduceOnly:true}),newOrderRespType:"RESULT"});executed=this.normalizedOrderQuantity(n(response&&response.executedQty)||closeQty);remaining=calc.normalizeLot(Math.max(0,beforeQty-executed),this.filters||{});tranche.profitLockOrderId=response&&response.orderId||null;tranche.profitLockFillPrice=n(response&&response.avgPrice)||currentPrice;tranche.profitLockClosedQty=executed;tranche.closePortionTriggered=true;tranche.profitLockTriggered=true;tranche.profitLockPrice=this.profitLockLevel(tranche);tranche.closePortionTriggeredAt=this.now();tranche.remainingQty=remaining;}
         if(!(remaining>0)){tranche.closedPrice=tranche.profitLockFillPrice;tranche.closedQty=executed;await this.finishTranche(tranche,"PROFIT_LOCK",{skipCancel:true});completed=true;return tranche;}
-        const allocatedEntryCommission=(n(tranche.entryCommission)||0)*(remaining/Math.max(remaining,n(tranche.filledQty)||remaining)),breakeven=calc.feeAwareBreakeven({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:remaining,entryCommission:allocatedEntryCommission,exitRate:this.rates.taker,tickSize:this.filters.tickSize});
-        if(!(breakeven>0))throw new Error("Fee-aware breakeven price is unavailable");
-        tranche.feeAwareBreakevenPrice=breakeven;tranche.pslPrice=breakeven;await this.ensureTrancheProtection(tranche);
-        this.logActivity("PROFIT_LOCK_APPLIED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,designatedLevel,closedQuantity:executed,remainingQuantity:remaining,feeAwareBreakevenPrice:breakeven,...clone(tranche)}});
+        let breakeven=null;if(doBe){const allocatedEntryCommission=(n(tranche.entryCommission)||0)*(remaining/Math.max(remaining,n(tranche.filledQty)||remaining));breakeven=calc.feeAwareBreakeven({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:remaining,entryCommission:allocatedEntryCommission,exitRate:this.rates.taker,tickSize:this.filters.tickSize});if(!(breakeven>0))throw new Error("Fee-aware breakeven price is unavailable");tranche.feeAwareBreakevenPrice=breakeven;tranche.pslPrice=breakeven;tranche.beMoveTriggered=true;tranche.beMoveTriggeredAt=this.now();}await this.ensureTrancheProtection(tranche,{psl:true,tp:doClose});
+        this.logActivity("PROFIT_LOCK_APPLIED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,closedQuantity:executed,remainingQuantity:remaining,feeAwareBreakevenPrice:breakeven,...clone(tranche)}});
         this.status=`PROFIT LOCK · ${tranche.direction} tranche ${tranche.trancheId} · ${executed} closed`;this.emit("profit-lock-applied");completed=true;return tranche;
       }catch(error){
         if(n(tranche.remainingQty)>0&&(!tranche.pslOrderId||!tranche.partialTpOrderId)){
-          if(!tranche.profitLockTriggered)tranche.pslPrice=originalPslPrice;
+          if(!tranche.beMoveTriggered)tranche.pslPrice=originalPslPrice;
           try{await this.ensureTrancheProtection(tranche);}catch(protectionError){tranche.status="UNPROTECTED";tranche.unprotectedQuantity=n(tranche.remainingQty);tranche.profitLockFailure={at:this.now(),message:error&&error.message||String(error),protectionError:protectionError&&protectionError.message||String(protectionError)};this.logActivity("PROFIT_LOCK_FAILED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,unprotectedQuantity:tranche.unprotectedQuantity,error:tranche.profitLockFailure,...clone(tranche)}});throw new Error(`${this.unprotectedQuantityText(tranche.direction,tranche.remainingQty)} Profit-lock protection failed: ${tranche.profitLockFailure.protectionError}`);}
         }
         throw error;
       }finally{
-        tranche.profitLockPending=false;if(branch.executionLock===lock)branch.executionLock=null;if(branch.state!=="ERROR")branch.state="IDLE";this.persistTrancheBook();if(completed&&this.state!=="ERROR"&&this.state!=="POSITION_MISMATCH")this.maybeProfitLocks(this.guide);
+        tranche.tradeManagementPending=false;if(branch.executionLock===lock)branch.executionLock=null;if(branch.state!=="ERROR")branch.state="IDLE";this.persistTrancheBook();if(completed&&this.state!=="ERROR"&&this.state!=="POSITION_MISMATCH")this.maybeProfitLocks(this.guide);
       }
     }
     protectionPrices(tranche){return calc.prices({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:tranche.filledQty,entryCommission:tranche.entryCommission,target:tranche.target,stop:tranche.stop,tpDelta:tranche.tpDelta,slDelta:tranche.slDelta,tpDriver:tranche.tpDriver,slDriver:tranche.slDriver,makerRate:this.rates.maker,takerRate:this.rates.taker,conservativeTpRate:this.rates.conservativeTp,fundingCost:n(tranche.fundingCost)||0,tickSize:this.filters.tickSize});}
     async ensureTrancheProtection(tranche,{psl=true,tp=true}={}){
       if(!tranche||!(n(tranche.remainingQty)>0))throw new Error("Tranche has no confirmed quantity to protect");
+      tranche.protectionBatchSequence=Math.max(0,Math.floor(n(tranche.protectionBatchSequence)||0))+1;
       const outcome=this.protectionPrices(tranche),exitSide=tranche.direction==="LONG"?"SELL":"BUY",qty=this.quantityText(tranche.remainingQty);tranche.status="PROTECTION_PENDING";this.persistTrancheBook();
       if(psl&&!tranche.pslOrderId){
-        const params={algoType:"CONDITIONAL",symbol:this.gateway.symbol(),side:exitSide,type:"STOP_MARKET",quantity:qty,triggerPrice:String(tranche.pslPrice||outcome.sl),workingType:"MARK_PRICE",clientAlgoId:tranche.pslClientId};if(this.filters&&this.filters.positionMode==="HEDGE")params.positionSide=tranche.direction;else params.reduceOnly="true";
-        let response=null,lastError=null;for(let attempt=0;attempt<=C.order.protectionRetry;attempt++){try{response=await this.gateway.submitAlgoOrder(params);break;}catch(error){lastError=error;}}
+        let response=null,lastError=null;for(let attempt=0;attempt<=C.order.protectionRetry;attempt++){tranche.pslClientId=freshProtectionClientId("S",tranche,this.now());this.persistTrancheBook();const params={algoType:"CONDITIONAL",symbol:this.gateway.symbol(),side:exitSide,type:"STOP_MARKET",quantity:qty,triggerPrice:String(tranche.pslPrice||outcome.sl),workingType:"MARK_PRICE",clientAlgoId:tranche.pslClientId};if(this.filters&&this.filters.positionMode==="HEDGE")params.positionSide=tranche.direction;else params.reduceOnly="true";try{response=await this.gateway.submitAlgoOrder(params);break;}catch(error){lastError=error;try{const existing=await this.gateway.queryAlgoOrder({symbol:this.gateway.symbol(),clientAlgoId:tranche.pslClientId});if(existing&&existing.status!=="REJECTED"){response=existing;break;}}catch(_queryError){}}}
         if(!response)throw new Error(`Protective PSL failed: ${lastError&&lastError.message||"unconfirmed"}`);tranche.pslOrderId=response.algoId??response.orderId??null;tranche.pslPrice=tranche.pslPrice||outcome.sl;this.persistTrancheBook();
       }
       if(tp&&!tranche.partialTpOrderId){
-        let response=null,lastError=null;for(let attempt=0;attempt<=C.order.tpRetry;attempt++){try{response=await this.gateway.submitOrder(this.orderParams(exitSide,tranche.remainingQty,{type:"LIMIT",clientId:tranche.partialTpClientId,positionSide:tranche.direction,reduceOnly:true,params:{price:String(tranche.partialTpPrice||outcome.tp),timeInForce:"GTC"}}));break;}catch(error){lastError=error;}}
+        let response=null,lastError=null;for(let attempt=0;attempt<=C.order.tpRetry;attempt++){tranche.partialTpClientId=freshProtectionClientId("T",tranche,this.now());this.persistTrancheBook();try{response=await this.gateway.submitOrder(this.orderParams(exitSide,tranche.remainingQty,{type:"LIMIT",clientId:tranche.partialTpClientId,positionSide:tranche.direction,reduceOnly:true,params:{price:String(tranche.partialTpPrice||outcome.tp),timeInForce:"GTC"}}));break;}catch(error){lastError=error;try{const existing=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.partialTpClientId});if(existing&&upper(existing.status)!=="REJECTED"){response=existing;break;}}catch(_queryError){}}}
         if(!response)throw new Error(`PARTIAL_TP failed: ${lastError&&lastError.message||"unconfirmed"}`);tranche.partialTpOrderId=response.orderId??null;tranche.partialTpPrice=tranche.partialTpPrice||outcome.tp;this.persistTrancheBook();
       }
       tranche.status="ACTIVE";this.persistTrancheBook();return tranche;

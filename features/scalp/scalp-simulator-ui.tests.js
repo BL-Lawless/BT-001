@@ -42,8 +42,8 @@ function elementMap(){
     "scalpSimulatorPopupRoot","scalpSimulatorToggle","scalpSimLoadData","scalpSimLoadStatus","scalpSimMinimumRank","scalpSimMinimumRankValue",
     "scalpSimFastSlopeMin","scalpSimFastSlopeMax","scalpSimSlowSlopeMin","scalpSimSlowSlopeMax","scalpSimSeparationMin","scalpSimSeparationMax","scalpSimRelativeVolumeMin","scalpSimRelativeVolumeMax",
     "scalpSimSlopeWeight","scalpSimMinEffectiveSeparation","scalpSimMinEffectiveSeparationValue","scalpSimVolumeGateThreshold","scalpSimMinVolumeGatedAngle","scalpSimMinVolumeGatedAngleValue",
-    "scalpSimLot","scalpSimStop","scalpSimTarget","scalpSimMaxConcurrent","scalpSimProfitLockEnabled","scalpSimLockThresholdPct",
-    "scalpSimLockPortionPct","scalpSimRankBoostEnabled","scalpSimRankBoostThreshold","scalpSimRankBoostPoints","scalpSimResultsBody",
+    "scalpSimLot","scalpSimStop","scalpSimTarget","scalpSimMaxConcurrent","scalpSimMoveSlToBeEnabled","scalpSimBeThresholdPct","scalpSimClosePortionEnabled","scalpSimCloseThresholdPct",
+    "scalpSimClosePortionPct","scalpSimRankBoostEnabled","scalpSimRankBoostThreshold","scalpSimRankBoostPoints","scalpSimResultsBody",
     "scalpSimStatEvents","scalpSimStatWinRate","scalpSimStatPnl","scalpSimStatRatio","scalpSimStatWins","scalpSimStatLosses",
     "scalpSimStatProfit","scalpSimStatLoss"
   ];

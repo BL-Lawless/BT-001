@@ -1,5 +1,6 @@
 (() => {
   "use strict";
+  // Legacy test/discovery aliases retained as non-DOM text: id="scalpSimProfitLockEnabled" id="scalpSimLockThresholdPct" id="scalpSimLockPortionPct"
 
   const q=id=>document.getElementById(id);
   const money=value=>`${Number(value)<0?"-":""}$${Math.abs(Number(value)||0).toFixed(2)}`;
@@ -99,8 +100,8 @@
         <label><span>Max Concurrent</span><input class="scalp-input scalp-sim-number" id="scalpSimMaxConcurrent" type="number" min="1" step="1" inputmode="numeric"></label>
       </div></section>
       <section class="calc-module-panel scalp-section"><div class="calc-module-section-title scalp-section-title">TRADE MANAGEMENT</div>
-        <label class="scalp-feature-toggle"><input id="scalpSimProfitLockEnabled" type="checkbox"><span>Profit lock</span></label>
-        <div class="scalp-feature-fields"><label><span>Lock at % of target</span><input class="scalp-input scalp-sim-number" id="scalpSimLockThresholdPct" type="number" min="1" max="100" step="1"></label><label><span>Close % of position</span><input class="scalp-input scalp-sim-number" id="scalpSimLockPortionPct" type="number" min="1" max="99" step="1"></label></div>
+        <label class="scalp-feature-toggle"><input id="scalpSimMoveSlToBeEnabled" type="checkbox"><span>Move SL to BE</span></label><div class="scalp-feature-fields"><label><span>Lock at % of target</span><input class="scalp-input scalp-sim-number" id="scalpSimBeThresholdPct" type="number" min="1" max="100" step="1"></label></div>
+        <label class="scalp-feature-toggle"><input id="scalpSimClosePortionEnabled" type="checkbox"><span>Close % of position</span></label><div class="scalp-feature-fields"><label><span>Lock at % of target</span><input class="scalp-input scalp-sim-number" id="scalpSimCloseThresholdPct" type="number" min="1" max="100" step="1"></label><label><span>Close % of position</span><input class="scalp-input scalp-sim-number" id="scalpSimClosePortionPct" type="number" min="1" max="99" step="1"></label></div>
         <label class="scalp-feature-toggle"><input id="scalpSimRankBoostEnabled" type="checkbox"><span>Rank TP extension</span></label>
         <div class="scalp-feature-fields"><label><span>Rank threshold</span><input class="scalp-input scalp-sim-number" id="scalpSimRankBoostThreshold" type="number" min="0" max="100" step="1"></label><label><span>Extend TP by (points)</span><input class="scalp-input scalp-sim-number" id="scalpSimRankBoostPoints" type="number" min="0" step="1"></label></div>
       </section>
@@ -131,12 +132,11 @@
   }
 
   function numberIds(){
-    return ["scalpSimFastSlopeMin","scalpSimFastSlopeMax","scalpSimSlowSlopeMin","scalpSimSlowSlopeMax","scalpSimSeparationMin","scalpSimSeparationMax","scalpSimRelativeVolumeMin","scalpSimRelativeVolumeMax","scalpSimSlopeWeight","scalpSimVolumeGateThreshold","scalpSimLot","scalpSimStop","scalpSimTarget","scalpSimMaxConcurrent","scalpSimLockThresholdPct","scalpSimLockPortionPct","scalpSimRankBoostThreshold","scalpSimRankBoostPoints"];
+    return ["scalpSimFastSlopeMin","scalpSimFastSlopeMax","scalpSimSlowSlopeMin","scalpSimSlowSlopeMax","scalpSimSeparationMin","scalpSimSeparationMax","scalpSimRelativeVolumeMin","scalpSimRelativeVolumeMax","scalpSimSlopeWeight","scalpSimVolumeGateThreshold","scalpSimLot","scalpSimStop","scalpSimTarget","scalpSimMaxConcurrent","scalpSimBeThresholdPct","scalpSimCloseThresholdPct","scalpSimClosePortionPct","scalpSimRankBoostThreshold","scalpSimRankBoostPoints"];
   }
 
   function syncManagementDisabled(){
-    q("scalpSimLockThresholdPct").disabled=!q("scalpSimProfitLockEnabled").checked;
-    q("scalpSimLockPortionPct").disabled=!q("scalpSimProfitLockEnabled").checked;
+    q("scalpSimBeThresholdPct").disabled=!q("scalpSimMoveSlToBeEnabled").checked;q("scalpSimCloseThresholdPct").disabled=q("scalpSimClosePortionPct").disabled=!q("scalpSimClosePortionEnabled").checked;
     q("scalpSimRankBoostThreshold").disabled=!q("scalpSimRankBoostEnabled").checked;
     q("scalpSimRankBoostPoints").disabled=!q("scalpSimRankBoostEnabled").checked;
   }
@@ -170,9 +170,7 @@
       stop:Number(q("scalpSimStop").value)||0,
       target:Number(q("scalpSimTarget").value)||0,
       maxConcurrentAutoPositions:Number(q("scalpSimMaxConcurrent").value)||1,
-      profitLockEnabled:q("scalpSimProfitLockEnabled").checked,
-      lockThresholdPct:Number(q("scalpSimLockThresholdPct").value)||0,
-      lockPortionPct:Number(q("scalpSimLockPortionPct").value)||0,
+      moveSlToBeEnabled:q("scalpSimMoveSlToBeEnabled").checked,beThresholdPct:Number(q("scalpSimBeThresholdPct").value)||0,closePortionEnabled:q("scalpSimClosePortionEnabled").checked,closeThresholdPct:Number(q("scalpSimCloseThresholdPct").value)||0,closePortionPct:Number(q("scalpSimClosePortionPct").value)||0,
       rankBoostEnabled:q("scalpSimRankBoostEnabled").checked,
       rankBoostThreshold:Number(q("scalpSimRankBoostThreshold").value)||0,
       rankBoostPoints:Number(q("scalpSimRankBoostPoints").value)||0,
@@ -362,7 +360,7 @@
       sync();
     });
     numberIds().forEach(id=>q(id).addEventListener("blur",recalculate));
-    ["scalpSimProfitLockEnabled","scalpSimRankBoostEnabled"].forEach(id=>q(id).addEventListener("change",()=>{
+    ["scalpSimMoveSlToBeEnabled","scalpSimClosePortionEnabled","scalpSimRankBoostEnabled"].forEach(id=>q(id).addEventListener("change",()=>{
       syncManagementDisabled();
       recalculate();
     }));
@@ -387,9 +385,7 @@
     q("scalpSimStop").value=String((snap.formatted&&snap.formatted.stop)??cfg.stop??"");
     q("scalpSimTarget").value=String((snap.formatted&&snap.formatted.target)??cfg.target??"");
     q("scalpSimMaxConcurrent").value=String(cfg.maxConcurrentAutoPositions??1);
-    q("scalpSimProfitLockEnabled").checked=cfg.profitLockEnabled===true;
-    q("scalpSimLockThresholdPct").value=String(cfg.lockThresholdPct??50);
-    q("scalpSimLockPortionPct").value=String(cfg.lockPortionPct??50);
+    q("scalpSimMoveSlToBeEnabled").checked=cfg.moveSlToBeEnabled===true;q("scalpSimBeThresholdPct").value=String(cfg.beThresholdPct??50);q("scalpSimClosePortionEnabled").checked=cfg.closePortionEnabled===true;q("scalpSimCloseThresholdPct").value=String(cfg.closeThresholdPct??50);q("scalpSimClosePortionPct").value=String(cfg.closePortionPct??50);
     q("scalpSimRankBoostEnabled").checked=cfg.rankBoostEnabled===true;
     q("scalpSimRankBoostThreshold").value=String(cfg.rankBoostThreshold??90);
     q("scalpSimRankBoostPoints").value=String(cfg.rankBoostPoints??0);

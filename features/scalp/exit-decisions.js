@@ -13,20 +13,24 @@
     return {triggerRank:rank,applied,normalTp:baseTp,tpPrice};
   }
 
-  function profitLockLevel({tranche={},tickSize=.01}={}){
-    const entry=n(tranche.entryPrice),tp=n(tranche.partialTpPrice),pct=n(tranche.lockThresholdPct),direction=upper(tranche.direction);
+  function actionLevel({tranche={},thresholdPct,tickSize=.01}={}){
+    const entry=n(tranche.entryPrice),tp=n(tranche.partialTpPrice),pct=n(thresholdPct),direction=upper(tranche.direction);
     if(!(entry>0)||!(tp>0)||!(pct>0)||!["LONG","SHORT"].includes(direction))return null;
     return calc.roundStep(entry+(tp-entry)*(pct/100),n(tickSize)||.01,direction==="LONG"?"up":"down");
   }
 
   function profitLockQuantity({tranche={},filters={}}={}){
-    const remaining=n(tranche.remainingQty)||0,step=n(filters.stepSize)||.001,requested=calc.normalizeLot(remaining*((n(tranche.lockPortionPct)||0)/100),filters),maximum=calc.normalizeLot(Math.max(0,remaining-step),filters);
+    const remaining=n(tranche.remainingQty)||0,step=n(filters.stepSize)||.001,requested=calc.normalizeLot(remaining*((n(tranche.closePortionPct??tranche.lockPortionPct)||0)/100),filters),maximum=calc.normalizeLot(Math.max(0,remaining-step),filters);
     return Math.min(requested,maximum);
   }
+  function profitLockLevel({tranche={},tickSize=.01}={}){return actionLevel({tranche,thresholdPct:tranche.closeThresholdPct??tranche.lockThresholdPct,tickSize});}
+  function beLevel({tranche={},tickSize=.01}={}){return actionLevel({tranche,thresholdPct:tranche.beThresholdPct,tickSize});}
+  const reached=(tranche,price,level,enabled,triggered,pending)=>{const current=n(price),direction=upper(tranche.direction);return !!(enabled&&!triggered&&!pending&&upper(tranche.status)==="ACTIVE"&&level>0&&current>0&&(direction==="LONG"?current>=level:direction==="SHORT"&&current<=level));};
+  function beReached({tranche={},price,tickSize=.01}={}){return reached(tranche,price,beLevel({tranche,tickSize}),tranche.moveSlToBeEnabled,tranche.beMoveTriggered,tranche.tradeManagementPending);}
 
   function profitLockReached({tranche={},price,tickSize=.01}={}){
     const level=profitLockLevel({tranche,tickSize}),current=n(price),direction=upper(tranche.direction);
-    return !!(tranche.profitLockEnabled&&!tranche.profitLockTriggered&&!tranche.profitLockPending&&upper(tranche.status)==="ACTIVE"&&level>0&&current>0&&(direction==="LONG"?current>=level:direction==="SHORT"&&current<=level));
+    return reached(tranche,current,level,tranche.closePortionEnabled??tranche.profitLockEnabled,tranche.closePortionTriggered??tranche.profitLockTriggered,tranche.tradeManagementPending??tranche.profitLockPending);
   }
 
   function profitLockDecision({tranche={},price,filters={}}={}){
@@ -44,6 +48,6 @@
   }
 
   root.exitDecisions=Object.freeze({
-    CANDLE_TIE_BREAK,rankBoost,profitLockLevel,profitLockQuantity,profitLockReached,profitLockDecision,evaluateProtectionCandle
+    CANDLE_TIE_BREAK,rankBoost,actionLevel,beLevel,beReached,profitLockLevel,profitLockQuantity,profitLockReached,profitLockDecision,evaluateProtectionCandle
   });
 })();

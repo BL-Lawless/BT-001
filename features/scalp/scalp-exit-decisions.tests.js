@@ -27,13 +27,17 @@ async function run(){
   assert.equal(shortBoost.tpPrice,80);
   cases.rankBoostIsPureStrictAndDirectionAware=true;
 
-  const lockTranche={direction:"LONG",entryPrice:100,partialTpPrice:110,remainingQty:.01,filledQty:.01,entryCommission:.0004,profitLockEnabled:true,lockThresholdPct:50,lockPortionPct:50,profitLockTriggered:false,profitLockPending:false,status:"ACTIVE"};
+  const lockTranche={direction:"LONG",entryPrice:100,partialTpPrice:110,remainingQty:.01,filledQty:.01,entryCommission:.0004,moveSlToBeEnabled:true,beThresholdPct:40,closePortionEnabled:true,closeThresholdPct:50,closePortionPct:50,beMoveTriggered:false,closePortionTriggered:false,tradeManagementPending:false,status:"ACTIVE"};
   const beforeLock=JSON.stringify(lockTranche),filters={tickSize:.1,stepSize:.001};
   assert.equal(decisions.profitLockLevel({tranche:lockTranche,tickSize:filters.tickSize}),105);
   assert.equal(decisions.profitLockQuantity({tranche:lockTranche,filters}),.005);
   assert.equal(decisions.profitLockReached({tranche:lockTranche,price:104.9,tickSize:filters.tickSize}),false);
   assert.equal(decisions.profitLockReached({tranche:lockTranche,price:105,tickSize:filters.tickSize}),true);
   assert.deepEqual(plain(decisions.profitLockDecision({tranche:lockTranche,price:105,filters})),{reached:true,level:105,quantity:.005});
+  assert.equal(decisions.beReached({tranche:{...lockTranche,moveSlToBeEnabled:false,closePortionEnabled:false},price:106,tickSize:.1}),false);
+  assert.equal(decisions.beReached({tranche:{...lockTranche,closePortionEnabled:false},price:104,tickSize:.1}),true);
+  assert.equal(decisions.profitLockReached({tranche:{...lockTranche,moveSlToBeEnabled:false},price:105,tickSize:.1}),true);
+  assert.equal(decisions.beReached({tranche:lockTranche,price:105,tickSize:.1})&&decisions.profitLockReached({tranche:lockTranche,price:105,tickSize:.1}),true);
   assert.equal(JSON.stringify(lockTranche),beforeLock,"profit-lock decisions must not mutate the tranche");
   cases.profitLockMathIsPureAndReturnBased=true;
 

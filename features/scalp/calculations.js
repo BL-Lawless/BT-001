@@ -59,6 +59,7 @@
     return linkedPreview({direction,guide,qty,target,stop,tpDriver:"NET_TARGET",slDriver:"NET_SL",rates,filters});
   }
   function normalizeLot(qty,filters={}){return roundStep(n(qty)||0,n(filters.stepSize)||0.001,"down");}
+  function validateOrderQuantity(quantity,price,filters={}){const q=n(quantity),normalized=normalizeLot(q,filters),errors=[],minQty=n(filters.minQty)||0,maxQty=n(filters.maxQty),minNotional=n(filters.minNotional)||0,p=n(price);if(!(q>0))errors.push("Close quantity must be greater than zero");if(q>0&&Math.abs(q-normalized)>1e-10)errors.push(`Close quantity must match step size ${filters.stepSize||.001}`);if(q>0&&q<minQty)errors.push(`Close quantity is below minimum ${minQty}`);if(maxQty!=null&&q>maxQty)errors.push(`Close quantity exceeds maximum ${maxQty}`);if(p>0&&q>0&&q*p<minNotional)errors.push(`Close notional is below minimum ${minNotional}`);return {ok:errors.length===0,errors,normalizedQuantity:normalized};}
   function feeAwareBreakeven({direction,entryPrice,qty,entryCommission=0,exitRate=0,tickSize=.01}={}){
     const side=upper(direction),entry=n(entryPrice),quantity=n(qty),commission=Math.max(0,n(entryCommission)||0),rate=Math.max(0,n(exitRate)||0),tick=n(tickSize)||.01;
     if(!["LONG","SHORT"].includes(side)||!(entry>0)||!(quantity>0))return null;
@@ -90,5 +91,5 @@
     const valid=value=>value!==null&&value!==""&&Number.isFinite(Number(value)),integer=value=>valid(value)?Math.round(Number(value)).toLocaleString("en-US"):"-",money=value=>valid(value)?`$${Number(value).toFixed(2)}`:"-";
     return {guide:valid(model&&model.guide)?Number(model.guide).toLocaleString("en-US",{maximumFractionDigits:2}):"-",tpDelta:integer(model&&model.tpDelta),slDelta:integer(model&&model.slDelta),tpFees:money(model&&model.tpFee),slFees:money(model&&model.slFee)};
   }
-  root.calculations=Object.freeze({n,quoteAsset,roundStep,feeRates,prices,estimate,linkedSide,linkedPreview,preview,normalizeLot,feeAwareBreakeven,formatNumeric,stepNumeric,validateArm,formatOutcome});
+  root.calculations=Object.freeze({n,quoteAsset,roundStep,feeRates,prices,estimate,linkedSide,linkedPreview,preview,normalizeLot,validateOrderQuantity,feeAwareBreakeven,formatNumeric,stepNumeric,validateArm,formatOutcome});
 })();
