@@ -155,13 +155,19 @@
     const rest=getRest();
     if(!rest)throw new Error("services/rest.service.js (window.restService) is unavailable");
     const query=new URLSearchParams({
-      select:"id,event_at,symbol,duration,tick_size,chart_interval_seconds,cells,metadata,provider_run_id,provider_dataset_id",
+      select:"id,event_at,symbol,duration,tick_size,chart_interval_seconds,metadata,storage_path,file_size_bytes,provider_run_id,provider_dataset_id",
       symbol:`eq.${String(symbol||"").trim().toUpperCase()}`,order:"event_at.desc",limit:"1"
     }),key=getAnonKey();
     const rows=await rest.get(`${getUrl()}/rest/v1/liquidation_heatmap_snapshots?${query}`,{
       headers:{apikey:key,Authorization:`Bearer ${key}`}
     });
-    return Array.isArray(rows)&&rows.length?rows[0]:null;
+    if(!Array.isArray(rows)||!rows.length)return null;
+    const row=rows[0],path=String(row.storage_path||"").split("/").filter(Boolean).map(encodeURIComponent).join("/");
+    if(!path)throw new Error("Latest heatmap snapshot has no Storage path");
+    const rawPayload=await rest.get(`${getUrl()}/storage/v1/object/liquidation-heatmaps/${path}`,{
+      headers:{apikey:key,Authorization:`Bearer ${key}`}
+    });
+    return {...row,raw_payload:rawPayload};
   }
 
   function pendingCount(){return worker?workerStatus.pending:pending.length;}
