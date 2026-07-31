@@ -23,16 +23,16 @@ async function run(){
   context.BT001ExchangeClock={now:()=>firedAt,fromLocal:value=>Number(value)+7000};
   const routingEngine=new build.ScalpEngine({gateway:fakeGateway(),storage:new MemoryStorage(),now:()=>rawBrowserNow});
   const expectedRoutes={
-    scalp_v1_signals:["DETECTION_QUALIFIED","RANK_REJECTED"],
     scalp_positions:["TRANCHE_ADDED","TRANCHE_CLOSED","TRANCHE_RECOVERED","ENTRY_FAILED","EMERGENCY_CLOSE_FAILED","EMERGENCY_CLOSE_SUCCEEDED","PROTECTION_REBUILD_STARTED","PROTECTION_REBUILD_SUCCEEDED","PROTECTION_REBUILD_FAILED","PROTECTION_REBUILD_REFUSED","TRANCHE_EXTERNALLY_REDUCED","PROFIT_LOCK_APPLIED","PROFIT_LOCK_FAILED"],
     scalp_operational:["ARMED","DISARMED","CONNECTION_TEST","DAILY_LOSS_CAP_BREACHED"]
   };
   const expectedCascadeAgreement={direction:"LONG",count:2,timeframes:["1m","5m"],records:[{timeframe:"1m",direction:"LONG"}]};
   for(const [table,actions]of Object.entries(expectedRoutes))for(const action of actions)routingEngine.logActivity(action,action==="DETECTION_QUALIFIED"?{cascadeAgreement:expectedCascadeAgreement}:{});
+  routingEngine.logActivity("DETECTION_QUALIFIED",{cascadeAgreement:expectedCascadeAgreement});
+  routingEngine.logActivity("RANK_REJECTED");
   routingEngine.logActivity("UNROUTED_ACTION");
   assert.equal(routedLogs.length,Object.values(expectedRoutes).flat().length);
   const expectedColumns={
-    scalp_v1_signals:["action","cascade_agreement","detector_state","event_at","machine_id","source_timeframe","symbol"],
     scalp_positions:["action","direction","event_at","machine_id","position_state","symbol","tranche_id"],
     scalp_operational:["action","detail","event_at","machine_id"]
   };
@@ -43,8 +43,7 @@ async function run(){
     assert.equal(row.event_at,new Date(firedAt).toISOString(),`${table} event_at must come from the engine clock`);
     assert(!Object.prototype.hasOwnProperty.call(row,"auto_entered"));
   }
-  assert.deepEqual(JSON.parse(JSON.stringify(routedLogs.find(item=>item.table==="scalp_v1_signals"&&item.row.action==="DETECTION_QUALIFIED").row.cascade_agreement)),expectedCascadeAgreement,"v1 signal writes must retain the computed cascade agreement");
-  assert(!routedLogs.some(item=>item.table==="scalp_activity_log"||item.table==="scalp_v2_signals"));cases.supabaseActivityRoutesWithTableSpecificPayloads=true;
+  assert(!routedLogs.some(item=>["scalp_activity_log","scalp_v1_signals","scalp_v2_signals"].includes(item.table)));cases.supabaseActivityRoutesWithTableSpecificPayloads=true;
   const rawTradeCreated=rawBrowserNow-1000,rawTradeClosed=rawBrowserNow;
   routingEngine.recordTradeLedger({
     createdAt:rawTradeCreated,closedAt:rawTradeClosed,symbol:"BTCUSDT",direction:"LONG",

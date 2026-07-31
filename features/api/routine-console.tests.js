@@ -20,7 +20,8 @@ assert(!calculator.includes('console.info(MODULE + " flat cleanup"'));
 
 assert(main.includes("window.binanceRealtimeDiagnostics = () => ({...diag});"));
 assert(clock.includes("Object.freeze({now,fromLocal,offset,sync,ensureSynchronized,isReliable,status,CACHE_MS,maxRoundTripMs})"));
-assert(supabase.includes("log,flushPending,pendingCount,loggingStatus,setLatestSnapshot"));
+assert(supabase.includes("log,flushPending,pendingCount,loggingStatus"));
+assert(!supabase.includes("setLatestSnapshot"));
 assert(gate.includes("state() {"));
 
 console.log("routine console audit tests: PASS");

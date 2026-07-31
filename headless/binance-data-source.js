@@ -22,6 +22,22 @@ function createBinanceDataSource(options={}){
     if(!Array.isArray(data))throw new Error("Invalid Binance klines response");
     return data.map(parseRestKline);
   }
+  async function fetchCurrentFundingRate(symbol){
+    const query=new URLSearchParams({symbol:String(symbol)});
+    const response=await fetchFn(`${restUrl}/fapi/v1/premiumIndex?${query}`,{headers:{"Cache-Control":"no-cache","Pragma":"no-cache"}});
+    if(!response.ok)throw new Error(`Binance premium index HTTP ${response.status}`);
+    const data=await response.json(),fundingRate=Number(data&&data.lastFundingRate);
+    if(!data||String(data.symbol)!==String(symbol)||!Number.isFinite(fundingRate))throw new Error("Invalid Binance premium index response");
+    return {symbol:String(data.symbol),fundingRate,time:Number(data.time)||null};
+  }
+  async function fetchCurrentOpenInterest(symbol){
+    const query=new URLSearchParams({symbol:String(symbol)});
+    const response=await fetchFn(`${restUrl}/fapi/v1/openInterest?${query}`,{headers:{"Cache-Control":"no-cache","Pragma":"no-cache"}});
+    if(!response.ok)throw new Error(`Binance open interest HTTP ${response.status}`);
+    const data=await response.json(),openInterest=Number(data&&data.openInterest);
+    if(!data||String(data.symbol)!==String(symbol)||!Number.isFinite(openInterest))throw new Error("Invalid Binance open interest response");
+    return {symbol:String(data.symbol),openInterest,time:Number(data.time)||null};
+  }
   function connectWebSocket(url,handlers={}){
     const now=options.now||Date.now,setTimeoutFn=options.setTimeoutFn||setTimeout,clearTimeoutFn=options.clearTimeoutFn||clearTimeout;
     const setIntervalFn=options.setIntervalFn||setInterval,clearIntervalFn=options.clearIntervalFn||clearInterval;
@@ -107,7 +123,7 @@ function createBinanceDataSource(options={}){
       status(){return {connected:!!socket,openedAt,lastMessageAt,lastPongAt,staleAfterMs};}
     };
   }
-  return Object.freeze({fetchKlines,connectWebSocket});
+  return Object.freeze({fetchKlines,fetchCurrentFundingRate,fetchCurrentOpenInterest,connectWebSocket});
 }
 
 module.exports={createBinanceDataSource,parseRestKline};

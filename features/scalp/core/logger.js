@@ -5,17 +5,14 @@
   const OPERATIONAL_ACTIONS=Object.freeze(["ARMED","DISARMED","CONNECTION_TEST","DAILY_LOSS_CAP_BREACHED"]);
   const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
   const number=value=>{const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;};
-  function activityTable(action,signalTable="scalp_v1_signals"){
-    return SIGNAL_ACTIONS.includes(action)?signalTable:POSITION_ACTIONS.includes(action)?"scalp_positions":OPERATIONAL_ACTIONS.includes(action)?"scalp_operational":null;
+  function activityTable(action){
+    return SIGNAL_ACTIONS.includes(action)?null:POSITION_ACTIONS.includes(action)?"scalp_positions":OPERATIONAL_ACTIONS.includes(action)?"scalp_operational":null;
   }
-  function buildActivityLog({action,detail={},symbol=null,machineId=null,signalTable="scalp_v1_signals",now=Date.now}={}){
-    const table=activityTable(action,signalTable);
+  function buildActivityLog({action,detail={},symbol=null,machineId=null,now=Date.now}={}){
+    const table=activityTable(action);
     if(!table)return null;
     const positionState=clone(detail.positionState??null),event_at=new Date(now()).toISOString();
-    const row=SIGNAL_ACTIONS.includes(action)?{
-      event_at,symbol,action,source_timeframe:detail.sourceTimeframe??null,
-      detector_state:clone(detail.detectorState??null),cascade_agreement:clone(detail.cascadeAgreement??null),machine_id:machineId
-    }:table==="scalp_positions"?{
+    const row=table==="scalp_positions"?{
       event_at,symbol,action,direction:positionState?.direction??null,
       tranche_id:positionState?.trancheId??null,position_state:positionState,machine_id:machineId
     }:{event_at,action,detail:clone(detail),machine_id:machineId};
@@ -37,7 +34,7 @@
     }};
   }
   function createLogger(options={}){
-    const getSupabase=options.getSupabase,getSymbol=options.getSymbol,getSignalTable=options.getSignalTable;
+    const getSupabase=options.getSupabase,getSymbol=options.getSymbol;
     const now=typeof options.now==="function"?options.now:Date.now;
     const fromLocal=typeof options.fromLocal==="function"?options.fromLocal:value=>value;
     function publish(client,result){
@@ -51,8 +48,7 @@
         const client=typeof getSupabase==="function"?getSupabase():null;
         if(!client||typeof client.log!=="function")return false;
         const machineId=typeof client.getDeviceId==="function"?client.getDeviceId():null;
-        const signalTable=typeof getSignalTable==="function"?getSignalTable():"scalp_v1_signals";
-        return publish(client,buildActivityLog({action,detail,symbol:typeof getSymbol==="function"?getSymbol():null,machineId,signalTable,now}));
+        return publish(client,buildActivityLog({action,detail,symbol:typeof getSymbol==="function"?getSymbol():null,machineId,now}));
       },
       logTrade(tranche,reason,pnl,guide){
         const client=typeof getSupabase==="function"?getSupabase():null;

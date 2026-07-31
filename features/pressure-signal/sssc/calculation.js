@@ -371,10 +371,10 @@
     const opposing=triggerEntries.map(entry=>metricValue(entry.item,"direction")).filter(value=>value!==null&&aggregateSign&&Math.sign(value)!==aggregateSign);
     const triggerTotal=Object.values(TIMEFRAME_ROLES).filter(meta=>meta.role==="trigger").length;
     const oppositionStrength=opposing.reduce((sum,value)=>sum+clamp(Math.abs(value)/100,0,1),0)/triggerTotal;
-    const triggerPenalty=14*oppositionStrength;
+    const triggerPenalty=56*oppositionStrength;
     const strongOpposing=triggerEntries.filter(entry=>{const value=metricValue(entry.item,"direction");return value!==null&&aggregateSign&&Math.sign(value)!==aggregateSign&&Math.abs(value)>55;});
     const unanimousStrongOpposition=triggerEntries.length===triggerTotal&&strongOpposing.length===triggerTotal;
-    const timingRisk=clamp(100-aggregateConfidence+triggerPenalty,0,100);
+    const timingRisk=clamp(48+triggerPenalty,0,100);
     return freeze({
       direction,directionalStrength,acceleration,coverage,alignment,momentumAgreement,structuralConfidence,confidenceConstraint,aggregateConfidence,timingRisk,
       roleSummaries,roleCoverage:Object.fromEntries(ROLE_ORDER.map(role=>[role,roleSummaries[role].coverage])),

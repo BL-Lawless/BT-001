@@ -8,6 +8,7 @@ const {createLoggerRunner,installProcessShutdown}=require("./logger-runner.js");
 const calculation=require("../features/pressure-signal/sssc/calculation.js");
 const {createOrchestration}=require("../features/pressure-signal/sssc/orchestration.js");
 const {createSnapshotLogger}=require("../features/pressure-signal/sssc/core/snapshot-logger.js");
+const {createFuturesMarketContextLogger}=require("./futures-market-context-logger.js");
 
 function marketFingerprint(state){
   const closed=state&&state.privateCandlesByTf||{},forming=state&&state.privateFormingByTf||{};
@@ -50,9 +51,12 @@ function buildSsscRunner(options={}){
     getSnapshot:pipeline.getSnapshot,getCalculation:()=>calculation,getSymbol:()=>config.symbol,
     getSupabase:()=>supabase,now:clock.now,warn:options.warn||console.warn
   });
+  const contextLogger=createFuturesMarketContextLogger({
+    dataSource,supabase,symbol:config.symbol,now:clock.now,warn:options.warn||console.warn
+  });
   const component={
-    async start(){pipeline.startLive();logger.start();},
-    stop(){logger.stop();pipeline.stop();},
+    async start(){pipeline.startLive();logger.start();await contextLogger.start();},
+    stop(){contextLogger.stop();logger.stop();pipeline.stop();},
     capture:logger.capture
   };
   return createLoggerRunner({component,dataSource});

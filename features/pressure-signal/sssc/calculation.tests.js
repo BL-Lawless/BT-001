@@ -111,6 +111,17 @@ assert.equal(maxConfirming.aggregateConfidence,96);
 assert.equal(maxOpposing.aggregateConfidence,72);
 assert(maxConfirming.aggregateConfidence>zeroMomentum.aggregateConfidence&&zeroMomentum.aggregateConfidence>maxOpposing.aggregateConfidence);
 
+// Timing risk is an independent trigger-role veto, not a confidence-derived duplicate gate.
+const triggerOpposition=calc.aggregate(allIntervals.map(interval=>({
+  available:true,interval,direction:interval==="1m"?-100:100,directionalStrength:100,acceleration:0,reliability:"full-warmup"
+})));
+assert(triggerOpposition.aggregateConfidence>=52,"fixture must clear the independent confidence gate");
+assert.equal(triggerOpposition.triggerRisk.unanimousStrongOpposition,false,"fixture must not use the explicit unanimous trigger veto");
+assert(triggerOpposition.timingRisk>72,"one maximally opposing trigger timeframe must independently raise timing risk above its gate");
+const timingBlocked=calc.evaluateMarketSetup(triggerOpposition);
+assert.equal(timingBlocked.setupAction,"WAIT");
+assert.equal(timingBlocked.reason,"Timing risk above setup threshold");
+
 // Coverage is data availability; alignment is actual directional sign consensus.
 const contradictory=calc.aggregate([
   {available:true,interval:"1d",direction:60,directionalStrength:20,acceleration:5},

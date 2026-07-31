@@ -39,14 +39,14 @@ const reordered=calc.aggregate([base[6],base[2],base[4],base[0],base[5],base[1],
 assert.equal(ordered.triggerRisk.disagreeingCount,2);
 assert.equal(ordered.triggerRisk.penalty,reordered.triggerRisk.penalty);
 assert.equal(ordered.timingRisk,reordered.timingRisk);
-assert(ordered.triggerRisk.penalty>0&&ordered.triggerRisk.penalty<14,"one weak plus one strong disagreement must scale below the maximum");
+assert(ordered.triggerRisk.penalty>0&&ordered.triggerRisk.penalty<56,"one weak plus one strong disagreement must scale below the maximum");
 
 const unanimousStrongOpposition=calc.aggregate([
   diagnostic("1d",100),diagnostic("4h",100),diagnostic("1h",100),diagnostic("15m",100),
   diagnostic("5m",100),diagnostic("3m",-60),diagnostic("1m",-60)
 ]);
 assert.equal(unanimousStrongOpposition.triggerRisk.unanimousStrongOpposition,true);
-assert(unanimousStrongOpposition.aggregateConfidence>=52&&unanimousStrongOpposition.timingRisk<=72,"veto fixture must otherwise qualify");
+assert(unanimousStrongOpposition.aggregateConfidence>=52&&unanimousStrongOpposition.timingRisk>72,"unanimous strong opposition must also register as high independent timing risk");
 assert.equal(calc.evaluateMarketSetup(unanimousStrongOpposition).setupAction,"WAIT");
 assert.match(calc.evaluateMarketSetup(unanimousStrongOpposition).reason,/unanimous strong trigger opposition/i);
 
@@ -56,7 +56,7 @@ assert.equal(missingOneTrigger.triggerRisk.availableCount,1);
 assert.equal(missingOneTrigger.triggerRisk.totalCount,2);
 assert.equal(missingOneTrigger.triggerRisk.coverage,.5);
 assert.equal(missingOneTrigger.triggerRisk.disagreeingCount,1);
-assert.equal(missingOneTrigger.triggerRisk.penalty,14*(.2/2));
+assert.equal(missingOneTrigger.triggerRisk.penalty,56*(.2/2));
 
 // Coverage and alignment must remain distinct and explain the clarity constraint.
 const fullDisagreement=calc.aggregate([

@@ -1,6 +1,6 @@
 "use strict";
 const assert=require("assert");
-const {SNAPSHOT_INTERVAL_MS,createRuntime}=require("./logging-worker.js");
+const {createRuntime}=require("./logging-worker.js");
 
 class MemoryStore{
   constructor(rows=[]){this.rows=rows;this.next=1;}
@@ -9,31 +9,20 @@ class MemoryStore{
   async all(){return this.rows.map(row=>({...row}));}
 }
 
-const tick=()=>new Promise(resolve=>setImmediate(resolve));
-
 (async()=>{
   const store=new MemoryStore(),calls=[],statusMessages=[];
-  let intervalCallback=null,intervalDelay=null;
   const runtime=createRuntime({
     store,
     fetchFn:async(url,options)=>{calls.push({url,options});return {ok:true,status:201};},
-    setIntervalFn:(callback,delay)=>{intervalCallback=callback;intervalDelay=delay;return 1;},
     postMessageFn:message=>statusMessages.push(message),
     setTimeoutFn:()=>1
   });
   await runtime.handle({type:"config",url:"https://project.supabase.co",key:"anon"});
-  await runtime.handle({type:"latestSnapshot",row:{event_at:"2026-07-27T00:00:00.000Z",machine_id:"m1"}});
-  runtime.startSnapshots();
-  runtime.startSnapshots();
-  assert.equal(intervalDelay,SNAPSHOT_INTERVAL_MS);
-  assert.equal(typeof intervalCallback,"function","the Worker must own the snapshot timer independently of page visibility");
-  intervalCallback();
-  await tick();await tick();
+  await runtime.handle({type:"enqueue",table:"scalp_operational",row:{event_at:"2026-07-27T00:00:00.000Z",action:"ARMED"}});
   assert.equal(calls.length,1);
-  assert(calls[0].url.endsWith("/rest/v1/sssc_snapshots"));
-  const freshness=statusMessages.findLast(message=>message.type==="status"&&message.latestSnapshotEventAt);
-  assert.equal(freshness.latestSnapshotEventAt,"2026-07-27T00:00:00.000Z");
-  assert(Number.isFinite(freshness.latestSnapshotAgeMs),"worker telemetry must expose cached snapshot age");
+  assert(calls[0].url.endsWith("/rest/v1/scalp_operational"));
+  assert(!Object.prototype.hasOwnProperty.call(runtime,"startSnapshots"));
+  assert(statusMessages.every(message=>!Object.prototype.hasOwnProperty.call(message,"latestSnapshotEventAt")));
 
   const durableRows=[],firstStore=new MemoryStore(durableRows);
   const first=createRuntime({

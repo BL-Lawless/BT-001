@@ -22425,7 +22425,7 @@ If there is NO open position, use this Section 2 instead:
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,Number(v)||0));
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
   let visible=false, drag=null;
-  let data={}, lastFullFetch=0, lastRender=0, pipeline=null, snapshotLogger=null;
+  let data={}, lastFullFetch=0, lastRender=0, pipeline=null;
   let previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
   const gaugeTracker=window.BT001_SSSC_GAUGE_PRESENTATION?.createGaugeTracker?.()||{update(){},reading(){return {current:0,previous:null};}};
   let hadCanonicalMaSlots=false;
@@ -22696,9 +22696,9 @@ If there is NO open position, use this Section 2 instead:
     if(!force&&Date.now()-lastRender<500)return;lastRender=Date.now();
     const items=TFS.map(([label])=>data[label]||{tf:label,available:false,reason:'Unavailable'});gaugeTracker.update(items);updatePreviousScores(items);
     const engine=calc(),summary=engine?.aggregate(items)||{direction:0,directionalStrength:0,acceleration:0,aggregateConfidence:0,timingRisk:100},marketRead=engine?.evaluateMarketSetup(summary)||{marketBias:0,marketStrength:0,marketAcceleration:0,aggregateConfidence:0,timingRisk:100,setupAction:'WAIT',reason:'Calculation module unavailable'},positionRead=engine?.evaluatePositionAction(marketRead,normalizedSsscPositionContext())||{positionAction:null,positionSide:null,reason:'Calculation module unavailable'},dir=marketRead.marketBias,pow=marketRead.marketStrength,confidence=marketRead.aggregateConfidence,risk=marketRead.timingRisk;
-    const setupAction=marketRead.setupAction,positionAction=positionRead.positionAction?(positionRead.positionAction+' '+positionRead.positionSide):'NO POSITION',dirSide=dir>18?'BULLISH':dir<-18?'BEARISH':'MIXED',dirCls=strengthClass(dir),powCls=pow>20?'blue':pow<-20?'red':'gray',accel=marketRead.marketAcceleration,accelCls=accel>20?'blue':accel<-20?'red':'gray';
+    const setupAction=marketRead.setupAction,positionAction=positionRead.positionAction?(positionRead.positionAction+' '+positionRead.positionSide):'NO POSITION',readyLong=setupAction==='FRESH LONG',readyShort=setupAction==='FRESH SHORT',entryReady=readyLong||readyShort,buildingLong=!entryReady&&(dir>18||pow>20),buildingShort=!entryReady&&(dir< -18||pow< -20),setupStage=entryReady?'READY':buildingLong||buildingShort?'BUILDING':'NEUTRAL',dirSide=readyLong?'READY LONG':readyShort?'READY SHORT':buildingLong?'BUILDING BULLISH':buildingShort?'BUILDING BEARISH':'MIXED',dirCls=entryReady?(readyLong?'blue':'red'):(buildingLong||buildingShort?'amber':'gray'),powCls=entryReady?(readyLong?'blue':'red'):(buildingLong||buildingShort?'amber':'gray'),accel=marketRead.marketAcceleration,accelCls=accel>20?'blue':accel<-20?'red':'gray';
     const dirVal=`${dirSide} | ${Math.abs(Math.round(dir))}`,strengthVal=signed(pow),accelVal=signed(accel),confidenceVal=Math.round(confidence)+'%',riskVal=Math.round(risk)+'%',topNode=$('ssscDashTop'),rowsNode=$('ssscDashRows');
-    topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dir>18?'Structure favors bullish side':dir<-18?'Structure favors bearish side':'Mixed',dirCls)+kpi('STRENGTH',`<span class="${blinkClass('kpi_strength',strengthVal)}">${strengthVal}</span>`,pow>20?'Bullish strength':pow<-20?'Bearish strength':'Neutral',powCls)+kpi('ACCEL',`<span class="${blinkClass('kpi_accel',accelVal)}">${accelVal}</span>`,accel>20?'Expanding':accel<-20?'Contracting':'Stable',accelCls)+kpi('CONFIDENCE',`<span class="${blinkClass('kpi_confidence',confidenceVal)}">${confidenceVal}</span>`,`${summary.confidenceConstraint||'none'} constrained`,confidence>62?'green':'gray','',true)+kpi('TIMING RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('MARKET SETUP',setupAction,marketRead.reason,'','action')+kpi('POSITION ACTION',positionAction,positionRead.reason,'','action',true);
+    topNode.innerHTML=kpi('DIR',`<span class="${blinkClass('kpi_dir',dirVal)}">${dirVal}</span>`,dirSide,dirCls)+kpi('STRENGTH',`<span class="${blinkClass('kpi_strength',strengthVal)}">${strengthVal}</span>`,entryReady?'Entry threshold confirmed':buildingLong||buildingShort?'Early directional strength · building':'Neutral',powCls)+kpi('ACCEL',`<span class="${blinkClass('kpi_accel',accelVal)}">${accelVal}</span>`,accel>20?'Expanding':accel<-20?'Contracting':'Stable',accelCls)+kpi('CONFIDENCE',`<span class="${blinkClass('kpi_confidence',confidenceVal)}">${confidenceVal}</span>`,`${summary.confidenceConstraint||'none'} constrained`,confidence>62?'green':'gray','',true)+kpi('TIMING RISK',`<span class="${blinkClass('kpi_risk',riskVal)}">${riskVal}</span>`,risk>65?'High timing risk':'Moderate timing risk',risk>65?'red':'amber')+kpi('MARKET SETUP',`${setupStage} · ${setupAction}`,marketRead.reason,entryReady?'green':setupStage==='BUILDING'?'amber':'','action')+kpi('POSITION ACTION',positionAction,positionRead.reason,'','action',true);
     rowsNode.innerHTML=items.map(rowHtml).join('');$('ssscDashEvents').innerHTML=eventRows(items);animateRollingDigits(rowsNode);settleScoreRoll(items);bindRows();
     const missing=items.filter(x=>!x.available).map(x=>x.tf+': '+(x.reason||'Unavailable'));
     $('ssscDashFooter').innerHTML=`Module: ${MODULE} | Private REST seed/resync: ${lastFullFetch?Math.round((Date.now()-lastFullFetch)/1000)+'s ago':'never'} | Calc throttle: 500ms | Render throttle: 500-1000ms ${missing.length?'<span class="sssc-warn"> Missing: '+missing.join(' | ')+'</span>':''}`;
@@ -22761,22 +22761,10 @@ If there is NO open position, use this Section 2 instead:
       connectWebSocket:(url,options)=>API.connectWebSocket(url,options),
       getWsUrl:()=>String((typeof cfg==="function"&&cfg()&&cfg().ws)||"wss://fstream.binance.com/market/stream"),
       klineLimit:KLINE_LIMIT,
-      onUpdate:state=>{data=state.data;lastFullFetch=state.lastFullFetch;render();if(snapshotLogger)snapshotLogger.capture();},
+      onUpdate:state=>{data=state.data;lastFullFetch=state.lastFullFetch;render();},
       warn:(message,error)=>console.warn(MODULE+' '+message,error)
     });
     return pipeline;
-  }
-  function ensureSnapshotLogger(){
-    if(snapshotLogger)return snapshotLogger;
-    const loggerApi=window.BT001_SSSC_SUPABASE_LOGGER,livePipeline=ensurePipeline();
-    if(!loggerApi||typeof loggerApi.createSnapshotLogger!=='function'||!livePipeline)return null;
-    snapshotLogger=loggerApi.createSnapshotLogger({
-      getSnapshot:()=>livePipeline.getSnapshot(),
-      getCalculation:calc,
-      getSymbol:sym,
-      getSupabase:()=>window.BT001Supabase||null
-    });
-    return snapshotLogger;
   }
   let visibilityRecoveryTimer=null;
   function scheduleSsscVisibilityRecovery(){
@@ -22799,7 +22787,7 @@ If there is NO open position, use this Section 2 instead:
       });
     },80);
   }
-  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } if(!window.__ssscVisibilityRecoveryBound){window.__ssscVisibilityRecoveryBound=true;["visibilitychange","focus","pageshow"].forEach(name=>window.addEventListener(name,scheduleSsscVisibilityRecovery,true));} installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); if(pipeline)ensureSnapshotLogger()?.start(); }
+  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } if(!window.__ssscVisibilityRecoveryBound){window.__ssscVisibilityRecoveryBound=true;["visibilitychange","focus","pageshow"].forEach(name=>window.addEventListener(name,scheduleSsscVisibilityRecovery,true));} installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); }
 
   if(window.BT001SettingsTabs&&!window.__ssscR3SettingsOpenBound){ window.__ssscR3SettingsOpenBound=true; window.BT001SettingsTabs.subscribe(event=>{ if(event.type==="opened") syncSsscToolbarButton(); }); }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);

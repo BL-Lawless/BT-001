@@ -1,7 +1,7 @@
 function BT001LoggingWorkerMain(){
   "use strict";
 
-  const SNAPSHOT_INTERVAL_MS=30000,RETRY_DELAY_MS=4000,DB_NAME="bt001-supabase-log-v1",STORE_NAME="jobs";
+  const RETRY_DELAY_MS=4000,DB_NAME="bt001-supabase-log-v1",STORE_NAME="jobs";
 
   function createIndexedDbStore(indexedDBImpl){
     let dbPromise=null;
@@ -35,21 +35,14 @@ function BT001LoggingWorkerMain(){
   function createRuntime(options={}){
     const store=options.store||createIndexedDbStore(options.indexedDB||indexedDB);
     const fetchFn=options.fetchFn||fetch;
-    const setIntervalFn=options.setIntervalFn||setInterval;
-    const clearIntervalFn=options.clearIntervalFn||clearInterval;
     const setTimeoutFn=options.setTimeoutFn||setTimeout;
     const post=options.postMessageFn||(()=>{});
-    let url="",key="",latestSnapshot=null,snapshotTimer=null,retryTimer=null,flushing=false;
+    let url="",key="",retryTimer=null,flushing=false;
     let pending=0,succeeded=0,failed=0;
     const initialized=Promise.resolve(store.all()).then(jobs=>{pending=jobs.length;status();}).catch(()=>{});
 
     const status=()=>{
-      const eventMs=Date.parse(latestSnapshot&&latestSnapshot.event_at||"");
-      post({
-        type:"status",pending,succeeded,failed,configured:!!url&&!!key,
-        latestSnapshotEventAt:latestSnapshot&&latestSnapshot.event_at||null,
-        latestSnapshotAgeMs:Number.isFinite(eventMs)?Math.max(0,Date.now()-eventMs):null
-      });
+      post({type:"status",pending,succeeded,failed,configured:!!url&&!!key});
     };
     function scheduleRetry(){
       if(retryTimer)return;
@@ -83,24 +76,16 @@ function BT001LoggingWorkerMain(){
       pending++;status();
       await flush();
     }
-    function startSnapshots(){
-      if(snapshotTimer!=null)return;
-      snapshotTimer=setIntervalFn(()=>{status();if(latestSnapshot)enqueue("sssc_snapshots",latestSnapshot).catch(()=>{});},SNAPSHOT_INTERVAL_MS);
-    }
-    function stopSnapshots(){if(snapshotTimer!=null)clearIntervalFn(snapshotTimer);snapshotTimer=null;}
     async function handle(message={}){
       if(message.type==="config"){
         url=String(message.url||"").replace(/\/+$/,"");key=String(message.key||"");status();await flush();
       }else if(message.type==="enqueue")await enqueue(message.table,message.row);
-      else if(message.type==="latestSnapshot")latestSnapshot=message.row||null;
-      else if(message.type==="startSnapshots")startSnapshots();
-      else if(message.type==="stopSnapshots")stopSnapshots();
       else if(message.type==="flush")await flush();
     }
-    return Object.freeze({handle,flush,enqueue,startSnapshots,stopSnapshots,getStatus:()=>({pending,succeeded,failed})});
+    return Object.freeze({handle,flush,enqueue,getStatus:()=>({pending,succeeded,failed})});
   }
 
-  const api=Object.freeze({SNAPSHOT_INTERVAL_MS,RETRY_DELAY_MS,createIndexedDbStore,createRuntime});
+  const api=Object.freeze({RETRY_DELAY_MS,createIndexedDbStore,createRuntime});
   if(typeof module!=="undefined"&&module.exports)module.exports=api;
   if(typeof window!=="undefined")window.BT001_LOGGING_WORKER_SOURCE=`(${BT001LoggingWorkerMain.toString()})();`;
   if(typeof self!=="undefined"&&typeof WorkerGlobalScope!=="undefined"&&self instanceof WorkerGlobalScope){

@@ -37,7 +37,6 @@
       this.activityLogger=options.activityLogger||loggerCore.createLogger({
         getSupabase:()=>window.BT001Supabase||null,
         getSymbol:()=>this.marketSymbol||(this.gateway&&typeof this.gateway.symbol==="function"?this.gateway.symbol():null)||null,
-        getSignalTable:()=>this.config.engineProfile==="V2"?"scalp_v2_signals":"scalp_v1_signals",
         now:()=>exchangeNow(this.now()),
         fromLocal:exchangeFromLocal
       });

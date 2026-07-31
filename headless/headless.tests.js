@@ -52,6 +52,14 @@ async function run(){
   });
   const rows=await market.fetchKlines("1m",1700000060000,1500,"BTCUSDT");
   assert.equal(rows[0].time,1700000000);assert(requestedUrl.includes("/fapi/v1/klines?"));assert(requestedUrl.includes("symbol=BTCUSDT"));assert(requestedUrl.includes("endTime=1700000060000"));
+  const contextUrls=[],contextSource=createBinanceDataSource({
+    fetch:async url=>{contextUrls.push(String(url));return {ok:true,json:async()=>String(url).includes("premiumIndex")?{symbol:"BTCUSDT",lastFundingRate:"0.000125",time:1700000060000}:{symbol:"BTCUSDT",openInterest:"12345.67",time:1700000060001}};},
+    WebSocket:FakeSocket,restUrl:"https://fapi.binance.com"
+  });
+  assert.deepEqual(await contextSource.fetchCurrentFundingRate("BTCUSDT"),{symbol:"BTCUSDT",fundingRate:.000125,time:1700000060000});
+  assert.deepEqual(await contextSource.fetchCurrentOpenInterest("BTCUSDT"),{symbol:"BTCUSDT",openInterest:12345.67,time:1700000060001});
+  assert(contextUrls[0].includes("/fapi/v1/premiumIndex?symbol=BTCUSDT"));
+  assert(contextUrls[1].includes("/fapi/v1/openInterest?symbol=BTCUSDT"));
   const socket=market.connectWebSocket("wss://example.test/stream",{reconnect:false});socket.disconnect();assert.equal(FakeSocket.last.closed,true);
   cases.binanceShimMatchesOrchestrationFetcherAndSocketShape=true;
 

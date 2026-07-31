@@ -177,10 +177,10 @@ assert.equal(calculatedOutbound.row.aggregate.marketStrength,calculatedDiagnosti
 
 const main=fs.readFileSync(path.resolve(__dirname,"..","..","..","main.js"),"utf8");
 const html=fs.readFileSync(path.resolve(__dirname,"..","..","..","index.html"),"utf8");
-assert(html.indexOf("features/pressure-signal/sssc/supabase-logger.js")<html.indexOf('src="main.js"'));
-assert(html.includes("core/snapshot-logger.js?v=20260729-vm-log-p1"));
-assert(html.includes("supabase-logger.js?v=20260729-vm-log-p1"),"logger asset must be cache-busted after extraction");
-assert(main.includes("ensureSnapshotLogger()?.start()"),"always-on install must start SSSC logging without opening the dashboard");
+assert(!html.includes("features/pressure-signal/sssc/supabase-logger.js"));
+assert(!html.includes("features/pressure-signal/sssc/core/snapshot-logger.js"));
+assert(!main.includes("ensureSnapshotLogger"),"the browser must not create an SSSC snapshot writer");
+assert(main.includes("onUpdate:state=>{data=state.data;lastFullFetch=state.lastFullFetch;render();}"),"browser SSSC updates must still calculate and render");
 const visibilityRecoverySource=main.slice(main.indexOf("function scheduleSsscVisibilityRecovery()"),main.indexOf("function install(){",main.indexOf("function scheduleSsscVisibilityRecovery()")));
 assert(visibilityRecoverySource.includes("livePipeline.calculate()"),"visibility recovery must immediately resume snapshot capture from retained buffers");
 assert(visibilityRecoverySource.includes("livePipeline.refresh(true)"),"visibility recovery must reseed and reconnect the SSSC pipeline");

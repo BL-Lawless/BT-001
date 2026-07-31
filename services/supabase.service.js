@@ -51,16 +51,10 @@
   // This small fallback is retained for non-Worker test/legacy environments only.
   const pending=[];
   let flushing=false,retryTimer=null;
-  let worker=null,workerAttempted=false,workerStatus={pending:0,succeeded:0,failed:0,latestSnapshotEventAt:null,latestSnapshotAgeMs:null};
-  let fallbackSnapshot=null,fallbackSnapshotTimer=null;
-  const SNAPSHOT_INTERVAL_MS=30000;
+  let worker=null,workerAttempted=false,workerStatus={pending:0,succeeded:0,failed:0};
 
   function syncWorkerConfig(){
     if(worker)worker.postMessage({type:"config",url:getUrl(),key:getAnonKey()});
-  }
-  function stopFallbackSnapshotTimer(){
-    if(fallbackSnapshotTimer!=null)clearInterval(fallbackSnapshotTimer);
-    fallbackSnapshotTimer=null;
   }
   function discardWorker(){
     const active=worker;
@@ -83,15 +77,12 @@
         if(message&&message.type==="status"){
           if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}
           workerStatus={
-            pending:Number(message.pending)||0,succeeded:Number(message.succeeded)||0,failed:Number(message.failed)||0,
-            latestSnapshotEventAt:message.latestSnapshotEventAt||null,
-            latestSnapshotAgeMs:Number.isFinite(Number(message.latestSnapshotAgeMs))?Number(message.latestSnapshotAgeMs):null
+            pending:Number(message.pending)||0,succeeded:Number(message.succeeded)||0,failed:Number(message.failed)||0
           };
         }
       });
       candidate.postMessage({type:"config",url:getUrl(),key:getAnonKey()});
       worker=candidate;
-      stopFallbackSnapshotTimer();
       return worker;
     }catch(error){
       if(objectUrl)try{URL.revokeObjectURL(objectUrl);}catch(_e){}
@@ -147,40 +138,7 @@
 
   function pendingCount(){return worker?workerStatus.pending:pending.length;}
   function loggingStatus(){
-    return Object.freeze({...workerStatus,workerActive:!!worker,fallbackActive:fallbackSnapshotTimer!=null});
-  }
-  function writeFallbackSnapshot(){
-    // A cleared interval callback may already be queued when a later Worker attempt succeeds.
-    // Never let that stale callback become a second producer through log()'s Worker routing.
-    if(worker){stopFallbackSnapshotTimer();return;}
-    if(!fallbackSnapshot)return;
-    insertRow("sssc_snapshots",fallbackSnapshot).catch(error=>{
-      console.warn("[BT001 Supabase] Fallback snapshot write failed; queued for retry.",error);
-      pending.push({table:"sssc_snapshots",row:fallbackSnapshot});scheduleFlush();
-    });
-  }
-  function setLatestSnapshot(row){
-    fallbackSnapshot=row||null;
-    try{const activeWorker=ensureWorker();if(activeWorker){activeWorker.postMessage({type:"latestSnapshot",row});return true;}}
-    catch(_error){}
-    return false;
-  }
-  function startSnapshotLogging(){
-    try{
-      const activeWorker=ensureWorker({retry:true});
-      if(activeWorker){
-        stopFallbackSnapshotTimer();
-        activeWorker.postMessage({type:"startSnapshots"});
-        return true;
-      }
-    }
-    catch(_error){discardWorker();}
-    if(fallbackSnapshotTimer==null)fallbackSnapshotTimer=setInterval(writeFallbackSnapshot,SNAPSHOT_INTERVAL_MS);
-    return false;
-  }
-  function stopSnapshotLogging(){
-    try{if(worker)worker.postMessage({type:"stopSnapshots"});}catch(_error){}
-    stopFallbackSnapshotTimer();
+    return Object.freeze({...workerStatus,workerActive:!!worker});
   }
 
   // Real end-to-end verification for the Settings panel: logActivity() is fire-and-forget and never
@@ -278,7 +236,7 @@
 
   window.BT001Supabase=Object.freeze({
     getUrl,getAnonKey,configured,saveUrlFromInput,saveKeyFromInput,clearUrl,clearKey,
-    log,flushPending,pendingCount,loggingStatus,setLatestSnapshot,startSnapshotLogging,stopSnapshotLogging,
+    log,flushPending,pendingCount,loggingStatus,
     getDeviceId,testConnection,testDbAccess
   });
   ensureWorker();

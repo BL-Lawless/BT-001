@@ -21,6 +21,10 @@ After cloning with the deploy key, install production dependencies with `npm ci 
 Before deploying the parallel Scalp V2 logger, run `deploy/sql/scalp_v2_signals.sql` once in the
 Supabase SQL editor.
 
+Before enabling futures funding/open-interest collection, run
+`deploy/sql/futures_market_snapshots.sql` once in the Supabase SQL editor. The additive collector
+runs inside `sssc-logger`; restart that service after deploying the code.
+
 Install and start the units:
 
 ```bash
