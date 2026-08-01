@@ -15,17 +15,23 @@
     const sequence=Math.max(0,Math.floor(n(tranche.protectionClientSequence)||0))+1;tranche.protectionClientSequence=sequence;
     return `${C.order.namespace}-${kind}-${hash(tranche.trancheId)}-R${Number(tranche.protectionBatchSequence||0).toString(36)}-A${sequence.toString(36)}`.toUpperCase().slice(0,36);
   }
+  function dualProtectionClientId(kind,tranche){
+    if(kind==="S"){const revision=Math.max(0,Math.floor(n(tranche.dualPslRevision)||0))+1;tranche.dualPslRevision=revision;return `${C.order.namespace}-S-2-${tranche.trancheId}-R${revision.toString(36)}`.toUpperCase().slice(0,36);}
+    return `${C.order.namespace}-${kind}-2-${tranche.trancheId}`.toUpperCase().slice(0,36);
+  }
   function filterValue(settings,type,key){const row=Array.isArray(settings&&settings.filters)?settings.filters.find(item=>item&&item.filterType===type):null;return n(row&&row[key]);}
   function normalizedFilters(settings={}){const lotStep=n(settings.stepSize)||filterValue(settings,"LOT_SIZE","stepSize")||0.001,marketStep=filterValue(settings,"MARKET_LOT_SIZE","stepSize")||lotStep,lotMin=filterValue(settings,"LOT_SIZE","minQty")||0,marketMin=filterValue(settings,"MARKET_LOT_SIZE","minQty")||0,maximums=[filterValue(settings,"LOT_SIZE","maxQty"),filterValue(settings,"MARKET_LOT_SIZE","maxQty")].filter(value=>value>0);return {...settings,tickSize:n(settings.tickSize)||filterValue(settings,"PRICE_FILTER","tickSize")||0.01,stepSize:Math.max(lotStep,marketStep),lotStepSize:lotStep,marketStepSize:marketStep,minQty:Math.max(lotMin,marketMin),maxQty:maximums.length?Math.min(...maximums):null,minNotional:filterValue(settings,"MIN_NOTIONAL","notional")||filterValue(settings,"NOTIONAL","minNotional")||0};}
   function orderClient(row){return String(row&&(row.clientOrderId??row.origClientOrderId??row.clientAlgoId??row.c??row.ca)||"");}
   function isOwned(row){return orderClient(row).startsWith(C.order.namespace+"-");}
   function snapshotOrders(value){const snap=value&&value.orders&&Array.isArray(value.orders)?value:value&&value.snapshot||value||{};return [...(Array.isArray(snap.orders)?snap.orders:[]),...(Array.isArray(snap.algoOrders)?snap.algoOrders:[])];}
   function orphanRole(row){
-    const id=orderClient(row),match=id.match(new RegExp(`^${C.order.namespace}-([TS])-(.+)$`));if(!match)return null;
+    const id=orderClient(row),dual=id.match(new RegExp(`^${C.order.namespace}-(S|T1|T2)-2-([0-9A-Z]+?)(?:-R([0-9A-Z]+))?$`,`i`)),match=dual||id.match(new RegExp(`^${C.order.namespace}-([TS])-(.+)$`));if(!match)return null;
     const explicit=upper(row&&row.positionSide),side=upper(row&&row.side),direction=["LONG","SHORT"].includes(explicit)?explicit:side==="SELL"?"LONG":side==="BUY"?"SHORT":null;
     const original=n(row&&(row.origQty??row.quantity??row.q??row.qty)),executed=n(row&&(row.executedQty??row.z))||0,remaining=original==null?null:Math.max(0,original-executed);
-    const level=n(row&&(match[1]==="T"?(row.price??row.p):(row.triggerPrice??row.stopPrice??row.activatePrice??row.sp)));
-    return {id,kind:match[1]==="T"?"PARTIAL_TP":"PSL",suffix:match[2].replace(/-A[0-9A-Z]+$/i,""),direction,remaining,level,executed,orderId:row&&(row.orderId??null),algoId:row&&(row.algoId??null),createdAt:n(row&&(row.time??row.updateTime??row.createTime))};
+    const tp=match[1]==="T"||match[1]==="T1"||match[1]==="T2",level=n(row&&(tp?(row.price??row.p):(row.triggerPrice??row.stopPrice??row.activatePrice??row.sp)));
+    if(dual)return {id,kind:match[1]==="T1"?"TP1":match[1]==="T2"?"TP2":"PSL",profile:2,suffix:upper(match[2]),trancheHash:null,revision:match[3]?upper(match[3]):null,attempt:null,direction,remaining,level,executed,orderId:row&&(row.orderId??null),algoId:row&&(row.algoId??null),createdAt:n(row&&(row.time??row.updateTime??row.createTime))};
+    const revised=match[2].match(/^([0-9A-Z]+)-R([0-9A-Z]+)-A([0-9A-Z]+)$/i);
+    return {id,kind:match[1]==="T"?"PARTIAL_TP":"PSL",profile:1,suffix:match[2].replace(/-A[0-9A-Z]+$/i,""),trancheHash:revised?upper(revised[1]):null,revision:revised?upper(revised[2]):null,attempt:revised?upper(revised[3]):null,direction,remaining,level,executed,orderId:row&&(row.orderId??null),algoId:row&&(row.algoId??null),createdAt:n(row&&(row.time??row.updateTime??row.createTime))};
   }
   class ScalpEngine extends EventTarget{
     constructor(options={}){
@@ -62,6 +68,12 @@
     persistTrancheBook(){try{this.storage.setItem(this.trancheStorageKey,JSON.stringify(tranches.snapshot(this.book)));}catch(_e){}}
     trancheCounts(){return tranches.counts(this.book);}
     trancheQuantities(){return {LONG:tranches.activeQuantity(this.book,"LONG"),SHORT:tranches.activeQuantity(this.book,"SHORT")};}
+    protectionClientIds(tranche){return tranche&&tranche.closePortionEnabled===true?[tranche.pslClientId,tranche.tp1ClientId,tranche.tp2ClientId]:[tranche&&tranche.pslClientId,tranche&&tranche.partialTpClientId];}
+    checkProtectionQuantityInvariant(tranche,orders=null,context="local"){
+      if(!tranche)return true;const tolerance=Math.max(1e-8,(n(this.filters&&this.filters.stepSize)||0)*1e-6),positionQty=n(tranche.remainingQty)||0,roles=orders?orders.map(orphanRole).filter(Boolean):null,pslQty=roles?(n(roles.find(row=>row.kind==="PSL")&&roles.find(row=>row.kind==="PSL").remaining)||0):positionQty,tpQty=roles?roles.filter(row=>["PARTIAL_TP","TP1","TP2"].includes(row.kind)).reduce((sum,row)=>sum+(n(row.remaining)||0),0):(tranche.closePortionEnabled===true?(n(tranche.tp1Qty)||0)-(n(tranche.tp1ExecutedQty)||0)+(n(tranche.tp2Qty)||0):positionQty),valid=Math.abs(pslQty-positionQty)<=tolerance&&Math.abs(tpQty-positionQty)<=tolerance;
+      if(!valid){const detail={trancheId:tranche.trancheId,context,positionQty,pslQty,tpQty};tranche.protectionQuantityViolation={at:this.now(),...detail};this.log("protection-quantity-invariant-violation",detail);this.logActivity("PROTECTION_QUANTITY_INVARIANT_VIOLATION",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,...detail,...clone(tranche)}});this.persistTrancheBook();}
+      return valid;
+    }
     canAddDirection(direction){return tranches.canAdd(this.book,direction,this.config.maxConcurrentAutoPositions);}
     saveConfig(){try{this.storage.setItem(C.configKey,JSON.stringify(this.config));}catch(_e){}}
     loadAutoLossState(){try{const saved=JSON.parse(this.storage.getItem(C.autoLossKey)||"null");if(saved&&typeof saved.day==="string")return {day:saved.day,accumulatedUsd:Math.max(0,n(saved.accumulatedUsd)||0)};}catch(_e){}return {day:null,accumulatedUsd:0};}
@@ -91,15 +103,15 @@
       if(!owned.length)return {ok:false,error:"No SCALP-owned orders found"};
       for(const order of owned){
         const role=orphanRole(order);if(!role||!role.direction||!(role.remaining>0)||!(role.level>0))return {ok:false,error:`Unrecognized orphan order ${orderClient(order)||"(missing client ID)"}`};
-        const key=`${role.direction}:${role.suffix}`,group=groups.get(key)||{direction:role.direction,suffix:role.suffix,orders:{},raw:{}};
+        const key=`${role.direction}:${role.profile}:${role.suffix}`,group=groups.get(key)||{direction:role.direction,profile:role.profile,suffix:role.suffix,orders:{},raw:{}};
         if(group.orders[role.kind])return {ok:false,error:`Duplicate ${role.kind} for orphan group ${key}`};
         group.orders[role.kind]=role;group.raw[role.kind]=clone(order);groups.set(key,group);
       }
       for(const group of groups.values()){
-        const tp=group.orders.PARTIAL_TP,psl=group.orders.PSL;if(!tp||!psl)return {ok:false,error:`Incomplete TP/PSL orphan pair ${group.direction}:${group.suffix}`};
-        if(Math.abs(tp.remaining-psl.remaining)>tolerance)return {ok:false,error:`Quantity mismatch in orphan pair ${group.direction}:${group.suffix}`};
+        const tp=group.orders.PARTIAL_TP,psl=group.orders.PSL,tp1=group.orders.TP1,tp2=group.orders.TP2,tpQty=group.profile===2?(n(tp1&&tp1.remaining)||0)+(n(tp2&&tp2.remaining)||0):n(tp&&tp.remaining);if(!psl||(group.profile===2?(!tp1||!tp2):!tp))return {ok:false,error:group.profile===2?`Incomplete TP1/TP2/PSL orphan group ${group.direction}:${group.suffix}`:`Incomplete TP/PSL orphan pair ${group.direction}:${group.suffix}`};
+        if(Math.abs(tpQty-psl.remaining)>tolerance)return {ok:false,error:`Quantity mismatch in orphan group ${group.direction}:${group.suffix}`};
         const live=this.position(group.direction);if(!live)return {ok:false,error:`No ${group.direction} exchange position for orphan pair ${group.suffix}`};
-        candidates.push({group,qty:Math.min(tp.remaining,psl.remaining),live});
+        candidates.push({group,qty:Math.min(tpQty,psl.remaining),live});
       }
       for(const direction of tranches.DIRECTIONS){
         const liveQty=n(this.position(direction)&&this.position(direction).qty)||0,pairedQty=candidates.filter(item=>item.group.direction===direction).reduce((sum,item)=>sum+item.qty,0);
@@ -108,12 +120,39 @@
       }
       const adopted=[];
       for(const {group,qty,live} of candidates){
-        const tp=group.orders.PARTIAL_TP,psl=group.orders.PSL,id=/^[LS][0-9A-Z]+$/i.test(group.suffix)&&group.suffix.length<=20?group.suffix:trancheId(group.direction,`orphan:${group.suffix}`,0),entryPrice=n(live.avg)||0;
-        const tranche=tranches.add(this.book,{trancheId:id,symbol:this.gateway.symbol(),quoteAsset:quoteAsset(this.gateway.symbol()),direction:group.direction,source:this.config.source,eventId:`orphan:${group.suffix}`,eventType:"RECOVERY",generation:0,entryClientId:`${C.order.namespace}-E-${group.suffix}`.slice(0,36),partialTpClientId:tp.id,pslClientId:psl.id,exitClientId:`${C.order.namespace}-X-${group.suffix}`.slice(0,36),partialTpOrderId:tp.orderId,pslOrderId:psl.algoId??psl.orderId,requestedQty:qty,filledQty:qty,remainingQty:qty,entryPrice,entryCommission:entryPrice*qty*this.rates.taker,entryCommissionActual:false,entryCommissionFills:[],fundingCost:0,fundingStatus:"unknown-after-orphan-recovery",mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),tpDelta:n(this.config.tpDelta),slDelta:n(this.config.slDelta),tpDriver:this.config.tpDriver,slDriver:this.config.slDriver,partialTpPrice:tp.level,pslPrice:psl.level,createdAt:Math.min(tp.createdAt||this.now(),psl.createdAt||this.now()),status:"ACTIVE",recoveredFromOrphanOrders:true,orphanOrderSnapshot:group.raw});
+        const tp=group.profile===2?group.orders.TP2:group.orders.PARTIAL_TP,tp1=group.orders.TP1,psl=group.orders.PSL,id=/^[LS][0-9A-Z]+$/i.test(group.suffix)&&group.suffix.length<=20?group.suffix:trancheId(group.direction,`orphan:${group.suffix}`,0),entryPrice=n(live.avg)||0;
+        const tranche=tranches.add(this.book,{trancheId:id,symbol:this.gateway.symbol(),quoteAsset:quoteAsset(this.gateway.symbol()),direction:group.direction,source:this.config.source,eventId:`orphan:${group.suffix}`,eventType:"RECOVERY",generation:0,entryClientId:`${C.order.namespace}-E-${group.suffix}`.slice(0,36),partialTpClientId:tp.id,tp1ClientId:tp1&&tp1.id,tp2ClientId:group.profile===2?tp.id:null,pslClientId:psl.id,exitClientId:`${C.order.namespace}-X-${group.suffix}`.slice(0,36),partialTpOrderId:tp.orderId,tp1OrderId:tp1&&tp1.orderId,tp2OrderId:group.profile===2?tp.orderId:null,pslOrderId:psl.algoId??psl.orderId,requestedQty:qty,filledQty:qty,remainingQty:qty,entryPrice,entryCommission:entryPrice*qty*this.rates.taker,entryCommissionActual:false,entryCommissionFills:[],fundingCost:0,fundingStatus:"unknown-after-orphan-recovery",mode:this.config.mode,target:n(this.config.target),stop:n(this.config.stop),tpDelta:n(this.config.tpDelta),slDelta:n(this.config.slDelta),tpDriver:this.config.tpDriver,slDriver:this.config.slDriver,closePortionEnabled:group.profile===2,tp1Qty:n(tp1&&tp1.remaining),tp2Qty:n(tp&&tp.remaining),tp1Price:n(tp1&&tp1.level),tp2Price:n(tp&&tp.level),partialTpPrice:tp.level,pslPrice:psl.level,createdAt:Math.min(tp.createdAt||this.now(),psl.createdAt||this.now()),status:"ACTIVE",recoveredFromOrphanOrders:true,orphanOrderSnapshot:group.raw});
         adopted.push(tranche);
       }
       this.setExternalPosition(null);this.persistTrancheBook();for(const tranche of adopted)this.logActivity("TRANCHE_RECOVERED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,recoveredFromOrphanOrders:true,...clone(tranche)}});
       this.log("orphan-orders-adopted",{count:adopted.length,trancheIds:adopted.map(row=>row.trancheId)});return {ok:true,tranches:adopted};
+    }
+    recognizeActiveOrphanedOrders(active,owned,knownIds,ownedIds){
+      const unknown=owned.filter(order=>!knownIds.has(orderClient(order)));if(!unknown.length)return {ok:true,repairs:[]};
+      const quantityTolerance=Math.max(1e-8,(n(this.filters&&this.filters.stepSize)||0)*1e-6),priceTolerance=Math.max(1e-8,(n(this.filters&&this.filters.tickSize)||0)*1e-6),repairs=[],claimed=new Set();
+      for(const order of unknown){
+        const role=orphanRole(order);if(!role||!role.direction||!(role.remaining>0)||!(role.level>0))return {ok:false,reason:`Unrecognized active SCALP order ${orderClient(order)||"(missing client ID)"}`};
+        const candidates=active.filter(tranche=>{
+          const identityMatches=role.trancheHash?hash(tranche.trancheId)===role.trancheHash:upper(role.suffix)===upper(tranche.trancheId);
+          if(!identityMatches||tranche.direction!==role.direction)return false;
+          const expectedClientId=role.kind==="PSL"?tranche.pslClientId:role.kind==="TP1"?tranche.tp1ClientId:role.kind==="TP2"?tranche.tp2ClientId:tranche.partialTpClientId;if(expectedClientId&&ownedIds.has(expectedClientId))return false;
+          const expectedPrice=n(role.kind==="PSL"?tranche.pslPrice:role.kind==="TP1"?tranche.tp1Price:role.kind==="TP2"?tranche.tp2Price:tranche.partialTpPrice),expectedQty=n(role.kind==="TP1"?tranche.tp1Qty:role.kind==="TP2"?tranche.tp2Qty:tranche.remainingQty);
+          return expectedPrice>0&&expectedQty>0&&Math.abs(expectedPrice-role.level)<=priceTolerance&&Math.abs(expectedQty-role.remaining)<=quantityTolerance;
+        });
+        if(candidates.length!==1)return {ok:false,reason:`Ambiguous active SCALP order ${role.id}`};
+        const tranche=candidates[0],claim=`${tranche.trancheId}:${role.kind}`;if(claimed.has(claim))return {ok:false,reason:`Duplicate ${role.kind} candidates for tranche ${tranche.trancheId}`};claimed.add(claim);
+        repairs.push({tranche,role,order});
+      }
+      for(const repair of repairs){
+        const {tranche,role}=repair;
+        if(role.kind==="PSL"){tranche.pslClientId=role.id;tranche.pslOrderId=role.algoId??role.orderId??null;}
+        else if(role.kind==="TP1"){tranche.tp1ClientId=role.id;tranche.tp1OrderId=role.orderId??null;}
+        else if(role.kind==="TP2"){tranche.tp2ClientId=tranche.partialTpClientId=role.id;tranche.tp2OrderId=tranche.partialTpOrderId=role.orderId??null;}
+        else{tranche.partialTpClientId=role.id;tranche.partialTpOrderId=role.orderId??null;}
+        this.logActivity("PROTECTION_ORDER_SELF_RECOGNIZED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,role:role.kind,clientOrderId:role.id,remainingQuantity:role.remaining,level:role.level,...clone(tranche)}});
+      }
+      if(repairs.length){this.persistTrancheBook();this.log("active-orphan-orders-recognized",{count:repairs.length,clientIds:repairs.map(item=>item.role.id)});}
+      return {ok:true,repairs};
     }
     externalPositionText(position){return position&&["LONG","SHORT"].includes(upper(position.side))?`UNTRACKED ${upper(position.side)} POSITION · reconciliation required`:"OFF";}
     setExternalPosition(position){this.externalPosition=position?{symbol:position.symbol||this.gateway.symbol(),side:upper(position.side),qty:n(position.qty),avg:n(position.avg)}:null;if(this.state==="OFF"&&!this.isActive())this.status=this.externalPositionText(this.externalPosition);}
@@ -174,7 +213,7 @@
       const owned=snapshotOrders(facts&&facts.orders).filter(isOwned);if(!this.isActive()&&owned.length)this.adoptOrphanedTranches(owned);
       const ownedIds=new Set(owned.map(orderClient));let active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));
       await this.reconcileExternalActiveReduction(active,ownedIds);active=tranches.DIRECTIONS.flatMap(direction=>tranches.activeTranches(this.book,direction));
-      const knownIds=new Set(active.flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.profitLockClientId,row.exitClientId].filter(Boolean))),unresolved=owned.filter(order=>ownedIds.has(orderClient(order))&&!knownIds.has(orderClient(order)));
+      const knownIds=new Set(active.flatMap(row=>[row.entryClientId,...this.protectionClientIds(row),row.profitLockClientId,row.exitClientId].filter(Boolean))),unresolved=owned.filter(order=>ownedIds.has(orderClient(order))&&!knownIds.has(orderClient(order)));
       if(unresolved.length){const failed={ok:false,errors:["Unresolved SCALP-owned orders exist"]};this.status=failed.errors[0];this.emit("arm-refused");return failed;}
       for(const direction of tranches.DIRECTIONS){const live=this.position(direction),tracked=tranches.activeQuantity(this.book,direction);if(live&&Math.abs((n(live.qty)||0)-tracked)>1e-8){this.setExternalPosition(live);const failed={ok:false,errors:[this.externalPositionText(live)]};this.emit("arm-refused");return failed;}}
       this.setExternalPosition(null);
@@ -192,9 +231,9 @@
       // last observed guide price.
       const dir=upper(tranche&&tranche.direction),entry=n(tranche&&tranche.entryPrice),qty=n(tranche&&tranche.closedQty)||n(tranche&&tranche.filledQty);
       if(!["LONG","SHORT"].includes(dir)||!(entry>0)||!(qty>0))return null;
-      const exit=n(tranche&&tranche.closedPrice)||(reason==="PARTIAL_TP"||reason==="TP"?n(tranche.partialTpPrice):reason==="PSL"||reason==="SL"?n(tranche.pslPrice):n(this.guide));
+      const exit=n(tranche&&tranche.closedPrice)||(reason==="PARTIAL_TP"||reason==="TP"||reason==="TP2"?n(tranche.partialTpPrice):reason==="PSL"||reason==="SL"?n(tranche.pslPrice):n(this.guide));
       if(!(exit>0))return null;
-      const side=dir==="LONG"?1:-1,gross=(exit-entry)*qty*side,exitFeeRate=reason==="PARTIAL_TP"||reason==="TP"?(this.rates.conservativeTp||this.rates.taker):this.rates.taker,entryFee=(n(tranche.entryCommission)||0)*(qty/Math.max(qty,n(tranche.filledQty)||qty)),fees=entryFee+exit*qty*exitFeeRate;
+      const side=dir==="LONG"?1:-1,gross=(exit-entry)*qty*side,exitFeeRate=reason==="PARTIAL_TP"||reason==="TP"||reason==="TP2"?(this.rates.conservativeTp||this.rates.taker):this.rates.taker,entryFee=(n(tranche.entryCommission)||0)*(qty/Math.max(qty,n(tranche.filledQty)||qty)),fees=entryFee+exit*qty*exitFeeRate;
       return gross-fees;
     }
     applyAutoLoss(lossUsd){
@@ -352,6 +391,7 @@
         if(!(tranche.filledQty>0))throw new Error(`Entry ${tranche.entryClientId} has no confirmed fill`);
         this.applyRankBoost(tranche,event);
         await this.ensureTrancheProtection(tranche);
+        this.checkProtectionQuantityInvariant(tranche,null,"entry");
         tranche.status="ACTIVE";branch.state="IDLE";this.persistTrancheBook();
         this.logActivity("TRANCHE_ADDED",{sourceTimeframe:tranche.source,detectorState:event,cascadeAgreement:tranche.cascadeAgreementAtEntry,positionState:{direction,trancheId:tranche.trancheId,...clone(tranche)}});
         this.status=`ARMED · ${direction} tranche ${tranche.trancheId} active`;this.emit("tranche-added");return tranche;
@@ -417,9 +457,26 @@
         if(executed>0){tranche.filledQty=this.normalizedOrderQuantity(Math.max(n(tranche.filledQty)||0,executed));tranche.remainingQty=this.normalizedOrderQuantity(Math.max(n(tranche.remainingQty)||0,executed));if(average>0)tranche.entryPrice=average;this.recordEntryCommission(tranche,o,status==="FILLED");this.persistTrancheBook();}
         return;
       }
+      if(tranche.closePortionEnabled===true&&[tranche.tp1ClientId,tranche.tp2ClientId,tranche.pslClientId].includes(id)){this.handleDualProtectionFill(tranche,id,status,executed,average).catch(error=>this.fail(error,"Dual-TP fill reconciliation failed"));return;}
       const reason=id===tranche.partialTpClientId?"PARTIAL_TP":id===tranche.pslClientId?"PSL":null;if(!reason)return;
       if(executed>0&&status==="PARTIALLY_FILLED"){tranche.exitExecutedQty=this.normalizedOrderQuantity(Math.max(n(tranche.exitExecutedQty)||0,executed));const remaining=Math.max(0,(n(tranche.filledQty)||0)-tranche.exitExecutedQty);tranche.remainingQty=remaining>0?this.normalizedOrderQuantity(remaining):0;tranche.status="EXIT_PENDING";this.persistTrancheBook();this.status=`${reason} · tranche ${tranche.trancheId} partially filled`;this.emit("tranche-exit-partial");this.resizeSiblingProtectionAfterPartial(tranche,reason).catch(error=>this.fail(error,"Partial tranche protection resize failed"));return;}
       if(status==="FILLED"){const branch=tranches.directionBook(this.book,tranche.direction);if(branch)branch.executionLock=`EXIT:${tranche.trancheId}`;tranche.status="EXIT_PENDING";this.persistTrancheBook();tranche.closedPrice=average>0?average:reason==="PARTIAL_TP"?n(tranche.partialTpPrice):n(tranche.pslPrice);tranche.closedQty=Math.max(executed,n(tranche.filledQty)||0);this.finishTranche(tranche,reason).catch(error=>this.fail(error,"Tranche exit reconciliation failed"));}
+    }
+    validateDualFill(tranche,kind,executed,finalFill=false){
+      const expected=n(kind==="TP1"?tranche.tp1Qty:kind==="TP2"?tranche.tp2Qty:tranche.remainingQty)||0,tolerance=Math.max(1e-8,(n(this.filters&&this.filters.stepSize)||0)*1e-6),valid=expected>0&&executed>0&&(finalFill?Math.abs(executed-expected)<=tolerance:executed<=expected+tolerance);
+      if(!valid){const detail={trancheId:tranche.trancheId,clientOrderId:kind==="TP1"?tranche.tp1ClientId:kind==="TP2"?tranche.tp2ClientId:tranche.pslClientId,kind,executed,expected};this.log("suspicious-dual-tp-fill",detail);this.logActivity("SUSPICIOUS_PROTECTION_FILL",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,...detail,...clone(tranche)}});}
+      return valid;
+    }
+    async handleDualProtectionFill(tranche,id,status,executed,average){
+      const kind=id===tranche.tp1ClientId?"TP1":id===tranche.tp2ClientId?"TP2":"PSL";if(!this.validateDualFill(tranche,kind,executed,status==="FILLED"))return;
+      if(kind==="TP1"){
+        const prior=n(tranche.tp1ExecutedQty)||0;if(executed<=prior)return;tranche.tp1ExecutedQty=executed;tranche.remainingQty=calc.normalizeLot(Math.max(0,(n(tranche.filledQty)||0)-executed),this.filters||{});tranche.status="EXIT_PENDING";this.persistTrancheBook();
+        if(tranche.remainingQty>0){await this.resizeSiblingProtectionAfterPartial(tranche,"TP1");this.checkProtectionQuantityInvariant(tranche,null,"tp1-fill");}return;
+      }
+      if(status!=="FILLED")return;
+      const branch=tranches.directionBook(this.book,tranche.direction);if(branch)branch.executionLock=`EXIT:${tranche.trancheId}`;tranche.status="EXIT_PENDING";tranche.closedPrice=average>0?average:kind==="TP2"?n(tranche.tp2Price):n(tranche.pslPrice);tranche.closedQty=n(tranche.remainingQty)||executed;this.persistTrancheBook();
+      if(kind==="TP2"){await this.confirmSiblingProtectionCancellation(tranche,"PSL",{resizeReason:null});tranche.pslOrderId=null;await this.finishTranche(tranche,"TP2",{skipCancel:true});return;}
+      await this.confirmSiblingProtectionCancellation(tranche,"TP1",{resizeReason:null});tranche.tp1OrderId=null;await this.confirmSiblingProtectionCancellation(tranche,"TP2",{resizeReason:null});tranche.tp2OrderId=tranche.partialTpOrderId=null;await this.finishTranche(tranche,"PSL",{skipCancel:true});
     }
     recordEntryCommission(tranche,order,finalFill=false){
       const amount=n(order.n??order.commission),fillId=String(order.t??order.tradeId??`${order.L??order.lastFilledPrice}|${order.l??order.lastFilledQty}|${amount}`),ids=this.fillIdsByTranche.get(tranche.trancheId)||new Set();this.fillIdsByTranche.set(tranche.trancheId,ids);if(amount==null||amount<0||ids.has(fillId))return false;ids.add(fillId);
@@ -446,18 +503,18 @@
       if(this.state==="ERROR"||this.state==="POSITION_MISMATCH")return;
       for(const direction of tranches.DIRECTIONS){
         const branch=tranches.directionBook(this.book,direction);if(!branch||branch.executionLock)continue;
-        const tranche=tranches.activeTranches(this.book,direction).find(row=>this.profitLockReached(row,price)||this.beMoveReached(row,price));if(!tranche)continue;
+        const tranche=tranches.activeTranches(this.book,direction).find(row=>row.closePortionEnabled===true?this.beMoveReached(row,price):(this.profitLockReached(row,price)||this.beMoveReached(row,price)));if(!tranche)continue;
         this.executeProfitLock(tranche,price).catch(error=>this.fail(error,"Trade management failed"));
       }
     }
     async executeProfitLock(tranche,currentPrice=this.guide){
-      const branch=tranches.directionBook(this.book,tranche&&tranche.direction),doBe=this.beMoveReached(tranche,currentPrice),doClose=this.profitLockReached(tranche,currentPrice),closeQty=doClose?this.profitLockQuantity(tranche):0;if(!branch||branch.executionLock||(!doBe&&!doClose))return null;
+      const branch=tranches.directionBook(this.book,tranche&&tranche.direction),doBe=this.beMoveReached(tranche,currentPrice),doClose=tranche&&tranche.closePortionEnabled===true?false:this.profitLockReached(tranche,currentPrice),closeQty=doClose?this.profitLockQuantity(tranche):0;if(!branch||branch.executionLock||(!doBe&&!doClose))return null;
       const lock=`PROFIT_LOCK:${tranche.trancheId}`,beforeQty=n(tranche.remainingQty)||0,originalPslPrice=n(tranche.pslPrice);let completed=false;branch.executionLock=lock;branch.state="EXIT_PENDING";tranche.tradeManagementPending=true;this.persistTrancheBook();
       try{
-        await this.cancelTrancheProtection(tranche,{keep:doClose?null:"TP"});tranche.pslOrderId=null;if(doClose)tranche.partialTpOrderId=null;this.persistTrancheBook();
+        let breakeven=null;if(doBe&&tranche.closePortionEnabled===true){const allocatedEntryCommission=(n(tranche.entryCommission)||0)*(beforeQty/Math.max(beforeQty,n(tranche.filledQty)||beforeQty));breakeven=calc.feeAwareBreakeven({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:beforeQty,entryCommission:allocatedEntryCommission,exitRate:this.rates.taker,tickSize:this.filters.tickSize});if(!(breakeven>0))throw new Error("Fee-aware breakeven price is unavailable");tranche.feeAwareBreakevenPrice=breakeven;tranche.pslPrice=breakeven;tranche.beMoveTriggered=true;tranche.beMoveTriggeredAt=this.now();this.persistTrancheBook();await this.confirmSiblingProtectionCancellation(tranche,"PSL",{resizeReason:"BE"});}else await this.cancelTrancheProtection(tranche,{keep:doClose?null:"TP"});tranche.pslOrderId=null;if(doClose)tranche.partialTpOrderId=null;this.persistTrancheBook();
         let executed=0,remaining=beforeQty;if(doClose){const validation=calc.validateOrderQuantity(closeQty,currentPrice,this.filters||{});if(!validation.ok)throw new Error(validation.errors.join(" · "));const side=tranche.direction==="LONG"?"SELL":"BUY",response=await this.gateway.submitOrder({...this.orderParams(side,closeQty,{clientId:tranche.profitLockClientId,positionSide:tranche.direction,reduceOnly:true}),newOrderRespType:"RESULT"});executed=this.normalizedOrderQuantity(n(response&&response.executedQty)||closeQty);remaining=calc.normalizeLot(Math.max(0,beforeQty-executed),this.filters||{});tranche.profitLockOrderId=response&&response.orderId||null;tranche.profitLockFillPrice=n(response&&response.avgPrice)||currentPrice;tranche.profitLockClosedQty=executed;tranche.closePortionTriggered=true;tranche.profitLockTriggered=true;tranche.profitLockPrice=this.profitLockLevel(tranche);tranche.closePortionTriggeredAt=this.now();tranche.remainingQty=remaining;}
         if(!(remaining>0)){tranche.closedPrice=tranche.profitLockFillPrice;tranche.closedQty=executed;await this.finishTranche(tranche,"PROFIT_LOCK",{skipCancel:true});completed=true;return tranche;}
-        let breakeven=null;if(doBe){const allocatedEntryCommission=(n(tranche.entryCommission)||0)*(remaining/Math.max(remaining,n(tranche.filledQty)||remaining));breakeven=calc.feeAwareBreakeven({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:remaining,entryCommission:allocatedEntryCommission,exitRate:this.rates.taker,tickSize:this.filters.tickSize});if(!(breakeven>0))throw new Error("Fee-aware breakeven price is unavailable");tranche.feeAwareBreakevenPrice=breakeven;tranche.pslPrice=breakeven;tranche.beMoveTriggered=true;tranche.beMoveTriggeredAt=this.now();}await this.ensureTrancheProtection(tranche,{psl:true,tp:doClose});
+        if(doBe&&tranche.closePortionEnabled!==true){const allocatedEntryCommission=(n(tranche.entryCommission)||0)*(remaining/Math.max(remaining,n(tranche.filledQty)||remaining));breakeven=calc.feeAwareBreakeven({direction:tranche.direction,entryPrice:tranche.entryPrice,qty:remaining,entryCommission:allocatedEntryCommission,exitRate:this.rates.taker,tickSize:this.filters.tickSize});if(!(breakeven>0))throw new Error("Fee-aware breakeven price is unavailable");tranche.feeAwareBreakevenPrice=breakeven;tranche.pslPrice=breakeven;tranche.beMoveTriggered=true;tranche.beMoveTriggeredAt=this.now();}await this.ensureTrancheProtection(tranche,{psl:true,tp:doClose});
         this.logActivity("PROFIT_LOCK_APPLIED",{sourceTimeframe:tranche.source,positionState:{direction:tranche.direction,trancheId:tranche.trancheId,closedQuantity:executed,remainingQuantity:remaining,feeAwareBreakevenPrice:breakeven,...clone(tranche)}});
         this.status=`PROFIT LOCK · ${tranche.direction} tranche ${tranche.trancheId} · ${executed} closed`;this.emit("profit-lock-applied");completed=true;return tranche;
       }catch(error){
@@ -476,32 +533,60 @@
       tranche.protectionBatchSequence=Math.max(0,Math.floor(n(tranche.protectionBatchSequence)||0))+1;
       const outcome=this.protectionPrices(tranche),exitSide=tranche.direction==="LONG"?"SELL":"BUY",qty=this.quantityText(tranche.remainingQty);tranche.status="PROTECTION_PENDING";this.persistTrancheBook();
       if(psl&&!tranche.pslOrderId){
-        let response=null,lastError=null;for(let attempt=0;attempt<=C.order.protectionRetry;attempt++){tranche.pslClientId=freshProtectionClientId("S",tranche,this.now());this.persistTrancheBook();const params={algoType:"CONDITIONAL",symbol:this.gateway.symbol(),side:exitSide,type:"STOP_MARKET",quantity:qty,triggerPrice:String(tranche.pslPrice||outcome.sl),workingType:"MARK_PRICE",clientAlgoId:tranche.pslClientId};if(this.filters&&this.filters.positionMode==="HEDGE")params.positionSide=tranche.direction;else params.reduceOnly="true";try{response=await this.gateway.submitAlgoOrder(params);break;}catch(error){lastError=error;try{const existing=await this.gateway.queryAlgoOrder({symbol:this.gateway.symbol(),clientAlgoId:tranche.pslClientId});if(existing&&existing.status!=="REJECTED"){response=existing;break;}}catch(_queryError){}}}
+        let response=null,lastError=null;const dual=tranche.closePortionEnabled===true;if(dual)tranche.pslClientId=dualProtectionClientId("S",tranche);for(let attempt=0;attempt<=C.order.protectionRetry;attempt++){if(!dual)tranche.pslClientId=freshProtectionClientId("S",tranche,this.now());this.persistTrancheBook();const params={algoType:"CONDITIONAL",symbol:this.gateway.symbol(),side:exitSide,type:"STOP_MARKET",quantity:qty,triggerPrice:String(tranche.pslPrice||outcome.sl),workingType:"MARK_PRICE",clientAlgoId:tranche.pslClientId};if(this.filters&&this.filters.positionMode==="HEDGE")params.positionSide=tranche.direction;else params.reduceOnly="true";try{response=await this.gateway.submitAlgoOrder(params);break;}catch(error){lastError=error;try{const existing=await this.gateway.queryAlgoOrder({symbol:this.gateway.symbol(),clientAlgoId:tranche.pslClientId});if(existing&&existing.status!=="REJECTED"){response=existing;break;}}catch(_queryError){}}}
         if(!response)throw new Error(`Protective PSL failed: ${lastError&&lastError.message||"unconfirmed"}`);tranche.pslOrderId=response.algoId??response.orderId??null;tranche.pslPrice=tranche.pslPrice||outcome.sl;this.persistTrancheBook();
       }
       if(tp&&!tranche.partialTpOrderId){
-        let response=null,lastError=null;for(let attempt=0;attempt<=C.order.tpRetry;attempt++){tranche.partialTpClientId=freshProtectionClientId("T",tranche,this.now());this.persistTrancheBook();try{response=await this.gateway.submitOrder(this.orderParams(exitSide,tranche.remainingQty,{type:"LIMIT",clientId:tranche.partialTpClientId,positionSide:tranche.direction,reduceOnly:true,params:{price:String(tranche.partialTpPrice||outcome.tp),timeInForce:"GTC"}}));break;}catch(error){lastError=error;try{const existing=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.partialTpClientId});if(existing&&upper(existing.status)!=="REJECTED"){response=existing;break;}}catch(_queryError){}}}
-        if(!response)throw new Error(`PARTIAL_TP failed: ${lastError&&lastError.message||"unconfirmed"}`);tranche.partialTpOrderId=response.orderId??null;tranche.partialTpPrice=tranche.partialTpPrice||outcome.tp;this.persistTrancheBook();
+        if(tranche.closePortionEnabled===true){
+          const full=this.normalizedOrderQuantity(tranche.remainingQty),tp1Qty=this.profitLockQuantity({...tranche,remainingQty:full}),tp2Qty=calc.normalizeLot(Math.max(0,full-tp1Qty),this.filters||{}),tp1Price=this.profitLockLevel({...tranche,partialTpPrice:tranche.partialTpPrice||outcome.tp}),tp2Price=tranche.partialTpPrice||outcome.tp;if(!(tp1Qty>0&&tp2Qty>0&&tp1Price>0))throw new Error("Dual-TP quantities or TP1 level are unavailable");
+          tranche.tp1Qty=tp1Qty;tranche.tp2Qty=tp2Qty;tranche.tp1Price=tp1Price;tranche.tp2Price=tp2Price;tranche.tp1ClientId=dualProtectionClientId("T1",tranche);tranche.tp2ClientId=dualProtectionClientId("T2",tranche);tranche.partialTpClientId=tranche.tp2ClientId;this.persistTrancheBook();
+          const submit=async(kind,quantity,price,clientId)=>{let response=null,lastError=null;for(let attempt=0;attempt<=C.order.tpRetry;attempt++){try{response=await this.gateway.submitOrder(this.orderParams(exitSide,quantity,{type:"LIMIT",clientId,positionSide:tranche.direction,reduceOnly:true,params:{price:String(price),timeInForce:"GTC"}}));break;}catch(error){lastError=error;try{const existing=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:clientId});if(existing&&upper(existing.status)!=="REJECTED"){response=existing;break;}}catch(_queryError){}}}if(!response)throw new Error(`${kind} failed: ${lastError&&lastError.message||"unconfirmed"}`);return response;};
+          const tp1=await submit("TP1",tp1Qty,tp1Price,tranche.tp1ClientId);tranche.tp1OrderId=tp1.orderId??null;this.persistTrancheBook();const tp2=await submit("TP2",tp2Qty,tp2Price,tranche.tp2ClientId);tranche.tp2OrderId=tranche.partialTpOrderId=tp2.orderId??null;tranche.partialTpPrice=tp2Price;this.persistTrancheBook();
+        }else{
+          let response=null,lastError=null;for(let attempt=0;attempt<=C.order.tpRetry;attempt++){tranche.partialTpClientId=freshProtectionClientId("T",tranche,this.now());this.persistTrancheBook();try{response=await this.gateway.submitOrder(this.orderParams(exitSide,tranche.remainingQty,{type:"LIMIT",clientId:tranche.partialTpClientId,positionSide:tranche.direction,reduceOnly:true,params:{price:String(tranche.partialTpPrice||outcome.tp),timeInForce:"GTC"}}));break;}catch(error){lastError=error;try{const existing=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.partialTpClientId});if(existing&&upper(existing.status)!=="REJECTED"){response=existing;break;}}catch(_queryError){}}}
+          if(!response)throw new Error(`PARTIAL_TP failed: ${lastError&&lastError.message||"unconfirmed"}`);tranche.partialTpOrderId=response.orderId??null;tranche.partialTpPrice=tranche.partialTpPrice||outcome.tp;this.persistTrancheBook();
+        }
       }
       tranche.status="ACTIVE";this.persistTrancheBook();return tranche;
+    }
+    async confirmSiblingProtectionCancellation(tranche,kind,options={}){
+      const psl=kind==="PSL",clientId=psl?tranche.pslClientId:kind==="TP1"?tranche.tp1ClientId:kind==="TP2"?tranche.tp2ClientId:tranche.partialTpClientId,orderId=psl?tranche.pslOrderId:kind==="TP1"?tranche.tp1OrderId:kind==="TP2"?tranche.tp2OrderId:tranche.partialTpOrderId,symbol=this.gateway.symbol(),params=psl
+        ? {symbol,...(orderId?{algoId:orderId}:{clientAlgoId:clientId})}
+        : {symbol,...(orderId?{orderId}:{origClientOrderId:clientId})};
+      let cancelError=null;try{if(psl)await this.gateway.cancelAlgoOrder(params);else await this.gateway.cancelOrder(params);}catch(error){cancelError=error;}
+      try{
+        const order=psl?await this.gateway.queryAlgoOrder(params):await this.gateway.queryOrder(params),status=upper(order&&(order.status??order.orderStatus));
+        if(!order||["CANCELED","CANCELLED","FILLED","EXPIRED","EXPIRED_IN_MATCH","REJECTED"].includes(status))return {confirmed:true,status:status||"GONE",cancelError};
+        throw new Error(`Binance reports ${kind} status ${status||"UNKNOWN"}`);
+      }catch(error){
+        const code=Number(error&&error.code),confirmedGone=(code===-2011||code===-2013)&&error.uncertain!==true;
+        if(confirmedGone)return {confirmed:true,status:"GONE",cancelError,queryError:error};
+        const message=`${kind} cancellation could not be confirmed: ${error&&error.message||String(error)}`;
+        tranche.protectionResizeFailure={at:this.now(),reason:"CANCELLATION_UNCONFIRMED",resizeReason:Object.prototype.hasOwnProperty.call(options,"resizeReason")?options.resizeReason:(psl?"PARTIAL_TP":"PSL"),kind,clientId,orderId,cancelError:cancelError&&cancelError.message||null,queryError:error&&error.message||String(error)};this.persistTrancheBook();
+        throw new Error(message);
+      }
     }
     async resizeSiblingProtectionAfterPartial(tranche,reason){
       if(!tranche||!(n(tranche.remainingQty)>0))return;
       const branch=tranches.directionBook(this.book,tranche.direction),lock=`RESIZE:${tranche.trancheId}`;if(branch)branch.executionLock=lock;
       try{
-        if(reason==="PARTIAL_TP"){
-          if(tranche.pslOrderId||tranche.pslClientId)await this.gateway.cancelAlgoOrder({symbol:this.gateway.symbol(),...(tranche.pslOrderId?{algoId:tranche.pslOrderId}:{clientAlgoId:tranche.pslClientId})}).catch(()=>null);
+        if(reason==="PARTIAL_TP"||reason==="TP1"||reason==="BE"){
+          if(tranche.pslOrderId||tranche.pslClientId)await this.confirmSiblingProtectionCancellation(tranche,"PSL");
           tranche.pslOrderId=null;await this.ensureTrancheProtection(tranche,{psl:true,tp:false});
         }else if(reason==="PSL"){
-          if(tranche.partialTpOrderId||tranche.partialTpClientId)await this.gateway.cancelOrder({symbol:this.gateway.symbol(),...(tranche.partialTpOrderId?{orderId:tranche.partialTpOrderId}:{origClientOrderId:tranche.partialTpClientId})}).catch(()=>null);
+          if(tranche.partialTpOrderId||tranche.partialTpClientId)await this.confirmSiblingProtectionCancellation(tranche,"TP");
           tranche.partialTpOrderId=null;await this.ensureTrancheProtection(tranche,{psl:false,tp:true});
         }
+        delete tranche.protectionResizeFailure;this.persistTrancheBook();
         this.status=`${reason} · tranche ${tranche.trancheId} remaining ${tranche.remainingQty} protected`;this.emit("tranche-exit-partial-protected");
       }finally{if(branch&&branch.executionLock===lock){branch.executionLock=null;this.persistTrancheBook();}}
     }
     async cancelTrancheProtection(tranche,{keep=null}={}){
       if(!tranche)return;const symbol=this.gateway.symbol(),jobs=[];
-      if(keep!=="TP"&&(tranche.partialTpOrderId||tranche.partialTpClientId))jobs.push(this.gateway.cancelOrder({symbol,...(tranche.partialTpOrderId?{orderId:tranche.partialTpOrderId}:{origClientOrderId:tranche.partialTpClientId})}).catch(()=>null));
+      if(tranche.closePortionEnabled===true){
+        if(keep!=="TP"&&(tranche.tp1OrderId||tranche.tp1ClientId))jobs.push(this.gateway.cancelOrder({symbol,...(tranche.tp1OrderId?{orderId:tranche.tp1OrderId}:{origClientOrderId:tranche.tp1ClientId})}).catch(()=>null));
+        if(keep!=="TP"&&(tranche.tp2OrderId||tranche.tp2ClientId))jobs.push(this.gateway.cancelOrder({symbol,...(tranche.tp2OrderId?{orderId:tranche.tp2OrderId}:{origClientOrderId:tranche.tp2ClientId})}).catch(()=>null));
+      }else if(keep!=="TP"&&(tranche.partialTpOrderId||tranche.partialTpClientId))jobs.push(this.gateway.cancelOrder({symbol,...(tranche.partialTpOrderId?{orderId:tranche.partialTpOrderId}:{origClientOrderId:tranche.partialTpClientId})}).catch(()=>null));
       if(keep!=="PSL"&&(tranche.pslOrderId||tranche.pslClientId))jobs.push(this.gateway.cancelAlgoOrder({symbol,...(tranche.pslOrderId?{algoId:tranche.pslOrderId}:{clientAlgoId:tranche.pslClientId})}).catch(()=>null));
       await Promise.all(jobs);
     }
@@ -521,7 +606,7 @@
     }
     fail(error,prefix){const message=error&&error.message||String(error);this.log("error",{message});for(const direction of tranches.DIRECTIONS){const branch=tranches.directionBook(this.book,direction);branch.executionLock=null;if(branch.state!=="IDLE")branch.state="ERROR";}this.persistTrancheBook();if(this.state!=="ERROR"&&C.transitions[this.state]&&C.transitions[this.state].includes("ERROR"))this.transition("ERROR",`${prefix}: ${message}`);else{this.status=`ERROR · ${prefix}: ${message}`;this.emit("error");}}
     async queryProtectionStatus(tranche){
-      const result={tp:null,psl:null};try{result.tp=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.partialTpClientId});}catch(_e){}try{result.psl=await this.gateway.queryAlgoOrder({symbol:this.gateway.symbol(),clientAlgoId:tranche.pslClientId});}catch(_e){}return result;
+      const result={tp:null,tp1:null,tp2:null,psl:null};if(tranche.closePortionEnabled===true){try{result.tp1=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.tp1ClientId});}catch(_e){}try{result.tp2=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.tp2ClientId});}catch(_e){}}else try{result.tp=await this.gateway.queryOrder({symbol:this.gateway.symbol(),origClientOrderId:tranche.partialTpClientId});}catch(_e){}try{result.psl=await this.gateway.queryAlgoOrder({symbol:this.gateway.symbol(),clientAlgoId:tranche.pslClientId});}catch(_e){}return result;
     }
     async reconcileExternalActiveReduction(active,ownedIds){
       const reconciledIds=new Set(),tolerance=Math.max(1e-8,(n(this.filters&&this.filters.stepSize)||0)*1e-6);
@@ -538,7 +623,7 @@
         const candidates=directional.map((row,index)=>({row,index})).sort((a,b)=>(n(b.row.createdAt)||0)-(n(a.row.createdAt)||0)||b.index-a.index);
         for(const {row:tranche} of candidates){
           if(excess<=tolerance)break;const before=n(tranche.remainingQty)||0;if(!(before>0))continue;
-          const ids=[tranche.pslClientId,tranche.partialTpClientId].filter(Boolean),skipCancel=!!ownedIds&&!ids.some(id=>ownedIds.has(id));ids.forEach(id=>{reconciledIds.add(id);if(ownedIds)ownedIds.delete(id);});
+          const ids=this.protectionClientIds(tranche).filter(Boolean),skipCancel=!!ownedIds&&!ids.some(id=>ownedIds.has(id));ids.forEach(id=>{reconciledIds.add(id);if(ownedIds)ownedIds.delete(id);});
           if(excess+tolerance>=before){
             tranche.externalCloseQuantity=before;tranche.closedQty=before;tranche.closedPrice=n(this.guide);await this.finishTranche(tranche,"MANUAL_EXTERNAL_CLOSE",{skipCancel});excess=Math.max(0,excess-before);continue;
           }
@@ -576,12 +661,18 @@
         if(this.state!=="ERROR"&&C.transitions[this.state]&&C.transitions[this.state].includes("ERROR"))this.transition("ERROR",message);else{this.status=message;this.emit("unprotected-tranche-recovered");}
         return;
       }
-      const knownIds=new Set(active.flatMap(row=>[row.entryClientId,row.pslClientId,row.partialTpClientId,row.profitLockClientId,row.exitClientId].filter(Boolean))),unknown=owned.filter(order=>!knownIds.has(orderClient(order)));if(unknown.length){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH","POSITION MISMATCH · unknown SCALP orders found");return;}
+      const knownIds=new Set(active.flatMap(row=>[row.entryClientId,...this.protectionClientIds(row),row.profitLockClientId,row.exitClientId].filter(Boolean)));
+      for(const tranche of active.filter(row=>row.protectionResizeFailure&&row.protectionResizeFailure.reason==="CANCELLATION_UNCONFIRMED"&&row.protectionResizeFailure.resizeReason)){
+        await this.resizeSiblingProtectionAfterPartial(tranche,tranche.protectionResizeFailure.resizeReason);
+        for(const id of this.protectionClientIds(tranche).filter(Boolean)){knownIds.add(id);ownedIds.add(id);}
+      }
+      const recognition=this.recognizeActiveOrphanedOrders(active,owned,knownIds,ownedIds);if(recognition.ok)for(const repair of recognition.repairs)knownIds.add(repair.role.id);const unknown=owned.filter(order=>!knownIds.has(orderClient(order)));if(!recognition.ok||unknown.length){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH","POSITION MISMATCH · unknown SCALP orders found");return;}
       // Resolve known exchange fills before treating any remaining directional deficit as an
       // external manual close. Otherwise a legitimate tranche PSL/TP fill could be misclassified.
       for(const tranche of active){
-        const hasPsl=ownedIds.has(tranche.pslClientId),hasTp=ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}
+        const hasPsl=ownedIds.has(tranche.pslClientId),hasTp1=tranche.closePortionEnabled===true&&ownedIds.has(tranche.tp1ClientId),hasTp2=tranche.closePortionEnabled===true&&ownedIds.has(tranche.tp2ClientId),hasTp=tranche.closePortionEnabled===true?hasTp1&&hasTp2:ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";this.checkProtectionQuantityInvariant(tranche,owned.filter(order=>this.protectionClientIds(tranche).includes(orderClient(order))),"reconcile-live");continue;}
         const status=await this.queryProtectionStatus(tranche),tpStatus=upper(status.tp&&(status.tp.status??status.tp.orderStatus)),pslStatus=upper(status.psl&&(status.psl.status??status.psl.orderStatus));
+        if(tranche.closePortionEnabled===true){const tp1Status=upper(status.tp1&&(status.tp1.status??status.tp1.orderStatus)),tp2Status=upper(status.tp2&&(status.tp2.status??status.tp2.orderStatus));if(tp1Status==="FILLED"){await this.handleDualProtectionFill(tranche,tranche.tp1ClientId,"FILLED",n(status.tp1.executedQty)||n(tranche.tp1Qty),n(status.tp1.avgPrice));continue;}if(tp2Status==="FILLED"){await this.handleDualProtectionFill(tranche,tranche.tp2ClientId,"FILLED",n(status.tp2.executedQty)||n(tranche.tp2Qty),n(status.tp2.avgPrice));continue;}if(pslStatus==="FILLED"){await this.handleDualProtectionFill(tranche,tranche.pslClientId,"FILLED",n(status.psl.executedQty)||n(tranche.remainingQty),n(status.psl.avgPrice));continue;}continue;}
         if(tpStatus==="FILLED"){tranche.closedPrice=n(status.tp.avgPrice)||n(tranche.partialTpPrice);tranche.closedQty=n(status.tp.executedQty)||n(tranche.filledQty);await this.finishTranche(tranche,"PARTIAL_TP");continue;}
         if(pslStatus==="FILLED"){tranche.closedPrice=n(status.psl.avgPrice)||n(tranche.pslPrice);tranche.closedQty=n(status.psl.executedQty)||n(tranche.filledQty);await this.finishTranche(tranche,"PSL");continue;}
         const tpExecuted=n(status.tp&&status.tp.executedQty)||0,pslExecuted=n(status.psl&&status.psl.executedQty)||0,partialExecuted=Math.max(tpExecuted,pslExecuted);
@@ -596,7 +687,7 @@
       // trade can contribute to the same hedge-mode net position. Require Binance to confirm the
       // exact SCALP entry order and its executed quantity before submitting any replacement order.
       for(const tranche of active){
-        const hasPsl=ownedIds.has(tranche.pslClientId),hasTp=ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}
+        const hasPsl=ownedIds.has(tranche.pslClientId),hasTp1=tranche.closePortionEnabled===true&&ownedIds.has(tranche.tp1ClientId),hasTp2=tranche.closePortionEnabled===true&&ownedIds.has(tranche.tp2ClientId),hasTp=tranche.closePortionEnabled===true?hasTp1&&hasTp2:ownedIds.has(tranche.partialTpClientId);if(hasPsl&&hasTp){tranche.status="ACTIVE";continue;}if(tranche.closePortionEnabled===true&&!hasTp){if(this.state!=="POSITION_MISMATCH"&&C.transitions[this.state]&&C.transitions[this.state].includes("POSITION_MISMATCH"))this.transition("POSITION_MISMATCH",`POSITION MISMATCH Â· dual TP missing for tranche ${tranche.trancheId}`);return;}
         const verification=await this.verifyRecoveryEntry(tranche);
         if(!verification.ok){this.refuseRecoveryProtection(tranche,verification.reason);return;}
         if(!hasPsl)tranche.pslOrderId=null;if(!hasTp)tranche.partialTpOrderId=null;
