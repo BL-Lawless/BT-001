@@ -110,6 +110,8 @@
   let lastFlatTransitionPositionContext = null;
   const notifiedExecutionKeys = new Set();
   let lastSettingsRequestedSymbol = "";
+  const settledNullLeverageAtBySymbol = new Map();
+  const SYMBOL_SETTINGS_CACHE_WINDOW_MS = 30000;
 
   function q(id){ return document.getElementById(id); }
   function num(v){
@@ -703,9 +705,11 @@
   function setMargin(node,value){
     if(!node) return;
     if(value && typeof value === "object" && value.unavailable){
-      node.textContent = "Leverage unavailable";
+      node.textContent = "-";
+      node.title = "Leverage unavailable";
       return;
     }
+    node.title = "";
     const rawValue = value && typeof value === "object" ? value.value : value;
     const n = num(rawValue);
     node.textContent = n == null ? "-" : "$" + Math.abs(n).toFixed(2);
@@ -1535,12 +1539,25 @@
     if(!helper || typeof helper.get !== "function") return;
     const symbol = currentSymbol();
     if(!symbol || lastSettingsRequestedSymbol === symbol) return;
+    const cached = typeof helper.getCached === "function" ? helper.getCached(symbol) : null;
+    const settledAt = Number(settledNullLeverageAtBySymbol.get(symbol));
+    if(cached && cached.leverage == null && settledAt > 0 && Date.now() - settledAt < SYMBOL_SETTINGS_CACHE_WINDOW_MS) return;
     lastSettingsRequestedSymbol = symbol;
     Promise.resolve(helper.get(symbol))
-      .catch(() => null)
+      .then(settings => {
+        const leverage = num(settings && settings.leverage);
+        if(leverage != null && leverage > 0){
+          settledNullLeverageAtBySymbol.delete(symbol);
+          calculate();
+        }else{
+          settledNullLeverageAtBySymbol.set(symbol,Date.now());
+        }
+      })
+      .catch(() => {
+        settledNullLeverageAtBySymbol.set(symbol,Date.now());
+      })
       .finally(() => {
         lastSettingsRequestedSymbol = "";
-        try{ calculate(); }catch(_e){}
       });
   }
   function entryRowMargin(row,level,lot){
