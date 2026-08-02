@@ -31,6 +31,29 @@ function scoreRevision(row){
     finalStateReason:row.final_state_reason,hardGates:row.hard_gates,flowEffectiveness:row.flow_effectiveness});
 }
 
+function candleTrace(row){
+  if(!row)return null;
+  return {time:row.time,open:row.open,high:row.high,low:row.low,close:row.close,volume:row.volume,quoteVolume:row.quoteVolume,
+    tradeCount:row.tradeCount,takerBuyBase:row.takerBuyBase,takerBuyQuote:row.takerBuyQuote,final:row.final!==false};
+}
+
+function traceEvaluationInputs(engine,snapshot){
+  const facts=engine.extractFacts(snapshot,HORIZON_ID,DIRECTION_MODE),setup=facts.setup||null,trigger=facts.trigger||{},permission=facts.directionalPermission||{};
+  return {
+    closedTails:Object.fromEntries(["1m","3m","5m","15m","1h","4h","1d"].map(tf=>[tf,(snapshot.closedByTf[tf]||[]).slice(-2).map(candleTrace)])),
+    direction:{selected:permission.direction||null,score:permission.score??null,longScore:permission.longScore??null,shortScore:permission.shortScore??null,breakdown:permission.breakdown||null},
+    setup:setup?{identity:setup.identity||null,family:setup.family||null,tf:setup.tf||null,level:setup.level??null,zone:setup.zone||null,
+      interactionTime:setup.interactionTime??null,interacted:setup.interacted===true,reactionConfirmed:setup.reactionConfirmed===true,
+      invalidated:setup.invalidated===true,repeatedTests:setup.repeatedTests??null,quality:setup.quality??null,distanceAtr:setup.distanceAtr??null}:null,
+    setupCandidateCount:(facts.setupCandidates||[]).length,setupCandidates:(facts.setupCandidates||[]).slice(0,5),setupComponents:facts.setupComponents||null,
+    trigger:{microstructureShift:trigger.microstructureShift===true,shiftTime:trigger.shiftTime??null,breakLevel:trigger.breakLevel??null,
+      displacementQuality:trigger.displacementQuality??null,retestHeld:trigger.retestHeld===true,qualifiedFollowThrough:trigger.qualifiedFollowThrough===true,
+      freshnessCandles:Number.isFinite(trigger.freshnessCandles)?trigger.freshnessCandles:null,eventWindow:trigger.eventWindow||null,
+      flow:trigger.flow||null,participation:trigger.participation||null},
+    volatility:facts.volatility||null,geometry:facts.geometry||null,current:facts.current||null,readinessSignals:facts.readinessSignals||null
+  };
+}
+
 function signalSnapshot(state,clock,generation){
   const closed=state&&state.privateCandlesByTf||{},forming=state&&state.privateFormingByTf||{};
   const closedByTf=Object.fromEntries(Object.entries(closed).map(([tf,rows])=>[tf,(rows||[]).map(row=>({...row,final:true}))]));
@@ -44,7 +67,8 @@ function signalSnapshot(state,clock,generation){
 
 function buildSigBRunner(options={}){
   const config=options.config,clock=options.clock,supabase=options.supabase,dataSource=options.dataSource;
-  const engine=options.engine||loadSignalBEngine(),freshness=createMarketFreshnessTracker({now:clock.now,staleAfterMs:90000});
+  const engine=options.engine||loadSignalBEngine(),traceEngine=options.traceEngine||loadSignalBEngine();
+  const freshness=createMarketFreshnessTracker({now:clock.now,staleAfterMs:90000});
   const slots=config.maPeriods.map((period,index)=>({slot:index+1,slotId:`MA${index+1}`,period}));
   let latestState=null,generation=0,timer=null,writing=false,onUpdateCount=0,marketChangeCount=0;
   let lastMarketRevision="",lastMarketChangeAt=0,lastInputDigest="",lastScoreDigest="";
@@ -68,6 +92,7 @@ function buildSigBRunner(options={}){
       output.engineId="B";output.engineVersion=output.engineVersion||engine.version;
       const row=buildSignalBSnapshotRow({evaluation:{output,symbol:SYMBOL,horizonId:HORIZON_ID,publicationGeneration},machineId:config.machineId,now:clock.now});
       const scoreDigest=digest(scoreRevision(row)),sameScoresAsPrevious=scoreDigest===lastScoreDigest,after=engine.diagnostics();
+      const evaluationInputs=traceEvaluationInputs(traceEngine,snapshot),comparison=output.comparisonDiagnostics||{};
       await supabase.log(TABLE,row);
       const captureDiagnostics={
         publicationGeneration,onUpdateCount,marketChangeCount,lastMarketChangeAt:lastMarketChangeAt?new Date(lastMarketChangeAt).toISOString():null,
@@ -78,6 +103,8 @@ function buildSigBRunner(options={}){
         engineRecomputed:after.calculations>beforeCalculations,engineCacheHit:after.cacheHits>beforeCacheHits,
         scoreDigest,sameScoresAsPrevious,entryState:row.entry_state,confidence:row.confidence,setupScore:row.setup_score,
         triggerScore:row.trigger_score,currentEntryScore:row.current_entry_score,readinessScore:row.readiness_score,
+        scoreInputs:{setupBreakdown:comparison.setupBreakdown||null,triggerBreakdown:comparison.triggerBreakdown||null,
+          currentEntryBreakdown:comparison.currentEntryBreakdown||null,readinessBreakdown:comparison.readinessBreakdown||null,evaluationInputs},
         continuity:latestState.continuity?{blocked:latestState.continuity.blocked,repairing:latestState.continuity.repairing,
           queuedMessages:latestState.continuity.queuedMessages,repairAttempts:latestState.continuity.repairAttempts,
           repairSuccesses:latestState.continuity.repairSuccesses,repairFailures:latestState.continuity.repairFailures,
@@ -101,5 +128,5 @@ async function main(){
   installProcessShutdown(runner);await runner.start();console.log(`[Headless Sig B] Running ${SYMBOL}/${HORIZON_ID}/${DIRECTION_MODE} as ${config.machineId}.`);
 }
 
-module.exports={SYMBOL,HORIZON_ID,DIRECTION_MODE,digest,candleRevision,marketRevision,scoreRevision,signalSnapshot,buildSigBRunner,main};
+module.exports={SYMBOL,HORIZON_ID,DIRECTION_MODE,digest,candleRevision,marketRevision,scoreRevision,candleTrace,traceEvaluationInputs,signalSnapshot,buildSigBRunner,main};
 if(require.main===module)main().catch(error=>{console.error("[Headless Sig B] Startup failed:",error);process.exitCode=1;});
