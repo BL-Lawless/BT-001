@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto=require("crypto");
 const {loadDotEnv,readConfig}=require("./config.js");
 const {createNodeExchangeClock}=require("./clock.js");
 const {createSupabaseLogger}=require("./supabase-client.js");
@@ -13,14 +14,30 @@ const {createMarketFreshnessTracker}=require("./run-sssc.js");
 
 const SYMBOL="BTCUSDT",HORIZON_ID="quick",DIRECTION_MODE="AUTO";
 
+function digest(value){return crypto.createHash("sha256").update(String(value||"")).digest("hex").slice(0,16);}
+
+function candleRevision(row){
+  return row?[row.time,row.open,row.high,row.low,row.close,row.volume,row.quoteVolume,row.tradeCount,row.takerBuyBase,row.takerBuyQuote,row.final===true?1:0].join(":"):"none";
+}
+
+function marketRevision(state){
+  const closed=state&&state.privateCandlesByTf||{},forming=state&&state.privateFormingByTf||{};
+  return Object.keys({...closed,...forming}).sort().map(tf=>`${tf}:${candleRevision(closed[tf]&&closed[tf].at(-1))}:${candleRevision(forming[tf])}`).join("|");
+}
+
+function scoreRevision(row){
+  return JSON.stringify({direction:row.direction,entryState:row.entry_state,confidence:row.confidence,setupScore:row.setup_score,
+    triggerScore:row.trigger_score,currentEntryScore:row.current_entry_score,readinessScore:row.readiness_score,
+    finalStateReason:row.final_state_reason,hardGates:row.hard_gates,flowEffectiveness:row.flow_effectiveness});
+}
+
 function signalSnapshot(state,clock,generation){
   const closed=state&&state.privateCandlesByTf||{},forming=state&&state.privateFormingByTf||{};
   const closedByTf=Object.fromEntries(Object.entries(closed).map(([tf,rows])=>[tf,(rows||[]).map(row=>({...row,final:true}))]));
   const rowsByTf=Object.fromEntries(Object.keys(closedByTf).map(tf=>[tf,forming[tf]?[...closedByTf[tf],{...forming[tf],final:false}]:closedByTf[tf].slice()]));
   const current=rowsByTf["1m"]&&rowsByTf["1m"].at(-1);
-  const rowRevision=row=>row?[row.time,row.open,row.high,row.low,row.close,row.volume,row.quoteVolume,row.tradeCount,row.takerBuyBase,row.takerBuyQuote,row.final===true?1:0].join(":"):"none";
   return {symbol:SYMBOL,horizonId:HORIZON_ID,createdAt:clock.now(),version:generation,
-    signature:Object.keys(rowsByTf).sort().map(tf=>`${tf}:${rowRevision(closedByTf[tf]&&closedByTf[tf].at(-1))}:${rowRevision(rowsByTf[tf]&&rowsByTf[tf].at(-1))}`).join("|"),
+    signature:Object.keys(rowsByTf).sort().map(tf=>`${tf}:${candleRevision(closedByTf[tf]&&closedByTf[tf].at(-1))}:${candleRevision(rowsByTf[tf]&&rowsByTf[tf].at(-1))}`).join("|"),
     currentPrice:current&&Number(current.close),closedByTf,rowsByTf,maByTf:{},structureByTf:{},
     freshness:{signalStatus:"LIVE"},health:{status:"sufficient"}};
 }
@@ -29,10 +46,15 @@ function buildSigBRunner(options={}){
   const config=options.config,clock=options.clock,supabase=options.supabase,dataSource=options.dataSource;
   const engine=options.engine||loadSignalBEngine(),freshness=createMarketFreshnessTracker({now:clock.now,staleAfterMs:90000});
   const slots=config.maPeriods.map((period,index)=>({slot:index+1,slotId:`MA${index+1}`,period}));
-  let latestState=null,generation=0,timer=null,writing=false;
+  let latestState=null,generation=0,timer=null,writing=false,onUpdateCount=0,marketChangeCount=0;
+  let lastMarketRevision="",lastMarketChangeAt=0,lastInputDigest="",lastScoreDigest="";
   const pipeline=createOrchestration({getSlots:()=>slots,getCalculation:()=>calculation,getSymbol:()=>SYMBOL,
     fetchKlines:dataSource.fetchKlines,connectWebSocket:dataSource.connectWebSocket,getWsUrl:()=>config.binanceWsUrl,now:clock.now,
-    onUpdate:state=>{latestState=state;freshness.observe(state);},warn:(message,error)=>(options.warn||console.warn)(`[Headless Sig B] ${message}`,error)});
+    onUpdate:state=>{
+      latestState=state;onUpdateCount+=1;freshness.observe(state);
+      const revision=marketRevision(state);
+      if(revision&&revision!==lastMarketRevision){lastMarketRevision=revision;marketChangeCount+=1;lastMarketChangeAt=clock.now();}
+    },warn:(message,error)=>(options.warn||console.warn)(`[Headless Sig B] ${message}`,error)});
   async function capture(){
     if(writing)return false;
     const status=freshness.status();
@@ -40,10 +62,29 @@ function buildSigBRunner(options={}){
     writing=true;
     try{
       const publicationGeneration=++generation,snapshot=signalSnapshot(latestState,clock,publicationGeneration);
+      const inputDigest=digest(snapshot.signature),sameInputAsPrevious=inputDigest===lastInputDigest;
+      const before=engine.diagnostics(),beforeCalculations=before.calculations,beforeCacheHits=before.cacheHits;
       const output=engine.evaluate({snapshot,horizonId:HORIZON_ID,directionMode:DIRECTION_MODE,publicationGeneration});
       output.engineId="B";output.engineVersion=output.engineVersion||engine.version;
       const row=buildSignalBSnapshotRow({evaluation:{output,symbol:SYMBOL,horizonId:HORIZON_ID,publicationGeneration},machineId:config.machineId,now:clock.now});
-      await supabase.log(TABLE,row);return true;
+      const scoreDigest=digest(scoreRevision(row)),sameScoresAsPrevious=scoreDigest===lastScoreDigest,after=engine.diagnostics();
+      await supabase.log(TABLE,row);
+      const captureDiagnostics={
+        publicationGeneration,onUpdateCount,marketChangeCount,lastMarketChangeAt:lastMarketChangeAt?new Date(lastMarketChangeAt).toISOString():null,
+        marketChangeAgeMs:lastMarketChangeAt?Math.max(0,clock.now()-lastMarketChangeAt):null,
+        inputDigest,sameInputAsPrevious,currentPrice:snapshot.currentPrice,
+        closedDepths:Object.fromEntries(Object.entries(snapshot.closedByTf).map(([tf,rows])=>[tf,rows.length])),
+        forming:Object.fromEntries(["1m","3m","5m"].map(tf=>[tf,candleRevision(latestState.privateFormingByTf&&latestState.privateFormingByTf[tf])])),
+        engineRecomputed:after.calculations>beforeCalculations,engineCacheHit:after.cacheHits>beforeCacheHits,
+        scoreDigest,sameScoresAsPrevious,entryState:row.entry_state,confidence:row.confidence,setupScore:row.setup_score,
+        triggerScore:row.trigger_score,currentEntryScore:row.current_entry_score,readinessScore:row.readiness_score,
+        continuity:latestState.continuity?{blocked:latestState.continuity.blocked,repairing:latestState.continuity.repairing,
+          queuedMessages:latestState.continuity.queuedMessages,repairAttempts:latestState.continuity.repairAttempts,
+          repairSuccesses:latestState.continuity.repairSuccesses,repairFailures:latestState.continuity.repairFailures,
+          lastSocketEvent:(latestState.continuity.socketEvents||[]).at(-1)||null}:null
+      };
+      (options.log||console.log)(`[Headless Sig B] capture diagnostics ${JSON.stringify(captureDiagnostics)}`);
+      lastInputDigest=inputDigest;lastScoreDigest=scoreDigest;return true;
     }catch(error){(options.warn||console.warn)("[Headless Sig B] snapshot write failed",error);return false;}
     finally{writing=false;}
   }
@@ -60,5 +101,5 @@ async function main(){
   installProcessShutdown(runner);await runner.start();console.log(`[Headless Sig B] Running ${SYMBOL}/${HORIZON_ID}/${DIRECTION_MODE} as ${config.machineId}.`);
 }
 
-module.exports={SYMBOL,HORIZON_ID,DIRECTION_MODE,signalSnapshot,buildSigBRunner,main};
+module.exports={SYMBOL,HORIZON_ID,DIRECTION_MODE,digest,candleRevision,marketRevision,scoreRevision,signalSnapshot,buildSigBRunner,main};
 if(require.main===module)main().catch(error=>{console.error("[Headless Sig B] Startup failed:",error);process.exitCode=1;});
