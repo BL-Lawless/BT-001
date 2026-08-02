@@ -15,11 +15,14 @@ function createBinanceDataSource(options={}){
   const rawFetch=options.fetch||globalThis.fetch,fetchFn=rawFetch&&rawFetch.__bt001BinanceGateWrapped?rawFetch:sharedGate.wrapFetch(rawFetch),WebSocketImpl=options.WebSocket||WebSocketClient;
   if(typeof fetchFn!=="function")throw new Error("A Fetch-compatible function is required for Binance market data");
   const restUrl=String(options.restUrl||"https://fapi.binance.com").replace(/\/+$/,"");
+  async function requestJson(url,init={}){
+    const response=await fetchFn(String(url),{...init,headers:{"Cache-Control":"no-cache","Pragma":"no-cache",...(init.headers||{})}});
+    if(!response.ok)throw new Error(`Binance REST HTTP ${response.status}`);
+    return response.json();
+  }
   async function fetchKlines(interval,endMs,limit,symbol){
     const query=new URLSearchParams({symbol:String(symbol),interval:String(interval),limit:String(Math.min(1500,Math.max(1,Number(limit)||1))),endTime:String(Math.floor(Number(endMs)))});
-    const response=await fetchFn(`${restUrl}/fapi/v1/klines?${query}`,{headers:{"Cache-Control":"no-cache","Pragma":"no-cache"}});
-    if(!response.ok)throw new Error(`Binance klines HTTP ${response.status}`);
-    const data=await response.json();
+    const data=await requestJson(`${restUrl}/fapi/v1/klines?${query}`);
     if(!Array.isArray(data))throw new Error("Invalid Binance klines response");
     return data.map(parseRestKline);
   }
@@ -124,7 +127,7 @@ function createBinanceDataSource(options={}){
       status(){return {connected:!!socket,openedAt,lastMessageAt,lastPongAt,staleAfterMs};}
     };
   }
-  return Object.freeze({fetchKlines,fetchCurrentFundingRate,fetchCurrentOpenInterest,connectWebSocket});
+  return Object.freeze({requestJson,fetchKlines,fetchCurrentFundingRate,fetchCurrentOpenInterest,connectWebSocket});
 }
 
 module.exports={createBinanceDataSource,parseRestKline};

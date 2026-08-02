@@ -68,19 +68,24 @@
   }
 
   function createPressureSignalDataFeed(options={}){
-    const api=options.api || window.API;
-    const timers=options.timers || window;
+    const browserGlobal=typeof window!=="undefined"?window:null;
+    const api=options.api || browserGlobal&&browserGlobal.API;
+    const timers=options.timers || browserGlobal || globalThis;
+    if(!api||typeof api.requestJson!=="function"||typeof api.connectWebSocket!=="function")throw new Error("Signal data feed requires requestJson and connectWebSocket adapters");
     const now=typeof options.now==="function" ? options.now : Date.now;
     const getRestUrl=typeof options.getRestUrl==="function" ? options.getRestUrl : () => "https://fapi.binance.com/fapi/v1/klines";
     const getWsUrl=typeof options.getWsUrl==="function" ? options.getWsUrl : () => "wss://fstream.binance.com/market/stream";
     const onUpdate=typeof options.onUpdate==="function" ? options.onUpdate : () => {};
+    const boundaryGuard=options.boundaryGuard===true;
+    const boundaryGraceMs=Math.max(1000,Number(options.boundaryGraceMs)||15000);
+    const boundaryCheckIntervalMs=Math.max(1000,Number(options.boundaryCheckIntervalMs)||5000);
     const state={
       desired:false,destroyed:false,symbol:"",requirements:new Map(),configurationKey:"",configurationGeneration:0,
-      socketGeneration:0,socket:null,reconnectTimer:null,reconnectAttempt:0,seedInFlight:new Map(),
+      socketGeneration:0,socket:null,reconnectTimer:null,boundaryTimer:null,reconnectAttempt:0,seedInFlight:new Map(),
       closed:new Map(),forming:new Map(),revisions:new Map(),timestamps:new Map(),maCache:new Map(),
       price:{value:null,source:null,at:0,revision:0},lastError:null,lastCalculationReason:"initial"
     };
-    const counters={socketCreates:0,socketCloses:0,reconnectSchedules:0,restRequests:0,restSeeds:0,gapRepairs:0,updates:0,listenerCount:0};
+    const counters={socketCreates:0,socketCloses:0,reconnectSchedules:0,restRequests:0,restSeeds:0,gapRepairs:0,boundaryChecks:0,boundaryRepairs:0,updates:0,listenerCount:0};
     const status={socketStatus:"idle",connectedAt:0,lastMessageAt:0,lastConfiguredAt:0,lastSeedAt:0};
 
     function tfState(tf){
@@ -160,10 +165,12 @@
           cursor=earliest-1;
         }
         const clock=now(),parsed=raw.map(row=>parseRestRow(row,clock)).filter(Boolean),closed=parsed.filter(row=>row.final),forming=parsed.filter(row=>!row.final).slice(-1)[0]||null;
-        replaceClosed(interval,closed,reason==="gap-repair"?"gap-repair-closed":"rest-seed-closed");
-        replaceForming(interval,forming,reason==="gap-repair"?"gap-repair-forming":"rest-seed-forming");
+        const repairing=reason==="gap-repair"||reason==="boundary-repair";
+        replaceClosed(interval,closed,repairing?`${reason}-closed`:"rest-seed-closed");
+        replaceForming(interval,forming,repairing?`${reason}-forming`:"rest-seed-forming");
         const meta=tfState(interval);meta.timestamps.lastRestSeedAt=clock;status.lastSeedAt=clock;counters.restSeeds+=1;
         if(reason==="gap-repair") counters.gapRepairs+=1;
+        if(reason==="boundary-repair") counters.boundaryRepairs+=1;
         if(getClosedBuffer(interval).length<target||!continuity(interval)) throw new Error(`${interval} Signal history seed incomplete`);
         return {tf:interval,count:getClosedBuffer(interval).length,forming:!!forming,continuous:true};
       })().catch(error=>{state.lastError=error&&error.message?error.message:String(error);throw error;}).finally(()=>{
@@ -192,6 +199,28 @@
       try{if(typeof socket.disconnect==="function")socket.disconnect();else if(typeof socket.close==="function")socket.close();}catch(_e){}
     }
     function clearReconnect(){ if(state.reconnectTimer!=null){timers.clearTimeout(state.reconnectTimer);state.reconnectTimer=null;} }
+    function clearBoundaryGuard(){if(state.boundaryTimer!=null&&typeof timers.clearInterval==="function")timers.clearInterval(state.boundaryTimer);state.boundaryTimer=null;}
+    function expectedClosedOpenTime(tf,at=now()){
+      const stepMs=TF_SECONDS[tf]*1000,current=number(at);if(!stepMs||current==null)return null;
+      const boundary=Math.floor(current/stepMs)*stepMs;if(current-boundary<boundaryGraceMs)return null;
+      return (boundary-stepMs)/1000;
+    }
+    function checkClosedCandleBoundaries(){
+      if(!boundaryGuard||state.destroyed||!state.desired)return [];
+      counters.boundaryChecks+=1;const repairs=[];
+      for(const tf of state.requirements.keys()){
+        const expected=expectedClosedOpenTime(tf),closed=getClosedBuffer(tf),last=closed.at(-1),lastTime=number(last&&last.time);
+        if(expected==null||!closed.length||lastTime>=expected||state.seedInFlight.has(tf))continue;
+        const detail={tf,lastOpenTime:lastTime,expectedOpenTime:expected,behindCandles:lastTime==null?null:Math.round((expected-lastTime)/TF_SECONDS[tf])};
+        repairs.push(detail);emit("boundary-repair-start",{kind:"recovery",...detail});
+        seedTimeframe(tf,{force:true,reason:"boundary-repair"}).catch(()=>{});
+      }
+      return repairs;
+    }
+    function startBoundaryGuard(){
+      if(!boundaryGuard||state.boundaryTimer!=null||typeof timers.setInterval!=="function")return;
+      state.boundaryTimer=timers.setInterval(checkClosedCandleBoundaries,boundaryCheckIntervalMs);
+    }
     function scheduleReconnect(reason){
       if(!state.desired||state.destroyed||state.reconnectTimer!=null)return;
       closeSocket();status.socketStatus="disconnected";state.lastError=String(reason||"Signal socket disconnected");
@@ -266,7 +295,7 @@
       }
       emit(reason,{kind:"configuration",symbolChanged});
       await seedRequired({force:symbolChanged,reason:symbolChanged?"symbol-seed":"requirement-seed"});
-      if(nextKey===state.configurationKey&&state.desired&&!state.destroyed) connect();
+      if(nextKey===state.configurationKey&&state.desired&&!state.destroyed){connect();startBoundaryGuard();}
       return {configured:true,symbolChanged,generation:state.configurationGeneration,timeframes:[...state.requirements.keys()].sort()};
     }
     async function ensureTimeframeBuffer(tf){ return seedTimeframe(tf,{force:false,reason:"requirement-seed"}); }
@@ -293,13 +322,14 @@
     }
     function diagnostics(){
       const buffers={};[...state.requirements.keys()].sort().forEach(tf=>{const rev=revisions(tf),stamp=tfState(tf).timestamps;buffers[tf]={depth:depthFor(tf),closed:getClosedBuffer(tf).length,forming:!!getFormingCandle(tf),closedRevision:rev.closedRevision,formingRevision:rev.formingRevision,lastClosedAt:stamp.lastClosedAt,lastFormingAt:stamp.lastFormingAt,lastRestSeedAt:stamp.lastRestSeedAt};});
-      return {module:MODULE,symbol:state.symbol,generation:state.configurationGeneration,socketGeneration:state.socketGeneration,socketStatus:status.socketStatus,subscribedTimeframes:[...state.requirements.keys()].sort(),streams:state.symbol?streams():[],buffers,currentPrice:getCurrentPrice(),latestPriceSource:state.price.source,latestPriceAt:state.price.at,lastCalculationReason:state.lastCalculationReason,lastError:state.lastError,connectedAt:status.connectedAt,lastMessageAt:status.lastMessageAt,lastConfiguredAt:status.lastConfiguredAt,lastSeedAt:status.lastSeedAt,evidenceFingerprint:evidenceFingerprint(),activeSocketCount:state.socket?1:0,reconnectTimerCount:state.reconnectTimer==null?0:1,inFlightRestCount:state.seedInFlight.size,listenerCount:counters.listenerCount,counters:{...counters}};
+      return {module:MODULE,symbol:state.symbol,generation:state.configurationGeneration,socketGeneration:state.socketGeneration,socketStatus:status.socketStatus,subscribedTimeframes:[...state.requirements.keys()].sort(),streams:state.symbol?streams():[],buffers,currentPrice:getCurrentPrice(),latestPriceSource:state.price.source,latestPriceAt:state.price.at,lastCalculationReason:state.lastCalculationReason,lastError:state.lastError,connectedAt:status.connectedAt,lastMessageAt:status.lastMessageAt,lastConfiguredAt:status.lastConfiguredAt,lastSeedAt:status.lastSeedAt,evidenceFingerprint:evidenceFingerprint(),activeSocketCount:state.socket?1:0,reconnectTimerCount:state.reconnectTimer==null?0:1,boundaryTimerCount:state.boundaryTimer==null?0:1,inFlightRestCount:state.seedInFlight.size,listenerCount:counters.listenerCount,counters:{...counters}};
     }
     function destroy(){
-      if(state.destroyed)return;state.destroyed=true;state.desired=false;state.configurationGeneration+=1;state.socketGeneration+=1;clearReconnect();closeSocket();state.seedInFlight.clear();status.socketStatus="destroyed";
+      if(state.destroyed)return;state.destroyed=true;state.desired=false;state.configurationGeneration+=1;state.socketGeneration+=1;clearReconnect();clearBoundaryGuard();closeSocket();state.seedInFlight.clear();status.socketStatus="destroyed";
     }
     function injectClosedForTest(tf,rows){return replaceClosed(tf,[...getClosedBuffer(tf),...(Array.isArray(rows)?rows:[])],"test-history-injection");}
-    return Object.freeze({configure,destroy,ensureTimeframeBuffer,getClosedBuffer,getFormingCandle,getLiveBuffer,getTimeframeRevisions:revisions,getAuthoritativeMaSnapshot,getCurrentPrice,isPriceFresh,evidenceFingerprint,diagnostics,_handlePayload:handlePayload,_injectClosedForTest:injectClosedForTest,_simulateDisconnect:reason=>scheduleReconnect(reason||"test-disconnect")});
+    return Object.freeze({configure,destroy,ensureTimeframeBuffer,getClosedBuffer,getFormingCandle,getLiveBuffer,getTimeframeRevisions:revisions,getAuthoritativeMaSnapshot,getCurrentPrice,isPriceFresh,evidenceFingerprint,diagnostics,
+      _handlePayload:handlePayload,_injectClosedForTest:injectClosedForTest,_checkClosedCandleBoundaries:checkClosedCandleBoundaries,_simulateDisconnect:reason=>scheduleReconnect(reason||"test-disconnect")});
   }
 
   function deterministicRows(tf,count,symbolSeed=0){
@@ -363,5 +393,7 @@
   createPressureSignalDataFeed.fixedDepths=FIXED_DEPTHS;
   createPressureSignalDataFeed.timeframeSeconds=TF_SECONDS;
   createPressureSignalDataFeed.constants=Object.freeze({REST_PAGE_LIMIT,MAX_RECONNECT_MS});
-  window.createPressureSignalDataFeed=createPressureSignalDataFeed;
+  const exported={createPressureSignalDataFeed,parseRestRow,parseWsRow};
+  if(typeof module!=="undefined"&&module.exports)module.exports=exported;
+  if(typeof window!=="undefined")window.createPressureSignalDataFeed=createPressureSignalDataFeed;
 })();

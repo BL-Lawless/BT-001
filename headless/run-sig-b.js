@@ -6,11 +6,9 @@ const {createNodeExchangeClock}=require("./clock.js");
 const {createSupabaseLogger}=require("./supabase-client.js");
 const {createBinanceDataSource}=require("./binance-data-source.js");
 const {createLoggerRunner,installProcessShutdown}=require("./logger-runner.js");
-const calculation=require("../features/pressure-signal/sssc/calculation.js");
-const {createOrchestration}=require("../features/pressure-signal/sssc/orchestration.js");
+const {createPressureSignalDataFeed}=require("../features/pressure-signal/data-feed.js");
 const {buildSignalBSnapshotRow,SNAPSHOT_INTERVAL_MS,TABLE}=require("../features/pressure-signal/engines/signal-b-snapshot-assembler.js");
 const {loadSignalBEngine}=require("./signal-b-engine-loader.js");
-const {createMarketFreshnessTracker}=require("./run-sssc.js");
 
 const SYMBOL="BTCUSDT",HORIZON_ID="quick",DIRECTION_MODE="AUTO";
 
@@ -20,9 +18,8 @@ function candleRevision(row){
   return row?[row.time,row.open,row.high,row.low,row.close,row.volume,row.quoteVolume,row.tradeCount,row.takerBuyBase,row.takerBuyQuote,row.final===true?1:0].join(":"):"none";
 }
 
-function marketRevision(state){
-  const closed=state&&state.privateCandlesByTf||{},forming=state&&state.privateFormingByTf||{};
-  return Object.keys({...closed,...forming}).sort().map(tf=>`${tf}:${candleRevision(closed[tf]&&closed[tf].at(-1))}:${candleRevision(forming[tf])}`).join("|");
+function marketRevision(feed,timeframes=[]){
+  return timeframes.slice().sort().map(tf=>`${tf}:${candleRevision(feed.getClosedBuffer(tf).at(-1))}:${candleRevision(feed.getFormingCandle(tf))}`).join("|");
 }
 
 function scoreRevision(row){
@@ -54,42 +51,49 @@ function traceEvaluationInputs(engine,snapshot){
   };
 }
 
-function signalSnapshot(state,clock,generation){
-  const closed=state&&state.privateCandlesByTf||{},forming=state&&state.privateFormingByTf||{};
-  const closedByTf=Object.fromEntries(Object.entries(closed).map(([tf,rows])=>[tf,(rows||[]).map(row=>({...row,final:true}))]));
-  const rowsByTf=Object.fromEntries(Object.keys(closedByTf).map(tf=>[tf,forming[tf]?[...closedByTf[tf],{...forming[tf],final:false}]:closedByTf[tf].slice()]));
-  const current=rowsByTf["1m"]&&rowsByTf["1m"].at(-1);
+function signalSnapshot(feed,requirements,clock,generation){
+  const items=requirements.items||[],timeframes=requirements.timeframes||items.map(item=>item.tf);
+  const closedByTf=Object.fromEntries(timeframes.map(tf=>[tf,feed.getClosedBuffer(tf)]));
+  const rowsByTf=Object.fromEntries(timeframes.map(tf=>[tf,feed.getLiveBuffer(tf)]));
+  const maByTf=Object.fromEntries(items.map(item=>[item.tf,{
+    live:feed.getAuthoritativeMaSnapshot(item.tf,{includeForming:true,requiredRows:item.historyTarget,slots:requirements.slots}),
+    closed:feed.getAuthoritativeMaSnapshot(item.tf,{includeForming:false,requiredRows:item.historyTarget,slots:requirements.slots})
+  }]));
+  const ownedPrice=feed.getCurrentPrice(),fallback=rowsByTf["1m"]&&rowsByTf["1m"].at(-1),currentPrice=Number((ownedPrice&&ownedPrice.value)??(fallback&&fallback.close));
+  const signature=[SYMBOL,HORIZON_ID,"smc:headless",...items.flatMap(item=>{const revision=feed.getTimeframeRevisions(item.tf);return [item.tf,item.historyTarget,revision.closedRevision,revision.formingRevision];}),Number.isFinite(currentPrice)?currentPrice:null].join("|");
   return {symbol:SYMBOL,horizonId:HORIZON_ID,createdAt:clock.now(),version:generation,
-    signature:Object.keys(rowsByTf).sort().map(tf=>`${tf}:${candleRevision(closedByTf[tf]&&closedByTf[tf].at(-1))}:${candleRevision(rowsByTf[tf]&&rowsByTf[tf].at(-1))}`).join("|"),
-    currentPrice:current&&Number(current.close),closedByTf,rowsByTf,maByTf:{},structureByTf:{},
-    freshness:{signalStatus:"LIVE"},health:{status:"sufficient"}};
+    signature,currentPrice:Number.isFinite(currentPrice)?currentPrice:null,closedByTf,rowsByTf,maByTf,structureByTf:{},
+    freshness:{signalStatus:feed.isPriceFresh(90000)?"LIVE":"STALE"},health:{status:"sufficient"}};
 }
 
 function buildSigBRunner(options={}){
   const config=options.config,clock=options.clock,supabase=options.supabase,dataSource=options.dataSource;
   const engine=options.engine||loadSignalBEngine(),traceEngine=options.traceEngine||loadSignalBEngine();
-  const freshness=createMarketFreshnessTracker({now:clock.now,staleAfterMs:90000});
-  const slots=config.maPeriods.map((period,index)=>({slot:index+1,slotId:`MA${index+1}`,period}));
-  let latestState=null,generation=0,timer=null,writing=false,onUpdateCount=0,marketChangeCount=0;
+  const requirements=engine.getRequirements({horizonId:HORIZON_ID,getCanonicalSlots:()=>config.maPeriods.map((period,index)=>({slot:index+1,slotId:`MA${index+1}`,period}))});
+  const timeframes=requirements.timeframes.slice();
+  let feed=null,generation=0,timer=null,writing=false,onUpdateCount=0,marketChangeCount=0;
   let lastMarketRevision="",lastMarketChangeAt=0,lastInputDigest="",lastScoreDigest="";
-  const pipeline=createOrchestration({getSlots:()=>slots,getCalculation:()=>calculation,getSymbol:()=>SYMBOL,
-    fetchKlines:dataSource.fetchKlines,connectWebSocket:dataSource.connectWebSocket,getWsUrl:()=>config.binanceWsUrl,now:clock.now,
-    closedCandleLagGuard:true,
-    onUpdate:state=>{
-      latestState=state;onUpdateCount+=1;freshness.observe(state);
-      const revision=marketRevision(state);
+  const signalApi={
+    requestJson:(url,init)=>dataSource.requestJson(url,init),
+    connectWebSocket:(url,handlers)=>dataSource.connectWebSocket(url,{...handlers,connectionKey:"sig-b-market-data",staleAfterMs:90000})
+  };
+  feed=options.feed||createPressureSignalDataFeed({api:signalApi,timers:options.timers||globalThis,now:clock.now,
+    getRestUrl:()=>`${config.binanceRestUrl}/fapi/v1/klines`,getWsUrl:()=>config.binanceWsUrl,
+    boundaryGuard:true,boundaryGraceMs:15000,boundaryCheckIntervalMs:5000,
+    onUpdate:()=>{
+      onUpdateCount+=1;
+      const revision=marketRevision(feed,timeframes);
       if(revision&&revision!==lastMarketRevision){lastMarketRevision=revision;marketChangeCount+=1;lastMarketChangeAt=clock.now();}
-    },warn:(message,error)=>(options.warn||console.warn)(`[Headless Sig B] ${message}`,error)});
+    }});
   async function capture(){
     if(writing)return false;
-    const status=freshness.status();
-    const continuity=pipeline.getSnapshot().continuity;
-    if(!latestState||!status.fresh||continuity.blocked||continuity.repairing){
-      (options.warn||console.warn)("[Headless Sig B] stale or repairing data detected, skipping snapshot write",{freshness:status,continuity});return false;
+    const feedStatus=feed.diagnostics(),priceFresh=feed.isPriceFresh(90000);
+    if(!priceFresh||feedStatus.socketStatus!=="live"||feedStatus.inFlightRestCount>0){
+      (options.warn||console.warn)("[Headless Sig B] stale or repairing data detected, skipping snapshot write",{priceFresh,feedStatus});return false;
     }
     writing=true;
     try{
-      const publicationGeneration=++generation,snapshot=signalSnapshot(latestState,clock,publicationGeneration);
+      const publicationGeneration=++generation,snapshot=signalSnapshot(feed,requirements,clock,publicationGeneration);
       const inputDigest=digest(snapshot.signature),sameInputAsPrevious=inputDigest===lastInputDigest;
       const before=engine.diagnostics(),beforeCalculations=before.calculations,beforeCacheHits=before.cacheHits;
       const output=engine.evaluate({snapshot,horizonId:HORIZON_ID,directionMode:DIRECTION_MODE,publicationGeneration});
@@ -103,25 +107,23 @@ function buildSigBRunner(options={}){
         marketChangeAgeMs:lastMarketChangeAt?Math.max(0,clock.now()-lastMarketChangeAt):null,
         inputDigest,sameInputAsPrevious,currentPrice:snapshot.currentPrice,
         closedDepths:Object.fromEntries(Object.entries(snapshot.closedByTf).map(([tf,rows])=>[tf,rows.length])),
-        forming:Object.fromEntries(["1m","3m","5m"].map(tf=>[tf,candleRevision(latestState.privateFormingByTf&&latestState.privateFormingByTf[tf])])),
+        forming:Object.fromEntries(["1m","3m","5m"].map(tf=>[tf,candleRevision(feed.getFormingCandle(tf))])),
         engineRecomputed:after.calculations>beforeCalculations,engineCacheHit:after.cacheHits>beforeCacheHits,
         scoreDigest,sameScoresAsPrevious,entryState:row.entry_state,confidence:row.confidence,setupScore:row.setup_score,
         triggerScore:row.trigger_score,currentEntryScore:row.current_entry_score,readinessScore:row.readiness_score,
         scoreInputs:{setupBreakdown:comparison.setupBreakdown||null,triggerBreakdown:comparison.triggerBreakdown||null,
           currentEntryBreakdown:comparison.currentEntryBreakdown||null,readinessBreakdown:comparison.readinessBreakdown||null,evaluationInputs},
-        continuity:latestState.continuity?{blocked:latestState.continuity.blocked,repairing:latestState.continuity.repairing,
-          queuedMessages:latestState.continuity.queuedMessages,repairAttempts:latestState.continuity.repairAttempts,
-          repairSuccesses:latestState.continuity.repairSuccesses,repairFailures:latestState.continuity.repairFailures,
-          lastSocketEvent:(latestState.continuity.socketEvents||[]).at(-1)||null}:null
+        feed:{socketStatus:feedStatus.socketStatus,lastMessageAt:feedStatus.lastMessageAt,lastSeedAt:feedStatus.lastSeedAt,
+          inFlightRestCount:feedStatus.inFlightRestCount,boundaryTimerCount:feedStatus.boundaryTimerCount,counters:feedStatus.counters}
       };
       (options.log||console.log)(`[Headless Sig B] capture diagnostics ${JSON.stringify(captureDiagnostics)}`);
       lastInputDigest=inputDigest;lastScoreDigest=scoreDigest;return true;
     }catch(error){(options.warn||console.warn)("[Headless Sig B] snapshot write failed",error);return false;}
     finally{writing=false;}
   }
-  const component={async start(){pipeline.startLive();timer=setInterval(()=>capture(),SNAPSHOT_INTERVAL_MS);},
-    stop(){if(timer!=null)clearInterval(timer);timer=null;pipeline.stop();},capture};
-  return createLoggerRunner({component,dataSource});
+  const component={async start(){await feed.configure({symbol:SYMBOL,timeframes,reason:"headless-sig-b-start"});timer=setInterval(()=>capture(),SNAPSHOT_INTERVAL_MS);},
+    stop(){if(timer!=null)clearInterval(timer);timer=null;feed.destroy();},capture};
+  return createLoggerRunner({component});
 }
 
 async function main(){
