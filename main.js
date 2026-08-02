@@ -3509,6 +3509,12 @@ const marketDataHub = (() => {
   }
   function mergeBufferRow(existing,incoming){
     if(!existing) return {...incoming};
+    // A finalized Binance REST candle is authoritative. Never retain local OHLCV
+    // from a closed candle when REST has supplied the canonical row.
+    if(incoming && incoming.final === true && incoming.source === "rest") return {...incoming,final:true};
+    // Some merge callers encounter the REST row first and retained local state
+    // second. Keep the finalized REST row authoritative regardless of ordering.
+    if(existing.final === true && existing.source === "rest" && incoming && incoming.final === true) return {...existing,final:true};
     const exHigh = Number(existing.high), exLow = Number(existing.low);
     const inHigh = Number(incoming.high), inLow = Number(incoming.low), inClose = Number(incoming.close);
     const merged = {...existing,...incoming};
@@ -3584,7 +3590,7 @@ const marketDataHub = (() => {
         warnIntegrity(`duplicate-closed:${tf}:${arr[i].time}`,"duplicate finalized candles found in canonical storage",{
           tf,time:arr[i].time,existing:{...arr[i-1]},incoming:{...arr[i]}
         });
-        arr[i-1] = arr[i].source === "ws" ? {...arr[i]} : (arr[i-1].source === "ws" ? arr[i-1] : mergeBufferRow(arr[i-1],arr[i]));
+        arr[i-1] = mergeBufferRow(arr[i-1],arr[i]);
         arr.splice(i,1);
       }
     }
@@ -4054,7 +4060,7 @@ const marketDataHub = (() => {
       const last = deduped[deduped.length-1];
       if(last && Number(last.time) === Number(row.time)){
         // Expected overlap between an older REST page and the retained canonical boundary row.
-        deduped[deduped.length-1] = row.source === "ws" ? row : (last.source === "ws" ? last : mergeBufferRow(last,row));
+        deduped[deduped.length-1] = mergeBufferRow(last,row);
       }
       else deduped.push(row);
     }

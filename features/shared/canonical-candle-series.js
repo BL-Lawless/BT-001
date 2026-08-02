@@ -24,7 +24,9 @@
     // finalized ingestion attempt and remains diagnosable.
     const expected=source==="rest"||existingSource!==source;
     if(!expected&&typeof warn==="function")warn({time,source,existingSource,existing:{...existing},incoming:{...incoming}});
-    if(source==="ws"||existingSource!=="ws"){
+    if(source==="rest"){
+      arr[idx]=typeof merge==="function"?merge(existing,incoming):{...incoming,final:true};
+    }else if(source==="ws"||existingSource!=="ws"){
       arr[idx]=source==="ws"?{...incoming,final:true}:(typeof merge==="function"?merge(existing,incoming):{...incoming,final:true});
     }
     return {rows:arr,inserted:false,collision:true,expected};
