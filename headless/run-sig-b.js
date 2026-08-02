@@ -18,8 +18,9 @@ function signalSnapshot(state,clock,generation){
   const closedByTf=Object.fromEntries(Object.entries(closed).map(([tf,rows])=>[tf,(rows||[]).map(row=>({...row,final:true}))]));
   const rowsByTf=Object.fromEntries(Object.keys(closedByTf).map(tf=>[tf,forming[tf]?[...closedByTf[tf],{...forming[tf],final:false}]:closedByTf[tf].slice()]));
   const current=rowsByTf["1m"]&&rowsByTf["1m"].at(-1);
+  const rowRevision=row=>row?[row.time,row.open,row.high,row.low,row.close,row.volume,row.quoteVolume,row.tradeCount,row.takerBuyBase,row.takerBuyQuote,row.final===true?1:0].join(":"):"none";
   return {symbol:SYMBOL,horizonId:HORIZON_ID,createdAt:clock.now(),version:generation,
-    signature:Object.keys(rowsByTf).sort().map(tf=>`${tf}:${rowsByTf[tf].at(-1)&&rowsByTf[tf].at(-1).closeTime||0}:${rowsByTf[tf].at(-1)&&rowsByTf[tf].at(-1).close||0}`).join("|"),
+    signature:Object.keys(rowsByTf).sort().map(tf=>`${tf}:${rowRevision(closedByTf[tf]&&closedByTf[tf].at(-1))}:${rowRevision(rowsByTf[tf]&&rowsByTf[tf].at(-1))}`).join("|"),
     currentPrice:current&&Number(current.close),closedByTf,rowsByTf,maByTf:{},structureByTf:{},
     freshness:{signalStatus:"LIVE"},health:{status:"sufficient"}};
 }

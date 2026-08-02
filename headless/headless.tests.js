@@ -39,8 +39,8 @@ async function run(){
   assert.equal(await guarded.flushSnapshot(),false);assert.match(staleWarnings[0][0],/stale data detected, skipping/);
   cases.staleSnapshotIsSkippedAndWarned=true;
 
-  const raw=[1700000000000,"1","3","0.5","2","10",1700000059999,"20"];
-  assert.deepEqual(parseRestKline(raw),{time:1700000000,open:1,high:3,low:.5,close:2,volume:10,baseVolume:10,openTime:1700000000000,closeTime:1700000059999,quoteVolume:20,final:true,source:"headless-rest"});
+  const raw=[1700000000000,"1","3","0.5","2","10",1700000059999,"20",15,"6","12"];
+  assert.deepEqual(parseRestKline(raw),{time:1700000000,open:1,high:3,low:.5,close:2,volume:10,baseVolume:10,openTime:1700000000000,closeTime:1700000059999,quoteVolume:20,tradeCount:15,takerBuyBase:6,takerBuyQuote:12,final:true,source:"headless-rest"});
   let requestedUrl=null;
   class FakeSocket{
     constructor(url){this.url=url;FakeSocket.last=this;}

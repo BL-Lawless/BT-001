@@ -18,6 +18,8 @@ const state={privateCandlesByTf:{"1m":[{time:1,close:100,closeTime:1000,final:tr
 const snapshot=signalSnapshot(state,{now:()=>2001},7);
 assert.equal(snapshot.symbol,SYMBOL);assert.equal(snapshot.horizonId,HORIZON_ID);assert.equal(DIRECTION_MODE,"AUTO");
 assert.equal(snapshot.closedByTf["1m"].length,1);assert.equal(snapshot.rowsByTf["1m"].length,2);assert.equal(snapshot.currentPrice,101);
+const flowChanged=signalSnapshot({...state,privateFormingByTf:{"1m":{...state.privateFormingByTf["1m"],volume:50,quoteVolume:5000,tradeCount:12,takerBuyBase:40,takerBuyQuote:4000}}},{now:()=>2002},8);
+assert.notEqual(flowChanged.signature,snapshot.signature,"volume/flow changes at an unchanged close must invalidate the Engine B cache");
 const engine=loadSignalBEngine();assert.equal(engine.id,"B");assert.equal(typeof engine.evaluate,"function");
 const runnerSource=fs.readFileSync(require.resolve("./run-sig-b.js"),"utf8"),orchestrationSource=fs.readFileSync(require.resolve("../features/pressure-signal/sssc/orchestration.js"),"utf8"),dataSource=fs.readFileSync(require.resolve("./binance-data-source.js"),"utf8");
 assert(runnerSource.includes("createOrchestration"),"Sig B must reuse the SSSC candle/WebSocket orchestration");

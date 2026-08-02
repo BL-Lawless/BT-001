@@ -216,7 +216,8 @@
     function applySocketKline(message,target,{publish=true}={}){
       if(!message||message.e!=="kline"||!message.k||message.s!==getSymbol())return false;
       const k=message.k;
-      const row={time:Math.floor(Number(k.t)/1000),open:Number(k.o),high:Number(k.h),low:Number(k.l),close:Number(k.c),volume:Number(k.v),baseVolume:Number(k.v),quoteVolume:Number(k.q),openTime:Number(k.t),closeTime:Number(k.T),source:"sssc-ws"};
+      const row={time:Math.floor(Number(k.t)/1000),open:Number(k.o),high:Number(k.h),low:Number(k.l),close:Number(k.c),volume:Number(k.v),baseVolume:Number(k.v),quoteVolume:Number(k.q),
+        tradeCount:Number(k.n),takerBuyBase:Number(k.V),takerBuyQuote:Number(k.Q),openTime:Number(k.t),closeTime:Number(k.T),source:"sssc-ws"};
       upsertPrivateKline(k.i,row,k.x===true,target);
       if(publish)calculate();
       return true;

@@ -6,7 +6,8 @@ const {sharedGate}=require("../services/binance-rest-gate.service.js");
 function parseRestKline(row){
   return {
     time:Math.floor(Number(row[0])/1000),open:Number(row[1]),high:Number(row[2]),low:Number(row[3]),close:Number(row[4]),
-    volume:Number(row[5]),baseVolume:Number(row[5]),openTime:Number(row[0]),closeTime:Number(row[6]),quoteVolume:Number(row[7]),final:true,source:"headless-rest"
+    volume:Number(row[5]),baseVolume:Number(row[5]),openTime:Number(row[0]),closeTime:Number(row[6]),quoteVolume:Number(row[7]),
+    tradeCount:Number(row[8]),takerBuyBase:Number(row[9]),takerBuyQuote:Number(row[10]),final:true,source:"headless-rest"
   };
 }
 
