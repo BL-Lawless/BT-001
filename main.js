@@ -148,7 +148,9 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const TRADE_CHUNK_MS = WEEK_MS;
 const TRADE_LIMIT = 1000;
 const RECON_LOOKBACK_WEEKS = 26;
-const BINANCE_BACKFILL_PAGE_DELAY_MS = 200;
+const BINANCE_BACKFILL_PAGE_DELAY_MS = 300;
+const BINANCE_RECONSTRUCTION_MAX_PAGES = 60;
+const BINANCE_RECONSTRUCTION_MAX_WEIGHT = 600;
 const SYMBOL_TRADING_SETTINGS_CACHE_TTL_MS = 30000;
 const API_CAPABILITY_CACHE_TTL_MS = 30000;
 const BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo";
@@ -163,6 +165,23 @@ function paceBinanceBackfill(requestIndex){
   return requestIndex>0
     ? new Promise(resolve=>setTimeout(resolve,BINANCE_BACKFILL_PAGE_DELAY_MS))
     : Promise.resolve();
+}
+
+function createBinanceReconstructionBudget(){
+  return {pages:0,weight:0,limited:false};
+}
+
+async function reserveBinanceReconstructionRequest(budget,weight){
+  const target = budget || createBinanceReconstructionBudget();
+  const requestWeight = Math.max(0,Number(weight) || 0);
+  if(target.pages >= BINANCE_RECONSTRUCTION_MAX_PAGES || target.weight + requestWeight > BINANCE_RECONSTRUCTION_MAX_WEIGHT){
+    target.limited = true;
+    return false;
+  }
+  await paceBinanceBackfill(target.pages);
+  target.pages += 1;
+  target.weight += requestWeight;
+  return true;
 }
 
 const STORE = "btc_futures_chart_v12_";
@@ -670,7 +689,7 @@ async function fetchSelectedSymbolTradingSettings(symbolOverride,options = {}){
   const now = Date.now();
   const cached = symbolTradingSettingsCache.get(symbol);
   if(!force && cached && cached.loadedAt > 0 && (now - cached.loadedAt) < SYMBOL_TRADING_SETTINGS_CACHE_TTL_MS) return cached;
-  if(!force && cached && cached.inFlight) return cached.inFlight;
+  if(cached && cached.inFlight) return cached.inFlight;
   const base = cached || {
     symbol,
     leverage:null,
@@ -679,6 +698,7 @@ async function fetchSelectedSymbolTradingSettings(symbolOverride,options = {}){
     filters:null,
     tickSize:null,
     stepSize:null,
+    exchangeInfo:null,
     leverageBracket:null,
     loadedAt:0,
     error:"",
@@ -722,6 +742,7 @@ async function fetchSelectedSymbolTradingSettings(symbolOverride,options = {}){
         filters:symbolInfo && symbolInfo.filters ? symbolInfo.filters : null,
         tickSize:filterValue(symbolInfo,"PRICE_FILTER","tickSize"),
         stepSize:filterValue(symbolInfo,"LOT_SIZE","stepSize"),
+        exchangeInfo,
         leverageBracket:bracket,
         status:"ready",
         loadedAt:Date.now(),
@@ -1943,16 +1964,16 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
     const bounds = closedTradeFastContextBounds(win.period);
     const maxContextStart = Math.max(0,win.start - bounds.max);
     let start = Math.max(0,win.start - bounds.initial);
-    let rows = await getUserTradesRange(key,sec,off,start,win.end);
+    const requestBudget = createBinanceReconstructionBudget();
+    let rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
     let rec = reconstruct(rows,symbol);
-    while(hasPeriodUnresolvedClose(rec,win) && start > maxContextStart){
+    while(!requestBudget.limited && hasPeriodUnresolvedClose(rec,win) && start > maxContextStart){
       if(!silent) closedTradeStatus("Resolving WF context...");
       start = Math.max(maxContextStart,start - bounds.step);
-      await paceBinanceBackfill(1);
-      rows = await getUserTradesRange(key,sec,off,start,win.end);
+      rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
       rec = reconstruct(rows,symbol);
     }
-    const contextLimited = hasPeriodUnresolvedClose(rec,win);
+    const contextLimited = requestBudget.limited || hasPeriodUnresolvedClose(rec,win);
     const fastReport = buildClosedTradeFastReport(rec,win,symbol,contextLimited);
 
     CLOSED_TRADES_STATE.fastReport = fastReport;
@@ -1971,7 +1992,8 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
         "Fast " + fastReport.period.label +
         " | Closed positions: " + fastReport.summaries.length +
         limitedText +
-        " | net P/L: " + closedTradeSignedMoney(fastReport.summary.netTotal),
+        " | net P/L: " + closedTradeSignedMoney(fastReport.summary.netTotal) +
+        (requestBudget.limited ? " | request limit reached — retry to load more" : ""),
         {mode:"summary"}
       );
     }else{
@@ -2009,19 +2031,19 @@ async function loadClosedTradesForPeriod(period,opt={}){
     const off = opt.off != null ? opt.off : await timeOffset();
     closedTradeStatus("Fetching fills...");
     let start = Math.max(0,win.start - RECON_LOOKBACK_WEEKS * WEEK_MS);
-    let rows = await getUserTradesRange(key,sec,off,start,win.end);
+    const requestBudget = createBinanceReconstructionBudget();
+    let rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
     closedTradeStatus("Reconstructing trades...");
     let full = reconstruct(rows,cfg().symbol);
     const maxBackfillStart = Math.max(0,win.start - Math.max(RECON_LOOKBACK_WEEKS,52) * WEEK_MS);
-    while(hasPeriodUnresolvedClose(full,win) && start > maxBackfillStart){
+    while(!requestBudget.limited && hasPeriodUnresolvedClose(full,win) && start > maxBackfillStart){
       closedTradeStatus("Fetching fills...");
       start = Math.max(maxBackfillStart,start - TRADE_CHUNK_MS);
-      await paceBinanceBackfill(1);
-      rows = await getUserTradesRange(key,sec,off,start,win.end);
+      rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
       closedTradeStatus("Reconstructing trades...");
       full = reconstruct(rows,cfg().symbol);
     }
-    fundingIncomeRows = await getFundingIncomeRange(key,sec,off,start,win.end).catch(e => {
+    fundingIncomeRows = await getFundingIncomeRange(key,sec,off,start,win.end,undefined,undefined,requestBudget).catch(e => {
       console.warn("Funding income fetch failed",e);
       fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:cfg().symbol};
       return [];
@@ -2056,7 +2078,8 @@ async function loadClosedTradesForPeriod(period,opt={}){
         "From: " + closedTradeStatusDay(win.start) +
         " | To: " + closedTradeStatusDay(win.end) +
         " | Trades: " + summary.parents.length +
-        " | net P/L: " + closedTradeSignedMoney(netPnl),
+        " | net P/L: " + closedTradeSignedMoney(netPnl) +
+        (requestBudget.limited ? " | request limit reached — retry to load more" : ""),
         {mode:"summary"}
       );
     }else{
@@ -5013,7 +5036,7 @@ async function serverTime(){
   return getExchangeNowMs();
 }
 
-async function signedGet(url,p,key,sec,off){
+async function signedGet(url,p,key,sec,off,options={}){
   const params = new URLSearchParams({
     ...p,
     recvWindow:"5000",
@@ -5026,13 +5049,18 @@ async function signedGet(url,p,key,sec,off){
   const r = await API.fetch(url + "?" + q + "&signature=" + sig,{
     method:"GET",
     cache:"no-store",
+    binanceRestGateBypass:options.binanceRestGateBypass===true,
     headers:{"X-MBX-APIKEY":key}
   });
 
-  const d = await r.json();
+  const d = await r.json().catch(() => null);
 
   if(!r.ok){
-    throw new Error(d && d.msg ? d.msg : "HTTP " + r.status);
+    const error = new Error(d && d.msg ? d.msg : "HTTP " + r.status);
+    error.status = r.status;
+    error.code = d && d.code != null ? d.code : null;
+    error.data = d;
+    throw error;
   }
 
   return d;
@@ -5130,15 +5158,15 @@ async function getTrades(key,sec,off){
   const seen = new Set();
 
   let chunk = start;
-  let requestCount = 0;
+  const requestBudget = createBinanceReconstructionBudget();
 
-  while(chunk < end){
+  while(chunk < end && !requestBudget.limited){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,end);
     let page = chunk;
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
-      await paceBinanceBackfill(requestCount++);
+      if(!await reserveBinanceReconstructionRequest(requestBudget,5)) break;
       const rows = await signedGet(
         c.userTrades,
         {
@@ -5181,7 +5209,7 @@ async function getTrades(key,sec,off){
   return all;
 }
 
-async function getUserTradesRange(key,sec,off,start,end){
+async function getUserTradesRange(key,sec,off,start,end,requestBudget){
   const c = cfg();
   const all = [];
   const seen = new Set();
@@ -5189,14 +5217,14 @@ async function getUserTradesRange(key,sec,off,start,end){
   const endMs = Math.max(startMs,Math.floor(Number(end) || Date.now()));
 
   let chunk = startMs;
-  let requestCount = 0;
-  while(chunk < endMs){
+  const budget = requestBudget || createBinanceReconstructionBudget();
+  while(chunk < endMs && !budget.limited){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,endMs);
     let page = chunk;
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
-      await paceBinanceBackfill(requestCount++);
+      if(!await reserveBinanceReconstructionRequest(budget,5)) break;
       const rows = await signedGet(
         c.userTrades,
         {
@@ -5448,14 +5476,14 @@ async function getFundingIncome(key,sec,off){
   const seen = new Set();
 
   let chunk = start;
-  let requestCount = 0;
-  while(chunk < end){
+  const requestBudget = createBinanceReconstructionBudget();
+  while(chunk < end && !requestBudget.limited){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,end);
     let page = chunk;
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
-      await paceBinanceBackfill(requestCount++);
+      if(!await reserveBinanceReconstructionRequest(requestBudget,30)) break;
       const rows = await signedGet(
         endpoint,
         {
@@ -5507,11 +5535,11 @@ async function getFundingIncome(key,sec,off){
   return all;
 }
 
-async function getFundingIncomeRange(key,sec,off,start,end,symbolOverride,trackStats){
-  return getIncomeRowsRange("FUNDING_FEE",key,sec,off,start,end,symbolOverride,trackStats);
+async function getFundingIncomeRange(key,sec,off,start,end,symbolOverride,trackStats,requestBudget){
+  return getIncomeRowsRange("FUNDING_FEE",key,sec,off,start,end,symbolOverride,trackStats,requestBudget);
 }
 
-async function getIncomeRowsRange(incomeType,key,sec,off,start,end,symbolOverride,trackStats){
+async function getIncomeRowsRange(incomeType,key,sec,off,start,end,symbolOverride,trackStats,requestBudget){
   const c = cfg();
   const endpoint = c.income || "https://fapi.binance.com/fapi/v1/income";
   const symbol = String(symbolOverride || c.symbol || "").toUpperCase();
@@ -5522,14 +5550,14 @@ async function getIncomeRowsRange(incomeType,key,sec,off,start,end,symbolOverrid
   const endMs = Math.max(startMs,Math.floor(Number(end) || Date.now()));
 
   let chunk = startMs;
-  let requestCount = 0;
-  while(chunk < endMs){
+  const budget = requestBudget || createBinanceReconstructionBudget();
+  while(chunk < endMs && !budget.limited){
     const chunkEnd = Math.min(chunk + TRADE_CHUNK_MS - 1,endMs);
     let page = chunk;
     let n = 0;
 
     while(page <= chunkEnd && n < 30){
-      await paceBinanceBackfill(requestCount++);
+      if(!await reserveBinanceReconstructionRequest(budget,30)) break;
       const rows = await signedGet(
         endpoint,
         {
@@ -5574,13 +5602,14 @@ async function getIncomeRowsRange(incomeType,key,sec,off,start,end,symbolOverrid
   return all;
 }
 
-async function getPositions(key,sec,off){
+async function getPositions(key,sec,off,options={}){
   const rows = await signedGet(
     cfg().positionRisk,
     {symbol:cfg().symbol},
     key,
     sec,
-    off
+    off,
+    options
   );
 
   return Array.isArray(rows) ? rows : [];
@@ -17507,12 +17536,12 @@ startTradeAuto();
     const request = (async() => {
       const {key,secret:sec} = activeApiCredentials();
       const off = await timeOffset().catch(() => 0);
-      const [spotAccount,futuresAccount,exchangeInfo,symbolSettings] = await Promise.all([
+      const [spotAccount,futuresAccount,symbolSettings] = await Promise.all([
         signedGetVerbose(BINANCE_SPOT_ACCOUNT_URL,{},key,sec,off),
         signedGetVerbose(BINANCE_FUTURES_ACCOUNT_URL,{},key,sec,off),
-        fetchExchangeInfo(symbol),
         fetchSelectedSymbolTradingSettings(symbol,{force:true}).catch(() => null)
       ]);
+      const exchangeInfo = symbolSettings && symbolSettings.exchangeInfo || null;
       let multiAssets = null;
       let commission = null;
       if(futuresAccount && futuresAccount.ok){

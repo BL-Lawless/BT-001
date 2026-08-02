@@ -185,11 +185,15 @@
       settled("Spot account",signedGet("spot","/api/v3/account",credentials)),
       settled("Futures account",signedGet("futures","/fapi/v2/account",credentials))
     ]);
+    const cachedSettings=slot===getInterfaceSlot()&&window.BT001SymbolTradingSettings&&typeof window.BT001SymbolTradingSettings.getCached==="function"
+      ? window.BT001SymbolTradingSettings.getCached(symbol)
+      : null;
+    const sharedSettings=cachedSettings&&cachedSettings.status==="ready"&&Date.now()-Number(cachedSettings.loadedAt||0)<30000?cachedSettings:null;
     const extras=futures.ok?await Promise.all([
-      settled("Position mode",signedGet("futures","/fapi/v1/positionSide/dual",credentials)),
+      sharedSettings?Promise.resolve({label:"Position mode",ok:true,data:{dualSidePosition:sharedSettings.positionMode==="HEDGE"},error:null}):settled("Position mode",signedGet("futures","/fapi/v1/positionSide/dual",credentials)),
       settled("Multi-assets mode",signedGet("futures","/fapi/v1/multiAssetsMargin",credentials)),
       settled("Commission rate",signedGet("futures","/fapi/v1/commissionRate",credentials,{symbol})),
-      settled("Position risk",signedGet("futures","/fapi/v2/positionRisk",credentials,{symbol}))
+      sharedSettings?Promise.resolve({label:"Position risk",ok:true,data:[{symbol,marginType:sharedSettings.marginMode,leverage:sharedSettings.leverage}],error:null}):settled("Position risk",signedGet("futures","/fapi/v2/positionRisk",credentials,{symbol}))
     ]):[];
     const byLabel=Object.fromEntries(extras.map(result=>[result.label,result])),spotReachable=spot.ok,futuresReachable=futures.ok,mode=accountMode(spotReachable,futuresReachable);
     if(spotReachable||futuresReachable)successfulSyncAt[slot]=Date.now();

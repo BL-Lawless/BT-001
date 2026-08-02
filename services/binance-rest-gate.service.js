@@ -43,6 +43,25 @@ const REFOCUS_DIAG = false;
     }
   }
 
+  function requestUrlOf(input) {
+    try {
+      const raw = input && typeof input === "object" && input.url ? input.url : input;
+      return new URL(String(raw), "https://invalid.local").href;
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function usedWeightHeadersOf(response) {
+    const result = {};
+    const headers = response && response.headers;
+    if (!headers || typeof headers.forEach !== "function") return result;
+    headers.forEach((value, name) => {
+      if (/^x-mbx-used-weight-/i.test(String(name))) result[String(name).toLowerCase()] = String(value);
+    });
+    return result;
+  }
+
   function isBinanceRestUrl(input) {
     const host = hostnameOf(input);
     return host === "api.binance.com"
@@ -83,6 +102,8 @@ const REFOCUS_DIAG = false;
       this.pausedUntil = 0;
       this.pauseStatus = null;
       this.pauseReason = "";
+      this.pauseUrl = "";
+      this.pauseUsedWeightHeaders = Object.freeze({});
       this.pauseLogged = false;
       this.exitTimer = null;
       this.waiters = [];
@@ -95,7 +116,9 @@ const REFOCUS_DIAG = false;
         pausedUntil: this.pausedUntil,
         remainingMs: Math.max(0, this.pausedUntil - this.now()),
         status: this.pauseStatus,
-        reason: this.pauseReason
+        reason: this.pauseReason,
+        url: this.pauseUrl,
+        usedWeightHeaders: this.pauseUsedWeightHeaders
       });
     }
 
@@ -113,6 +136,8 @@ const REFOCUS_DIAG = false;
       this.pausedUntil = 0;
       this.pauseStatus = null;
       this.pauseReason = "";
+      this.pauseUrl = "";
+      this.pauseUsedWeightHeaders = Object.freeze({});
       if (this.exitTimer != null) clearTimeout(this.exitTimer);
       this.exitTimer = null;
       this.pauseLogged = false;
@@ -142,10 +167,18 @@ const REFOCUS_DIAG = false;
     pause(until, details = {}) {
       const nextUntil = Math.max(this.now() + 1, Number(until) || 0);
       const wasPaused = this.pausedUntil > this.now();
-      if (nextUntil <= this.pausedUntil && wasPaused) return this.state();
+      if (nextUntil <= this.pausedUntil && wasPaused) {
+        this.pauseStatus = details.status || this.pauseStatus;
+        this.pauseReason = details.reason || this.pauseReason;
+        this.pauseUrl = details.url || this.pauseUrl;
+        if (details.usedWeightHeaders) this.pauseUsedWeightHeaders = Object.freeze({...details.usedWeightHeaders});
+        return this.state();
+      }
       this.pausedUntil = nextUntil;
       this.pauseStatus = details.status || this.pauseStatus;
       this.pauseReason = details.reason || this.pauseReason || "Binance rate limit";
+      this.pauseUrl = details.url || this.pauseUrl || "";
+      if (details.usedWeightHeaders) this.pauseUsedWeightHeaders = Object.freeze({...details.usedWeightHeaders});
       if (!wasPaused) {
         this.pauseLogged = true;
         refocusDiag("BINANCE_REST_GATE paused state changed",{
@@ -168,7 +201,7 @@ const REFOCUS_DIAG = false;
       }
     }
 
-    async observeResponse(response) {
+    async observeResponse(response, input) {
       if (!response || response.ok) return response;
       const now = this.now();
       let body = "";
@@ -183,6 +216,8 @@ const REFOCUS_DIAG = false;
       const fallbackUntil = now + (response.status === 418 ? this.default418PauseMs : this.default429PauseMs);
       this.pause(Math.max(retryUntil, bannedUntil) || fallbackUntil, {
         status: response.status,
+        url: requestUrlOf(input),
+        usedWeightHeaders: usedWeightHeadersOf(response),
         reason: bannedUntil
           ? `Binance IP ban response: ${body.slice(0, 240)}`
           : `Binance rate-limit response HTTP ${response.status}`
@@ -195,10 +230,11 @@ const REFOCUS_DIAG = false;
       const gate = this;
       const wrapped = async function gatedBinanceFetch(input, options) {
         if (!isBinanceRestUrl(input)) return fetchFn(input, options);
-        const pause = gate.beforeRequest(input);
+        const bypassPause = !!(options && options.binanceRestGateBypass === true);
+        const pause = bypassPause ? null : gate.beforeRequest(input);
         if (pause) await pause;
         const response = await fetchFn(input, options);
-        return gate.observeResponse(response);
+        return gate.observeResponse(response, input);
       };
       Object.defineProperty(wrapped, "__bt001BinanceGateWrapped", { value: true });
       return wrapped;

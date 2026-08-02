@@ -37,6 +37,7 @@ function functionSource(name){
   assert(directSend.includes("signedPosition({off:sendContext.off})"));
   assert(directSend.includes("readOpenOrdersSnapshot({off:sendContext.off})"));
   assert(directSend.includes("sendContext,"));
+  assert(!directSend.includes("waitForSendRestGate"),"Send must not pre-wait on the shared REST pause");
 
   const openOrders = functionSource("readOpenOrdersSnapshot");
   assert(openOrders.includes("await Promise.allSettled(["));
@@ -89,38 +90,10 @@ function functionSource(name){
     "the second Exit/PSL validator must reuse the first validator's refresh"
   );
 
-  const gateHelperSource = functionSource("waitForSendRestGate");
-  const statuses = [];
-  let beforeRequestCalls = 0;
-  const gate = {
-    beforeRequest(){
-      beforeRequestCalls++;
-      return Promise.resolve();
-    },
-    state(){
-      return {paused:true,remainingMs:4200};
-    }
-  };
-  const waitForSendRestGate = new Function(
-    "window",
-    "ORDER_WRITE_URL",
-    "setStatus",
-    "setInterval",
-    "clearInterval",
-    `return (${gateHelperSource});`
-  )(
-    {BINANCE_REST_GATE:gate},
-    "https://fapi.binance.com/fapi/v1/order",
-    value => statuses.push(value),
-    () => 1,
-    () => {}
-  );
-  await waitForSendRestGate();
-  assert.equal(beforeRequestCalls,1);
-  assert(
-    statuses.some(value => /Binance rate limit pause active, retrying in 5s/.test(value)),
-    "an active REST-gate pause must be surfaced in the Send UI"
-  );
+  const writeSource = functionSource("signedBinanceWrite");
+  assert(writeSource.includes("binanceRestGateBypass:true"),"Calculator order writes must bypass a pre-existing shared pause");
+  assert(writeSource.includes("This order was rejected by Binance: rate limited"),"a live order-write 429/418 must become a direct row error");
+  assert(!source.includes("Binance rate limit pause active, retrying in"),"Calculator Send must not render a shared-pause countdown");
 
   console.log("calculator send-path tests passed");
 })().catch(error => {

@@ -12,9 +12,8 @@
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
   const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
   const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
-  const AUTO_SYNC_POLL_MS = 2000;
+  const AUTO_SYNC_DISPLAY_REFRESH_MS = 500;
   const SEND_POSITION_MAX_AGE_MS = 5000;
-  const AUTO_SYNC_DEBOUNCE_MS = 800;
   const FLAT_CLEANUP_CONFIRM_MS = 700;
   const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1200;
   const OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS = [0,1,2,5];
@@ -39,6 +38,8 @@
   let cbsEnabled = false;
   let expressModeEnabled = false;
   let ordersVisible = true;
+  let calculatorRowsHydrated = false;
+  let calculatorRowsHydrationPromise = null;
   let otfEnabled = false;
   let otfSelection = null;
   let otfSelectionAnimation = 0;
@@ -64,9 +65,7 @@
   let sendPlanState = null;
   let sendPlanSeq = 0;
   let autoSyncEnabled = false;
-  let autoSyncPollTimer = null;
-  let autoSyncDebounceTimer = null;
-  let autoSyncChecking = false;
+  let autoSyncDisplayTimer = null;
   let autoSyncRefreshing = false;
   let autoSyncBaselineSignature = "";
   let structuralWarningActive = false;
@@ -903,6 +902,7 @@
     });
   }
   function scheduleBinanceStateReconcile(detail){
+    if(!autoSyncEnabled) return;
     const signature = String(detail && detail.signature || "");
     if(!signature || signature === lastBinanceStateEventSignature) return;
     lastBinanceStateEventSignature = signature;
@@ -1012,21 +1012,44 @@
     }
     try{ if(typeof draw === "function") draw(); }catch(_e){}
   }
-  function hasLoadedCalculatorOrderState(){
-    if(lastReadStateSnapshot) return true;
-    if(currentStopAlgoMeta) return true;
-    return ["calcModuleEntryRows","calcModuleExitRows","calcModulePartialStopRows"].some(containerId =>
-      rows(containerId).some(row => String(row.dataset && row.dataset.source || "").startsWith("binance-"))
+  function hasReliableCalculatorPrivateState(){
+    const cache = window.BINANCE_OPEN_ORDERS_CACHE;
+    const orders = cache && typeof cache.getSnapshot === "function" ? cache.getSnapshot(currentSymbol()) : null;
+    const sync = window.BINANCE_PRIVATE_SYNC;
+    const privateState = sync && typeof sync.diagnostics === "function" ? sync.diagnostics() : null;
+    const streamLive = String(privateState && privateState.streamStatus || orders && orders.streamStatus || "").toLowerCase() === "live";
+    const orderVerifiedAt = Number(orders && orders.verifiedAt) || 0;
+    const positionVerifiedAt = Math.max(
+      Number(privateState && privateState.verifiedAt && privateState.verifiedAt.position) || 0,
+      Number(privateState && privateState.stateChangedAt && privateState.stateChangedAt.position) || 0
     );
+    const maxAgeMs = Number(privateState && privateState.safetyCadenceMs) || 60000;
+    const now = Date.now();
+    const ordersReliable = !!(orders && orders.status === "ok" && orders.sourcesChecked && orderVerifiedAt > 0 && (streamLive || now - orderVerifiedAt <= maxAgeMs));
+    const positionReliable = positionVerifiedAt > 0 && (streamLive || now - positionVerifiedAt <= maxAgeMs);
+    return ordersReliable && positionReliable;
+  }
+  function ensureCalculatorRowsHydratedForOrders(){
+    enableAutoSyncDetection();
+    if(calculatorRowsHydrated && hasReliableCalculatorPrivateState()) return Promise.resolve(false);
+    if(calculatorRowsHydrationPromise) return calculatorRowsHydrationPromise;
+    calculatorRowsHydrationPromise = Promise.resolve(
+      readBinance({preserveSendPlan:true,source:"ordersToggleLoad"})
+    ).then(() => calculatorRowsHydrated).finally(() => {
+      calculatorRowsHydrationPromise = null;
+    });
+    return calculatorRowsHydrationPromise;
+  }
+  function readBinanceFromUser(){
+    if(calculatorRowsHydrationPromise) return calculatorRowsHydrationPromise;
+    return readBinance({userRead:true});
   }
   async function toggleOrdersVisible(){
     const next = !ordersVisible;
     if(!next) saveOtfEnabled(false);
     saveOrdersVisible(next);
-    if(!next || hasLoadedCalculatorOrderState()) return;
-    try{
-      await readBinance({preserveSendPlan:true,source:"ordersToggleLoad"});
-    }catch(_e){}
+    if(!next) return;
+    try{ await ensureCalculatorRowsHydratedForOrders(); }catch(_e){}
   }
   function otfSelectionMatches(item){
     return !!(otfSelection && item && otfSelection.row === item.row && otfSelection.type === item.type);
@@ -1295,6 +1318,7 @@
     }
     btn.onclick = toggleOrdersVisible;
     saveOrdersVisible(ordersVisible);
+    if(ordersVisible) ensureCalculatorRowsHydratedForOrders().catch(() => {});
     let otfBtn = q("calcModuleOtfToggle");
     if(!otfBtn){
       otfBtn = document.createElement("button");
@@ -2360,13 +2384,21 @@
     });
     return qty > 0 ? {side,qty,entry:value / qty,source:"openPositionBoxes"} : null;
   }
+  async function calculatorReadOffset(options={}){
+    if(options.off != null) return Number(options.off) || 0;
+    if(options.binanceRestGateBypass === true){
+      const clock = window.BT001ExchangeClock;
+      return clock && typeof clock.offset === "function" ? Number(clock.offset()) || 0 : 0;
+    }
+    return typeof timeOffset === "function" ? await timeOffset() : 0;
+  }
   async function signedPosition(options={}){
     if(typeof hasKeys !== "function" || !hasKeys()) return null;
     const sharedOwner=window.BT001_SHARED_POSITION;
     const expected=sharedOwner&&typeof sharedOwner.captureExpectation==="function"?sharedOwner.captureExpectation():null;
     const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
-    const off = options.off != null ? Number(options.off) : (typeof timeOffset === "function" ? await timeOffset() : 0);
-    const risk = typeof getPositions === "function" ? await getPositions(key,sec,off) : [];
+    const off = await calculatorReadOffset(options);
+    const risk = typeof getPositions === "function" ? await getPositions(key,sec,off,{binanceRestGateBypass:options.binanceRestGateBypass===true}) : [];
     if(sharedOwner&&typeof sharedOwner.ingestRestRisk==="function"){
       const sharedResult=sharedOwner.ingestRestRisk(risk,{source:"calculator-positionRisk",symbol:currentSymbol(),expected,observedAt:Date.now(),allowAdvance:true,ignoreStreamAuthority:!window.BINANCE_PRIVATE_STATE||window.BINANCE_PRIVATE_STATE.streamStatus!=="live"});
       const shared=sharedResult&&sharedResult.snapshot&&sharedResult.snapshot.position;
@@ -2875,70 +2907,32 @@
   function updateAutoSyncBaseline(position,snapshot){
     autoSyncBaselineSignature = buildStructuralSignature(position,snapshot || {symbol:currentSymbol(),normalOrders:[]});
   }
-  async function readStructuralStateForAutoSync(){
-    const pos = await signedPosition() || openBoxPosition();
-    const snapshot = await readOpenOrdersSnapshot();
-    if(snapshot && snapshot.normalFetchError) return null;
-    return {
-      position:pos,
-      snapshot,
-      signature:buildStructuralSignature(pos,snapshot)
-    };
+  function calculatorAutoSyncVisible(){
+    const win = q("calcModuleWindow");
+    return !!(win && !win.classList.contains("hidden") && !document.hidden);
   }
-  function scheduleAutoSyncRefresh(){
-    if(!autoSyncEnabled || autoSyncRefreshing) return;
-    clearTimeout(autoSyncDebounceTimer);
-    autoSyncDebounceTimer = setTimeout(async() => {
-      if(!autoSyncEnabled || autoSyncRefreshing) return;
-      if(isCalculatorOwnedRefreshActive()){
-        try{
-          const live = await readStructuralStateForAutoSync();
-          if(live && live.snapshot) updateAutoSyncBaseline(live.position,live.snapshot);
-          clearStructuralWarning();
-        }catch(_e){}
-        return;
-      }
-      autoSyncRefreshing = true;
-      try{
-        await readBinance({preserveSendPlan:true,autoSync:true,source:"autoWatch"});
-      }finally{
-        autoSyncRefreshing = false;
-      }
-    },AUTO_SYNC_DEBOUNCE_MS);
+  function refreshAutoSyncDisplayFromHeldState(){
+    if(!autoSyncEnabled || !calculatorAutoSyncVisible()) return;
+    setMoney(q("calcModuleCollapsedEntryFloating"),currentFloatingPl());
+    const coverageQty = lastKnownLiveOpenPositionQty == null ? liveCachedOpenPositionQty() : lastKnownLiveOpenPositionQty;
+    const stopSum = q("calcModuleStopSum");
+    const exitSum = q("calcModuleExitSum");
+    if(stopSum) stopSum.textContent = fmtLot(totalPartialStopLots()) + "/" + fmtLot(coverageQty || 0);
+    if(exitSum) exitSum.textContent = fmtLot(readRows("calcModuleExitRows").reduce((sum,row) => sum + row.lot,0)) + "/" + fmtLot(coverageQty || 0);
   }
-  async function checkAutoSyncStructuralState(){
-    if(!autoSyncEnabled || autoSyncChecking || autoSyncRefreshing || !autoSyncBaselineSignature) return;
-    autoSyncChecking = true;
-    try{
-      const live = await readStructuralStateForAutoSync();
-      if(!live || !live.signature) return;
-      if(live.signature !== autoSyncBaselineSignature){
-        if(openPositionSizeChanged(lastReadStateSnapshot && lastReadStateSnapshot.openPosition,live.position)){
-          setCalculatorPositionSizeNotice();
-        }
-        if(isCalculatorOwnedRefreshActive()){
-          updateAutoSyncBaseline(live.position,live.snapshot);
-          clearStructuralWarning();
-          return;
-        }
-        scheduleAutoSyncRefresh();
-      }
-    }catch(_e){
-      const gate=window.BINANCE_REST_GATE;
-      if(gate&&typeof gate.state==="function"&&gate.state().paused){
-        const resume=gate.beforeRequest(OPEN_ORDERS_URL);
-        if(resume)resume.then(()=>checkAutoSyncStructuralState());
-      }
-    }finally{
-      autoSyncChecking = false;
-    }
+  function stopAutoSyncDisplayRefresh(){
+    if(autoSyncDisplayTimer != null) clearInterval(autoSyncDisplayTimer);
+    autoSyncDisplayTimer = null;
+  }
+  function startAutoSyncDisplayRefresh(){
+    stopAutoSyncDisplayRefresh();
+    if(!autoSyncEnabled || !calculatorAutoSyncVisible()) return;
+    refreshAutoSyncDisplayFromHeldState();
+    autoSyncDisplayTimer = setInterval(refreshAutoSyncDisplayFromHeldState,AUTO_SYNC_DISPLAY_REFRESH_MS);
   }
   function enableAutoSyncDetection(){
     autoSyncEnabled = true;
-    if(autoSyncPollTimer) return;
-    autoSyncPollTimer = setInterval(() => {
-      checkAutoSyncStructuralState();
-    },AUTO_SYNC_POLL_MS);
+    startAutoSyncDisplayRefresh();
   }
   function inferDirectionForSend(livePosition){
     if(livePosition && (livePosition.side === "LONG" || livePosition.side === "SHORT")) return livePosition.side;
@@ -3138,24 +3132,6 @@
       btn.classList.remove("bt001-send-success-blink");
       btn.__bt001SendBlinkTimer = null;
     },900);
-  }
-  async function waitForSendRestGate(){
-    const gate = window.BINANCE_REST_GATE;
-    if(!gate || typeof gate.beforeRequest !== "function") return;
-    const pause = gate.beforeRequest(ORDER_WRITE_URL);
-    if(!pause) return;
-    const renderPause = () => {
-      const state = typeof gate.state === "function" ? gate.state() : null;
-      const seconds = Math.max(1,Math.ceil(Number(state && state.remainingMs || 0) / 1000));
-      setStatus("Binance rate limit pause active, retrying in " + seconds + "s");
-    };
-    renderPause();
-    const timer = setInterval(renderPause,1000);
-    try{
-      await pause;
-    }finally{
-      clearInterval(timer);
-    }
   }
   function renderSendPlanTable(){
     const box = ensureSendPopup();
@@ -4339,10 +4315,10 @@
     };
     if(typeof hasKeys === "function" && hasKeys() && typeof signedGet === "function"){
       const {key,secret:sec} = window.BT001_ACTIVE_BINANCE_CREDENTIALS();
-      const off = options.off != null ? Number(options.off) : (typeof timeOffset === "function" ? await timeOffset() : 0);
+      const off = await calculatorReadOffset(options);
       const [normalResult,algoResult] = await Promise.allSettled([
-        signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off),
-        signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off)
+        signedGet(OPEN_ORDERS_URL,{symbol:sym},key,sec,off,{binanceRestGateBypass:options.binanceRestGateBypass===true}),
+        signedGet(OPEN_ALGO_ORDERS_URL,{symbol:sym},key,sec,off,{binanceRestGateBypass:options.binanceRestGateBypass===true})
       ]);
       if(normalResult.status === "fulfilled") snapshot.normalOrders = unwrapOrders(normalResult.value);
       else snapshot.normalFetchError = normalResult.reason;
@@ -5714,11 +5690,16 @@
     const res = await API.fetch(url + "?" + q + "&signature=" + sig,{
       method:method,
       cache:"no-store",
+      binanceRestGateBypass:true,
       headers:{"X-MBX-APIKEY":key}
     });
     const data = await res.json().catch(() => null);
     if(!res.ok){
-      const err = new Error(data && data.msg ? data.msg : ("HTTP " + res.status));
+      const rateLimited = res.status === 429 || res.status === 418;
+      const err = new Error(rateLimited
+        ? "This order was rejected by Binance: rate limited (HTTP " + res.status + ")."
+        : data && data.msg ? data.msg : ("HTTP " + res.status));
+      err.status = res.status;
       err.code = data && data.code != null ? data.code : null;
       err.data = data;
       throw err;
@@ -6238,7 +6219,6 @@
     }
     const contextDirection = options.contextDirection || inferDirectionForSend(lastReadStateSnapshot && lastReadStateSnapshot.openPosition);
     const executionMode = options.executionMode || "normal";
-    clearTimeout(autoSyncDebounceTimer);
     plan.executing = true;
     if(options.hidePopupUntilComplete) plan.showPopup = false;
     renderSendPlanTable();
@@ -6350,7 +6330,6 @@
   async function executeDirectSend(){
     clearSendPlan();
     clearStructuralWarning();
-    clearTimeout(autoSyncDebounceTimer);
     if(typeof hasKeys !== "function" || !hasKeys()){
       sendPlanState = {
         planId:++sendPlanSeq,
@@ -6385,7 +6364,6 @@
     updateSendButtonState(true);
     setStatus("Send: reading live Binance state...");
     try{
-      await waitForSendRestGate();
       const sendContext = {
         off:typeof timeOffset === "function" ? await timeOffset() : 0,
         livePosition:null,
@@ -6467,7 +6445,6 @@
   async function prepareSendPlan(){
     clearSendPlan();
     clearStructuralWarning();
-    clearTimeout(autoSyncDebounceTimer);
     if(typeof hasKeys !== "function" || !hasKeys()){
       sendPlanState = {
         planId:++sendPlanSeq,
@@ -6592,7 +6569,6 @@
   async function executeExpressMode(){
     clearSendPlan();
     clearStructuralWarning();
-    clearTimeout(autoSyncDebounceTimer);
     if(typeof hasKeys !== "function" || !hasKeys()){
       sendPlanState = {
         planId:++sendPlanSeq,
@@ -6779,13 +6755,13 @@
     const opts = options || {};
     const source = opts.source || (opts.userRead ? "userRead" : opts.autoSync ? "autoWatch" : "");
     const isAutoWatch = source === "autoWatch";
+    const readRequestOptions = {off:opts.off,binanceRestGateBypass:true};
     const isOwnedRefresh = CALC_OWNED_REFRESH_SOURCES.has(source);
     if(isOwnedRefresh && !opts.__ownedWrapped){
       return withCalculatorOwnedRefresh(source,() => readBinance({...opts,__ownedWrapped:true}));
     }
     if(source === "userRead"){
       clearStructuralWarning();
-      clearTimeout(autoSyncDebounceTimer);
     }
     if(!opts.preserveSendPlan) markSendPlanStale("Read clicked after preflight.");
     if(!opts.preserveSendPlan) lastReadStateSnapshot = null;
@@ -6813,8 +6789,8 @@
       const preservedEntryRows = snapshotManualRows("calcModuleEntryRows");
       const previousLivePosition = lastKnownOpenPositionContext();
       let pos = (isOwnedRefresh
-        ? await withCalculatorOwnedRefresh(source,async() => ({pos:await signedPosition({off:opts.off}) || openBoxPosition()}))
-        : {pos:await signedPosition({off:opts.off}) || openBoxPosition()}).pos;
+        ? await withCalculatorOwnedRefresh(source,async() => ({pos:await signedPosition(readRequestOptions) || openBoxPosition()}))
+        : {pos:await signedPosition(readRequestOptions) || openBoxPosition()}).pos;
       unlockEntryRows();
       if(pos){
         const groupSync = syncPositionGroup(pos);
@@ -6845,8 +6821,8 @@
       let activePartialStopKeys = new Set();
       try{
         snapshot = isOwnedRefresh
-          ? await withCalculatorOwnedRefresh(source,() => readOpenOrdersSnapshot({off:opts.off}))
-          : await readOpenOrdersSnapshot({off:opts.off});
+          ? await withCalculatorOwnedRefresh(source,() => readOpenOrdersSnapshot(readRequestOptions))
+          : await readOpenOrdersSnapshot(readRequestOptions);
         const normalErr = !!snapshot.normalFetchError;
         const algoErr = !!snapshot.algoFetchError;
         diag.openOrdersReadStatus = normalErr && algoErr ? "error" : (normalErr || algoErr ? "partial" : "ok");
@@ -6944,12 +6920,22 @@
         lastReadStateSnapshot = buildReadStateSnapshot(pos,{symbol:currentSymbol(),normalOrders:[],algoOrders:[]},{entryRows:[],exitRows:[],diagnostic:{}});
         updateAutoSyncBaseline(pos,{symbol:currentSymbol(),normalOrders:[]});
       }
+      if(
+        diag.openOrdersReadStatus === "ok" &&
+        typeof hasKeys === "function" &&
+        hasKeys()
+      ) calculatorRowsHydrated = true;
       if(source === "userRead") enableAutoSyncDetection();
       suppressCalculatorOverlayDraw = false;
       calculate();
       refreshLiveStopsValidity(pos,true);
       refreshLiveExitsValidity(pos,true);
-      if(!pos){
+      const orderRateLimitStatus = [snapshot && snapshot.normalFetchError,snapshot && snapshot.algoFetchError]
+        .map(error => Number(error && error.status))
+        .find(status => status === 429 || status === 418);
+      if(orderRateLimitStatus){
+        setStatus("Read failed: rate limited (HTTP " + orderRateLimitStatus + ").");
+      }else if(!pos){
         setStatus(diag.mappedEntries || diag.mappedExits ? "No current open position found. LIMIT orders loaded." : "No current open position found.");
       }else if(diag.openOrdersReadStatus === "error"){
         setStatus("Position loaded. Open orders read failed.");
@@ -6967,7 +6953,10 @@
       binanceSyncPreserveKeys = new Set();
       binanceSyncPreservedRows = [];
       console.warn(MODULE + " Binance read failed",e);
-      setStatus("Read failed.");
+      const status = Number(e && e.status);
+      setStatus(status === 429 || status === 418
+        ? "Read failed: rate limited (HTTP " + status + ")."
+        : "Read failed.");
       lastReadStateSnapshot = null;
       diag.openOrdersReadStatus = "error";
       publishReadDiagnostic(diag);
@@ -7130,9 +7119,11 @@
       clearCalculatorExecutionNotice();
       openBtn.setAttribute("aria-pressed","true");
       window.__bt001LastOverlayModule = "calculator";
+      startAutoSyncDisplayRefresh();
       try{ draw(); }catch(_e){}
     }
     function hideCalculator(){
+      stopAutoSyncDisplayRefresh();
       win.classList.add("hidden");
       openBtn.classList.remove("is-on");
       openBtn.setAttribute("aria-pressed","false");
@@ -7246,7 +7237,7 @@
       q("calcModuleSummaryCaret").textContent = closed ? "▸" : "▾";
     },false);
     q("calcModuleClear").addEventListener("click",clearCalculatorLocal,false);
-    q("calcModuleRead").addEventListener("click",() => readBinance({userRead:true}),false);
+    q("calcModuleRead").addEventListener("click",readBinanceFromUser,false);
     q("calcModuleSend").addEventListener("click",() => {
       window.__bt001LastOverlayModule = "calculator";
       try{ draw(); }catch(_e){}
@@ -7309,6 +7300,13 @@
       window.__calculatorBinanceStateReconcileBound = true;
       window.addEventListener("v14:binance-state-change",event => {
         scheduleBinanceStateReconcile(event && event.detail);
+      },false);
+    }
+    if(!document.__calculatorAutoSyncVisibilityBound){
+      document.__calculatorAutoSyncVisibilityBound = true;
+      document.addEventListener("visibilitychange",() => {
+        if(document.hidden) stopAutoSyncDisplayRefresh();
+        else startAutoSyncDisplayRefresh();
       },false);
     }
   }

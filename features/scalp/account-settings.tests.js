@@ -129,6 +129,9 @@ async function run(){
   assert(source.includes('typeof window.updateTabTitle==="function"'));
   assert(calculator.includes("window.BT001_ACTIVE_BINANCE_CREDENTIALS()")&&grad.includes("window.BT001_ACTIVE_BINANCE_CREDENTIALS()"));
   assert(scalpIndex.includes("BT001ScalpSecondaryGateway.create(slot)")&&scalpIndex.includes("accountSlot:slot")&&secondary.includes("getCredentials(slot)")&&secondary.includes("normalizePositions"));
+  assert(source.includes("window.BT001SymbolTradingSettings.getCached(symbol)"),"matching active-account reads should reuse fresh main symbol settings");
+  assert(source.includes("slot===getInterfaceSlot()"),"shared settings must be restricted to the same active credential slot");
+  assert(secondary.includes('const REST_BASE = "https://fapi.binance.com"'),"secondary credentials must retain an independent authenticated gateway");
   cases.mainAndCalculatorsUseActiveAccountWhileScalpCanUseEitherIndependentSlot=true;
 
   const settingsStatusFunction=(main.match(/function updateSettingsStatus\(\)\{[\s\S]*?\n\}/)||[])[0];
