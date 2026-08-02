@@ -4462,10 +4462,6 @@
       signalTooltip:tooltipPayload.text,signalTooltipPublication:tooltipPayload.publication,signalTooltipFactory:null,
       publicationFingerprint,signalReportFingerprint:publicationFingerprint,signalTooltipFingerprint:publicationFingerprint
     };
-    if(output.engineId==="B"){
-      const signalBLogger=window.BT001_SIGNAL_B_SUPABASE_LOGGER;
-      if(signalBLogger&&typeof signalBLogger.setLatestEvaluation==="function")signalBLogger.setLatestEvaluation({output,symbol:reportSnapshot&&reportSnapshot.symbol||currentSignalSymbol37(),horizonId:state.horizon,publicationGeneration:generation});
-    }
     publishSignalPresentation37(publication);return publication;
   }
   function publishSignalEngineUnavailable37(error,contextKey=presentationContextKey37()){

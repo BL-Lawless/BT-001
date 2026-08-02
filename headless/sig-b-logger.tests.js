@@ -2,7 +2,6 @@
 
 const assert=require("assert");
 const fs=require("fs");
-const browserAssembler=require("../features/pressure-signal/engines/signal-b-supabase-logger.js");
 const portable=require("../features/pressure-signal/engines/signal-b-snapshot-assembler.js");
 const {loadSignalBEngine}=require("./signal-b-engine-loader.js");
 const {createPressureSignalDataFeed}=require("../features/pressure-signal/data-feed.js");
@@ -11,8 +10,8 @@ const {signalSnapshot,marketRevision,scoreRevision,digest,traceEvaluationInputs,
 const diagnostics={directionalPermissionScore:64,setupScore:61,setupBreakdown:{a:1},triggerScore:52,triggerBreakdown:{b:2},currentEntryScore:70,currentEntryBreakdown:{c:3},readinessScore:67,readinessBreakdown:{d:4},hardGates:{passed:["freshData"],failed:[],pending:[]},flowEffectiveness:{effective:true},chaseDistanceAtr:.1,chaseWarning:false,remainingRewardRisk:"INVALID",rewardRiskStatus:"INVALID",finalStateReason:"fixture",publicationGeneration:3,engineVersion:"1.1.0",decision:{state:"WATCHING"},comparisonDiagnostics:{detail:true}};
 const output={engineId:"B",engineVersion:"1.1.0",direction:"LONG",entryState:"WATCHING",setupIdentity:"fixture",setupTimeframe:"5m",comparisonDiagnostics:diagnostics,decision:{diagnostic:true},secondaryReasons:["keep"],dataStatus:"sufficient",automaticDirection:"LONG",__engineToken:"keep-token"};
 const evaluation={output,symbol:"BTCUSDT",horizonId:"quick",publicationGeneration:3},now=1712345678901;
-assert.deepStrictEqual(portable.buildSignalBSnapshotRow({evaluation,machineId:"vm",now:()=>now}),browserAssembler.buildSnapshotPayload({evaluation,machineId:"vm",now:()=>now}));
 const row=portable.buildSignalBSnapshotRow({evaluation,machineId:"vm",now:()=>now});
+assert.equal(row.machine_id,"vm");assert.equal(row.symbol,"BTCUSDT");assert.equal(row.setup_score,61);assert.equal(row.trigger_score,52);assert.equal(row.readiness_score,67);
 assert.deepStrictEqual(row.signal_output,output,"signal_output must remain the complete untrimmed engine output");
 
 const state={closed:{"1m":[{time:1,close:100,closeTime:1000,final:true}],"5m":[{time:1,close:99,closeTime:1000,final:true}]},forming:{"1m":{time:2,close:101,closeTime:2000,final:false}}};

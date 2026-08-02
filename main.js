@@ -22919,24 +22919,6 @@ If there is NO open position, use this Section 2 instead:
   };
 })();
 
-(()=>{
-  "use strict";
-  let signalBSnapshotLogger=null;
-  function ensureSignalBSnapshotLogger(){
-    if(signalBSnapshotLogger)return signalBSnapshotLogger;
-    const api=window.BT001_SIGNAL_B_SUPABASE_LOGGER;
-    if(!api||typeof api.createSnapshotLogger!=="function")return null;
-    signalBSnapshotLogger=api.createSnapshotLogger({
-      getEvaluation:()=>api.getLatestEvaluation(),
-      getSupabase:()=>window.BT001Supabase||null
-    });
-    return signalBSnapshotLogger;
-  }
-  function installSignalBSnapshotLogger(){ensureSignalBSnapshotLogger()?.start();}
-  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",installSignalBSnapshotLogger,{once:true});
-  else installSignalBSnapshotLogger();
-})();
-
 (() => {
   "use strict";
   const MODULE = "V13_UI_OTF_TOOLTIP_LAYOUT_AND_PLBOX_HOVER";
