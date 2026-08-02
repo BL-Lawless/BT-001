@@ -2,7 +2,7 @@
 
 const assert=require("assert");
 const {
-  readMonitorConfig,evaluateHeartbeat,createSupabaseSnapshotReader,
+  readMonitorConfig,evaluateHeartbeat,evaluateSignalBHeartbeat,createSupabaseSnapshotReader,
   checkSystemdServices,runMonitorOnce,report
 }=require("./monitor-heartbeat.js");
 
@@ -15,6 +15,8 @@ function snapshot(at,value=1){
   };
 }
 
+function sigBSnapshot(at,value=1){return {created_at:new Date(at).toISOString(),event_at:new Date(at-100).toISOString(),machine_id:"vm-btc-sig-logger",symbol:"BTCUSDT",direction:"LONG",entry_state:"WATCHING",confidence:60+value,setup_score:value,hard_gates:{passed:[String(value)]},flow_effectiveness:{effective:value%2===0},signal_output:{readinessScore:value}};}
+
 function fakeClient(rows,error=null){
   const calls=[];
   const query={
@@ -26,7 +28,7 @@ function fakeClient(rows,error=null){
   return {calls,from(table){calls.push(["from",table]);return query;}};
 }
 
-function fakeMonitorClient(snapshotRows){
+function fakeMonitorClient(snapshotRows,sigBRows=Array.from({length:8},(_,index)=>sigBSnapshot(Date.now()-index*30000,index+1))){
   const inserts=[],unresolved=[],calls=[];
   return {
     inserts,calls,
@@ -41,6 +43,7 @@ function fakeMonitorClient(snapshotRows){
         order(){return this;},
         limit(){
           if(table==="sssc_snapshots")return Promise.resolve({data:snapshotRows,error:null});
+          if(table==="sig_b_snapshots")return Promise.resolve({data:sigBRows,error:null});
           const match=unresolved.find(row=>row.machine_id===filters.machine_id&&row.check_name===filters.check_name);
           return Promise.resolve({data:match?[match]:[],error:null});
         },
@@ -58,6 +61,7 @@ async function run(){
   const cases={},now=Date.parse("2026-07-30T12:00:00.000Z");
   const config=readMonitorConfig({SUPABASE_URL:"https://example.supabase.co/",SUPABASE_ANON_KEY:"anon"});
   assert.equal(config.machineId,"vm-btc-sig-logger");assert.equal(config.staleMs,180000);assert.equal(config.frozenRows,8);
+  assert.equal(config.sigBStaleMs,180000);assert.equal(config.sigBFrozenRows,8);
   assert.equal(config.incidentDedupeMs,21600000);
   cases.monitorDefaultsMatchVmCadence=true;
 
@@ -83,6 +87,12 @@ async function run(){
   assert(frozen.incidents.some(item=>item.code==="SSSC_FROZEN_DUPLICATES"));
   cases.frozenCalculatedPayloadAlertsEvenWhileRowsAdvance=true;
 
+  const sigBHealthy=Array.from({length:8},(_,index)=>sigBSnapshot(now-index*30000,index+1));
+  assert.equal(evaluateSignalBHeartbeat({rows:sigBHealthy,machineId:config.machineId,staleMs:180000,frozenRows:8,now}).healthy,true);
+  const frozenSigB=Array.from({length:8},(_,index)=>{const row=sigBSnapshot(now-index*30000,42);row.signal_output.comparisonDiagnostics={publicationGeneration:index+1};row.signal_output.__engineToken=`token-${index}`;return row;});
+  assert(evaluateSignalBHeartbeat({rows:frozenSigB,machineId:config.machineId,staleMs:180000,frozenRows:8,now}).incidents.some(item=>item.code==="SIGB_FROZEN_DUPLICATES"));
+  cases.sigBStalenessAndFrozenPayloadChecksMatchSsscPattern=true;
+
   const down=evaluateHeartbeat({
     rows:healthyRows,services:[{name:"sssc-logger",active:true,status:"active"},{name:"scalp-signal-logger",active:false,status:"failed"}],
     machineId:config.machineId,staleMs:180000,frozenRows:8,now
@@ -102,7 +112,7 @@ async function run(){
   assert.deepEqual(serviceStates.map(item=>item.active),[true,false]);
   cases.systemdStatusIsMockable=true;
 
-  const incidentClient=fakeMonitorClient([snapshot(now-180001,7)]);
+  const incidentClient=fakeMonitorClient([snapshot(now-180001,7)],sigBHealthy);
   const incidentConfig={...config,checkSystemd:false};
   const firstIncident=await runMonitorOnce({config:incidentConfig,client:incidentClient,now:()=>now});
   assert(firstIncident.incidentWrites.some(item=>item.inserted));
@@ -122,7 +132,7 @@ async function run(){
 
   const queryFailure=await runMonitorOnce({
     config:{...config,checkSystemd:false},
-    reader:{latest:async()=>{throw new Error("network unavailable");}},now:()=>now
+    reader:{latest:async()=>{throw new Error("network unavailable");},latestSignalB:async()=>sigBHealthy},now:()=>now
   });
   assert(queryFailure.incidents.some(item=>item.code==="SUPABASE_QUERY_FAILED"));
   assert(!queryFailure.incidents.some(item=>item.code==="SSSC_NO_ROWS"),"query failure must not be misreported as proof that no rows exist");

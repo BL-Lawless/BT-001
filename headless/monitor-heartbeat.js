@@ -7,7 +7,7 @@ const DEFAULT_MACHINE_ID="vm-btc-sig-logger";
 const DEFAULT_STALE_MS=180000;
 const DEFAULT_FROZEN_ROWS=8;
 const DEFAULT_INCIDENT_DEDUPE_MS=21600000;
-const LOGGER_SERVICES=Object.freeze(["sssc-logger","scalp-signal-logger"]);
+const LOGGER_SERVICES=Object.freeze(["sssc-logger","scalp-signal-logger","sig-b-logger"]);
 
 function positiveInteger(value,fallback,name){
   const parsed=Number(value==null||value===""?fallback:value);
@@ -22,6 +22,8 @@ function readMonitorConfig(env=process.env){
     machineId:String(env.BT001_MACHINE_ID||DEFAULT_MACHINE_ID).trim(),
     staleMs:positiveInteger(env.MONITOR_SSSC_STALE_MS,DEFAULT_STALE_MS,"MONITOR_SSSC_STALE_MS"),
     frozenRows:positiveInteger(env.MONITOR_SSSC_FROZEN_ROWS,DEFAULT_FROZEN_ROWS,"MONITOR_SSSC_FROZEN_ROWS"),
+    sigBStaleMs:positiveInteger(env.MONITOR_SIG_B_STALE_MS,DEFAULT_STALE_MS,"MONITOR_SIG_B_STALE_MS"),
+    sigBFrozenRows:positiveInteger(env.MONITOR_SIG_B_FROZEN_ROWS,DEFAULT_FROZEN_ROWS,"MONITOR_SIG_B_FROZEN_ROWS"),
     incidentDedupeMs:positiveInteger(env.MONITOR_INCIDENT_DEDUPE_MS,DEFAULT_INCIDENT_DEDUPE_MS,"MONITOR_INCIDENT_DEDUPE_MS"),
     checkSystemd:String(env.MONITOR_CHECK_SYSTEMD||"true").toLowerCase()!=="false"
   });
@@ -35,11 +37,29 @@ function canonicalize(value){
   return value;
 }
 
+function removeVolatileSignalFields(value){
+  if(Array.isArray(value))return value.map(removeVolatileSignalFields);
+  if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value)
+    .filter(([key])=>key!=="publicationGeneration"&&key!=="__engineToken")
+    .map(([key,item])=>[key,removeVolatileSignalFields(item)]));
+  return value;
+}
+
 function snapshotFingerprint(row){
   return JSON.stringify(canonicalize({
     symbol:row&&row.symbol||null,
     timeframes:row&&row.timeframes||null,
     aggregate:row&&row.aggregate||null
+  }));
+}
+
+function signalBSnapshotFingerprint(row){
+  return JSON.stringify(canonicalize({
+    symbol:row&&row.symbol||null,direction:row&&row.direction||null,entry_state:row&&row.entry_state||null,
+    confidence:(row&&row.confidence)??null,setup_score:(row&&row.setup_score)??null,trigger_score:(row&&row.trigger_score)??null,
+    current_entry_score:(row&&row.current_entry_score)??null,readiness_score:(row&&row.readiness_score)??null,
+    hard_gates:row&&row.hard_gates||null,flow_effectiveness:row&&row.flow_effectiveness||null,
+    signal_output:removeVolatileSignalFields(row&&row.signal_output||null)
   }));
 }
 
@@ -88,6 +108,25 @@ function evaluateHeartbeat(options={}){
   return {healthy:incidents.length===0,checkedAt:new Date(now).toISOString(),incidents};
 }
 
+function evaluateSignalBHeartbeat(options={}){
+  const now=typeof options.now==="function"?options.now():Number(options.now)||Date.now();
+  const staleMs=positiveInteger(options.staleMs,DEFAULT_STALE_MS,"staleMs"),frozenRows=positiveInteger(options.frozenRows,DEFAULT_FROZEN_ROWS,"frozenRows");
+  const rows=Array.isArray(options.rows)?options.rows:[],incidents=[];
+  if(!rows.length)incidents.push({code:"SIGB_NO_ROWS",message:`No sig_b_snapshots rows found for machine_id=${options.machineId}`});
+  else{
+    const latestAt=rowTime(rows[0]),ageMs=latestAt==null?Infinity:Math.max(0,now-latestAt);
+    if(latestAt==null||ageMs>staleMs)incidents.push({code:"SIGB_STALE",ageMs:Number.isFinite(ageMs)?ageMs:null,
+      lastRowAt:latestAt==null?null:new Date(latestAt).toISOString(),message:`Latest Sig B snapshot is stale (${Number.isFinite(ageMs)?Math.round(ageMs/1000):"unknown"}s old; limit ${Math.round(staleMs/1000)}s)`});
+    if(rows.length>=frozenRows){
+      const sample=rows.slice(0,frozenRows);
+      if(new Set(sample.map(signalBSnapshotFingerprint)).size===1)incidents.push({code:"SIGB_FROZEN_DUPLICATES",rowCount:frozenRows,
+        newestAt:rowTime(sample[0])==null?null:new Date(rowTime(sample[0])).toISOString(),oldestAt:rowTime(sample.at(-1))==null?null:new Date(rowTime(sample.at(-1))).toISOString(),
+        message:`Last ${frozenRows} Sig B rows have identical calculated payloads`});
+    }
+  }
+  return {healthy:incidents.length===0,checkedAt:new Date(now).toISOString(),incidents};
+}
+
 function createSupabaseMonitorStore(options={}){
   const createClient=options.createClient||require("@supabase/supabase-js").createClient;
   const client=options.client||createClient(options.url,options.key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});
@@ -98,6 +137,14 @@ function createSupabaseMonitorStore(options={}){
         .eq("machine_id",machineId).order("created_at",{ascending:false}).limit(limit);
       if(error)throw error;
       if(!Array.isArray(data))throw new Error("Invalid Supabase monitoring response");
+      return data;
+    },
+    async latestSignalB(machineId,limit){
+      const {data,error}=await client.from("sig_b_snapshots")
+        .select("created_at,event_at,machine_id,symbol,direction,entry_state,confidence,setup_score,trigger_score,current_entry_score,readiness_score,hard_gates,flow_effectiveness,signal_output")
+        .eq("machine_id",machineId).order("created_at",{ascending:false}).limit(limit);
+      if(error)throw error;
+      if(!Array.isArray(data))throw new Error("Invalid Supabase Sig B monitoring response");
       return data;
     },
     async findRecentUnresolved(machineId,checkName,since){
@@ -123,13 +170,15 @@ function incidentRow(incident,options={}){
     SSSC_NO_ROWS:"sssc_no_rows",
     SSSC_STALE:"sssc_stale",
     SSSC_FROZEN_DUPLICATES:"sssc_frozen_duplicate",
+    SIGB_NO_ROWS:"sig_b_no_rows",
+    SIGB_STALE:"sig_b_stale",
+    SIGB_FROZEN_DUPLICATES:"sig_b_frozen_duplicate",
     SUPABASE_QUERY_FAILED:"supabase_query_failed"
   };
   const checkName=incident&&incident.code==="SERVICE_DOWN"
-    ?(service==="scalp-signal-logger"?"scalp_service_down":"sssc_service_down")
+    ?(service==="scalp-signal-logger"?"scalp_service_down":service==="sig-b-logger"?"sig_b_service_down":"sssc_service_down")
     :names[incident&&incident.code]||String(incident&&incident.code||"monitor_unknown").toLowerCase();
-  const severity=incident&&incident.code==="SSSC_FROZEN_DUPLICATES"?"critical"
-    :incident&&incident.code==="SSSC_NO_ROWS"?"critical":"error";
+  const severity=["SSSC_FROZEN_DUPLICATES","SSSC_NO_ROWS","SIGB_FROZEN_DUPLICATES","SIGB_NO_ROWS"].includes(incident&&incident.code)?"critical":"error";
   return {
     machine_id:String(options.machineId||DEFAULT_MACHINE_ID),
     check_name:checkName,severity,
@@ -168,19 +217,27 @@ async function runMonitorOnce(options={}){
   const config=options.config;
   const store=options.store||(!options.reader?createSupabaseMonitorStore({url:config.supabaseUrl,key:config.supabaseAnonKey,client:options.client}):null);
   const reader=options.reader||store;
-  let rows=[],queryError=null;
+  let rows=[],sigBRows=[],queryError=null,sigBQueryError=null;
   try{rows=await reader.latest(config.machineId,config.frozenRows);}
   catch(error){queryError=error;}
+  try{sigBRows=await reader.latestSignalB(config.machineId,config.sigBFrozenRows);}
+  catch(error){sigBQueryError=error;}
   let services=[];
   if(config.checkSystemd){
     try{services=(options.checkServices||checkSystemdServices)();}
     catch(error){services=LOGGER_SERVICES.map(name=>({name,active:false,status:`check failed: ${error.message||error}`}));}
   }
   const result=evaluateHeartbeat({rows,services,machineId:config.machineId,staleMs:config.staleMs,frozenRows:config.frozenRows,now:options.now});
+  const sigBResult=evaluateSignalBHeartbeat({rows:sigBRows,machineId:config.machineId,staleMs:config.sigBStaleMs,frozenRows:config.sigBFrozenRows,now:options.now});
+  result.incidents.push(...sigBResult.incidents);result.healthy=result.incidents.length===0;
   if(queryError){
     result.incidents=result.incidents.filter(incident=>!["SSSC_NO_ROWS","SSSC_STALE","SSSC_FROZEN_DUPLICATES"].includes(incident.code));
     result.healthy=false;
     result.incidents.unshift({code:"SUPABASE_QUERY_FAILED",message:`Supabase health query failed: ${queryError.message||queryError}`});
+  }
+  if(sigBQueryError){
+    result.incidents=result.incidents.filter(incident=>!["SIGB_NO_ROWS","SIGB_STALE","SIGB_FROZEN_DUPLICATES"].includes(incident.code));
+    result.healthy=false;result.incidents.push({code:"SUPABASE_SIGB_QUERY_FAILED",message:`Supabase Sig B health query failed: ${sigBQueryError.message||sigBQueryError}`});
   }
   result.incidentWrites=store&&result.incidents.length?await persistIncidents(result,store,{
     machineId:config.machineId,dedupeMs:config.incidentDedupeMs,now:options.now
@@ -211,7 +268,7 @@ async function main(){
 
 module.exports={
   DEFAULT_MACHINE_ID,DEFAULT_STALE_MS,DEFAULT_FROZEN_ROWS,DEFAULT_INCIDENT_DEDUPE_MS,LOGGER_SERVICES,
-  readMonitorConfig,canonicalize,snapshotFingerprint,evaluateHeartbeat,
+  readMonitorConfig,canonicalize,removeVolatileSignalFields,snapshotFingerprint,signalBSnapshotFingerprint,evaluateHeartbeat,evaluateSignalBHeartbeat,
   createSupabaseMonitorStore,createSupabaseSnapshotReader,incidentRow,persistIncidents,
   checkSystemdServices,runMonitorOnce,report,main
 };

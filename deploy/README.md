@@ -9,8 +9,9 @@ Expected layout:
 - service account: `nader_moustafa`
 - repository: `/home/nader_moustafa/BT-001`
 - untracked environment file: `/home/nader_moustafa/BT-001/.env`
-- units: `/etc/systemd/system/sssc-logger.service` and
-  `/etc/systemd/system/scalp-signal-logger.service`
+- units: `/etc/systemd/system/sssc-logger.service`,
+  `/etc/systemd/system/scalp-signal-logger.service`, and
+  `/etc/systemd/system/sig-b-logger.service`
 - monitor units: `/etc/systemd/system/vm-logger-monitor.service` and
   `/etc/systemd/system/vm-logger-monitor.timer`
 - heatmap units: `/etc/systemd/system/liquidation-heatmap.service` and
@@ -37,8 +38,8 @@ Install and start the units:
 ```bash
 sudo cp deploy/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now sssc-logger scalp-signal-logger
-systemctl status sssc-logger scalp-signal-logger
+sudo systemctl enable --now sssc-logger scalp-signal-logger sig-b-logger
+systemctl status sssc-logger scalp-signal-logger sig-b-logger
 ```
 
 Install the heatmap oneshot/timer after its table exists:
@@ -55,13 +56,13 @@ Reboot verification:
 ```bash
 sudo reboot
 # reconnect after boot
-systemctl is-enabled sssc-logger scalp-signal-logger
-systemctl is-active sssc-logger scalp-signal-logger
-journalctl -u sssc-logger -u scalp-signal-logger --since boot --no-pager
+systemctl is-enabled sssc-logger scalp-signal-logger sig-b-logger
+systemctl is-active sssc-logger scalp-signal-logger sig-b-logger
+journalctl -u sssc-logger -u scalp-signal-logger -u sig-b-logger --since boot --no-pager
 ```
 
 Database verification must filter all five tables by the exact VM machine ID and a timestamp after
-service startup. Rows are expected in `sssc_snapshots`, `scalp_v1_signals`, and
+service startup. Rows are expected in `sssc_snapshots`, `sig_b_snapshots`, `scalp_v1_signals`, and
 `scalp_v2_signals`. The same query window must return zero VM rows from `scalp_positions`,
 `scalp_trades`, and `scalp_operational`.
 

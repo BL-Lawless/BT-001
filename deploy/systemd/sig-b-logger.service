@@ -1,0 +1,19 @@
+[Unit]
+Description=BT-001 Signal B snapshot logger
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nader_moustafa
+Group=nader_moustafa
+WorkingDirectory=/home/nader_moustafa/BT-001
+EnvironmentFile=/home/nader_moustafa/BT-001/.env
+ExecStart=/usr/bin/node /home/nader_moustafa/BT-001/headless/run-sig-b.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
