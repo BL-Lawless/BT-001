@@ -74,6 +74,7 @@ function buildSigBRunner(options={}){
   let lastMarketRevision="",lastMarketChangeAt=0,lastInputDigest="",lastScoreDigest="";
   const pipeline=createOrchestration({getSlots:()=>slots,getCalculation:()=>calculation,getSymbol:()=>SYMBOL,
     fetchKlines:dataSource.fetchKlines,connectWebSocket:dataSource.connectWebSocket,getWsUrl:()=>config.binanceWsUrl,now:clock.now,
+    closedCandleLagGuard:true,
     onUpdate:state=>{
       latestState=state;onUpdateCount+=1;freshness.observe(state);
       const revision=marketRevision(state);
@@ -82,7 +83,10 @@ function buildSigBRunner(options={}){
   async function capture(){
     if(writing)return false;
     const status=freshness.status();
-    if(!latestState||!status.fresh){(options.warn||console.warn)("[Headless Sig B] stale data detected, skipping snapshot write",status);return false;}
+    const continuity=pipeline.getSnapshot().continuity;
+    if(!latestState||!status.fresh||continuity.blocked||continuity.repairing){
+      (options.warn||console.warn)("[Headless Sig B] stale or repairing data detected, skipping snapshot write",{freshness:status,continuity});return false;
+    }
     writing=true;
     try{
       const publicationGeneration=++generation,snapshot=signalSnapshot(latestState,clock,publicationGeneration);

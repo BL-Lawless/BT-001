@@ -45,11 +45,14 @@
     const clearTimeoutFn=options.clearTimeoutFn||clearTimeout;
     const klineLimit=Math.max(1,Number(options.klineLimit)||1500);
     const heartbeatMs=Math.max(1,Number(options.heartbeatMs)||500);
+    const closedCandleLagGuard=options.closedCandleLagGuard===true;
+    const closedCandleGraceMs=Math.max(1000,Number(options.closedCandleGraceMs)||15000);
+    const closedCandleCheckIntervalMs=Math.max(1000,Number(options.closedCandleCheckIntervalMs)||5000);
 
     let data={},lastFullFetch=0,currentSymbol="";
     let privateCandlesByTf={},privateFormingByTf={};
     let privateSocket=null,privateGeneration=0,calcTimer=null,started=false;
-    let privateEverOpened=false,continuityBlocked=false,repairPromise=null,repairTimer=null;
+    let privateEverOpened=false,continuityBlocked=false,repairPromise=null,repairTimer=null,privateWindowTarget=0,lastClosedCandleCheckAt=0;
     let queuedSocketMessages=[],socketEvents=[],repairAttempts=0,repairSuccesses=0,repairFailures=0;
 
     function snapshot(){
@@ -108,12 +111,37 @@
         return;
       }
       currentSymbol=liveSymbol;
+      if(checkClosedCandleProgress())return;
       for(const [label,tf] of tfs){
         data[label]=buildDiagnosticSet(label,tf)||{tf:label,interval:tf,available:false,reason:"No private data",mode:liveTfs.has(tf)?"live":"confirmed"};
       }
       publish();
     }
     function intervalSeconds(tf){return {"1m":60,"3m":180,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400}[tf]||60;}
+    function closedCandleLags(at=now()){
+      const current=Number(at),lags=[];
+      if(!Number.isFinite(current))return lags;
+      for(const [,tf] of tfs){
+        const rows=privateCandlesByTf[tf]||[];
+        if(!rows.length)continue;
+        const stepMs=intervalSeconds(tf)*1000,boundaryMs=Math.floor(current/stepMs)*stepMs;
+        if(current-boundaryMs<closedCandleGraceMs)continue;
+        const expectedOpenTime=(boundaryMs-stepMs)/1000,lastOpenTime=Number(rows.at(-1)&&rows.at(-1).time);
+        if(!Number.isFinite(lastOpenTime)||lastOpenTime<expectedOpenTime)lags.push({tf,lastOpenTime:Number.isFinite(lastOpenTime)?lastOpenTime:null,expectedOpenTime,behindCandles:Number.isFinite(lastOpenTime)?Math.round((expectedOpenTime-lastOpenTime)/(stepMs/1000)):null});
+      }
+      return lags;
+    }
+    function checkClosedCandleProgress(){
+      const current=now();
+      if(!closedCandleLagGuard||!started||!lastFullFetch||!privateWindowTarget||continuityBlocked||repairPromise||current-lastClosedCandleCheckAt<closedCandleCheckIntervalMs)return false;
+      lastClosedCandleCheckAt=current;
+      const lags=closedCandleLags(current);
+      if(!lags.length)return false;
+      warn("Closed-candle boundary lag detected; forcing REST reseed",{lags,graceMs:closedCandleGraceMs});
+      repairContinuity(privateWindowTarget,"closed-candle-lag").catch(()=>{});
+      publish();
+      return true;
+    }
     function normalizedPrivateRows(tf,rows,target){
       const ordered=(Array.isArray(rows)?rows:[]).filter(row=>row&&Number.isFinite(Number(row.time))).sort((a,b)=>Number(a.time)-Number(b.time));
       const unique=[];
@@ -256,6 +284,7 @@
     async function refresh(){
       currentSymbol=getSymbol();
       const targets=warmupTargets(getSlots({allowStartupFallback:true}));
+      privateWindowTarget=targets.full;
       try{
         const loaded=await Promise.all(tfs.map(async ([,tf])=>[tf,await loadPrivateWindow(tf,targets.full)]));
         const gaps=loaded.flatMap(([tf,value])=>continuityGaps(tf,value.closed));
@@ -286,7 +315,7 @@
       closePrivateSocket();
     }
 
-    return {startLive,stop,refresh,calculate,buildDiagnosticSet,upsertPrivateKline,connectPrivateSocket,getSnapshot:snapshot,warmupTargets,continuityGaps,repairContinuity};
+    return {startLive,stop,refresh,calculate,buildDiagnosticSet,upsertPrivateKline,connectPrivateSocket,getSnapshot:snapshot,warmupTargets,continuityGaps,closedCandleLags,checkClosedCandleProgress,repairContinuity};
   }
 
   const api={createOrchestration,warmupTargets,wsBase};

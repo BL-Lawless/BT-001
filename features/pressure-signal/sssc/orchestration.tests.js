@@ -165,5 +165,30 @@ const {createOrchestration,warmupTargets}=require("./orchestration.js");
   reconnectPipeline.calculate();
   assert(reconnectUpdates>updatesBeforeBlockedCalculate,"continuity failures must not suppress the regular publish heartbeat");
 
+  // A multiplexed socket can remain active while one timeframe misses its k.x=true event.
+  // The opt-in Sig B boundary guard must detect that stale closed tail and atomically REST-reseed.
+  const guardBoundary=1900000020000-Math.floor(1900000020000%60000),guardNow=guardBoundary+20000;
+  const expectedClosedOpen=guardBoundary/1000-60;
+  const guardCandles=(lastOpen,count)=>Array.from({length:count},(_,index)=>{
+    const time=lastOpen-(count-1-index)*60,close=50000+index;
+    return {time,openTime:time*1000,closeTime:(time+60)*1000-1,open:close-1,high:close+2,low:close-2,close,volume:10,baseVolume:10,quoteVolume:close*10};
+  });
+  const staleGuardRows=guardCandles(expectedClosedOpen-60,100),repairedGuardRows=guardCandles(guardBoundary/1000,101);
+  let guardFetches=0,guardWarnings=[];
+  const guardPipeline=createOrchestration({
+    tfs:[["1M","1m"]],liveTfs:["1m"],getSlots:()=>reconnectSlots,getCalculation:()=>calculation,getSymbol:()=>"BTCUSDT",now:()=>guardNow,
+    fetchKlines:async()=>++guardFetches===1?staleGuardRows:repairedGuardRows,
+    connectWebSocket:()=>({disconnect(){}}),getWsUrl:()=>"wss://example/ws",setIntervalFn:()=>1,clearIntervalFn:()=>{},
+    closedCandleLagGuard:true,closedCandleGraceMs:15000,closedCandleCheckIntervalMs:1000,warn:(message,detail)=>guardWarnings.push({message,detail})
+  });
+  guardPipeline.startLive();
+  for(let index=0;index<5;index+=1)await new Promise(resolve=>setImmediate(resolve));
+  const guardedSnapshot=guardPipeline.getSnapshot();
+  assert(guardFetches>=2,"a missed finalization must force a REST reseed even while the socket remains connected");
+  assert.equal(guardedSnapshot.privateCandlesByTf["1m"].at(-1).time,expectedClosedOpen);
+  assert(guardedSnapshot.continuity.socketEvents.some(event=>event.type==="repair-success"&&event.reason==="closed-candle-lag"));
+  assert(guardWarnings.some(entry=>entry.message==="Closed-candle boundary lag detected; forcing REST reseed"));
+  guardPipeline.stop();
+
   console.log("sssc always-on orchestration tests: PASS");
 })().catch(error=>{console.error(error);process.exitCode=1;});
