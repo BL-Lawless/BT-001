@@ -4765,6 +4765,7 @@ const marketDataHub = (() => {
   }
 
   function scheduleVisibilityRecovery(event){
+    if(!window.BT001VisibilityRecoveryGate.isGenuineVisibilityEvent(event,window,document))return;
     refocusDiag("browser refocus event",{type:event&&event.type||"unknown",documentHidden:document.hidden});
     if(document.hidden){
       diag.hiddenSince = now();
@@ -16580,7 +16581,7 @@ startTradeAuto();
     return mainResult&&typeof mainResult==="object"?{...mainResult,scalpFacts}:{mainResult,scalpFacts};
   }
   window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>{const main=mainVisibilityRecoveryGate21.diagnostics();return {active:main.inFlight,runs:main.completedRuns,main,mainSmart:{...mainSmartRecoveryDiagnostics21},scalp:scalpVisibilityRecoveryGate21.diagnostics()};}});
-  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {if(name==="visibilitychange"&&document.hidden){captureMainHiddenStreamHistory21();return;}recoverVisibleAccounts21(`focus-visibility-recovery:${name}`).catch(error=>console.warn("Authenticated visibility recovery failed",error));},true));
+  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,event => {if(!window.BT001VisibilityRecoveryGate.isGenuineVisibilityEvent(event,window,document))return;if(name==="visibilitychange"&&document.hidden){captureMainHiddenStreamHistory21();return;}recoverVisibleAccounts21(`focus-visibility-recovery:${name}`).catch(error=>console.warn("Authenticated visibility recovery failed",error));},true));
   if(marketEl) marketEl.addEventListener("change",() => {
     markPrivateDirty21({positionDirty:true,ordersDirty:true},"symbol-change",{immediate:true});
     schedulePrivateStreamRestart21();
@@ -23013,6 +23014,7 @@ If there is NO open position, use this Section 2 instead:
   }
   let visibilityRecoveryTimer=null;
   function scheduleSsscVisibilityRecovery(event){
+    if(!window.BT001VisibilityRecoveryGate.isGenuineVisibilityEvent(event,window,document))return;
     if(document.hidden)return;
     const reason=`sssc-visibility-recovery:${event&&event.type||"unknown"}`;
     if(visibilityRecoveryTimer!=null)clearTimeout(visibilityRecoveryTimer);

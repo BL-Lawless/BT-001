@@ -6,6 +6,13 @@
 })(typeof window!=="undefined"?window:globalThis,function(){
   "use strict";
 
+  function isGenuineVisibilityEvent(event,windowRef,documentRef){
+    if(!event||typeof event.type!=="string")return false;
+    if(event.type==="focus"||event.type==="pageshow")return event.target===windowRef;
+    if(event.type==="visibilitychange")return event.target===documentRef;
+    return false;
+  }
+
   function create(options={}){
     const windowMs=Number.isFinite(Number(options.windowMs))?Math.max(0,Number(options.windowMs)):30000;
     const now=typeof options.now==="function"?options.now:Date.now;
@@ -50,5 +57,5 @@
     return Object.freeze({run,diagnostics});
   }
 
-  return Object.freeze({create});
+  return Object.freeze({create,isGenuineVisibilityEvent});
 });
