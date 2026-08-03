@@ -3924,6 +3924,45 @@ const marketDataHub = (() => {
       });
     }
   }
+  function detectClosedBoundaryIssues(tf,rows,options={}){
+    const arr=Array.isArray(rows)?rows:[],stepSec=Math.max(1,Number(options.stepSec)||ivSec(tf));
+    const lookback=Math.max(3,Math.round(Number(options.lookback)||14));
+    const atrFraction=Math.max(0.05,Number(options.atrFraction)||0.35);
+    const noiseFloorBps=Math.max(0,Number(options.noiseFloorBps)||1);
+    const issues=[];
+    const trueRange=(row,prior)=>{
+      const high=Number(row&&row.high),low=Number(row&&row.low),priorClose=Number(prior&&prior.close);
+      if(!Number.isFinite(high)||!Number.isFinite(low))return NaN;
+      return Number.isFinite(priorClose)?Math.max(high-low,Math.abs(high-priorClose),Math.abs(low-priorClose)):high-low;
+    };
+    for(let index=1;index<arr.length;index++){
+      const previous=arr[index-1],current=arr[index];
+      const previousTime=Number(previous&&previous.time),currentTime=Number(current&&current.time);
+      if(!Number.isFinite(previousTime)||!Number.isFinite(currentTime)||currentTime-previousTime!==stepSec)continue;
+      const priorClose=Number(previous.close),nextOpen=Number(current.open);
+      const previousHigh=Number(previous.high),previousLow=Number(previous.low),currentHigh=Number(current.high),currentLow=Number(current.low);
+      if(![priorClose,nextOpen,previousHigh,previousLow,currentHigh,currentLow].every(Number.isFinite))continue;
+      const ranges=[];
+      const start=Math.max(1,index-lookback+1);
+      for(let cursor=start;cursor<=index;cursor++){
+        const value=trueRange(arr[cursor-1],arr[cursor-2]);
+        if(Number.isFinite(value)&&value>0)ranges.push(value);
+      }
+      const atr=ranges.length?ranges.reduce((sum,value)=>sum+value,0)/ranges.length:Math.max(previousHigh-previousLow,currentHigh-currentLow,0);
+      const referencePrice=Math.max(Math.abs(priorClose),Math.abs(nextOpen),Number.EPSILON);
+      const threshold=Math.max(atr*atrFraction,referencePrice*(noiseFloorBps/10000),Number.EPSILON);
+      const closeOpenGap=Math.abs(nextOpen-priorClose);
+      const wickGap=currentLow>previousHigh?currentLow-previousHigh:(previousLow>currentHigh?previousLow-currentHigh:0);
+      if(closeOpenGap<=threshold&&wickGap<=threshold)continue;
+      issues.push({
+        kind:"boundary-discontinuity",tf,fromTime:previousTime,toTime:currentTime,missingCount:0,
+        closeOpenGap,wickGap,atr,threshold,atrFraction,noiseFloorBps,
+        previous:{time:previousTime,open:Number(previous.open),high:previousHigh,low:previousLow,close:priorClose},
+        current:{time:currentTime,open:nextOpen,high:currentHigh,low:currentLow,close:Number(current.close)}
+      });
+    }
+    return issues;
+  }
   function validateClosedBuffer(tf,rows,{repair=false,reason="validate"}={}){
     const arr = Array.isArray(rows) ? rows : getClosedBuffer(tf);
     if(!Array.isArray(arr) || arr.length < 2) return [];
@@ -3963,6 +4002,11 @@ const marketDataHub = (() => {
       }
     }
     if(unsorted) warnIntegrity(`unsorted-buffer:${tf}`,"unsorted candle buffer detected",{tf,reason,rows:arr.slice(-20)});
+    const boundaryIssues=detectClosedBoundaryIssues(tf,arr);
+    for(const issue of boundaryIssues){
+      gaps.push({...issue,reason});
+      warnIntegrity(`boundary-discontinuity:${tf}:${issue.fromTime}:${issue.toTime}`,"implausible closed-candle boundary detected",{...issue,reason},12000);
+    }
     if(repair && gaps.length) repairMissingClosedCandles(tf,gaps,reason).catch(e => {
       warnIntegrity(`gap-repair-failed:${tf}`,"REST gap repair failed",{tf,reason,error:e && e.message ? e.message : String(e)},12000);
     });
@@ -4139,12 +4183,14 @@ const marketDataHub = (() => {
     const task = (async () => {
       let fetched = 0;
       let merged = 0;
+      let corrected = 0;
       let stale = false;
       const beforeRepairContent=closedContentKey(getClosedBuffer(tf));
       const existingTimes=new Set(getClosedBuffer(tf).map(row=>Number(row&&row.time)));
       for(const gap of gaps){
         if(!isGuardCurrent(guard)){stale=true;break;}
-        const count = Math.max(1,Math.min(KLINE_LIMIT,Number(gap.missingCount) || 1));
+        const boundaryRepair=gap&&gap.kind==="boundary-discontinuity";
+        const count = boundaryRepair?2:Math.max(1,Math.min(KLINE_LIMIT,Number(gap.missingCount) || 1));
         const endMs = (Number(gap.toTime) + ivSec(tf)) * 1000 - 1;
         if(!Number.isFinite(endMs) || endMs <= 0) continue;
         const rows = await klinesForInterval(tf,endMs,Math.min(KLINE_LIMIT,count + 2),cfg().symbol);
@@ -4161,12 +4207,17 @@ const marketDataHub = (() => {
             !isFormingRow(tf,row)
           );
         for(const row of closedRows){
+          const beforeRow=getClosedBuffer(tf).find(item=>Number(item&&item.time)===Number(row.time));
+          const beforeKey=candleContentKey(beforeRow);
           upsertClosedBuffer(tf,row,intervalKeep(tf),{
             source:"rest",deferRevision:true,deferValidation:true
           });
           if(!existingTimes.has(Number(row.time))){
             existingTimes.add(Number(row.time));
             merged+=1;
+          }else{
+            const afterRow=getClosedBuffer(tf).find(item=>Number(item&&item.time)===Number(row.time));
+            if(beforeKey!==candleContentKey(afterRow))corrected+=1;
           }
         }
       }
@@ -4177,7 +4228,7 @@ const marketDataHub = (() => {
       }
       const unresolvedGaps=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"post-gap-repair"});
       if(!stale&&!unresolvedGaps.length)state.lastGapRepairMsByTf[tf] = now();
-      return {fetched,merged,changed:repairChanged,resolved:!stale&&!unresolvedGaps.length,unresolvedGaps,reason,started,stale};
+      return {fetched,merged,corrected,changed:repairChanged,resolved:!stale&&!unresolvedGaps.length,unresolvedGaps,reason,started,stale};
     })().finally(() => {
       state.gapRepairInFlightByTf[tf] = null;
     });
@@ -4496,20 +4547,20 @@ const marketDataHub = (() => {
       refocusDiag("restSyncLatest end",{reason,outcome:refocusOutcome,elapsedMs:refocusDiagNow()-refocusStarted});
     }
   }
-  function repairKnownClosedGaps(reason="gap-check",options={}){
+  async function repairKnownClosedGaps(reason="gap-check",options={}){
     ensureBufferSymbol();
-    if(options.throwOnError!==true){
-      requiredKlineTimeframes().forEach(tf => {
-        validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason});
-      });
-      return Promise.resolve([]);
-    }
     const repairs=[];
+    let issueCount=0;
     requiredKlineTimeframes().forEach(tf => {
-      const gaps=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason});
-      if(gaps.length)repairs.push(repairMissingClosedCandles(tf,gaps,reason));
+      const issues=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason});
+      issueCount+=issues.length;
+      if(!issues.length)return;
+      const repair=repairMissingClosedCandles(tf,issues,reason);
+      repairs.push(options.throwOnError===true?repair:repair.catch(error=>({resolved:false,stale:false,error:error&&error.message||String(error),reason,tf})));
     });
-    return Promise.all(repairs);
+    const results=await Promise.all(repairs);
+    const unresolved=results.filter(result=>!result||result.resolved!==true||result.stale===true);
+    return {resolved:unresolved.length===0,stale:results.some(result=>result&&result.stale===true),issueCount,results,unresolved};
   }
   function connect({force=false,reason=""}={}){
     state.desiredLive = true;
@@ -4698,7 +4749,8 @@ const marketDataHub = (() => {
   }
 
   async function runPublicMarketVisibilityRecovery(reason){
-    await repairKnownClosedGaps(reason,{throwOnError:true});
+    const repairOutcome=await repairKnownClosedGaps(reason,{throwOnError:true});
+    if(!repairOutcome||repairOutcome.resolved!==true||repairOutcome.stale===true)throw new Error("Public market visibility candle-integrity repair remained unresolved");
     const synced=await restSyncLatest(reason,{throwOnError:true});
     if(!synced)throw new Error("Public market visibility REST sync did not complete");
     const hydration=[];
@@ -16497,18 +16549,38 @@ startTradeAuto();
     windowMs:MAIN_VISIBILITY_RECOVERY_DEBOUNCE_MS21,
     skippedReason:"recent-main-account-visibility-recovery"
   });
-  async function performVisibleAccountsRecovery21(reason){
+  let mainHiddenStreamHistory21=null;
+  const mainSmartRecoveryDiagnostics21={evaluations:0,healthyDecisions:0,fallbackDecisions:0,restSkips:0,restRuns:0,lastDecision:null,lastEvaluatedAt:0};
+  function captureMainHiddenStreamHistory21(){
+    mainHiddenStreamHistory21={hiddenSince:Date.now(),before:privateSnapshot21().userStream||null};
+    return mainHiddenStreamHistory21;
+  }
+  function evaluateMainVisibilityRestSkip21(){
+    const helper=window.BT001VisibilitySmartRecovery;
+    const evidence=mainHiddenStreamHistory21?{...mainHiddenStreamHistory21,visibleAt:Date.now(),after:privateSnapshot21().userStream||null}:{};
+    const decision=helper&&typeof helper.decidePrivateStreamRestSkip==="function"?helper.decidePrivateStreamRestSkip(evidence):{skipRest:false,reason:"smart-recovery-helper-unavailable"};
+    mainSmartRecoveryDiagnostics21.evaluations+=1;
+    mainSmartRecoveryDiagnostics21[decision.skipRest?"healthyDecisions":"fallbackDecisions"]+=1;
+    mainSmartRecoveryDiagnostics21.lastDecision={...decision,hiddenSince:evidence.hiddenSince||0,visibleAt:evidence.visibleAt||0};
+    mainSmartRecoveryDiagnostics21.lastEvaluatedAt=Date.now();
+    return decision;
+  }
+  async function performVisibleAccountsRecovery21(reason,smartDecision){
+    if(smartDecision&&smartDecision.skipRest){mainSmartRecoveryDiagnostics21.restSkips+=1;return {restSkipped:true,reason:smartDecision.reason};}
+    mainSmartRecoveryDiagnostics21.restRuns+=1;
     const clock=window.BT001ExchangeClock;if(!clock)throw new Error("Binance exchange clock is unavailable");const discardedBefore=Number(clock.status().discardedContaminatedSamples)||0;await clock.sync(true);if((Number(clock.status().discardedContaminatedSamples)||0)>discardedBefore)await clock.sync(true);if(!clock.isReliable())throw new Error("Fresh visible Binance clock synchronization was not trustworthy");startPrivateUserStream21();markPrivateDirty21({positionDirty:true,ordersDirty:true},reason,{schedule:false});const mainFacts=await reconcilePrivateState21();const mainBalance=window.BT001_BINANCE_TRADING&&await window.BT001_BINANCE_TRADING.balance();return {mainFacts,mainBalance};
   }
   async function recoverVisibleAccounts21(reason="visibility-return"){
     if(document.hidden)return null;
-    const mainResult=await mainVisibilityRecoveryGate21.run(reason,performVisibleAccountsRecovery21);
+    // Evaluate stream evidence for every entry attempt before either independent debounce gate runs.
+    const smartDecision=evaluateMainVisibilityRestSkip21();
+    const mainResult=await mainVisibilityRecoveryGate21.run(reason,runReason=>performVisibleAccountsRecovery21(runReason,smartDecision));
     const scalp=window.BT001_SCALP;
     const scalpFacts=scalp&&typeof scalp.recoverAuthenticated==="function"?await scalpVisibilityRecoveryGate21.run(reason,()=>scalp.recoverAuthenticated(reason)):null;
     return mainResult&&typeof mainResult==="object"?{...mainResult,scalpFacts}:{mainResult,scalpFacts};
   }
-  window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>{const main=mainVisibilityRecoveryGate21.diagnostics();return {active:main.inFlight,runs:main.completedRuns,main,scalp:scalpVisibilityRecoveryGate21.diagnostics()};}});
-  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {if(name==="visibilitychange"&&document.hidden)return;recoverVisibleAccounts21(`focus-visibility-recovery:${name}`).catch(error=>console.warn("Authenticated visibility recovery failed",error));},true));
+  window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>{const main=mainVisibilityRecoveryGate21.diagnostics();return {active:main.inFlight,runs:main.completedRuns,main,mainSmart:{...mainSmartRecoveryDiagnostics21},scalp:scalpVisibilityRecoveryGate21.diagnostics()};}});
+  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {if(name==="visibilitychange"&&document.hidden){captureMainHiddenStreamHistory21();return;}recoverVisibleAccounts21(`focus-visibility-recovery:${name}`).catch(error=>console.warn("Authenticated visibility recovery failed",error));},true));
   if(marketEl) marketEl.addEventListener("change",() => {
     markPrivateDirty21({positionDirty:true,ordersDirty:true},"symbol-change",{immediate:true});
     schedulePrivateStreamRestart21();
@@ -22952,11 +23024,11 @@ If there is NO open position, use this Section 2 instead:
         const refocusStarted=refocusDiagNow();
         refocusDiag("SSSC refocus refresh start",{documentHidden:document.hidden});
         try{
-          // Publish immediately from retained buffers, then reseed/reconnect once per cooldown.
+          // Publish retained buffers immediately, then independently repair only visibility gaps.
           livePipeline.calculate();
-          await livePipeline.refresh(true);
+          const repairResult=await livePipeline.repairVisibility(reason);
           const refreshedSnapshot=typeof livePipeline.getSnapshot==="function"?livePipeline.getSnapshot():null;
-          if(refreshedSnapshot&&refreshedSnapshot.continuity&&refreshedSnapshot.continuity.blocked)throw new Error("SSSC visibility reseed did not restore candle continuity");
+          if(!repairResult||repairResult.ok!==true||(refreshedSnapshot&&refreshedSnapshot.continuity&&refreshedSnapshot.continuity.blocked))throw new Error("SSSC visibility repair/fallback did not restore candle continuity");
           refocusDiag("SSSC refocus refresh end",{outcome:"success",elapsedMs:refocusDiagNow()-refocusStarted});
           return true;
         }catch(error){

@@ -48,19 +48,22 @@
     const closedCandleLagGuard=options.closedCandleLagGuard===true;
     const closedCandleGraceMs=Math.max(1000,Number(options.closedCandleGraceMs)||15000);
     const closedCandleCheckIntervalMs=Math.max(1000,Number(options.closedCandleCheckIntervalMs)||5000);
+    const visibilityRepairMaxCandles=Math.max(1,Number(options.visibilityRepairMaxCandles)||100);
 
     let data={},lastFullFetch=0,currentSymbol="";
     let privateCandlesByTf={},privateFormingByTf={};
     let privateSocket=null,privateGeneration=0,calcTimer=null,started=false;
     let privateEverOpened=false,continuityBlocked=false,repairPromise=null,repairTimer=null,privateWindowTarget=0,lastClosedCandleCheckAt=0;
     let queuedSocketMessages=[],socketEvents=[],repairAttempts=0,repairSuccesses=0,repairFailures=0;
+    let visibilityRepairAttempts=0,visibilityRepairSuccesses=0,visibilityRepairFallbacks=0,lastVisibilityRepair=null;
 
     function snapshot(){
       return {
         data:{...data},lastFullFetch,started,privateCandlesByTf,privateFormingByTf,
         continuity:{
           blocked:continuityBlocked,repairing:!!repairPromise,queuedMessages:queuedSocketMessages.length,
-          repairAttempts,repairSuccesses,repairFailures,socketEvents:socketEvents.slice()
+          repairAttempts,repairSuccesses,repairFailures,socketEvents:socketEvents.slice(),
+          visibilityRepair:{maxCandles:visibilityRepairMaxCandles,attempts:visibilityRepairAttempts,successes:visibilityRepairSuccesses,fallbacks:visibilityRepairFallbacks,last:lastVisibilityRepair}
         }
       };
     }
@@ -272,7 +275,7 @@
           return Promise.resolve(true);
         },
         onClose:event=>{continuityBlocked=true;recordSocketEvent("closed",{code:event&&event.code||null});},
-        onError:()=>recordSocketEvent("error"),
+        onError:()=>{continuityBlocked=true;recordSocketEvent("error");},
         onMessage:event=>{
         if(token!==privateGeneration)return;
         let message;
@@ -281,10 +284,12 @@
         applySocketKline(message,target);
       }});
     }
-    async function refresh(){
+    async function fullReload({reconnect=true,reason="full-refresh"}={}){
       currentSymbol=getSymbol();
       const targets=warmupTargets(getSlots({allowStartupFallback:true}));
       privateWindowTarget=targets.full;
+      continuityBlocked=true;
+      let success=false;
       try{
         const loaded=await Promise.all(tfs.map(async ([,tf])=>[tf,await loadPrivateWindow(tf,targets.full)]));
         const gaps=loaded.flatMap(([tf,value])=>continuityGaps(tf,value.closed));
@@ -292,10 +297,87 @@
         const nextClosed={},nextForming={};
         for(const [tf,value] of loaded){nextClosed[tf]=value.closed;if(value.forming)nextForming[tf]=value.forming;}
         privateCandlesByTf=nextClosed;privateFormingByTf=nextForming;continuityBlocked=false;
+        if(repairTimer!=null){clearTimeoutFn(repairTimer);repairTimer=null;}
+        lastFullFetch=now();success=true;
+        const queued=queuedSocketMessages.splice(0);
+        for(const message of queued)applySocketKline(message,targets.full,{publish:false});
       }catch(error){continuityBlocked=true;warn("SSSC private seed failed",{error,gaps:error&&error.gaps||[]});}
-      if(!continuityBlocked)lastFullFetch=now();
       calculate();
-      connectPrivateSocket(targets.full);
+      if(reconnect)connectPrivateSocket(targets.full);
+      recordSocketEvent(success?"full-reload-success":"full-reload-failed",{reason,reconnect});
+      return success;
+    }
+    async function refresh(){
+      return fullReload({reconnect:true,reason:"refresh"});
+    }
+    function visibilityGapPlan(at=now()){
+      const current=Number(at),items=[];
+      if(!Number.isFinite(current))return {repairable:false,reason:"invalid-clock",items,totalMissing:Infinity};
+      for(const [,tf] of tfs){
+        const rows=privateCandlesByTf[tf]||[],last=Number(rows.at(-1)&&rows.at(-1).time),step=intervalSeconds(tf);
+        if(!rows.length||!Number.isFinite(last))return {repairable:false,reason:`missing-${tf}-history`,items,totalMissing:Infinity};
+        const activeOpen=Math.floor(current/(step*1000))*step,expectedClosed=activeOpen-step;
+        const delta=expectedClosed-last;
+        if(delta<0||delta%step!==0)return {repairable:false,reason:`invalid-${tf}-closed-tail`,items,totalMissing:Infinity};
+        items.push({tf,lastOpenTime:last,expectedClosedOpenTime:expectedClosed,activeOpenTime:activeOpen,missingCandles:delta/step});
+      }
+      const totalMissing=items.reduce((sum,item)=>sum+item.missingCandles,0);
+      return {repairable:totalMissing<=visibilityRepairMaxCandles,reason:totalMissing<=visibilityRepairMaxCandles?"targeted":"gap-threshold-exceeded",items,totalMissing};
+    }
+    async function repairVisibility(reason="visibility-return"){
+      visibilityRepairAttempts+=1;
+      if(repairPromise){
+        const prior=await repairPromise;
+        if(!prior||continuityBlocked)return repairVisibility(`${reason}-after-blocked-repair`);
+      }
+      const socketUnhealthy=!privateSocket||continuityBlocked;
+      const plan=visibilityGapPlan();
+      if(socketUnhealthy||!plan.repairable){
+        visibilityRepairFallbacks+=1;
+        const fallbackReason=socketUnhealthy?"socket-unhealthy":plan.reason;
+        const ok=await fullReload({reconnect:socketUnhealthy,reason:`visibility-fallback:${fallbackReason}`});
+        lastVisibilityRepair={at:now(),reason,mode:"full-fallback",fallbackReason,ok,reconnected:socketUnhealthy,totalMissing:plan.totalMissing};
+        return {...lastVisibilityRepair,blocked:continuityBlocked};
+      }
+      continuityBlocked=true;
+      repairPromise=(async()=>{
+        try{
+          const fetched=await Promise.all(plan.items.map(async item=>{
+            const limit=Math.min(klineLimit,Math.max(2,item.missingCandles+2));
+            return [item,await fetchKlines(item.tf,now(),limit,getSymbol()),limit];
+          }));
+          const loaded=[];
+          for(const [item,rows,limit] of fetched){
+            const prior=(privateCandlesByTf[item.tf]||[]).concat(privateFormingByTf[item.tf]?[privateFormingByTf[item.tf]]:[]);
+            const value=normalizedPrivateRows(item.tf,prior.concat(Array.isArray(rows)?rows:[]),privateWindowTarget);
+            const gaps=continuityGaps(item.tf,value.closed);
+            const last=Number(value.closed.at(-1)&&value.closed.at(-1).time);
+            const forming=Number(value.forming&&value.forming.time);
+            if(gaps.length||last!==item.expectedClosedOpenTime||forming!==item.activeOpenTime){
+              throw Object.assign(new Error(`SSSC targeted visibility repair incomplete for ${item.tf}`),{gaps,tf:item.tf,last,expected:item.expectedClosedOpenTime,forming,active:item.activeOpenTime});
+            }
+            loaded.push([item.tf,value,limit]);
+          }
+          const nextClosed={...privateCandlesByTf},nextForming={...privateFormingByTf};
+          for(const [tf,value] of loaded){nextClosed[tf]=value.closed;nextForming[tf]=value.forming;}
+          privateCandlesByTf=nextClosed;privateFormingByTf=nextForming;continuityBlocked=false;
+          const queued=queuedSocketMessages.splice(0);
+          for(const message of queued)applySocketKline(message,privateWindowTarget,{publish:false});
+          calculate();visibilityRepairSuccesses+=1;
+          recordSocketEvent("visibility-repair-success",{reason,totalMissing:plan.totalMissing});
+          return {ok:true,mode:"targeted",reason,totalMissing:plan.totalMissing,requests:loaded.map(([tf,,limit])=>({tf,limit})),reconnected:false};
+        }catch(error){
+          recordSocketEvent("visibility-repair-failed",{reason,error:error&&error.message||String(error)});
+          warn("SSSC targeted visibility repair failed",{reason,error});
+          return {ok:false,error};
+        }finally{repairPromise=null;}
+      })();
+      const targeted=await repairPromise;
+      if(targeted.ok){lastVisibilityRepair={...targeted,at:now(),blocked:false};return lastVisibilityRepair;}
+      visibilityRepairFallbacks+=1;
+      const ok=await fullReload({reconnect:false,reason:"visibility-fallback:targeted-repair-failed"});
+      lastVisibilityRepair={at:now(),reason,mode:"full-fallback",fallbackReason:"targeted-repair-failed",ok,reconnected:false,totalMissing:plan.totalMissing,blocked:continuityBlocked};
+      return lastVisibilityRepair;
     }
     function startLive(){
       if(started)return;
@@ -315,7 +397,7 @@
       closePrivateSocket();
     }
 
-    return {startLive,stop,refresh,calculate,buildDiagnosticSet,upsertPrivateKline,connectPrivateSocket,getSnapshot:snapshot,warmupTargets,continuityGaps,closedCandleLags,checkClosedCandleProgress,repairContinuity};
+    return {startLive,stop,refresh,repairVisibility,calculate,buildDiagnosticSet,upsertPrivateKline,connectPrivateSocket,getSnapshot:snapshot,warmupTargets,continuityGaps,closedCandleLags,checkClosedCandleProgress,repairContinuity,visibilityGapPlan};
   }
 
   const api={createOrchestration,warmupTargets,wsBase};

@@ -184,8 +184,8 @@ assert(main.includes("onUpdate:state=>{data=state.data;lastFullFetch=state.lastF
 const visibilityRecoveryStart=main.indexOf("function scheduleSsscVisibilityRecovery(");
 const visibilityRecoverySource=main.slice(visibilityRecoveryStart,main.indexOf("function install(){",visibilityRecoveryStart));
 assert(visibilityRecoverySource.includes("livePipeline.calculate()"),"visibility recovery must immediately resume snapshot capture from retained buffers");
-assert(visibilityRecoverySource.includes("livePipeline.refresh(true)"),"visibility recovery must reseed and reconnect the SSSC pipeline");
-assert(visibilityRecoverySource.includes("refreshedSnapshot.continuity.blocked"),"a failed SSSC reseed must not be treated as a completed visibility recovery");
+assert(visibilityRecoverySource.includes("livePipeline.repairVisibility(reason)"),"visibility recovery must use targeted repair instead of a blind full reload");
+assert(visibilityRecoverySource.includes("refreshedSnapshot.continuity.blocked"),"a normally-resolved blocked repair/fallback must not be treated as a completed visibility recovery");
 const hideSource=main.slice(main.indexOf("function hide(){ visible=false"),main.indexOf("function savePanel()",main.indexOf("function hide(){ visible=false")));
 assert(!hideSource.includes(".stop("),"closing the dashboard must only hide UI and must not stop its background pipeline");
 assert(main.includes("$('ssscDashClose')?.addEventListener('click',hide)"));

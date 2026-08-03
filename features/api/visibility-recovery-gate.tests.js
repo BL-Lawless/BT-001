@@ -83,7 +83,7 @@ const {create}=require("./visibility-recovery-gate.module.js");
   const main=fs.readFileSync(path.join(root,"main.js"),"utf8");
   const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
   assert(html.includes('features/api/visibility-recovery-gate.module.js'),"the browser must load the shared visibility gate before main.js");
-  assert(main.includes('mainVisibilityRecoveryGate21.run(reason,performVisibleAccountsRecovery21)'),"both main-account entry points must route through one gate");
+  assert(main.includes('mainVisibilityRecoveryGate21.run(reason,runReason=>performVisibleAccountsRecovery21(runReason,smartDecision))'),"both main-account entry points must route through one gate after independently evaluating stream evidence");
   const mainWorkStart=main.indexOf("async function performVisibleAccountsRecovery21"),mainEntryStart=main.indexOf("async function recoverVisibleAccounts21",mainWorkStart),mainEntryEnd=main.indexOf("window.BT001VisibilityRecovery=",mainEntryStart);
   const mainWorkSource=main.slice(mainWorkStart,mainEntryStart),mainEntrySource=main.slice(mainEntryStart,mainEntryEnd);
   assert(!mainWorkSource.includes("scalpVisibilityRecoveryGate21.run"),"SCALP's gate must not be nested inside the main-account gate");
