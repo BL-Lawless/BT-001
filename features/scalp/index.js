@@ -15,7 +15,7 @@
       const engineOptions=secondaryGateway?{gateway:secondaryGateway,useGlobalPrivateEvents:false,accountSlot:slot}:{accountSlot:slot};
       const engine=new build.ScalpEngine(engineOptions),ui=new build.ScalpUI(engine);ui.install();
       if(secondaryGateway)secondaryGateway.attach(engine);
-      const api={version:"BT001_SCALP_V1",engine,ui,show:()=>ui.show(),hide:()=>ui.hide(),arm:()=>engine.arm(),disarm:()=>engine.disarm(),closeNow:()=>engine.closeNow(),recoverAuthenticated:()=>secondaryGateway&&secondaryGateway.recover?secondaryGateway.recover():engine.recover({reconnect:true}),snapshot:()=>engine.snapshot(),diagnostics:()=>engine.getDiagnostics(),destroy:()=>{if(secondaryGateway)secondaryGateway.detach();ui.destroy();engine.destroy();}};
+      const api={version:"BT001_SCALP_V1",engine,ui,show:()=>ui.show(),hide:()=>ui.hide(),arm:()=>engine.arm(),disarm:()=>engine.disarm(),closeNow:()=>engine.closeNow(),recoverAuthenticated:reason=>secondaryGateway&&secondaryGateway.recover?secondaryGateway.recover(reason):engine.recover({reconnect:true}),snapshot:()=>engine.snapshot(),diagnostics:()=>({...engine.getDiagnostics(),connection:secondaryGateway?secondaryGateway.connection():engine.gateway&&engine.gateway.connection?engine.gateway.connection():null}),destroy:()=>{if(secondaryGateway)secondaryGateway.detach();ui.destroy();engine.destroy();}};
       Object.defineProperty(window,"BT001_SCALP",{value:Object.freeze(api),configurable:true});
       try{await engine.initialize();}catch(error){engine.fail(error,"SCALP initialization failed");}
     }finally{

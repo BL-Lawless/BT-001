@@ -86,6 +86,7 @@
   function create(accountSlot = "scalper") {
     const slot = accountSlot === "main" ? "main" : "scalper";
     let streamStatus = "OFFLINE", stream = null, attachedEngine = null, recoveryPromise=null;
+    const recoveryDiagnostics={runs:0,lastReason:null,lastStartedAt:0,lastCompletedAt:0,lastError:null};
 
     function credentials() {
       return window.BT001ScalpAccount && window.BT001ScalpAccount.getCredentials ? window.BT001ScalpAccount.getCredentials(slot) : { key: "", secret: "" };
@@ -102,6 +103,27 @@
     function setStreamStatus(status) {
       streamStatus = status;
       if (window.BT001ScalpAccount) window.BT001ScalpAccount.reportConnectionStatus(slot, status);
+    }
+    function connection() {
+      const detail=stream&&typeof stream.diagnostics==="function"?stream.diagnostics():{};
+      return {
+        streamStatus,
+        starts:Number(detail.starts)||0,
+        reconnects:Number(detail.reconnects)||0,
+        connectedAt:Number(detail.connectedAt)||0,
+        disconnectedAt:Number(detail.disconnectedAt)||0,
+        lastError:detail.lastError||null,
+        wsEndpoint:detail.wsEndpoint||null,
+        wsEndpointCapturedAt:Number(detail.wsEndpointCapturedAt)||0,
+        lastCloseAt:Number(detail.lastCloseAt)||0,
+        lastCloseCode:detail.lastCloseCode??null,
+        lastCloseReason:detail.lastCloseReason||null,
+        authenticatedRecoveryRuns:recoveryDiagnostics.runs,
+        lastAuthenticatedRecoveryReason:recoveryDiagnostics.lastReason,
+        lastAuthenticatedRecoveryStartedAt:recoveryDiagnostics.lastStartedAt,
+        lastAuthenticatedRecoveryCompletedAt:recoveryDiagnostics.lastCompletedAt,
+        lastAuthenticatedRecoveryError:recoveryDiagnostics.lastError
+      };
     }
 
     async function positionRows() {
@@ -187,13 +209,14 @@
       if (stream) { try { stream.stop(); } catch (_e) {} }
       stream = null; attachedEngine = null; setStreamStatus("OFFLINE");
     }
-    async function recover(){
+    async function recover(reason="authenticated-recovery"){
       if(recoveryPromise)return recoveryPromise;
-      recoveryPromise=(async()=>{if(!isAuthenticated())return null;if(attachedEngine&&typeof attachedEngine.setRecoveryBlocked==="function")attachedEngine.setRecoveryBlocked(true,"Authenticated account recovery");try{if(!stream)attach(attachedEngine);else if(!["CONNECTING","LIVE"].includes(streamStatus))await stream.start({reconnect:true});const [facts,account]=await Promise.all([reconcile(),balance()]);if(attachedEngine){attachedEngine.applyPositionFacts(facts.positions);await attachedEngine.recover({reconnect:true});if(typeof attachedEngine.completeRecovery==="function")attachedEngine.completeRecovery();}return {facts,account,streamStatus};}finally{recoveryPromise=null;}})();return recoveryPromise;
+      recoveryDiagnostics.runs+=1;recoveryDiagnostics.lastReason=String(reason||"authenticated-recovery");recoveryDiagnostics.lastStartedAt=Date.now();recoveryDiagnostics.lastError=null;
+      recoveryPromise=(async()=>{if(!isAuthenticated())return null;if(attachedEngine&&typeof attachedEngine.setRecoveryBlocked==="function")attachedEngine.setRecoveryBlocked(true,"Authenticated account recovery");try{if(!stream)attach(attachedEngine);else if(!["CONNECTING","LIVE"].includes(streamStatus))await stream.start({reconnect:true});const [facts,account]=await Promise.all([reconcile(),balance()]);if(attachedEngine){attachedEngine.applyPositionFacts(facts.positions);await attachedEngine.recover({reconnect:true});if(typeof attachedEngine.completeRecovery==="function")attachedEngine.completeRecovery();}recoveryDiagnostics.lastCompletedAt=Date.now();return {facts,account,streamStatus};}catch(error){recoveryDiagnostics.lastError=String(error&&error.message||error);throw error;}finally{recoveryPromise=null;}})();return recoveryPromise;
     }
 
     return Object.freeze({
-      isAuthenticated, symbol, connection: () => ({ streamStatus }),
+      isAuthenticated, symbol, connection,
       position, positions, filters, orders, balance, commissionRate, refreshPosition, refreshPositions, reconcile,
       submitOrder, cancelOrder, queryOrder, submitAlgoOrder, cancelAlgoOrder, queryAlgoOrder,
       markDirty, attach, detach, recover

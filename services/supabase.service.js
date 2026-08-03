@@ -150,7 +150,7 @@
     return Array.isArray(rows)&&rows.length?rows[0]:null;
   }
 
-  async function getLatestHeatmapSnapshot(symbol){
+  async function getLatestHeatmapSnapshotMetadata(symbol){
     if(!configured())return null;
     const rest=getRest();
     if(!rest)throw new Error("services/rest.service.js (window.restService) is unavailable");
@@ -161,12 +161,24 @@
     const rows=await rest.get(`${getUrl()}/rest/v1/liquidation_heatmap_snapshots?${query}`,{
       headers:{apikey:key,Authorization:`Bearer ${key}`}
     });
-    if(!Array.isArray(rows)||!rows.length)return null;
-    const row=rows[0],path=String(row.storage_path||"").split("/").filter(Boolean).map(encodeURIComponent).join("/");
+    return Array.isArray(rows)&&rows.length?rows[0]:null;
+  }
+
+  async function getHeatmapSnapshotPayload(storagePath){
+    if(!configured())return null;
+    const rest=getRest();
+    if(!rest)throw new Error("services/rest.service.js (window.restService) is unavailable");
+    const path=String(storagePath||"").split("/").filter(Boolean).map(encodeURIComponent).join("/"),key=getAnonKey();
     if(!path)throw new Error("Latest heatmap snapshot has no Storage path");
-    const rawPayload=await rest.get(`${getUrl()}/storage/v1/object/liquidation-heatmaps/${path}`,{
+    return rest.get(`${getUrl()}/storage/v1/object/liquidation-heatmaps/${path}`,{
       headers:{apikey:key,Authorization:`Bearer ${key}`}
     });
+  }
+
+  async function getLatestHeatmapSnapshot(symbol){
+    const row=await getLatestHeatmapSnapshotMetadata(symbol);
+    if(!row)return null;
+    const rawPayload=await getHeatmapSnapshotPayload(row.storage_path);
     return {...row,raw_payload:rawPayload};
   }
 
@@ -271,7 +283,8 @@
 
   window.BT001Supabase=Object.freeze({
     getUrl,getAnonKey,configured,saveUrlFromInput,saveKeyFromInput,clearUrl,clearKey,
-    log,flushPending,pendingCount,loggingStatus,getLatestFuturesMarketSnapshot,getLatestHeatmapSnapshot,
+    log,flushPending,pendingCount,loggingStatus,getLatestFuturesMarketSnapshot,
+    getLatestHeatmapSnapshotMetadata,getHeatmapSnapshotPayload,getLatestHeatmapSnapshot,
     getDeviceId,testConnection,testDbAccess
   });
   ensureWorker();

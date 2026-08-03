@@ -107,7 +107,7 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
     privateCoordinator.includes("requestAuthoritativeOrders21("),
     "position and order reconciliation reads must start in parallel"
   );
-  const visibilityRecoveryStart=main.indexOf("async function recoverVisibleAccounts21"),visibilityReturn=main.slice(visibilityRecoveryStart,visibilityRecoveryStart+2500);
+  const visibilityRecoveryStart=main.indexOf("async function performVisibleAccountsRecovery21"),visibilityReturn=main.slice(visibilityRecoveryStart,visibilityRecoveryStart+2500);
   assert(
     visibilityReturn.includes("await clock.sync(true)"),
     "visibility recovery must force the shared exchange clock to bypass its five-minute cache"

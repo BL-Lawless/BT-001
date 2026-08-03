@@ -3113,6 +3113,11 @@ const SHARED_MA_STACK_TFS = [
 
 const marketDataHub = (() => {
   const MODULE = "BINANCE_PUBLIC_MARKET_DATA_HUB";
+  const PUBLIC_MARKET_VISIBILITY_DEBOUNCE_MS = 30000;
+  const publicMarketVisibilityRecoveryGate=window.BT001VisibilityRecoveryGate.create({
+    windowMs:PUBLIC_MARKET_VISIBILITY_DEBOUNCE_MS,
+    skippedReason:"recent-public-market-visibility-recovery"
+  });
   const ACTIVE_FEED_STALE_MS = 8000;
   const WS_STALE_MS = 12000;
   const WS_RECONNECT_MS = 25000;
@@ -3188,6 +3193,7 @@ const marketDataHub = (() => {
   diag.lastGapRepairMsByTf = state.lastGapRepairMsByTf;
   diag.closedRevisionByTf = state.closedRevisionByTf;
   diag.formingRevisionByTf = state.formingRevisionByTf;
+  Object.defineProperty(diag,"visibilityRecovery",{enumerable:true,get:()=>publicMarketVisibilityRecoveryGate.diagnostics()});
 
   function now(){ return Date.now(); }
   function publishMarketUpdate(detail){
@@ -4441,18 +4447,18 @@ const marketDataHub = (() => {
       connect({force:true,reason});
     },delay);
   }
-  async function restSyncLatest(reason="fallback"){
+  async function restSyncLatest(reason="fallback",options={}){
     const refocusStarted=refocusDiagNow();
     refocusDiag("restSyncLatest start",{reason,documentHidden:document.hidden});
     if(state.restInFlight){
       refocusDiag("restSyncLatest end",{reason,outcome:"skipped-in-flight",elapsedMs:refocusDiagNow()-refocusStarted});
-      return;
+      return false;
     }
     const gate=window.BINANCE_REST_GATE;
     const gateState=gate&&typeof gate.state==="function"?gate.state():{paused:false};
     if(gateState.paused){
       refocusDiag("restSyncLatest end",{reason,outcome:"skipped-gate-paused",remainingMs:gateState.remainingMs,elapsedMs:refocusDiagNow()-refocusStarted});
-      return;
+      return false;
     }
     const requestStarted = now();
     const requestSymbol = cfg().symbol;
@@ -4463,7 +4469,7 @@ const marketDataHub = (() => {
     if(!waitingForFirstTick()) paintStatus("REST FALLBACK",reason);
     try{
       const rows = await klines(Date.now(),REST_LATEST_LIMIT);
-      if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return;
+      if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return false;
       const currentChart = getChartBuffer(requestInterval);
       const currentLastTime = currentChart.length ? currentChart[currentChart.length-1].time : 0;
       const activeKlineTick = Number(diag.lastKlineTickByTf[requestInterval]) || 0;
@@ -4477,21 +4483,33 @@ const marketDataHub = (() => {
       lastRest = now();
       diag.lastRestSyncTime = lastRest;
       refreshConnectionStatus();
+      return true;
     }catch(e){
       refocusOutcome="error";
       diag.lastError = e && e.message ? e.message : String(e);
       if(!socketOpen()) paintStatus("OFFLINE / ERROR",diag.lastError);
       console.warn(MODULE + " REST fallback failed",e);
+      if(options.throwOnError===true)throw e;
+      return false;
     }finally{
       state.restInFlight = false;
       refocusDiag("restSyncLatest end",{reason,outcome:refocusOutcome,elapsedMs:refocusDiagNow()-refocusStarted});
     }
   }
-  function repairKnownClosedGaps(reason="gap-check"){
+  function repairKnownClosedGaps(reason="gap-check",options={}){
     ensureBufferSymbol();
+    if(options.throwOnError!==true){
+      requiredKlineTimeframes().forEach(tf => {
+        validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason});
+      });
+      return Promise.resolve([]);
+    }
+    const repairs=[];
     requiredKlineTimeframes().forEach(tf => {
-      validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason});
+      const gaps=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason});
+      if(gaps.length)repairs.push(repairMissingClosedCandles(tf,gaps,reason));
     });
+    return Promise.all(repairs);
   }
   function connect({force=false,reason=""}={}){
     state.desiredLive = true;
@@ -4669,18 +4687,29 @@ const marketDataHub = (() => {
       diag.hiddenSince = 0;
       diag.lastVisibleAt = now();
       setTimeout(()=>{
-        repairKnownClosedGaps("visibility/focus return");
-        restSyncLatest("visibility/focus return");
-        if(state.ssscVisible) ensureSsscBuffers(false).catch(() => {});
-        if(state.maStackVisible) ensureMaStackBuffers(false).catch(() => {});
-        const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
-        if(!socketOpen()) connect();
-        else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
-        else refreshConnectionStatus();
+        const reason="visibility/focus return";
+        publicMarketVisibilityRecoveryGate.run(reason,runPublicMarketVisibilityRecovery).catch(error=>{
+          console.warn(MODULE+" visibility recovery failed",error);
+        });
       },0);
     }finally{
       refocusDiag("handleVisibilityReturn end",{documentHidden:document.hidden,elapsedMs:refocusDiagNow()-refocusStarted});
     }
+  }
+
+  async function runPublicMarketVisibilityRecovery(reason){
+    await repairKnownClosedGaps(reason,{throwOnError:true});
+    const synced=await restSyncLatest(reason,{throwOnError:true});
+    if(!synced)throw new Error("Public market visibility REST sync did not complete");
+    const hydration=[];
+    if(state.ssscVisible)hydration.push(ensureSsscBuffers(false));
+    if(state.maStackVisible)hydration.push(ensureMaStackBuffers(false));
+    await Promise.all(hydration);
+    const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
+    if(!socketOpen()) connect();
+    else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
+    else refreshConnectionStatus();
+    return true;
   }
 
   function scheduleVisibilityRecovery(event){
@@ -16445,12 +16474,40 @@ startTradeAuto();
       markPrivateDirty21({positionDirty:true,ordersDirty:true},"60-second-open-position-safety-check",{immediate:true});
     }
   },PRIVATE_SAFETY_MS21);
-  let visibilityAccountRecoveryPromise21=null,visibilityRecoveryRuns21=0;
-  async function recoverVisibleAccounts21(reason="visibility-return"){
-    if(document.hidden)return null;if(visibilityAccountRecoveryPromise21)return visibilityAccountRecoveryPromise21;
-    visibilityAccountRecoveryPromise21=(async()=>{visibilityRecoveryRuns21++;const clock=window.BT001ExchangeClock;if(!clock)throw new Error("Binance exchange clock is unavailable");const discardedBefore=Number(clock.status().discardedContaminatedSamples)||0;await clock.sync(true);if((Number(clock.status().discardedContaminatedSamples)||0)>discardedBefore)await clock.sync(true);if(!clock.isReliable())throw new Error("Fresh visible Binance clock synchronization was not trustworthy");startPrivateUserStream21();markPrivateDirty21({positionDirty:true,ordersDirty:true},reason,{schedule:false});const mainFacts=await reconcilePrivateState21();const mainBalance=window.BT001_BINANCE_TRADING&&await window.BT001_BINANCE_TRADING.balance();const scalp=window.BT001_SCALP;const scalpFacts=scalp&&typeof scalp.recoverAuthenticated==="function"?await scalp.recoverAuthenticated():null;return {mainFacts,mainBalance,scalpFacts};})().finally(()=>{visibilityAccountRecoveryPromise21=null;});return visibilityAccountRecoveryPromise21;
+  const SCALP_VISIBILITY_RECOVERY_DEBOUNCE_MS21=30000;
+  function createScalpVisibilityRecoveryGate21(options={}){
+    const windowMs=Number.isFinite(Number(options.windowMs))?Math.max(0,Number(options.windowMs)):SCALP_VISIBILITY_RECOVERY_DEBOUNCE_MS21;
+    const now=typeof options.now==="function"?options.now:Date.now;
+    let inFlight=null,lastCompletedAt=null,completedRuns=0,suppressedAttempts=0,lastRunReason=null,lastSuppressedReason=null,lastSuppressedAt=0;
+    async function run(reason,recover){
+      if(typeof recover!=="function")return null;
+      const requestedAt=now();
+      if(inFlight){suppressedAttempts+=1;lastSuppressedReason=String(reason||"visibility-recovery");lastSuppressedAt=requestedAt;return inFlight;}
+      if(lastCompletedAt!=null&&requestedAt-lastCompletedAt<windowMs){suppressedAttempts+=1;lastSuppressedReason=String(reason||"visibility-recovery");lastSuppressedAt=requestedAt;return {skipped:true,reason:"recent-scalp-recovery",lastCompletedAt,nextEligibleAt:lastCompletedAt+windowMs};}
+      lastRunReason=String(reason||"visibility-recovery");
+      inFlight=(async()=>{try{const result=await recover(lastRunReason);lastCompletedAt=now();completedRuns+=1;return result;}finally{inFlight=null;}})();
+      return inFlight;
+    }
+    function diagnostics(){return {windowMs,inFlight:!!inFlight,lastCompletedAt,completedRuns,suppressedAttempts,lastRunReason,lastSuppressedReason,lastSuppressedAt,nextEligibleAt:lastCompletedAt==null?0:lastCompletedAt+windowMs};}
+    return Object.freeze({run,diagnostics});
   }
-  window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>({active:!!visibilityAccountRecoveryPromise21,runs:visibilityRecoveryRuns21})});
+  const scalpVisibilityRecoveryGate21=createScalpVisibilityRecoveryGate21();
+  const MAIN_VISIBILITY_RECOVERY_DEBOUNCE_MS21=30000;
+  const mainVisibilityRecoveryGate21=window.BT001VisibilityRecoveryGate.create({
+    windowMs:MAIN_VISIBILITY_RECOVERY_DEBOUNCE_MS21,
+    skippedReason:"recent-main-account-visibility-recovery"
+  });
+  async function performVisibleAccountsRecovery21(reason){
+    const clock=window.BT001ExchangeClock;if(!clock)throw new Error("Binance exchange clock is unavailable");const discardedBefore=Number(clock.status().discardedContaminatedSamples)||0;await clock.sync(true);if((Number(clock.status().discardedContaminatedSamples)||0)>discardedBefore)await clock.sync(true);if(!clock.isReliable())throw new Error("Fresh visible Binance clock synchronization was not trustworthy");startPrivateUserStream21();markPrivateDirty21({positionDirty:true,ordersDirty:true},reason,{schedule:false});const mainFacts=await reconcilePrivateState21();const mainBalance=window.BT001_BINANCE_TRADING&&await window.BT001_BINANCE_TRADING.balance();return {mainFacts,mainBalance};
+  }
+  async function recoverVisibleAccounts21(reason="visibility-return"){
+    if(document.hidden)return null;
+    const mainResult=await mainVisibilityRecoveryGate21.run(reason,performVisibleAccountsRecovery21);
+    const scalp=window.BT001_SCALP;
+    const scalpFacts=scalp&&typeof scalp.recoverAuthenticated==="function"?await scalpVisibilityRecoveryGate21.run(reason,()=>scalp.recoverAuthenticated(reason)):null;
+    return mainResult&&typeof mainResult==="object"?{...mainResult,scalpFacts}:{mainResult,scalpFacts};
+  }
+  window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>{const main=mainVisibilityRecoveryGate21.diagnostics();return {active:main.inFlight,runs:main.completedRuns,main,scalp:scalpVisibilityRecoveryGate21.diagnostics()};}});
   ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,() => {if(name==="visibilitychange"&&document.hidden)return;recoverVisibleAccounts21(`focus-visibility-recovery:${name}`).catch(error=>console.warn("Authenticated visibility recovery failed",error));},true));
   if(marketEl) marketEl.addEventListener("change",() => {
     markPrivateDirty21({positionDirty:true,ordersDirty:true},"symbol-change",{immediate:true});
@@ -22510,6 +22567,11 @@ If there is NO open position, use this Section 2 instead:
   const STORE='btc_futures_chart_r13_sssc_proto_v1_';
   const TFS=[['1D','1d'],['4H','4h'],['1H','1h'],['15M','15m'],['5M','5m'],['3M','3m'],['1M','1m']];
   const LIVE_DIAG_TFS=new Set(['15m','5m','3m','1m']);
+  const SSSC_VISIBILITY_RECOVERY_DEBOUNCE_MS=60000;
+  const ssscVisibilityRecoveryGate=window.BT001VisibilityRecoveryGate.create({
+    windowMs:SSSC_VISIBILITY_RECOVERY_DEBOUNCE_MS,
+    skippedReason:"recent-sssc-visibility-recovery"
+  });
   const DEFAULT_MA_PERIODS=[9,21,55,100,200];
   const $=id=>document.getElementById(id);
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,Number(v)||0));
@@ -22878,22 +22940,30 @@ If there is NO open position, use this Section 2 instead:
     return pipeline;
   }
   let visibilityRecoveryTimer=null;
-  function scheduleSsscVisibilityRecovery(){
+  function scheduleSsscVisibilityRecovery(event){
     if(document.hidden)return;
+    const reason=`sssc-visibility-recovery:${event&&event.type||"unknown"}`;
     if(visibilityRecoveryTimer!=null)clearTimeout(visibilityRecoveryTimer);
     visibilityRecoveryTimer=setTimeout(()=>{
       visibilityRecoveryTimer=null;
       const livePipeline=ensurePipeline();
       if(!livePipeline)return;
-      const refocusStarted=refocusDiagNow();
-      refocusDiag("SSSC refocus refresh start",{documentHidden:document.hidden});
-      // Publish immediately from the retained buffers, then reseed/reconnect so a throttled
-      // background timer or suspended socket cannot leave snapshot capture stalled.
-      livePipeline.calculate();
-      livePipeline.refresh(true).then(()=>{
-        refocusDiag("SSSC refocus refresh end",{outcome:"success",elapsedMs:refocusDiagNow()-refocusStarted});
+      ssscVisibilityRecoveryGate.run(reason,async()=>{
+        const refocusStarted=refocusDiagNow();
+        refocusDiag("SSSC refocus refresh start",{documentHidden:document.hidden});
+        try{
+          // Publish immediately from retained buffers, then reseed/reconnect once per cooldown.
+          livePipeline.calculate();
+          await livePipeline.refresh(true);
+          const refreshedSnapshot=typeof livePipeline.getSnapshot==="function"?livePipeline.getSnapshot():null;
+          if(refreshedSnapshot&&refreshedSnapshot.continuity&&refreshedSnapshot.continuity.blocked)throw new Error("SSSC visibility reseed did not restore candle continuity");
+          refocusDiag("SSSC refocus refresh end",{outcome:"success",elapsedMs:refocusDiagNow()-refocusStarted});
+          return true;
+        }catch(error){
+          refocusDiag("SSSC refocus refresh end",{outcome:"error",elapsedMs:refocusDiagNow()-refocusStarted,error:error&&error.message||String(error)});
+          throw error;
+        }
       }).catch(error=>{
-        refocusDiag("SSSC refocus refresh end",{outcome:"error",elapsedMs:refocusDiagNow()-refocusStarted,error:error&&error.message||String(error)});
         console.warn(MODULE+' visibility recovery failed',error);
       });
     },80);
@@ -22907,6 +22977,7 @@ If there is NO open position, use this Section 2 instead:
     show,
     hide,
     refresh:()=>ensurePipeline()?.refresh(true),
+    visibilityRecoveryDiagnostics:()=>ssscVisibilityRecoveryGate.diagnostics(),
     diagnose(label,tf,rows){
       const slots=currentMaSlots({allowStartupFallback:true}),targets=window.BT001_SSSC_ORCHESTRATION.warmupTargets(slots),fixedRows=(Array.isArray(rows)?rows:[]).slice(-targets.full);
       return calc().calculateTimeframe({label,interval:tf,rows:fixedRows,slots,minimumRows:targets.minimum,fullRows:targets.full});
@@ -22916,6 +22987,11 @@ If there is NO open position, use this Section 2 instead:
       return data[label] || null;
     },
     getAllDiagnostics(){ return {...data}; }
+  };
+  window.BT001VisibilityBurstDiagnostics=()=>{
+    const authenticated=window.BT001VisibilityRecovery&&typeof window.BT001VisibilityRecovery.diagnostics==="function"?window.BT001VisibilityRecovery.diagnostics():{};
+    const market=typeof window.binanceRealtimeDiagnostics==="function"?window.binanceRealtimeDiagnostics():{};
+    return {main:authenticated.main||null,scalp:authenticated.scalp||null,publicMarket:market.visibilityRecovery||null,sssc:ssscVisibilityRecoveryGate.diagnostics()};
   };
 })();
 

@@ -27,6 +27,11 @@ const vm=require("vm");
   assert(main.includes("expectedPosition=SHARED_POSITION_OWNER.captureExpectation()")&&main.includes("verifyAgainstStream"),"REST verification must carry the stream expectation");
   assert(main.includes("schedulePositionVerificationRetry")&&main.includes("restMismatchCount"),"REST mismatches need bounded retry diagnostics");
   assert(main.includes('"wss://fstream.binance.com/private/ws"'),"production user stream must use Binance's current /private endpoint");
+  assert.equal(
+    context.createBinanceUserDataStream.buildStreamUrl("wss://fstream.binance.com/private/ws","integration-listen-key"),
+    "wss://fstream.binance.com/private/ws?listenKey=integration-listen-key&events=ORDER_TRADE_UPDATE%2FACCOUNT_UPDATE",
+    "production user stream must subscribe with Binance's complete listenKey/events query format"
+  );
   assert(main.includes("lastSig21=sharedPositionSig21();"),"private reconciliation signatures must remain sourced from the shared owner");
   assert(main.includes("SHARED_POSITION_OWNER.isGuardCurrent(reconstructionGuard)"),"reconstruction must have a current-generation guard");
   assert(main.includes("reconstructionPending:reconstructionNeeded")&&!main.includes("const loaded = await loadActiveParentReconstruction"),"trade reconstruction must remain detached from the position-fact path");

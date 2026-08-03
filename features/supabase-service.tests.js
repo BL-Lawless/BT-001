@@ -77,6 +77,29 @@ const run=(async()=>{
     assert.equal(fetchImpl.calls.length,0);
   }
 
+  // Heatmap reads are split so callers can compare the lightweight newest-row metadata before
+  // deciding whether the comparatively large Storage object needs to be downloaded.
+  {
+    const row={id:17,event_at:"2026-07-31T12:34:56.000Z",symbol:"BTCUSDT",duration:"3D",storage_path:"BTCUSDT/3D/file.json"};
+    const payload=[{success:true,liqHeatMap:{data:[]}}];
+    const fetchImpl=recordingFetch(async url=>{
+      if(String(url).includes("/rest/v1/liquidation_heatmap_snapshots?"))return new Response(JSON.stringify([row]),{status:200,headers:{"content-type":"application/json"}});
+      if(String(url).includes("/storage/v1/object/liquidation-heatmaps/"))return new Response(JSON.stringify(payload),{status:200,headers:{"content-type":"application/json"}});
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const {context}=runtime({fetchImpl});
+    context.BT001Supabase.saveUrlFromInput({value:"https://myproject.supabase.co"});
+    context.BT001Supabase.saveKeyFromInput({value:"anon-key"});
+    const metadata=await context.BT001Supabase.getLatestHeatmapSnapshotMetadata("BTCUSDT");
+    assert.equal(metadata.id,17);
+    assert.equal(fetchImpl.calls.length,1,"metadata lookup alone must not download the Storage object");
+    assert(fetchImpl.calls[0].url.includes("/rest/v1/liquidation_heatmap_snapshots?"));
+    const downloaded=await context.BT001Supabase.getHeatmapSnapshotPayload(metadata.storage_path);
+    assert.equal(JSON.stringify(downloaded),JSON.stringify(payload));
+    assert.equal(fetchImpl.calls.length,2);
+    assert(fetchImpl.calls[1].url.endsWith("/storage/v1/object/liquidation-heatmaps/BTCUSDT/3D/file.json"));
+  }
+
   // Success: a real insert-shaped POST reaches the right URL/table with the right auth headers,
   // and the row is tagged CONNECTION_TEST so it's distinguishable from real activity rows.
   {

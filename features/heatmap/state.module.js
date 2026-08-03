@@ -11,7 +11,7 @@
   const emptyDiagnostics=()=>({requestStartedAt:null,currentStage:"NOT LOADED",reason:null,httpStatus:null,runStatus:null,runId:null,datasetId:null,datasetRetrievalStatus:"NOT REQUESTED",lastSuccessfulProviderStage:null,actorCompletedAt:null,runDurationMs:null,timeoutMs:null,elapsedMs:0,statusErrorCount:0,statusTimeline:[],rawItemCount:0,heatmapObjectFound:null,selectedObject:null,requiredFieldsFound:[],missingFields:[],payloadStructure:null,inspectedCandidatePaths:[],decodedStringPaths:[],jsonDecodeFailurePaths:[],rawCellCount:0,validCellCount:0,normalizedCellCount:0,rejectedCellCount:0,rejectionReasons:{},timestampUnit:null,visibleTimeCellCount:0,visiblePriceCellCount:0,visibleCellCount:0,thresholdCellCount:0,drawnCellCount:0,invalidCoordinateCount:0,zeroDrawReason:"No dataset loaded",displayingPreviousDataset:false,lastDrawAt:null,canvas:null});
   const emptyRecovery=()=>({runId:null,datasetId:null,duration:null,actorStatus:null,actorRequestStartedAt:null,actorCompletedAt:null,runDurationMs:null,datasetRetrievalStatus:"NOT REQUESTED",lastSuccessfulProviderStage:null,failedStage:null,retryEligible:false,hasRawPayload:false,hasParsedCandidate:false,hasNormalizedCandidate:false,cachedRunId:null,cachedDatasetId:null,rawPayloadRequestGeneration:null});
   const state={prefs:{enabled:bool("enabled",DEFAULTS.enabled),selectedDuration:DURATIONS.includes(storedDuration)?storedDuration:DEFAULTS.selectedDuration,opacity:num("opacity",DEFAULTS.opacity,5,80),strength:num("strength",DEFAULTS.strength,0,100),mode:read("mode",DEFAULTS.mode)==="RAW"?"RAW":"BALANCED",maxClipping:num("maxClipping",DEFAULTS.maxClipping,50,100),smoothing:bool("smoothing",DEFAULTS.smoothing),showLegend:bool("showLegend",DEFAULTS.showLegend),showSourceLabel:bool("showSourceLabel",DEFAULTS.showSourceLabel)},dataset:null,displayedDuration:null,status:"NOT_LOADED",loading:false,lastSuccessfulUpdate:null,error:null,requestGeneration:0,diagnostics:emptyDiagnostics(),recovery:emptyRecovery()};
-  let retainedRawPayload=null,retainedParsedCandidate=null,retainedNormalizedCandidate=null,pendingPublication=null;
+  let retainedRawPayload=null,retainedParsedCandidate=null,retainedNormalizedCandidate=null,pendingPublication=null,lastPublishedDatasetKey=null;
   const snapshot=()=>({...state,prefs:{...state.prefs},recovery:{...state.recovery},diagnostics:{...state.diagnostics,rejectionReasons:{...state.diagnostics.rejectionReasons},statusTimeline:state.diagnostics.statusTimeline.map(item=>({...item}))}});
   function notify(){const value=snapshot();listeners.forEach(listener=>{try{listener(value);}catch(_error){}});}
   function emitDiagnostics(){try{if(typeof window.CustomEvent==="function"&&typeof window.dispatchEvent==="function")window.dispatchEvent(new CustomEvent("heatmap:diagnostics",{detail:snapshot()}));}catch(_error){}}
@@ -73,7 +73,7 @@
     state.error=failure.reason;state.status="UPDATE_FAILED";Object.assign(state.diagnostics,{currentStage:failure.stage,reason:failure.reason,httpStatus:failure.httpStatus,runStatus:downstream?"SUCCEEDED":failure.runStatus,elapsedMs:Date.now()-(state.diagnostics.requestStartedAt||Date.now()),datasetRetrievalStatus:state.recovery.datasetRetrievalStatus,displayingPreviousDataset:!!state.dataset});
     if(error&&error.diagnostics)Object.assign(state.diagnostics,error.diagnostics);
   }
-  async function publishNormalized(normalized,duration,requestId,eventAt=null){
+  async function publishNormalized(normalized,duration,requestId,eventAt=null,datasetKey=null){
     if(requestId!==state.requestGeneration)return false;
     retainedNormalizedCandidate=normalized;state.recovery.hasNormalizedCandidate=true;datasetDiagnostics(normalized);
     state.diagnostics.currentStage="NORMALIZING";state.diagnostics.elapsedMs=Date.now()-state.diagnostics.requestStartedAt;notify();
@@ -81,7 +81,7 @@
     const previous={previousDataset:state.dataset,previousDuration:state.displayedDuration,previousUpdate:state.lastSuccessfulUpdate,rendered:false,renderFailure:null};
     pendingPublication=previous;state.dataset=normalized;state.displayedDuration=duration;state.diagnostics.currentStage="RENDERING";state.diagnostics.reason=null;notify();
     if(previous.renderFailure){const error=new Error(previous.renderFailure);error.stage="RENDERING FAILED";throw error;}
-    pendingPublication=null;state.lastSuccessfulUpdate=Number.isFinite(Date.parse(eventAt||""))?Date.parse(eventAt):Date.now();state.error=null;state.recovery.failedStage=null;state.recovery.retryEligible=false;
+    pendingPublication=null;state.lastSuccessfulUpdate=Number.isFinite(Date.parse(eventAt||""))?Date.parse(eventAt):Date.now();if(datasetKey!=null)lastPublishedDatasetKey=String(datasetKey);state.error=null;state.recovery.failedStage=null;state.recovery.retryEligible=false;
     state.status=state.prefs.selectedDuration===duration?"READY":"REFRESH_REQUIRED";state.diagnostics.currentStage=state.prefs.enabled?"READY":"READY · OVERLAY OFF";state.diagnostics.elapsedMs=Date.now()-state.diagnostics.requestStartedAt;state.diagnostics.displayingPreviousDataset=false;if(!state.prefs.enabled)state.diagnostics.zeroDrawReason="Heatmap hidden";notify();return true;
   }
   async function processPayload(payload,duration,requestId){
@@ -108,11 +108,15 @@
     if(!DURATIONS.includes(requestedDuration)){state.loading=false;markFailure(Object.assign(new Error("Selected duration missing"),{stage:"INPUT VALIDATION"}));notify();return false;}
     try{
       await nextPaint();if(requestId!==state.requestGeneration)return false;
-      const payload=await window.BT001HeatmapProvider.run({duration:requestedDuration,requestId,isCurrent:id=>id===state.requestGeneration,onStage:update=>{if(requestId===state.requestGeneration)requestStage(update);}});
+      const payload=await window.BT001HeatmapProvider.run({duration:requestedDuration,requestId,currentDatasetKey:lastPublishedDatasetKey,isCurrent:id=>id===state.requestGeneration,onStage:update=>{if(requestId===state.requestGeneration)requestStage(update);}});
       if(requestId!==state.requestGeneration)return false;
+      if(payload&&payload.unchanged){
+        if(!state.dataset||!lastPublishedDatasetKey||payload.datasetKey!==lastPublishedDatasetKey)throw Object.assign(new Error("Heatmap snapshot was marked unchanged without a matching published dataset"),{stage:"DATASET ASSOCIATION FAILED"});
+        state.error=null;state.status=state.prefs.selectedDuration===requestedDuration?"READY":"REFRESH_REQUIRED";state.diagnostics.currentStage=state.prefs.enabled?"READY \u00b7 NO NEW DATA":"READY \u00b7 OVERLAY OFF \u00b7 NO NEW DATA";state.diagnostics.reason="Latest Supabase heatmap snapshot is unchanged";state.diagnostics.elapsedMs=Date.now()-state.diagnostics.requestStartedAt;state.diagnostics.displayingPreviousDataset=false;notify();return true;
+      }
       if(payload&&payload.normalized){
         retainedNormalizedCandidate=payload.normalized;state.recovery.hasNormalizedCandidate=true;
-        return await publishNormalized(payload.normalized,payload.duration||requestedDuration,requestId,payload.eventAt);
+        return await publishNormalized(payload.normalized,payload.duration||requestedDuration,requestId,payload.eventAt,payload.datasetKey);
       }
       retainedRawPayload=payload;state.recovery.hasRawPayload=true;
       return await processPayload(payload,requestedDuration,requestId);
