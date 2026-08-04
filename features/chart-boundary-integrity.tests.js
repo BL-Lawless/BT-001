@@ -10,7 +10,7 @@ const {create}=require("./api/visibility-recovery-gate.module.js");
   const root=path.resolve(__dirname,"..");
   const main=fs.readFileSync(path.join(root,"main.js"),"utf8");
   const detectStart=main.indexOf("function detectClosedBoundaryIssues");
-  const detectEnd=main.indexOf("function validateClosedBuffer",detectStart);
+  const detectEnd=main.indexOf("function recordClosedBoundaryDiagnostic",detectStart);
   assert(detectStart>=0&&detectEnd>detectStart,"boundary detector must remain independently testable");
   const detect=vm.runInNewContext(`(${main.slice(detectStart,detectEnd).trim()})`,{Math,Number});
   const candle=(index,{open=100,high=102,low=98,close=100,source="ws"}={})=>({time:1000+index*60,open,high,low,close,volume:10,final:true,source});
@@ -61,6 +61,24 @@ const {create}=require("./api/visibility-recovery-gate.module.js");
   assert.equal(revisionBumps,1,"the boundary correction must bump the closed revision once");
   assert.equal(redraws,1,"a corrected active boundary must trigger chart rehydration/redraw");
   assert.equal(detect("1m",rows,{stepSec:60}).length,0);
+
+  const diagnosticRecordStart=main.indexOf("function recordClosedBoundaryDiagnostic");
+  const recordEnd=main.indexOf("function validateClosedBuffer",diagnosticRecordStart);
+  assert(diagnosticRecordStart>=0&&recordEnd>diagnosticRecordStart,"boundary diagnostics recorder must remain independently testable");
+  const diagnosticWindow={};
+  let diagnosticClock=1000;
+  const recordDiagnostic=vm.runInNewContext(`(${main.slice(diagnosticRecordStart,recordEnd).trim()})`,{
+    Array,window:diagnosticWindow,now:()=>diagnosticClock++
+  });
+  for(let index=0;index<105;index++)recordDiagnostic({
+    tf:"1m",expectedStepSec:60,actualDiffSec:120,timeUnit:"seconds",fromTime:index*60,toTime:(index+2)*60
+  });
+  assert.equal(diagnosticWindow.__candleBoundaryDiagLog.length,100,"durable boundary diagnostics must remain capped");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(diagnosticWindow.__candleBoundaryDiagLog[99])),
+    {ts:1104,tf:"1m",expectedStepSec:60,actualDiffSec:120,timeUnit:"seconds",fromTime:6240,toTime:6360},
+    "durable boundary diagnostics must preserve the exact comparison values"
+  );
 
   const validateSource=main.slice(main.indexOf("function validateClosedBuffer"),main.indexOf("function inspectTimeframeBuffer"));
   assert(validateSource.includes("detectClosedBoundaryIssues(tf,arr)")&&validateSource.includes("implausible closed-candle boundary detected"),"detected boundaries must enter the existing warning and repair issue list");

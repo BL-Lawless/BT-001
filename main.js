@@ -3938,7 +3938,8 @@ const marketDataHub = (() => {
     for(let index=1;index<arr.length;index++){
       const previous=arr[index-1],current=arr[index];
       const previousTime=Number(previous&&previous.time),currentTime=Number(current&&current.time);
-      if(!Number.isFinite(previousTime)||!Number.isFinite(currentTime)||currentTime-previousTime===stepSec)continue;
+      const actualDiffSec=currentTime-previousTime;
+      if(!Number.isFinite(previousTime)||!Number.isFinite(currentTime)||actualDiffSec===stepSec)continue;
       const priorClose=Number(previous.close),nextOpen=Number(current.open);
       const previousHigh=Number(previous.high),previousLow=Number(previous.low),currentHigh=Number(current.high),currentLow=Number(current.low);
       if(![priorClose,nextOpen,previousHigh,previousLow,currentHigh,currentLow].every(Number.isFinite))continue;
@@ -3956,12 +3957,26 @@ const marketDataHub = (() => {
       if(closeOpenGap<=threshold&&wickGap<=threshold)continue;
       issues.push({
         kind:"boundary-discontinuity",tf,fromTime:previousTime,toTime:currentTime,missingCount:0,
+        expectedStepSec:stepSec,actualDiffSec,timeUnit:"seconds",
         closeOpenGap,wickGap,atr,threshold,atrFraction,noiseFloorBps,
         previous:{time:previousTime,open:Number(previous.open),high:previousHigh,low:previousLow,close:priorClose},
         current:{time:currentTime,open:nextOpen,high:currentHigh,low:currentLow,close:Number(current.close)}
       });
     }
     return issues;
+  }
+  function recordClosedBoundaryDiagnostic(issue){
+    const log=Array.isArray(window.__candleBoundaryDiagLog)?window.__candleBoundaryDiagLog:(window.__candleBoundaryDiagLog=[]);
+    log.push({
+      ts:now(),
+      tf:issue.tf,
+      expectedStepSec:issue.expectedStepSec,
+      actualDiffSec:issue.actualDiffSec,
+      timeUnit:issue.timeUnit,
+      fromTime:issue.fromTime,
+      toTime:issue.toTime
+    });
+    if(log.length>100)log.splice(0,log.length-100);
   }
   function validateClosedBuffer(tf,rows,{repair=false,reason="validate"}={}){
     const arr = Array.isArray(rows) ? rows : getClosedBuffer(tf);
@@ -4005,6 +4020,7 @@ const marketDataHub = (() => {
     const boundaryIssues=detectClosedBoundaryIssues(tf,arr);
     for(const issue of boundaryIssues){
       gaps.push({...issue,reason});
+      recordClosedBoundaryDiagnostic(issue);
       warnIntegrity(`boundary-discontinuity:${tf}:${issue.fromTime}:${issue.toTime}`,"implausible closed-candle boundary detected",{...issue,reason},12000);
     }
     if(repair && gaps.length) repairMissingClosedCandles(tf,gaps,reason).catch(e => {
