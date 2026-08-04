@@ -24,11 +24,11 @@ const assert=require("assert"),fs=require("fs"),path=require("path"),vm=require(
   assert.equal(detect("1m",[candle(0),{...candle(1),openTime:NaN,time:NaN}],{stepSec:60}).length,1,"malformed timestamps must fail");
 
   const repairStart=main.indexOf("async function repairMissingClosedCandles"),repairEnd=main.indexOf("function ingestRestRows",repairStart),repairSource=main.slice(repairStart,repairEnd).trim();
-  let rows=gap.map(row=>({...row})),warnings=0,fetches=0;
+  let rows=gap.map(row=>({...row})),warnings=0,fetches=0,clock=999999;
   const key=row=>row?[row.time,row.open,row.high,row.low,row.close,row.volume].join(":"):"";
   const context={Math,Number,String,Array,Object,Promise,Set,
-    state:{generation:7,gapRepairInFlightByTf:{},lastGapRepairMsByTf:{},gapRepairAttemptsByTf:{}},KLINE_LIMIT:1500,
-    ensureBufferSymbol:()=>"BTCUSDT",now:()=>999999,getClosedBuffer:()=>rows,closedContentKey:value=>(value||[]).map(key).join("|"),candleContentKey:key,
+    state:{generation:7,gapRepairInFlightByTf:{},lastGapRepairMsByTf:{},gapRepairAttemptsByTf:{}},KLINE_LIMIT:1500,GAP_REPAIR_RETRY_BASE_MS:15000,GAP_REPAIR_RETRY_MAX_MS:300000,
+    ensureBufferSymbol:()=>"BTCUSDT",now:()=>clock,getClosedBuffer:()=>rows,closedContentKey:value=>(value||[]).map(key).join("|"),candleContentKey:key,
     isGuardCurrent:()=>true,ivSec:()=>60,cfg:()=>({symbol:"BTCUSDT"}),klinesForInterval:async()=>{fetches++;return [candle(0),candle(1),candle(2)];},
     normalizeCandleRow:(_tf,row)=>({...row,final:true,source:"rest"}),isFormingRow:()=>false,intervalKeep:()=>100,
     upsertClosedBuffer:(_tf,row)=>{const i=rows.findIndex(item=>item.time===row.time);if(i>=0)rows[i]=row;else rows.push(row);rows.sort((a,b)=>a.time-b.time);},
@@ -39,9 +39,12 @@ const assert=require("assert"),fs=require("fs"),path=require("path"),vm=require(
   rows=gap.map(row=>({...row}));context.klinesForInterval=async()=>{fetches++;return rows;};
   const unresolvedIssue=detect("1m",rows,{stepSec:60})[0];
   await repair("1m",[unresolvedIssue],"test",{generation:8});
-  await repair("1m",[unresolvedIssue],"test",{generation:8});
-  const capped=await repair("1m",[unresolvedIssue],"test",{generation:8});
-  assert.equal(capped.deduplicated,true);assert.equal(capped.retryCount,2);assert.equal(warnings,2,"each unresolved input/generation emits one consolidated warning");
+  const deferred=await repair("1m",[unresolvedIssue],"test",{generation:8});
+  assert.equal(deferred.deferred,true);assert.equal(deferred.retryCount,1,"an immediate duplicate must respect retry backoff");
+  clock+=15000;await repair("1m",[unresolvedIssue],"test",{generation:8});
+  clock+=30000;const retried=await repair("1m",[unresolvedIssue],"test",{generation:8});
+  assert.equal(retried.retryCount,3);assert.equal(fetches,4,"the unchanged gap must keep retrying periodically without a socket generation change");
+  assert.equal(warnings,3,"each actual unresolved retry emits a consolidated warning");
   assert(repairSource.includes('gap&&gap.kind==="timestamp-boundary"'));
   console.log("chart boundary integrity tests: PASS");
 })().catch(error=>{console.error(error);process.exitCode=1;});

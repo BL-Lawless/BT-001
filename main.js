@@ -3127,6 +3127,9 @@ const marketDataHub = (() => {
   const REST_FALLBACK_MS = 10000;
   const REST_STATUS_HOLD_MS = 12000;
   const REST_LATEST_LIMIT = 5;
+  const HISTORICAL_CONTINUITY_CHECK_MS = 60000;
+  const GAP_REPAIR_RETRY_BASE_MS = 15000;
+  const GAP_REPAIR_RETRY_MAX_MS = 5*60*1000;
   const FIRST_TICK_GRACE_MS = 12000;
   const diag = {
     module:MODULE,
@@ -3156,6 +3159,8 @@ const marketDataHub = (() => {
     gapRepairInFlightByTf:{},
     lastGapRepairMsByTf:{},
     gapRepairAttemptsByTf:{},
+    historicalContinuityInFlight:null,
+    lastHistoricalContinuityCheckMs:0,
     hiddenSince:document.hidden ? Date.now() : 0,
     lastVisibleAt:document.hidden ? 0 : Date.now(),
     hiddenMessageCount:0,
@@ -4058,6 +4063,12 @@ const marketDataHub = (() => {
     if(before !== candleContentKey(state.formingKlineByTf[tf])) bumpFormingRevision(tf);
     return state.formingKlineByTf[tf];
   }
+  function beginGapReconciliation(tf,issues,reason="gap"){
+    return repairMissingClosedCandles(tf,issues,reason).catch(error=>{
+      warnIntegrity(`gap-repair-failed:${tf}`,"REST gap repair failed",{tf,reason,error:error&&error.message?error.message:String(error)},12000);
+      return {resolved:false,error:error&&error.message?error.message:String(error),reason,tf};
+    });
+  }
   function upsertClosedBuffer(tf,row,limitOverride,{source="ws",deferRevision=false,deferValidation=false}={}){
     if(!tf || !row || !Number.isFinite(Number(row.time))) return;
     const normalized = normalizeCandleRow(tf,row,{source,final:true});
@@ -4175,11 +4186,12 @@ const marketDataHub = (() => {
     const recoveryGeneration=Number(options&&options.generation!=null?options.generation:state.generation)||0;
     const inputSignature=closedContentKey(getClosedBuffer(tf))+"|"+gaps.map(gap=>[gap.kind||"gap",gap.fromTime,gap.toTime,gap.missingCount].join(":")).join("|");
     const priorAttempt=state.gapRepairAttemptsByTf[tf];
-    if(priorAttempt&&priorAttempt.generation===recoveryGeneration&&priorAttempt.inputSignature===inputSignature&&priorAttempt.attempts>=2){
-      return {fetched:0,merged:0,corrected:0,changed:false,resolved:false,stale:false,deduplicated:true,retryCount:priorAttempt.attempts,reason,unresolvedGaps:gaps};
+    if(priorAttempt&&priorAttempt.generation===recoveryGeneration&&priorAttempt.inputSignature===inputSignature&&Number(priorAttempt.nextRetryAt)>now()){
+      return {fetched:0,merged:0,corrected:0,changed:false,resolved:false,stale:false,deferred:true,retryAt:priorAttempt.nextRetryAt,retryCount:priorAttempt.attempts,reason,unresolvedGaps:gaps};
     }
     const retryCount=priorAttempt&&priorAttempt.generation===recoveryGeneration&&priorAttempt.inputSignature===inputSignature?priorAttempt.attempts+1:1;
-    state.gapRepairAttemptsByTf[tf]={generation:recoveryGeneration,inputSignature,attempts:retryCount};
+    const retryDelay=Math.min(GAP_REPAIR_RETRY_MAX_MS,GAP_REPAIR_RETRY_BASE_MS*Math.pow(2,Math.max(0,retryCount-1)));
+    state.gapRepairAttemptsByTf[tf]={generation:recoveryGeneration,inputSignature,attempts:retryCount,lastAttemptAt:now(),nextRetryAt:0};
     const started = now();
     const task = (async () => {
       let fetched = 0;
@@ -4230,9 +4242,20 @@ const marketDataHub = (() => {
       const unresolvedGaps=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"post-gap-repair"});
       if(!stale&&!unresolvedGaps.length)state.lastGapRepairMsByTf[tf] = now();
       const resolved=!stale&&!unresolvedGaps.length;
-      if(!resolved)warnIntegrity(`repair-unresolved:${tf}:${recoveryGeneration}:${inputSignature}`,"candle repair remains unresolved",{tf,reason,generation:recoveryGeneration,retryCount,unresolvedGaps},Number.MAX_SAFE_INTEGER);
+      if(resolved){
+        const attempt=state.gapRepairAttemptsByTf[tf];
+        if(attempt&&attempt.generation===recoveryGeneration&&attempt.inputSignature===inputSignature)delete state.gapRepairAttemptsByTf[tf];
+      }else{
+        const attempt=state.gapRepairAttemptsByTf[tf];
+        if(attempt&&attempt.generation===recoveryGeneration&&attempt.inputSignature===inputSignature)attempt.nextRetryAt=now()+retryDelay;
+        warnIntegrity(`repair-unresolved:${tf}:${recoveryGeneration}:${inputSignature}`,"candle repair remains unresolved",{tf,reason,generation:recoveryGeneration,retryCount,retryAt:now()+retryDelay,unresolvedGaps},retryDelay);
+      }
       return {fetched,merged,corrected,changed:repairChanged,resolved,unresolvedGaps,reason,started,stale,generation:recoveryGeneration,retryCount};
-    })().finally(() => {
+    })().catch(error=>{
+      const attempt=state.gapRepairAttemptsByTf[tf];
+      if(attempt&&attempt.generation===recoveryGeneration&&attempt.inputSignature===inputSignature)attempt.nextRetryAt=now()+retryDelay;
+      throw error;
+    }).finally(() => {
       state.gapRepairInFlightByTf[tf] = null;
     });
     state.gapRepairInFlightByTf[tf] = task;
@@ -4565,6 +4588,27 @@ const marketDataHub = (() => {
     const unresolved=results.filter(result=>!result||result.resolved!==true||result.stale===true);
     return {resolved:unresolved.length===0,stale:results.some(result=>result&&result.stale===true),issueCount,results,unresolved};
   }
+  async function auditHistoricalContinuity(reason="periodic historical continuity"){
+    if(state.historicalContinuityInFlight)return state.historicalContinuityInFlight;
+    const checkedAt=now();
+    if(checkedAt-state.lastHistoricalContinuityCheckMs<HISTORICAL_CONTINUITY_CHECK_MS)return {skipped:true,resolved:true};
+    state.lastHistoricalContinuityCheckMs=checkedAt;
+    const task=(async()=>{
+      const targeted=await repairKnownClosedGaps(reason);
+      if(targeted.resolved)return {...targeted,reseeded:[]};
+      const reseeded=[];
+      for(const tf of requiredKlineTimeframes()){
+        const gaps=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:`${reason}-reseed-check`});
+        if(!gaps.length)continue;
+        await seedBuffer(tf,Math.max(10,intervalKeep(tf)),true);
+        const remaining=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:`${reason}-reseed-verify`});
+        reseeded.push({tf,resolved:remaining.length===0,remaining});
+      }
+      return {resolved:reseeded.every(item=>item.resolved),issueCount:targeted.issueCount,results:targeted.results,reseeded};
+    })().finally(()=>{if(state.historicalContinuityInFlight===task)state.historicalContinuityInFlight=null;});
+    state.historicalContinuityInFlight=task;
+    return task;
+  }
   function connect({force=false,reason=""}={}){
     state.desiredLive = true;
     ensureBufferSymbol();
@@ -4617,8 +4661,14 @@ const marketDataHub = (() => {
             window.__countdownLocalMs = now();
           }
           if(d && d.e === "kline" && d.k){
-            markWsTick("kline");
-            handleKline(d);
+            try{
+              handleKline(d);
+              markWsTick("kline");
+            }catch(error){
+              diag.lastError="Kline processing failed: "+(error&&error.message?error.message:String(error));
+              console.error(MODULE+" kline processing failed",error);
+              refreshConnectionStatus();
+            }
           }else if(d && d.e === "aggTrade"){
             markWsTick("aggTrade");
             queueTradeTick(d);
@@ -4678,6 +4728,9 @@ const marketDataHub = (() => {
     if(document.hidden) return;
     refreshConnectionStatus();
     if(loading || waitingForFirstTick()) return;
+    auditHistoricalContinuity("periodic historical continuity").catch(error=>{
+      warnIntegrity("periodic-continuity-failed","periodic historical continuity repair failed",{error:error&&error.message?error.message:String(error)},HISTORICAL_CONTINUITY_CHECK_MS);
+    });
     const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     const chartAge = activeChartAge();
     if((!socketOpen() || chartAge > ACTIVE_FEED_STALE_MS) && !state.restInFlight){
