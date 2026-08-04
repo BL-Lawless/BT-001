@@ -6,11 +6,34 @@
 })(typeof window!=="undefined"?window:globalThis,function(){
   "use strict";
 
-  function isGenuineVisibilityEvent(event,windowRef,documentRef){
-    if(!event||typeof event.type!=="string")return false;
-    if(event.type==="focus"||event.type==="pageshow")return event.target===windowRef;
-    if(event.type==="visibilitychange")return event.target===documentRef;
-    return false;
+  function createLifecycleTracker(options={}){
+    const documentRef=options.documentRef;
+    let hidden=!!(documentRef&&documentRef.hidden),frozen=false,pageHidden=false,generation=0,lastTrigger=null;
+    const observed=typeof WeakMap!=="undefined"?new WeakMap():null;
+    function observe(event){
+      if(!event||typeof event.type!=="string")return null;
+      if(observed&&observed.has(event))return observed.get(event);
+      let trigger=null;
+      if(event.type==="visibilitychange"){
+        if(documentRef&&documentRef.hidden)hidden=true;
+        else if(hidden){hidden=false;trigger="hidden-to-visible";}
+      }else if(event.type==="freeze"){frozen=true;}
+      else if(event.type==="resume"&&frozen){frozen=false;trigger="freeze-to-resume";}
+      else if(event.type==="pagehide"){pageHidden=true;}
+      else if(event.type==="pageshow"&&(pageHidden||event.persisted===true)){pageHidden=false;trigger="page-restored";}
+      // focus is deliberately informational only; it can never prove a lifecycle transition.
+      const result=trigger?Object.freeze({trigger,generation:++generation,eventType:event.type}):null;
+      if(result)lastTrigger=result;
+      if(observed)observed.set(event,result);
+      return result;
+    }
+    function diagnostics(){return {hidden,frozen,pageHidden,generation,lastTrigger};}
+    return Object.freeze({observe,diagnostics});
+  }
+
+  function isGenuineVisibilityEvent(event,windowRef,documentRef,tracker){
+    void windowRef;
+    return !!(tracker&&typeof tracker.observe==="function"&&tracker.observe(event));
   }
 
   function create(options={}){
@@ -57,5 +80,5 @@
     return Object.freeze({run,diagnostics});
   }
 
-  return Object.freeze({create,isGenuineVisibilityEvent});
+  return Object.freeze({create,createLifecycleTracker,isGenuineVisibilityEvent});
 });

@@ -174,17 +174,14 @@
     catch(error){return {label,ok:false,data:null,error:{message:error&&error.message||String(error),code:error&&error.code}};}
   }
   function permissionValue(...values){const defined=values.filter(value=>typeof value==="boolean");return defined.length?defined.some(Boolean):null;}
-  function accountMode(spotReachable,futuresReachable){return spotReachable&&futuresReachable?"Both":futuresReachable?"Futures":spotReachable?"Spot":"Invalid";}
+  function accountMode(futuresReachable){return futuresReachable?"Futures":"Invalid";}
   function activeSymbol(){
     try{return window.BT001_BINANCE_TRADING&&window.BT001_BINANCE_TRADING.symbol?window.BT001_BINANCE_TRADING.symbol():"BTCUSDT";}catch(_e){return "BTCUSDT";}
   }
   async function readAccount(slot){
     const credentials=getCredentials(slot),symbol=activeSymbol();
     if(!credentials.key||!credentials.secret)return {slot,symbol,configured:false,mode:"Invalid",lastSyncAt:successfulSyncAt[slot],futuresReachable:false,spotReachable:false,permissions:{canTrade:null,canDeposit:null,canWithdraw:null},futures:{},errors:[{message:"API key and secret are not configured."}]};
-    const [spot,futures]=await Promise.all([
-      settled("Spot account",signedGet("spot","/api/v3/account",credentials)),
-      settled("Futures account",signedGet("futures","/fapi/v2/account",credentials))
-    ]);
+    const futures=await settled("Futures account",signedGet("futures","/fapi/v2/account",credentials));
     const cachedSettings=slot===getInterfaceSlot()&&window.BT001SymbolTradingSettings&&typeof window.BT001SymbolTradingSettings.getCached==="function"
       ? window.BT001SymbolTradingSettings.getCached(symbol)
       : null;
@@ -195,15 +192,15 @@
       settled("Commission rate",signedGet("futures","/fapi/v1/commissionRate",credentials,{symbol})),
       sharedSettings?Promise.resolve({label:"Position risk",ok:true,data:[{symbol,marginType:sharedSettings.marginMode,leverage:sharedSettings.leverage}],error:null}):settled("Position risk",signedGet("futures","/fapi/v2/positionRisk",credentials,{symbol}))
     ]):[];
-    const byLabel=Object.fromEntries(extras.map(result=>[result.label,result])),spotReachable=spot.ok,futuresReachable=futures.ok,mode=accountMode(spotReachable,futuresReachable);
-    if(spotReachable||futuresReachable)successfulSyncAt[slot]=Date.now();
-    const spotData=spot.data||{},futuresData=futures.data||{},positions=byLabel["Position risk"]&&byLabel["Position risk"].ok&&Array.isArray(byLabel["Position risk"].data)?byLabel["Position risk"].data:[],position=positions.find(row=>upper(row&&row.symbol)===upper(symbol))||null,commission=byLabel["Commission rate"]&&byLabel["Commission rate"].data||{},dual=byLabel["Position mode"]&&byLabel["Position mode"].data,multi=byLabel["Multi-assets mode"]&&byLabel["Multi-assets mode"].data;
+    const byLabel=Object.fromEntries(extras.map(result=>[result.label,result])),spotReachable=false,futuresReachable=futures.ok,mode=accountMode(futuresReachable);
+    if(futuresReachable)successfulSyncAt[slot]=Date.now();
+    const futuresData=futures.data||{},positions=byLabel["Position risk"]&&byLabel["Position risk"].ok&&Array.isArray(byLabel["Position risk"].data)?byLabel["Position risk"].data:[],position=positions.find(row=>upper(row&&row.symbol)===upper(symbol))||null,commission=byLabel["Commission rate"]&&byLabel["Commission rate"].data||{},dual=byLabel["Position mode"]&&byLabel["Position mode"].data,multi=byLabel["Multi-assets mode"]&&byLabel["Multi-assets mode"].data;
     return {
       slot,symbol,configured:true,mode,lastSyncAt:successfulSyncAt[slot],spotReachable,futuresReachable,
       permissions:{
-        canTrade:permissionValue(spotData.canTrade,futuresData.canTrade),
-        canDeposit:permissionValue(spotData.canDeposit,futuresData.canDeposit),
-        canWithdraw:permissionValue(spotData.canWithdraw,futuresData.canWithdraw)
+        canTrade:permissionValue(futuresData.canTrade),
+        canDeposit:permissionValue(futuresData.canDeposit),
+        canWithdraw:permissionValue(futuresData.canWithdraw)
       },
       futures:{
         positionMode:dual&&dual.dualSidePosition===true?"Hedge Mode":dual?"One-way":"-",

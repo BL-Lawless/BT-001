@@ -131,6 +131,8 @@ async function run(){
   assert(scalpIndex.includes("BT001ScalpSecondaryGateway.create(slot)")&&scalpIndex.includes("accountSlot:slot")&&secondary.includes("getCredentials(slot)")&&secondary.includes("normalizePositions"));
   assert(source.includes("window.BT001SymbolTradingSettings.getCached(symbol)"),"matching active-account reads should reuse fresh main symbol settings");
   assert(source.includes("slot===getInterfaceSlot()"),"shared settings must be restricted to the same active credential slot");
+  assert(!source.includes("/api/v3/account")&&!main.includes("BINANCE_SPOT_ACCOUNT_URL"),"credential validation must never call the Binance Spot account endpoint");
+  assert(source.includes('signedGet("futures","/fapi/v2/account"')&&main.includes("BINANCE_FUTURES_ACCOUNT_URL"),"credential validation must reuse the Futures signed-request path");
   assert(secondary.includes('const REST_BASE = "https://fapi.binance.com"'),"secondary credentials must retain an independent authenticated gateway");
   cases.mainAndCalculatorsUseActiveAccountWhileScalpCanUseEitherIndependentSlot=true;
 

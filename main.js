@@ -133,6 +133,10 @@ const CHART_INDICATOR_WARMUP_MIN = 600;
 const CHART_BUFFER_RETENTION_CAP = 1500;
 const CHART_HISTORY_RETENTION_CAP = 10000;
 
+if(location.protocol === "file:"){
+  console.error("BT-001 requires http://localhost for private Binance, Supabase, popup, and frame features; file:// origin failures are not Binance outages.");
+}
+
 const MAX_FUTURE_RATIO = 0.5;
 
 const REST_MS = 500;
@@ -156,7 +160,6 @@ const API_CAPABILITY_CACHE_TTL_MS = 30000;
 const BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo";
 const BINANCE_POSITION_MODE_URL = "https://fapi.binance.com/fapi/v1/positionSide/dual";
 const BINANCE_LEVERAGE_BRACKET_URL = "https://fapi.binance.com/fapi/v1/leverageBracket";
-const BINANCE_SPOT_ACCOUNT_URL = "https://api.binance.com/api/v3/account";
 const BINANCE_FUTURES_ACCOUNT_URL = "https://fapi.binance.com/fapi/v2/account";
 const BINANCE_MULTI_ASSETS_MODE_URL = "https://fapi.binance.com/fapi/v1/multiAssetsMargin";
 const BINANCE_COMMISSION_RATE_URL = "https://fapi.binance.com/fapi/v1/commissionRate";
@@ -3152,6 +3155,7 @@ const marketDataHub = (() => {
     integrityWarnMsByKey:{},
     gapRepairInFlightByTf:{},
     lastGapRepairMsByTf:{},
+    gapRepairAttemptsByTf:{},
     hiddenSince:document.hidden ? Date.now() : 0,
     lastVisibleAt:document.hidden ? 0 : Date.now(),
     hiddenMessageCount:0,
@@ -3170,6 +3174,7 @@ const marketDataHub = (() => {
     maStackVisible:false,
     lastMessageSource:"",
     visibilityRecoveryTimer:null,
+    pendingLifecycleEvidence:null,
     closedKlinesByTf:{},
     formingKlineByTf:{},
     gapRepairInFlightByTf:{},
@@ -3925,40 +3930,27 @@ const marketDataHub = (() => {
     }
   }
   function detectClosedBoundaryIssues(tf,rows,options={}){
-    const arr=Array.isArray(rows)?rows:[],stepSec=Math.max(1,Number(options.stepSec)||ivSec(tf));
-    const lookback=Math.max(3,Math.round(Number(options.lookback)||14));
-    const atrFraction=Math.max(0.05,Number(options.atrFraction)||0.35);
-    const noiseFloorBps=Math.max(0,Number(options.noiseFloorBps)||1);
+    const arr=Array.isArray(rows)?rows:[],intervalMsExpected=Math.max(1000,(Number(options.stepSec)||ivSec(tf))*1000);
+    const toleranceMs=Math.max(0,Number(options.toleranceMs)||1);
     const issues=[];
-    const trueRange=(row,prior)=>{
-      const high=Number(row&&row.high),low=Number(row&&row.low),priorClose=Number(prior&&prior.close);
-      if(!Number.isFinite(high)||!Number.isFinite(low))return NaN;
-      return Number.isFinite(priorClose)?Math.max(high-low,Math.abs(high-priorClose),Math.abs(low-priorClose)):high-low;
-    };
     for(let index=1;index<arr.length;index++){
       const previous=arr[index-1],current=arr[index];
-      const previousTime=Number(previous&&previous.time),currentTime=Number(current&&current.time);
-      if(!Number.isFinite(previousTime)||!Number.isFinite(currentTime)||currentTime-previousTime!==stepSec)continue;
-      const priorClose=Number(previous.close),nextOpen=Number(current.open);
-      const previousHigh=Number(previous.high),previousLow=Number(previous.low),currentHigh=Number(current.high),currentLow=Number(current.low);
-      if(![priorClose,nextOpen,previousHigh,previousLow,currentHigh,currentLow].every(Number.isFinite))continue;
-      const ranges=[];
-      const start=Math.max(1,index-lookback+1);
-      for(let cursor=start;cursor<=index;cursor++){
-        const value=trueRange(arr[cursor-1],arr[cursor-2]);
-        if(Number.isFinite(value)&&value>0)ranges.push(value);
-      }
-      const atr=ranges.length?ranges.reduce((sum,value)=>sum+value,0)/ranges.length:Math.max(previousHigh-previousLow,currentHigh-currentLow,0);
-      const referencePrice=Math.max(Math.abs(priorClose),Math.abs(nextOpen),Number.EPSILON);
-      const threshold=Math.max(atr*atrFraction,referencePrice*(noiseFloorBps/10000),Number.EPSILON);
-      const closeOpenGap=Math.abs(nextOpen-priorClose);
-      const wickGap=currentLow>previousHigh?currentLow-previousHigh:(previousLow>currentHigh?previousLow-currentHigh:0);
-      if(closeOpenGap<=threshold&&wickGap<=threshold)continue;
+      const previousOpenRaw=Number(previous&&(previous.openTime??Number(previous.time)*1000));
+      const nextOpenRaw=Number(current&&(current.openTime??Number(current.time)*1000));
+      const previousOpenMs=Number.isFinite(previousOpenRaw)?previousOpenRaw:NaN,nextOpenMs=Number.isFinite(nextOpenRaw)?nextOpenRaw:NaN;
+      const suppliedCloseMs=Number(previous&&previous.closeTime);
+      const expectedPreviousCloseMs=previousOpenMs+intervalMsExpected-1;
+      const previousCloseMs=Number.isFinite(suppliedCloseMs)?suppliedCloseMs:expectedPreviousCloseMs;
+      const expectedNextOpenMs=expectedPreviousCloseMs+1;
+      const actualDifferenceMs=nextOpenMs-expectedNextOpenMs;
+      const closeDifferenceMs=previousCloseMs-expectedPreviousCloseMs;
+      if(Number.isFinite(previousOpenMs)&&Number.isFinite(nextOpenMs)&&Math.abs(actualDifferenceMs)<=toleranceMs&&Math.abs(closeDifferenceMs)<=toleranceMs)continue;
       issues.push({
-        kind:"boundary-discontinuity",tf,fromTime:previousTime,toTime:currentTime,missingCount:0,
-        closeOpenGap,wickGap,atr,threshold,atrFraction,noiseFloorBps,
-        previous:{time:previousTime,open:Number(previous.open),high:previousHigh,low:previousLow,close:priorClose},
-        current:{time:currentTime,open:nextOpen,high:currentHigh,low:currentLow,close:Number(current.close)}
+        kind:"timestamp-boundary",tf,intervalMs:intervalMsExpected,toleranceMs,
+        previousOpenMs,previousCloseMs,expectedPreviousCloseMs,expectedNextOpenMs,nextOpenMs,
+        actualDifferenceMs,closeDifferenceMs,
+        fromTime:Number(previous&&previous.time),toTime:Number(current&&current.time),
+        missingCount:Number.isFinite(actualDifferenceMs)&&actualDifferenceMs>toleranceMs?Math.max(1,Math.round(actualDifferenceMs/intervalMsExpected)):0
       });
     }
     return issues;
@@ -4005,7 +3997,7 @@ const marketDataHub = (() => {
     const boundaryIssues=detectClosedBoundaryIssues(tf,arr);
     for(const issue of boundaryIssues){
       gaps.push({...issue,reason});
-      warnIntegrity(`boundary-discontinuity:${tf}:${issue.fromTime}:${issue.toTime}`,"implausible closed-candle boundary detected",{...issue,reason},12000);
+      warnIntegrity(`timestamp-boundary:${tf}:${issue.fromTime}:${issue.toTime}`,"closed-candle timestamp boundary invalid",{...issue,reason,generation:state.generation},60000);
     }
     if(repair && gaps.length) repairMissingClosedCandles(tf,gaps,reason).catch(e => {
       warnIntegrity(`gap-repair-failed:${tf}`,"REST gap repair failed",{tf,reason,error:e && e.message ? e.message : String(e)},12000);
@@ -4179,6 +4171,14 @@ const marketDataHub = (() => {
     const guard = options && options.guard;
     const suppressRedraw = !!(options && options.suppressRedraw);
     if(state.gapRepairInFlightByTf[tf]) return state.gapRepairInFlightByTf[tf];
+    const recoveryGeneration=Number(options&&options.generation!=null?options.generation:state.generation)||0;
+    const inputSignature=closedContentKey(getClosedBuffer(tf))+"|"+gaps.map(gap=>[gap.kind||"gap",gap.fromTime,gap.toTime,gap.missingCount].join(":")).join("|");
+    const priorAttempt=state.gapRepairAttemptsByTf[tf];
+    if(priorAttempt&&priorAttempt.generation===recoveryGeneration&&priorAttempt.inputSignature===inputSignature&&priorAttempt.attempts>=2){
+      return {fetched:0,merged:0,corrected:0,changed:false,resolved:false,stale:false,deduplicated:true,retryCount:priorAttempt.attempts,reason,unresolvedGaps:gaps};
+    }
+    const retryCount=priorAttempt&&priorAttempt.generation===recoveryGeneration&&priorAttempt.inputSignature===inputSignature?priorAttempt.attempts+1:1;
+    state.gapRepairAttemptsByTf[tf]={generation:recoveryGeneration,inputSignature,attempts:retryCount};
     const started = now();
     const task = (async () => {
       let fetched = 0;
@@ -4189,7 +4189,7 @@ const marketDataHub = (() => {
       const existingTimes=new Set(getClosedBuffer(tf).map(row=>Number(row&&row.time)));
       for(const gap of gaps){
         if(!isGuardCurrent(guard)){stale=true;break;}
-        const boundaryRepair=gap&&gap.kind==="boundary-discontinuity";
+        const boundaryRepair=gap&&gap.kind==="timestamp-boundary";
         const count = boundaryRepair?2:Math.max(1,Math.min(KLINE_LIMIT,Number(gap.missingCount) || 1));
         const endMs = (Number(gap.toTime) + ivSec(tf)) * 1000 - 1;
         if(!Number.isFinite(endMs) || endMs <= 0) continue;
@@ -4228,7 +4228,9 @@ const marketDataHub = (() => {
       }
       const unresolvedGaps=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:"post-gap-repair"});
       if(!stale&&!unresolvedGaps.length)state.lastGapRepairMsByTf[tf] = now();
-      return {fetched,merged,corrected,changed:repairChanged,resolved:!stale&&!unresolvedGaps.length,unresolvedGaps,reason,started,stale};
+      const resolved=!stale&&!unresolvedGaps.length;
+      if(!resolved)warnIntegrity(`repair-unresolved:${tf}:${recoveryGeneration}:${inputSignature}`,"candle repair remains unresolved",{tf,reason,generation:recoveryGeneration,retryCount,unresolvedGaps},Number.MAX_SAFE_INTEGER);
+      return {fetched,merged,corrected,changed:repairChanged,resolved,unresolvedGaps,reason,started,stale,generation:recoveryGeneration,retryCount};
     })().finally(() => {
       state.gapRepairInFlightByTf[tf] = null;
     });
@@ -4734,11 +4736,11 @@ const marketDataHub = (() => {
         BT001_PERFORMANCE_DIAGNOSTICS.visibilityFirstChartPaintMs=firstPaintMs;
         BT001_PERFORMANCE_DIAGNOSTICS.visibilityInteractiveMs=firstPaintMs;
       }
-      if(window.BT001VisibilityRecovery&&typeof window.BT001VisibilityRecovery.recover==="function")window.BT001VisibilityRecovery.recover("public-visibility-return").catch(()=>{});
       diag.hiddenSince = 0;
       diag.lastVisibleAt = now();
       setTimeout(()=>{
-        const reason="visibility/focus return";
+        const evidence=state.pendingLifecycleEvidence;
+        const reason=`lifecycle:${evidence&&evidence.trigger||"unknown"}:generation-${evidence&&evidence.generation||0}`;
         publicMarketVisibilityRecoveryGate.run(reason,runPublicMarketVisibilityRecovery).catch(error=>{
           console.warn(MODULE+" visibility recovery failed",error);
         });
@@ -4753,10 +4755,7 @@ const marketDataHub = (() => {
     if(!repairOutcome||repairOutcome.resolved!==true||repairOutcome.stale===true)throw new Error("Public market visibility candle-integrity repair remained unresolved");
     const synced=await restSyncLatest(reason,{throwOnError:true});
     if(!synced)throw new Error("Public market visibility REST sync did not complete");
-    const hydration=[];
-    if(state.ssscVisible)hydration.push(ensureSsscBuffers(false));
-    if(state.maStackVisible)hydration.push(ensureMaStackBuffers(false));
-    await Promise.all(hydration);
+    if(state.maStackVisible)await ensureMaStackBuffers(false);
     const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     if(!socketOpen()) connect();
     else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
@@ -4765,12 +4764,14 @@ const marketDataHub = (() => {
   }
 
   function scheduleVisibilityRecovery(event){
-    if(!window.BT001VisibilityRecoveryGate.isGenuineVisibilityEvent(event,window,document))return;
-    refocusDiag("browser refocus event",{type:event&&event.type||"unknown",documentHidden:document.hidden});
+    const evidence=window.BT001LifecycleTracker.observe(event);
     if(document.hidden){
       diag.hiddenSince = now();
       return;
     }
+    if(!evidence)return;
+    state.pendingLifecycleEvidence=evidence;
+    refocusDiag("browser lifecycle return",{...evidence,documentHidden:document.hidden});
     if(state.visibilityRecoveryTimer){
       clearTimeout(state.visibilityRecoveryTimer);
     }
@@ -4780,9 +4781,12 @@ const marketDataHub = (() => {
     },80);
   }
 
-  ["visibilitychange","focus","pageshow"].forEach(ev => {
-    window.addEventListener(ev,scheduleVisibilityRecovery,true);
-  });
+  window.BT001LifecycleTracker ||= window.BT001VisibilityRecoveryGate.createLifecycleTracker({documentRef:document});
+  document.addEventListener("visibilitychange",scheduleVisibilityRecovery,false);
+  document.addEventListener("freeze",scheduleVisibilityRecovery,false);
+  document.addEventListener("resume",scheduleVisibilityRecovery,false);
+  window.addEventListener("pagehide",scheduleVisibilityRecovery,false);
+  window.addEventListener("pageshow",scheduleVisibilityRecovery,false);
 
   window.BINANCE_REALTIME_DIAG = diag;
   window.binanceRealtimeDiagnostics = () => ({...diag});
@@ -16581,7 +16585,10 @@ startTradeAuto();
     return mainResult&&typeof mainResult==="object"?{...mainResult,scalpFacts}:{mainResult,scalpFacts};
   }
   window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>{const main=mainVisibilityRecoveryGate21.diagnostics();return {active:main.inFlight,runs:main.completedRuns,main,mainSmart:{...mainSmartRecoveryDiagnostics21},scalp:scalpVisibilityRecoveryGate21.diagnostics()};}});
-  ["visibilitychange","focus","pageshow"].forEach(name => window.addEventListener(name,event => {if(!window.BT001VisibilityRecoveryGate.isGenuineVisibilityEvent(event,window,document))return;if(name==="visibilitychange"&&document.hidden){captureMainHiddenStreamHistory21();return;}recoverVisibleAccounts21(`focus-visibility-recovery:${name}`).catch(error=>console.warn("Authenticated visibility recovery failed",error));},true));
+  const handleAuthenticatedLifecycle21=event=>{const evidence=window.BT001LifecycleTracker.observe(event);if(event.type==="visibilitychange"&&document.hidden){captureMainHiddenStreamHistory21();return;}if(!evidence)return;recoverVisibleAccounts21(`lifecycle:${evidence.trigger}:generation-${evidence.generation}`).catch(error=>console.warn("Authenticated lifecycle recovery failed",error));};
+  document.addEventListener("visibilitychange",handleAuthenticatedLifecycle21,false);
+  document.addEventListener("resume",handleAuthenticatedLifecycle21,false);
+  window.addEventListener("pageshow",handleAuthenticatedLifecycle21,false);
   if(marketEl) marketEl.addEventListener("change",() => {
     markPrivateDirty21({positionDirty:true,ordersDirty:true},"symbol-change",{immediate:true});
     schedulePrivateStreamRestart21();
@@ -17672,8 +17679,7 @@ startTradeAuto();
     const request = (async() => {
       const {key,secret:sec} = activeApiCredentials();
       const off = await timeOffset().catch(() => 0);
-      const [spotAccount,futuresAccount,symbolSettings] = await Promise.all([
-        signedGetVerbose(BINANCE_SPOT_ACCOUNT_URL,{},key,sec,off),
+      const [futuresAccount,symbolSettings] = await Promise.all([
         signedGetVerbose(BINANCE_FUTURES_ACCOUNT_URL,{},key,sec,off),
         fetchSelectedSymbolTradingSettings(symbol,{force:true}).catch(() => null)
       ]);
@@ -17686,13 +17692,13 @@ startTradeAuto();
           signedGetVerbose(BINANCE_COMMISSION_RATE_URL,{symbol},key,sec,off)
         ]);
       }
-      const spotReachable = !!(spotAccount && spotAccount.ok);
+      const spotReachable = false;
       const futuresReachable = !!(futuresAccount && futuresAccount.ok);
       const accountMode = modeText(spotReachable,futuresReachable);
       const permissions = {
-        canTrade:permissionValue(spotAccount && spotAccount.data && spotAccount.data.canTrade,futuresAccount && futuresAccount.data && futuresAccount.data.canTrade),
-        canDeposit:permissionValue(spotAccount && spotAccount.data && spotAccount.data.canDeposit,futuresAccount && futuresAccount.data && futuresAccount.data.canDeposit),
-        canWithdraw:permissionValue(spotAccount && spotAccount.data && spotAccount.data.canWithdraw,futuresAccount && futuresAccount.data && futuresAccount.data.canWithdraw)
+        canTrade:permissionValue(futuresAccount && futuresAccount.data && futuresAccount.data.canTrade),
+        canDeposit:permissionValue(futuresAccount && futuresAccount.data && futuresAccount.data.canDeposit),
+        canWithdraw:permissionValue(futuresAccount && futuresAccount.data && futuresAccount.data.canWithdraw)
       };
       const settings = symbolSettings && symbolSettings.status === "ready" ? symbolSettings : null;
       const futuresInfo = {
@@ -17711,12 +17717,11 @@ startTradeAuto();
       };
       const lastError = pickApiError([
         futuresAccount && !futuresAccount.ok ? {label:"Futures account",...(futuresAccount.error || {})} : null,
-        spotAccount && !spotAccount.ok ? {label:"Spot account",...(spotAccount.error || {})} : null,
         multiAssets && !multiAssets.ok ? {label:"Multi-assets mode",...(multiAssets.error || {})} : null,
         commission && !commission.ok ? {label:"Commission rate",...(commission.error || {})} : null,
         symbolSettings && symbolSettings.status === "error" ? {label:"Symbol settings",message:symbolSettings.error || "Unable to load symbol settings"} : null
       ]);
-      const successAt = spotReachable || futuresReachable ? Date.now() : apiCapabilityState.lastSuccessAt;
+      const successAt = futuresReachable ? Date.now() : apiCapabilityState.lastSuccessAt;
       const nextState = {
         ...apiCapabilityState,
         status:"ready",
@@ -23014,9 +23019,10 @@ If there is NO open position, use this Section 2 instead:
   }
   let visibilityRecoveryTimer=null;
   function scheduleSsscVisibilityRecovery(event){
-    if(!window.BT001VisibilityRecoveryGate.isGenuineVisibilityEvent(event,window,document))return;
+    const evidence=window.BT001LifecycleTracker.observe(event);
     if(document.hidden)return;
-    const reason=`sssc-visibility-recovery:${event&&event.type||"unknown"}`;
+    if(!evidence)return;
+    const reason=`lifecycle:${evidence.trigger}:generation-${evidence.generation}`;
     if(visibilityRecoveryTimer!=null)clearTimeout(visibilityRecoveryTimer);
     visibilityRecoveryTimer=setTimeout(()=>{
       visibilityRecoveryTimer=null;
@@ -23042,7 +23048,7 @@ If there is NO open position, use this Section 2 instead:
       });
     },80);
   }
-  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } if(!window.__ssscVisibilityRecoveryBound){window.__ssscVisibilityRecoveryBound=true;["visibilitychange","focus","pageshow"].forEach(name=>window.addEventListener(name,scheduleSsscVisibilityRecovery,true));} installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); }
+  function install(){ syncSsscToolbarButton(); $('ssscDashClose')?.addEventListener('click',hide); $('ssscDashRefresh')?.addEventListener('click',()=>ensurePipeline()?.refresh(true)); const evBtn=$('ssscEventToggle'); const evBody=$('ssscDashEvents'); if(evBtn&&evBody&&!evBtn.__ssscBound){ evBtn.__ssscBound=true; evBtn.addEventListener('click',()=>{ const closed=evBody.classList.toggle('hidden'); evBtn.textContent=closed?'Expand':'Collapse'; }); } const dtBtn=$('ssscDetailToggle'); const dtBox=$('ssscDashDetail'); if(dtBtn&&dtBox&&!dtBtn.__ssscBound){ dtBtn.__ssscBound=true; dtBtn.addEventListener('click',()=>{ const closed=dtBox.classList.toggle('hidden'); dtBtn.textContent=closed?'Expand':'Collapse'; }); } if(!window.__ssscVisibilityRecoveryBound){window.__ssscVisibilityRecoveryBound=true;document.addEventListener("visibilitychange",scheduleSsscVisibilityRecovery,false);document.addEventListener("resume",scheduleSsscVisibilityRecovery,false);window.addEventListener("pageshow",scheduleSsscVisibilityRecovery,false);} installDrag(); installResizeGuard(); restorePanel(); ensurePipeline()?.startLive(); }
 
   if(window.BT001SettingsTabs&&!window.__ssscR3SettingsOpenBound){ window.__ssscR3SettingsOpenBound=true; window.BT001SettingsTabs.subscribe(event=>{ if(event.type==="opened") syncSsscToolbarButton(); }); }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install(); setTimeout(install,300);
