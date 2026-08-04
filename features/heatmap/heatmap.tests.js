@@ -24,9 +24,18 @@ const vm=require("vm");
   };
   context.window=context;
   vm.createContext(context);
-  for(const file of ["dataset.module.js","provider-adapter.module.js","state.module.js","renderer.module.js"]){
+  for(const file of ["dataset.module.js","provider-adapter.module.js","freshness.module.js","state.module.js","renderer.module.js"]){
     vm.runInContext(fs.readFileSync(path.join(root,file),"utf8"),context,{filename:file});
   }
+
+  const freshness=context.BT001HeatmapFreshness;
+  const utc=value=>Date.parse(value);
+  assert.equal(freshness.nextScheduledPull(utc("2026-08-04T00:00:00Z")),utc("2026-08-04T07:00:00Z"));
+  assert.equal(freshness.nextScheduledPull(utc("2026-08-04T12:59:59Z")),utc("2026-08-04T13:00:00Z"));
+  assert.equal(freshness.nextScheduledPull(utc("2026-08-04T17:00:01Z")),utc("2026-08-04T21:00:00Z"));
+  assert.equal(freshness.nextScheduledPull(utc("2026-08-04T21:00:00Z")),utc("2026-08-05T00:00:00Z"),"the schedule must roll over after 21:00 UTC");
+  assert.equal(freshness.countdown(utc("2026-08-04T13:00:00Z"),utc("2026-08-04T11:15:00Z")),"01:45");
+  assert.equal(freshness.line(utc("2026-08-04T11:00:35Z"),utc("2026-08-04T13:00:00Z"),false,utc("2026-08-04T11:15:00Z")),"BTCUSDT Heatmap · 04/08/2026 | 11:00:35 - Next update in 01:45");
 
   assert.equal(await context.BT001HeatmapState.refresh(),true);
   const ready=context.BT001HeatmapState.snapshot();
@@ -67,6 +76,16 @@ const vm=require("vm");
   assert.equal(payloadReads,3,"a new snapshot id must be downloaded again until it renders successfully");
   assert.notStrictEqual(changed.dataset,firstDataset,"a changed snapshot must replace the rendered dataset");
   assert.equal(changed.lastSuccessfulUpdate,Date.parse(changedAt),"a changed snapshot must update the existing freshness label source");
+  const scheduledBoundary=changed.nextScheduledUpdate;
+  assert.equal(await context.BT001HeatmapState._test.scheduleTick(scheduledBoundary),true);
+  assert.equal(context.BT001HeatmapState.snapshot().awaitingScheduledUpdate,true,"zero must transition to Updating...");
+  assert(freshness.line(changed.lastSuccessfulUpdate,scheduledBoundary,true,scheduledBoundary).endsWith("Updating..."));
+  const afterBoundary="2026-08-05T00:04:56.000Z";
+  row={...row,id:19,event_at:afterBoundary,provider_run_id:"run-19",provider_dataset_id:"dataset-19",storage_path:"BTCUSDT/3D/2026/08/05/file-19.json"};
+  assert.equal(await context.BT001HeatmapState.refresh(),true);
+  const resumed=context.BT001HeatmapState.snapshot();
+  assert.equal(resumed.awaitingScheduledUpdate,false,"a genuinely newer row must restart the countdown");
+  assert.equal(resumed.lastSuccessfulUpdate,Date.parse(afterBoundary));
   context.BT001HeatmapState.setPreference("selectedDuration","1D");
   assert.equal(context.BT001HeatmapState.snapshot().prefs.selectedDuration,"3D","duration is fixed and read-only");
 
@@ -77,11 +96,11 @@ const vm=require("vm");
   const report=context.BT001HeatmapRenderer.draw(ctx,view,context.BT001HeatmapState.snapshot());
   assert(report.drawnCellCount>0,"Storage-fetched real-scale payload must render end-to-end");
   context.BT001HeatmapRenderer.drawDecorations(ctx,view,context.BT001HeatmapState.snapshot());
-  assert(labels.some(label=>label.includes("as of")),"chart source label must include freshness");
+  assert(labels.some(label=>/^BTCUSDT Heatmap · \d{2}\/\d{2}\/\d{4} \| \d{2}:\d{2}:\d{2} - Next update in \d{2}:\d{2}$/.test(label)),"chart source label must use the live countdown format");
 
   const ui=fs.readFileSync(path.join(root,"ui.module.js"),"utf8");
   for(const removed of ["heatmapProviderSecret","heatmapProviderTest","heatmapSettingsRefresh","heatmapRetryDataset","heatmapDuration","Automatic refresh: OFF"])assert(!ui.includes(removed),`${removed} must be removed`);
-  assert(ui.includes("Data source: VM-scheduled (5x/day)"));
+  assert(ui.includes("BT001HeatmapFreshness.line"));
   const html=fs.readFileSync(path.join(root,"..","..","index.html"),"utf8");
   assert(!html.includes("features/heatmap/provider-auth.module.js"));
   assert(!html.includes("features/heatmap/provider-config.module.js"));

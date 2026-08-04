@@ -22657,7 +22657,7 @@ If there is NO open position, use this Section 2 instead:
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
   let visible=false, drag=null;
   let data={}, lastFullFetch=0, lastRender=0, pipeline=null;
-  let futuresContext=null,futuresContextReadAt=0,futuresContextPending=null;
+  let futuresContext=null,futuresContextReadAt=0,futuresContextPending=null,futuresContextSymbol=null;
   const FUTURES_CONTEXT_REFRESH_MS=30000;
   let previousScoreValueByTf={}, lastRenderedScoreByTf={}, pendingScoreRollByTf={}, previousTopValues={};
   const gaugeTracker=window.BT001_SSSC_GAUGE_PRESENTATION?.createGaugeTracker?.()||{update(){},reading(){return {current:0,previous:null};}};
@@ -22920,23 +22920,20 @@ If there is NO open position, use this Section 2 instead:
     return `<div class="sssc-ui-kpi ${extra}"${title}><label>${label}</label><div class="val ${cls}">${val}</div>${tooltip?'':`<div class="sub">${sub}</div>`}</div>`;
   }
   function refreshFuturesContext(){
-    if(futuresContextPending||Date.now()-futuresContextReadAt<FUTURES_CONTEXT_REFRESH_MS)return futuresContextPending;
-    const supabase=window.BT001Supabase;
-    if(!supabase||typeof supabase.getLatestFuturesMarketSnapshot!=='function')return null;
+    const symbol=sym(),source=window.BT001SsscFuturesContext;
+    if(futuresContextPending&&futuresContextSymbol===symbol)return futuresContextPending;
+    if(futuresContextSymbol===symbol&&Date.now()-futuresContextReadAt<FUTURES_CONTEXT_REFRESH_MS)return futuresContextPending;
+    if(!source||typeof source.fetchCurrent!=='function')return null;
     futuresContextReadAt=Date.now();
-    futuresContextPending=Promise.resolve(supabase.getLatestFuturesMarketSnapshot(sym())).then(row=>{
-      futuresContext=row||null;renderFuturesContext();return row;
-    }).catch(error=>console.warn(MODULE+' futures market snapshot read failed',error)).finally(()=>{futuresContextPending=null;});
-    return futuresContextPending;
+    futuresContextSymbol=symbol;
+    const request=Promise.resolve(source.fetchCurrent(symbol)).then(row=>{
+      if(sym()===symbol){futuresContext=row||null;renderFuturesContext();}return row;
+    }).catch(error=>console.warn(MODULE+' Binance futures context read failed',error)).finally(()=>{if(futuresContextPending===request)futuresContextPending=null;});
+    futuresContextPending=request;return request;
   }
   function renderFuturesContext(){
     const node=$('ssscMarketContext');if(!node)return;
-    if(!futuresContext){node.textContent='Funding rate: — · Open interest: — · As of —';return;}
-    const eventMs=Date.parse(futuresContext.event_at),age=Number.isFinite(eventMs)?Math.max(0,Math.round((Date.now()-eventMs)/1000)):null;
-    const ageText=age==null?'unknown':age<60?`${age}s ago`:age<3600?`${Math.floor(age/60)}m ago`:`${Math.floor(age/3600)}h ago`;
-    const asOf=Number.isFinite(eventMs)&&typeof formatDateTime==='function'?formatDateTime(eventMs):futuresContext.event_at;
-    const funding=num(futuresContext.funding_rate),interest=num(futuresContext.open_interest);
-    node.textContent=`Funding rate: ${funding==null?'—':funding.toFixed(8)} · Open interest: ${interest==null?'—':interest.toLocaleString('en-US',{maximumFractionDigits:3})} · As of ${asOf} (${ageText})`;
+    node.textContent=window.BT001SsscFuturesContext.displayText(futuresContext);
   }
   function changedValue(key,val){ val=String(val); const old=previousTopValues[key]; const changed=old!==undefined && old!==val; previousTopValues[key]=val; return changed; }
   function blinkClass(key,val){ return changedValue(key,val)?' sssc-value-blink':''; }

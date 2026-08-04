@@ -3,7 +3,6 @@
   const $=id=>document.getElementById(id);
   const statusText=status=>({NOT_LOADED:"NOT LOADED",REFRESH_REQUIRED:"REFRESH REQUIRED",STARTING_REQUEST:"STARTING ACTOR",LOADING:"LOADING",READY:"READY",UPDATE_FAILED:"UPDATE FAILED",UNAVAILABLE:"UNAVAILABLE"})[status]||status;
   const date=value=>value?new Date(value).toLocaleString():"--";
-  const freshnessDate=value=>value?(typeof window.formatDateTime==="function"?window.formatDateTime(value):date(value)):"--";
   const sourceDate=value=>Number.isFinite(Number(value))?new Date(Number(value)*1000).toLocaleString():"--";
   const elapsed=value=>{const total=Math.max(0,Math.floor((Number(value)||0)/1000));return `${String(Math.floor(total/60)).padStart(2,"0")}:${String(total%60).padStart(2,"0")}`;};
   const text=(id,value)=>{const element=$(id);if(element)element.textContent=value==null||value===""?"--":String(value);};
@@ -96,7 +95,7 @@
       <label>Maximum clipping <input id="heatmapClipping" type="range" min="50" max="100"><output id="heatmapClippingOut"></output></label><label><input id="heatmapSmoothing" type="checkbox"> Cell smoothing</label>
       <label><input id="heatmapLegend" type="checkbox"> Show legend</label><label><input id="heatmapSourceLabel" type="checkbox"> Show source label</label></div>
       <h4 class="heatmap-section-heading">Source</h4><div class="heatmap-settings-grid"><span>Source market</span><strong>BTCUSDT (read-only)</strong><span>Duration</span><strong id="heatmapDisplayed">--</strong></div>
-      <div class="heatmap-fixed"><span id="heatmapFreshness">Data source: VM-scheduled (5x/day) · Heatmap as of --</span></div>
+      <div class="heatmap-fixed"><span id="heatmapFreshness">BTCUSDT Heatmap · -- | -- - Next update in --:--</span></div>
       <h4 class="heatmap-section-heading">Dataset</h4><div class="heatmap-settings-grid">
       <span>Status</span><strong id="heatmapStatus">NOT LOADED</strong><span>Failure reason</span><span id="heatmapReason">--</span>
       <span>Dataset start</span><span id="heatmapDatasetStart">--</span><span>Dataset end</span><span id="heatmapDatasetEnd">--</span><span>Source chart interval</span><span id="heatmapInterval">--</span><span>Source price step</span><span id="heatmapPriceStep">--</span>
@@ -116,7 +115,7 @@
     Object.entries(values).forEach(([id,value])=>{const element=$(id);if(element){if(element.type==="checkbox")element.checked=!!value;else element.value=String(value);}});
     const toggle=$("heatmapOverlayToggle");if(toggle){toggle.classList.toggle("is-on",prefs.enabled);toggle.classList.toggle("is-off",!prefs.enabled);toggle.setAttribute("aria-pressed",prefs.enabled?"true":"false");}
     const exactStatus=(state.loading||state.status==="UPDATE_FAILED"||state.status==="READY")&&state.diagnostics.currentStage?state.diagnostics.currentStage:statusText(state.status);
-    text("heatmapDisplayed",state.displayedDuration||"3D");text("heatmapFreshness",`Data source: VM-scheduled (5x/day) · Heatmap as of ${freshnessDate(state.lastSuccessfulUpdate)}`);text("heatmapStatus",exactStatus);text("heatmapOpacityOut",`${prefs.opacity}%`);text("heatmapStrengthOut",`${prefs.strength}%`);text("heatmapClippingOut",`${prefs.maxClipping}%`);text("heatmapLastUpdate",date(state.lastSuccessfulUpdate));text("heatmapDatasetStart",metadata?sourceDate(metadata.datasetStart):"--");text("heatmapDatasetEnd",metadata?sourceDate(metadata.datasetEnd):"--");text("heatmapInterval",metadata?(metadata.sourceInterval||`${metadata.chartIntervalSeconds}s`):"--");text("heatmapPriceStep",metadata?String(metadata.tickSize):"--");
+    text("heatmapDisplayed",state.displayedDuration||"3D");text("heatmapFreshness",window.BT001HeatmapFreshness.line(state.lastSuccessfulUpdate,state.nextScheduledUpdate,state.awaitingScheduledUpdate));text("heatmapStatus",exactStatus);text("heatmapOpacityOut",`${prefs.opacity}%`);text("heatmapStrengthOut",`${prefs.strength}%`);text("heatmapClippingOut",`${prefs.maxClipping}%`);text("heatmapLastUpdate",date(state.lastSuccessfulUpdate));text("heatmapDatasetStart",metadata?sourceDate(metadata.datasetStart):"--");text("heatmapDatasetEnd",metadata?sourceDate(metadata.datasetEnd):"--");text("heatmapInterval",metadata?(metadata.sourceInterval||`${metadata.chartIntervalSeconds}s`):"--");text("heatmapPriceStep",metadata?String(metadata.tickSize):"--");
     renderDiagnostics(state);scheduleOverlayAlignment();try{if(typeof window.draw==="function")window.draw();}catch(_error){}
   }
   function init(){watchOverlayToggle();settings();installLayoutObservers();watchDevicePixelRatio();scheduleOverlayAlignment();window.BT001HeatmapState.subscribe(render);window.addEventListener("resize",scheduleOverlayAlignment);if(document.fonts&&document.fonts.ready){document.fonts.ready.then(scheduleOverlayAlignment).catch(()=>{});if(typeof document.fonts.addEventListener==="function")document.fonts.addEventListener("loadingdone",scheduleOverlayAlignment);}window.addEventListener("heatmap:diagnostics",event=>renderDiagnostics(event.detail));}

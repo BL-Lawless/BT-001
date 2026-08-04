@@ -136,20 +136,6 @@
     }
   }
 
-  async function getLatestFuturesMarketSnapshot(symbol){
-    if(!configured())return null;
-    const rest=getRest();
-    if(!rest)throw new Error("services/rest.service.js (window.restService) is unavailable");
-    const query=new URLSearchParams({
-      select:"event_at,symbol,funding_rate,open_interest",
-      symbol:`eq.${String(symbol||"").trim().toUpperCase()}`,order:"event_at.desc",limit:"1"
-    }),key=getAnonKey();
-    const rows=await rest.get(`${getUrl()}/rest/v1/futures_market_snapshots?${query}`,{
-      headers:{apikey:key,Authorization:`Bearer ${key}`}
-    });
-    return Array.isArray(rows)&&rows.length?rows[0]:null;
-  }
-
   async function getLatestHeatmapSnapshotMetadata(symbol){
     if(!configured())return null;
     const rest=getRest();
@@ -283,7 +269,7 @@
 
   window.BT001Supabase=Object.freeze({
     getUrl,getAnonKey,configured,saveUrlFromInput,saveKeyFromInput,clearUrl,clearKey,
-    log,flushPending,pendingCount,loggingStatus,getLatestFuturesMarketSnapshot,
+    log,flushPending,pendingCount,loggingStatus,
     getLatestHeatmapSnapshotMetadata,getHeatmapSnapshotPayload,getLatestHeatmapSnapshot,
     getDeviceId,testConnection,testDbAccess
   });

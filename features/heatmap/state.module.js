@@ -10,7 +10,9 @@
   const storedDuration=read("selectedDuration",DEFAULTS.selectedDuration);
   const emptyDiagnostics=()=>({requestStartedAt:null,currentStage:"NOT LOADED",reason:null,httpStatus:null,runStatus:null,runId:null,datasetId:null,datasetRetrievalStatus:"NOT REQUESTED",lastSuccessfulProviderStage:null,actorCompletedAt:null,runDurationMs:null,timeoutMs:null,elapsedMs:0,statusErrorCount:0,statusTimeline:[],rawItemCount:0,heatmapObjectFound:null,selectedObject:null,requiredFieldsFound:[],missingFields:[],payloadStructure:null,inspectedCandidatePaths:[],decodedStringPaths:[],jsonDecodeFailurePaths:[],rawCellCount:0,validCellCount:0,normalizedCellCount:0,rejectedCellCount:0,rejectionReasons:{},timestampUnit:null,visibleTimeCellCount:0,visiblePriceCellCount:0,visibleCellCount:0,thresholdCellCount:0,drawnCellCount:0,invalidCoordinateCount:0,zeroDrawReason:"No dataset loaded",displayingPreviousDataset:false,lastDrawAt:null,canvas:null});
   const emptyRecovery=()=>({runId:null,datasetId:null,duration:null,actorStatus:null,actorRequestStartedAt:null,actorCompletedAt:null,runDurationMs:null,datasetRetrievalStatus:"NOT REQUESTED",lastSuccessfulProviderStage:null,failedStage:null,retryEligible:false,hasRawPayload:false,hasParsedCandidate:false,hasNormalizedCandidate:false,cachedRunId:null,cachedDatasetId:null,rawPayloadRequestGeneration:null});
-  const state={prefs:{enabled:bool("enabled",DEFAULTS.enabled),selectedDuration:DURATIONS.includes(storedDuration)?storedDuration:DEFAULTS.selectedDuration,opacity:num("opacity",DEFAULTS.opacity,5,80),strength:num("strength",DEFAULTS.strength,0,100),mode:read("mode",DEFAULTS.mode)==="RAW"?"RAW":"BALANCED",maxClipping:num("maxClipping",DEFAULTS.maxClipping,50,100),smoothing:bool("smoothing",DEFAULTS.smoothing),showLegend:bool("showLegend",DEFAULTS.showLegend),showSourceLabel:bool("showSourceLabel",DEFAULTS.showSourceLabel)},dataset:null,displayedDuration:null,status:"NOT_LOADED",loading:false,lastSuccessfulUpdate:null,error:null,requestGeneration:0,diagnostics:emptyDiagnostics(),recovery:emptyRecovery()};
+  const schedule=window.BT001HeatmapFreshness;
+  const state={prefs:{enabled:bool("enabled",DEFAULTS.enabled),selectedDuration:DURATIONS.includes(storedDuration)?storedDuration:DEFAULTS.selectedDuration,opacity:num("opacity",DEFAULTS.opacity,5,80),strength:num("strength",DEFAULTS.strength,0,100),mode:read("mode",DEFAULTS.mode)==="RAW"?"RAW":"BALANCED",maxClipping:num("maxClipping",DEFAULTS.maxClipping,50,100),smoothing:bool("smoothing",DEFAULTS.smoothing),showLegend:bool("showLegend",DEFAULTS.showLegend),showSourceLabel:bool("showSourceLabel",DEFAULTS.showSourceLabel)},dataset:null,displayedDuration:null,status:"NOT_LOADED",loading:false,lastSuccessfulUpdate:null,nextScheduledUpdate:schedule.nextScheduledPull(Date.now()),awaitingScheduledUpdate:false,error:null,requestGeneration:0,diagnostics:emptyDiagnostics(),recovery:emptyRecovery()};
+  let awaitedEventAt=null;
   let retainedRawPayload=null,retainedParsedCandidate=null,retainedNormalizedCandidate=null,pendingPublication=null,lastPublishedDatasetKey=null;
   const snapshot=()=>({...state,prefs:{...state.prefs},recovery:{...state.recovery},diagnostics:{...state.diagnostics,rejectionReasons:{...state.diagnostics.rejectionReasons},statusTimeline:state.diagnostics.statusTimeline.map(item=>({...item}))}});
   function notify(){const value=snapshot();listeners.forEach(listener=>{try{listener(value);}catch(_error){}});}
@@ -82,6 +84,7 @@
     pendingPublication=previous;state.dataset=normalized;state.displayedDuration=duration;state.diagnostics.currentStage="RENDERING";state.diagnostics.reason=null;notify();
     if(previous.renderFailure){const error=new Error(previous.renderFailure);error.stage="RENDERING FAILED";throw error;}
     pendingPublication=null;state.lastSuccessfulUpdate=Number.isFinite(Date.parse(eventAt||""))?Date.parse(eventAt):Date.now();if(datasetKey!=null)lastPublishedDatasetKey=String(datasetKey);state.error=null;state.recovery.failedStage=null;state.recovery.retryEligible=false;
+    if(state.awaitingScheduledUpdate&&state.lastSuccessfulUpdate>(awaitedEventAt==null?-Infinity:awaitedEventAt)){state.awaitingScheduledUpdate=false;awaitedEventAt=null;state.nextScheduledUpdate=schedule.nextScheduledPull(Date.now());}
     state.status=state.prefs.selectedDuration===duration?"READY":"REFRESH_REQUIRED";state.diagnostics.currentStage=state.prefs.enabled?"READY":"READY · OVERLAY OFF";state.diagnostics.elapsedMs=Date.now()-state.diagnostics.requestStartedAt;state.diagnostics.displayingPreviousDataset=false;if(!state.prefs.enabled)state.diagnostics.zeroDrawReason="Heatmap hidden";notify();return true;
   }
   async function processPayload(payload,duration,requestId){
@@ -137,13 +140,19 @@
     }catch(error){if(requestId!==state.requestGeneration)return false;markFailure(error);return false;}
     finally{if(requestId===state.requestGeneration){state.loading=false;notify();}}
   }
-  let refreshTimer=null;
+  let refreshTimer=null,countdownTimer=null;
+  function scheduleTick(now=Date.now()){
+    if(!state.awaitingScheduledUpdate&&now>=state.nextScheduledUpdate){state.awaitingScheduledUpdate=true;awaitedEventAt=state.lastSuccessfulUpdate;notify();return refresh();}
+    if(state.awaitingScheduledUpdate&&!state.loading)return refresh();
+    notify();
+  }
   function startScheduledReads(intervalMs=30*60*1000){
     if(refreshTimer!=null)return false;
     refresh().catch(()=>{});
     refreshTimer=setInterval(()=>refresh().catch(()=>{}),Math.max(5*60*1000,Number(intervalMs)||30*60*1000));
+    countdownTimer=setInterval(()=>scheduleTick(),60*1000);
     return true;
   }
-  function destroy(){state.requestGeneration++;state.loading=false;if(refreshTimer!=null)clearInterval(refreshTimer);refreshTimer=null;state.diagnostics.currentStage="DESTROYED";notify();}
-  window.BT001HeatmapState=Object.freeze({DURATIONS,DEFAULTS,snapshot,setPreference,subscribe,refresh,retryDatasetRetrieval,reportRender,startScheduledReads,destroy});
+  function destroy(){state.requestGeneration++;state.loading=false;if(refreshTimer!=null)clearInterval(refreshTimer);if(countdownTimer!=null)clearInterval(countdownTimer);refreshTimer=null;countdownTimer=null;state.diagnostics.currentStage="DESTROYED";notify();}
+  window.BT001HeatmapState=Object.freeze({DURATIONS,DEFAULTS,snapshot,setPreference,subscribe,refresh,retryDatasetRetrieval,reportRender,startScheduledReads,destroy,_test:{scheduleTick}});
 })();
