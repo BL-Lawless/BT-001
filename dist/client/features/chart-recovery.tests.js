@@ -1,0 +1,17 @@
+"use strict";
+const fs=require("fs"),path=require("path"),assert=require("assert");
+const main=fs.readFileSync(path.join(__dirname,"..","main.js"),"utf8");
+const load=main.slice(main.indexOf("async function loadChart"),main.indexOf("/* =========================================================\n   SECTION 11"));
+const visibility=main.slice(main.indexOf("function handleVisibilityReturn()"),main.indexOf("function scheduleVisibilityRecovery",main.indexOf("function handleVisibilityReturn()")));
+assert(load.indexOf("inspectTimeframeBuffer(requestedInterval)")<load.indexOf("if(loading)"),"retained presentation must be considered before an active full load queues the selection");
+assert(load.indexOf("draw();")<load.indexOf("setTimeout(()=>{"),"retained candles must paint before background repair starts");
+assert(load.includes("requestGeneration === chartLoadGeneration")&&load.includes("queued.generation===chartLoadGeneration"),"obsolete timeframe work must be generation guarded");
+assert(load.includes("rebuildRequirements(false)"),"retained timeframe presentation must not force-restart a compatible public socket");
+assert(main.includes("allowRetained:false")&&main.includes("symbol:state.bufferSymbol,timeframe:tf,valid,usable:valid"),"full consumer rebuilds and centralized retained-buffer validation must remain explicit");
+assert(main.includes('repairMissingClosedCandles(tf,retained.gaps,"retained-buffer-repair"'),"retained internal gaps must use targeted canonical repair");
+assert(main.includes("state.gapRepairInFlightByTf[tf]")&&main.includes("state.timeframeEnsureInFlight[interval]"),"compatible gap and history work must remain single-flight");
+assert(main.includes("candleRestInFlight.has(requestKey)")&&main.includes("restCandleRequestReuseCount"),"identical REST candle windows must reuse one in-flight request");
+assert(visibility.indexOf("rehydrateActiveChartFromHub")<visibility.indexOf("setTimeout(()=>{"),"visibility return must paint retained candles before public repair");
+assert(visibility.includes("BT001VisibilityRecovery.recover")&&visibility.includes("setTimeout(()=>{"),"authenticated recovery must stay independent from deferred public repair");
+assert(main.includes("visibilityFirstChartPaintMs")&&main.includes("timeframeFirstPaintMs")&&main.includes("restCandleRequests")&&main.includes("publicWsRestartCount")&&main.includes("obsoleteChartLoadsDiscarded"),"browser-verification diagnostics must be exposed");
+console.log("chart recovery tests passed");

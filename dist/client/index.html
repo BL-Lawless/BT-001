@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>BTC Futures Realtime Chart V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1</title>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link rel="icon" href="data:,"/>
+
+<!-- V13_UI_V2_CLEAN_BASE
+Cleanup-only build from V13_UI_V2_PATCH_20.
+Exact duplicate inline script/style blocks removed; final behavior patches preserved in last-load order.
+Rollback baseline: V13_UI_V2_PATCH_20.
+-->
+  <link rel="stylesheet" href="style.css"/>
+  <link rel="stylesheet" href="features/pressure-signal/pressure-signal.css"/>
+  <link rel="stylesheet" href="features/grad-calculator/grad-calculator.css"/>
+  <link rel="stylesheet" href="features/scalp/scalp.css"/>
+</head>
+<body>
+
+
+<div class="topbar">
+<span id="exchangeClockStatus" hidden role="status"></span>
+<button class="settings-button" id="apiKeysBtn" title="Settings">⚙</button>
+<button id="ssscDashBtn" title="Open SSSC MA Diagnostic Dashboard" type="button">SSSC</button>
+<select id="market">
+<option value="btcusdt">BTCUSDT</option>
+<option selected="" value="btcusdc">BTCUSDC</option>
+<option value="paxgusdt">PAXGUSDT</option>
+<option value="clusdt">CLUSDT</option>
+</select>
+<label>TF
+    <select id="interval">
+<option value="1m">1m</option>
+<option value="3m">3m</option>
+<option value="5m">5m</option>
+<option selected="" value="15m">15m</option>
+<option value="30m">30m</option>
+<option value="1h">1h</option>
+<option value="4h">4h</option>
+<option value="1d">1d</option>
+<option value="1w">1w</option>
+<option value="1M">1M</option>
+</select>
+</label>
+<span class="indicator-toggles">
+<label class="toggle"><input id="tglEMA20" type="checkbox"/><span id="lblEMA20">EMA20</span></label>
+<label class="toggle"><input id="tglEMA50" type="checkbox"/><span id="lblEMA50">EMA50</span></label>
+<label class="toggle"><input id="tglEMA3" type="checkbox"/><span id="lblEMA3">EMA100</span></label>
+<label class="toggle"><input id="tglVWAP" type="checkbox"/>VWAP</label>
+<label class="toggle"><input id="tglSMC" type="checkbox"/>SMC</label>
+</span>
+<button id="reload">Reload</button>
+<button id="resetView">Reset</button>
+<div class="toggles">
+<span class="trade-count" id="tradeCount"></span>
+<label class="report-control">Period
+      <select id="reportWeeks">
+<option selected="" value="1d">1D</option>
+<option value="1w">1W</option>
+<option value="2w">2W</option>
+<option value="3w">3W</option>
+<option value="1m">1M</option>
+<option value="2m">2M</option>
+<option value="3m">3M</option>
+</select>
+</label>
+<span class="custom-range hidden" id="customRange">
+<span>From</span><input autocomplete="off" id="customFrom" placeholder="dd/mm/yy" type="date"/>
+<span>To</span><input autocomplete="off" id="customTo" placeholder="dd/mm/yy" type="date"/>
+</span>
+<button id="loadTrades">Load Trades</button>
+<label class="toggle"><input id="tglPositions" type="checkbox"/>Positions</label>
+<label class="toggle"><input id="tglResults" type="checkbox"/>Results</label>
+<label class="toggle"><input id="tglDollarValues" type="checkbox"/>$ Values</label>
+<label class="toggle"><input id="tglLots" type="checkbox"/>Lots</label>
+<div class="conn-wrap" id="connWrap" title="Disconnected">
+<div class="led" id="connLed">X</div>
+</div>
+</div>
+</div>
+<div class="metrics">
+<div class="metric"><div class="k">Symbol</div><div class="v" id="mSymbol">-</div></div>
+<div class="metric metric-wide metric-date-time"><div class="k">Date / time</div><div class="v" id="mTime">-</div></div>
+<div class="metric"><div class="k">Day Open</div><div class="v" id="mOpen">-</div></div>
+<div class="metric"><div class="k">Day High</div><div class="v" id="mHigh">-</div></div>
+<div class="metric"><div class="k">Day Low</div><div class="v" id="mLow">-</div></div>
+<div class="metric"><div class="k">Day Volume</div><div class="v" id="mVolume">-</div></div>
+<div class="metric"><div class="k">Day Change</div><div class="v" id="mChange">-</div></div>
+<div class="metric metric-day-range is-neutral" id="mDayRangeBox"><div class="k">Day Range</div><div class="v metric-day-range-value" id="mDayRange">-</div></div>
+<div class="metric metric-account metric-account-start"><div class="k">Balance</div><div class="v" id="mBalance">-</div></div>
+<div class="metric metric-account metric-lot-size"><div class="k">Lot size</div><div class="v" id="mLotSize">0.000</div></div>
+<div class="metric metric-account"><div class="k">Floating P/L</div><div class="v" id="mFloatPL">-</div></div>
+</div>
+<canvas id="chart"></canvas>
+<div class="modal-backdrop hidden" id="apiModal">
+<div class="modal">
+<h3>Binance API Keys</h3>
+<div class="modal-row">
+<label for="apiKey">API Key</label>
+<input autocomplete="off" id="apiKey" type="password"/>
+</div>
+<div class="modal-row">
+<label for="apiSecret">Secret</label>
+<input autocomplete="off" id="apiSecret" type="password"/>
+</div>
+<label class="toggle">
+<input checked="" id="rememberKeys" type="checkbox"/>
+      Remember keys locally in this browser
+    </label>
+<div class="modal-note">
+      Keys are stored only in this browser’s local storage when Remember is checked.
+    </div>
+<div class="modal-actions">
+<button class="secondary" id="closeApiKeys">Close</button>
+<button id="saveApiKeys">Save</button>
+</div>
+</div>
+</div>
+<div class="modal-backdrop hidden" id="apiModalScalper">
+<div class="modal">
+<h3>Binance API Keys — Scalper Account</h3>
+<div class="modal-row">
+<label for="apiKeyScalper">API Key</label>
+<input autocomplete="off" id="apiKeyScalper" type="password"/>
+</div>
+<div class="modal-row">
+<label for="apiSecretScalper">Secret</label>
+<input autocomplete="off" id="apiSecretScalper" type="password"/>
+</div>
+<label class="toggle">
+<input checked="" id="rememberKeysScalper" type="checkbox"/>
+      Remember keys locally in this browser
+    </label>
+<div class="modal-note">
+      Keys are stored only in this browser’s local storage when Remember is checked. This account is used ONLY by the SCALP module when its "Enable Scalper" toggle is on -- never by the main chart, manual trading, or calculator.
+    </div>
+<div class="modal-actions">
+<button class="secondary" id="closeApiKeysScalper">Close</button>
+<button id="saveApiKeysScalper">Save</button>
+</div>
+</div>
+</div>
+<div class="modal-backdrop hidden" id="settingsModal">
+<div class="modal">
+<h3>Settings</h3>
+<div class="settings-grid">
+<div class="settings-card" id="binanceSettingsCard">
+<div class="settings-card-title">Binance API</div>
+<div class="api-account-block" data-account="main">
+<div class="api-account-row">
+<input class="api-account-nickname" id="apiNicknameMain" placeholder="Nickname" type="text" value="Main"/>
+<div class="api-account-controls">
+<label class="toggle api-account-scalper-toggle"><input id="apiScalperToggleMain" type="checkbox"/> Enable Scalper</label>
+<button class="secondary api-account-read" id="readBinanceAccountMain" type="button">Read</button>
+<button class="secondary api-account-switch" id="switchBinanceAccountMain" type="button">Switch to</button>
+</div>
+</div>
+<button class="secondary" id="openBinanceSettings" type="button">Open Binance API</button>
+</div>
+<div class="api-account-block" data-account="scalper">
+<div class="api-account-row">
+<input class="api-account-nickname" id="apiNicknameScalper" placeholder="Nickname" type="text" value="Scalper"/>
+<div class="api-account-controls">
+<label class="toggle api-account-scalper-toggle"><input id="apiScalperToggleScalper" type="checkbox"/> Enable Scalper</label>
+<button class="secondary api-account-read" id="readBinanceAccountScalper" type="button">Read</button>
+<button class="secondary api-account-switch" id="switchBinanceAccountScalper" type="button">Switch to</button>
+</div>
+</div>
+<button class="secondary" id="openBinanceSettingsScalper" type="button">Open Binance API</button>
+</div>
+</div>
+<div class="settings-card" id="gptSettingsCard">
+<div class="settings-card-title">GPT API</div>
+<div class="settings-card-desc">GPT key and model used by Strategy Lab analysis.</div>
+<button class="secondary" id="openGptFromSettings">Open GPT API</button>
+</div>
+<div class="settings-card" id="strategyLabSettingsCard">
+<div class="settings-card-title">Strategy Lab</div>
+<div class="settings-card-desc">Build, save, inspect, and analyze strategies using the current chart context.</div>
+<button class="secondary" id="v13LabBtn" title="Open Strategy Lab" type="button">Open Strategy Lab</button>
+</div>
+<div class="settings-card" id="legacyEmaSettingsCard">
+<div class="settings-card-title">EMAs</div>
+<div class="settings-card-desc">Chart indicator periods only.</div>
+<div class="ema-settings">
+<label>EMA 1<input id="emaPeriod1" max="999" min="1" step="1" type="number"/></label>
+<label>EMA 2<input id="emaPeriod2" max="999" min="1" step="1" type="number"/></label>
+<label>EMA 3<input id="emaPeriod3" max="999" min="1" step="1" type="number"/></label>
+</div>
+</div>
+<div class="settings-card" id="scalpSupabaseSettingsCard">
+<div class="settings-card-title">Supabase (SCALP auto-entry log)</div>
+<div class="settings-card-desc">Project URL and anon key used only to INSERT decision-log rows for SCALP auto-entry review. Stored locally in this browser after Save; never pre-populated; the field is cleared immediately after saving.</div>
+<div class="modal-row">
+<label for="scalpSupabaseUrl">Project URL</label>
+<input autocomplete="off" id="scalpSupabaseUrl" placeholder="https://xxxxxxxx.supabase.co" type="text"/>
+</div>
+<div class="modal-row">
+<label for="scalpSupabaseAnonKey">Anon key</label>
+<input autocomplete="off" id="scalpSupabaseAnonKey" placeholder="Paste anon key, then Save" type="password"/>
+</div>
+<div class="settings-card-desc" id="scalpSupabaseStatus">NOT CONFIGURED</div>
+<button class="secondary" id="scalpSupabaseSave" type="button">Save</button>
+<button class="secondary" id="scalpSupabaseClear" type="button">Clear</button>
+<button class="secondary" id="scalpSupabaseTest" type="button">Test connection</button>
+<button class="secondary" id="scalpSupabaseDbTest" type="button">Test DB Access</button>
+<div class="settings-card-desc" id="scalpSupabaseTestStatus"></div>
+<div class="settings-card-desc" id="scalpSupabaseDbTestStatus"></div>
+</div>
+</div>
+<div class="modal-actions">
+<button class="secondary" id="closeSettings">Close</button>
+</div>
+</div>
+</div>
+<section aria-label="Binance account status" class="api-account-status-window hidden" id="apiAccountStatusWindow">
+<header class="api-account-status-head" id="apiAccountStatusHead">
+<div>
+<div class="api-account-status-title" id="apiAccountStatusTitle">Binance Account Status</div>
+<div class="api-account-status-subtitle" id="apiAccountStatusSubtitle"></div>
+</div>
+<button aria-label="Close Binance account status" class="secondary" id="closeApiAccountStatus" type="button">×</button>
+</header>
+<div class="api-account-status-content" id="apiAccountStatusContent"></div>
+</section>
+
+
+  <script src="features/settings/tab-registry.js" defer></script>
+  <script src="services/binance-rest-gate.service.js?v=20260729-ban-gate-v1" defer></script>
+  <script src="services/rest.service.js" defer></script>
+  <script src="features/api/exchange-clock.module.js?v=20260727-exchange-clock-v1" defer></script>
+  <script src="services/websocket.service.js" defer></script>
+  <script src="features/pressure-signal/sssc/logging-worker.js?v=20260727-blob-worker-v1" defer></script>
+  <script src="services/supabase.service.js" defer></script>
+  <script src="apis.js" defer></script>
+  <script src="features/api/api-config.module.js" defer></script>
+  <script src="features/api/binance-rest.module.js" defer></script>
+  <script src="features/api/binance-ws.module.js" defer></script>
+  <script src="features/api/binance-user-stream.module.js" defer></script>
+  <script src="features/api/visibility-recovery-gate.module.js?v=20260803-focus-routing-v1" defer></script>
+  <script src="features/api/visibility-smart-recovery.module.js?v=20260803-visibility-smart-v1" defer></script>
+  <script src="features/api/shared-position-fact.module.js" defer></script>
+  <script src="features/api/api-index.js" defer></script>
+  <script src="features/scalp/account-settings.module.js" defer></script>
+  <script src="features/ma/ma-settings.module.js" defer></script>
+  <script src="features/ma/ma-series.module.js" defer></script>
+  <script src="features/ma/ma-overlay.module.js" defer></script>
+  <script src="features/ma/ma-tooltip.module.js" defer></script>
+  <script src="features/ma/ma-index.js" defer></script>
+  <script src="features/shared/binancePositionGroupTracker.js" defer></script>
+  <script src="features/shared/binanceConditionalOrderClassifier.js" defer></script>
+  <script src="features/shared/canonical-candle-series.js?v=20260727-duplicate-integrity-v1" defer></script>
+  <script src="features/heatmap/provider-adapter.module.js" defer></script>
+  <script src="features/heatmap/dataset.module.js" defer></script>
+  <script src="features/heatmap/state.module.js" defer></script>
+  <script src="features/heatmap/renderer.module.js" defer></script>
+  <script src="features/heatmap/ui.module.js" defer></script>
+  <script src="features/heatmap/index.js" defer></script>
+  <script src="features/pressure-signal/sssc/calculation.js" defer></script>
+  <script src="features/pressure-signal/sssc/orchestration.js" defer></script>
+  <script src="features/pressure-signal/sssc/gauge-presentation.js" defer></script>
+  <script src="main.js" defer></script>
+  <script src="features/smc/smc-overlay.module.js" defer></script>
+  <script src="features/pressure-signal/core/config.js" defer></script>
+  <script src="features/pressure-signal/core/targets.js" defer></script>
+  <script src="features/pressure-signal/diagnostics/reporting.js" defer></script>
+  <script src="features/pressure-signal/management/position-engine.js" defer></script>
+  <script src="features/pressure-signal/management/action-lifecycle.js" defer></script>
+  <script src="features/pressure-signal/ui/windows.js" defer></script>
+  <script src="features/pressure-signal/ui/signal-tooltip.js" defer></script>
+  <script src="features/pressure-signal/data-feed.js" defer></script>
+  <script src="features/pressure-signal/engines/registry.js" defer></script>
+  <script src="features/pressure-signal/engines/engine-a.js" defer></script>
+  <script src="features/pressure-signal/engines/engine-b.js" defer></script>
+  <script src="features/pressure-signal/engines/engine-c.js" defer></script>
+  <script src="features/pressure-signal/engines/selector.js" defer></script>
+  <script src="features/pressure-signal/index.js" defer></script>
+  <script src="features/scalp/config.js" defer></script>
+  <script src="features/scalp/calculations.js" defer></script>
+  <script src="features/scalp/tranche-book.js" defer></script>
+  <script src="features/scalp/exit-decisions.js" defer></script>
+  <script src="features/scalp/core/logger.js?v=20260729-vm-log-p1" defer></script>
+  <script src="features/scalp/core/signal-detector-core.js?v=20260729-vm-log-p3" defer></script>
+  <script src="features/scalp/core/signal-detector-v2-core.js?v=20260731-scalp-v2" defer></script>
+  <script src="features/scalp/simulator-data.js" defer></script>
+  <script src="features/scalp/simulator-message-bridge.js" defer></script>
+  <script src="features/scalp/signal-detector.js" defer></script>
+  <script src="features/scalp/signal-detector-v2.js?v=20260731-scalp-v2" defer></script>
+  <script src="features/scalp/state-machine.js" defer></script>
+  <script src="features/scalp/simulator-ui.js" defer></script>
+  <script src="features/scalp/ui.js" defer></script>
+  <script src="features/scalp/secondary-gateway.module.js" defer></script>
+  <script src="features/scalp/index.js" defer></script>
+  <script src="features/scalp/supabase-settings.module.js" defer></script>
+  <script src="features/calculator/index.js" defer></script>
+  <script src="features/grad-calculator/index.js" defer></script>
+  <script src="features/settings/tab-manifest.js" defer></script>
+
+<div class="v13-modal-backdrop hidden" id="v13GptModal">
+<div class="v13-modal">
+<h3>GPT API Key</h3>
+<div class="v13-modal-row">
+<label for="v13GptKey">API Key</label>
+<input autocomplete="off" id="v13GptKey" type="password"/>
+</div>
+<div class="v13-modal-row">
+<label for="v13GptModel">Model</label>
+<input autocomplete="off" id="v13GptModel" type="text" value="gpt-4o-mini"/>
+</div>
+<label class="toggle">
+<input checked="" id="v13RememberGpt" type="checkbox"/>
+      Remember GPT key locally in this browser
+    </label>
+<div class="modal-note">
+      Used only by this local browser file. The key is stored in localStorage when Remember is checked.
+    </div>
+<div class="v13-modal-actions">
+<button class="secondary" id="v13CloseGpt">Close</button>
+<button id="v13SaveGpt">Save</button>
+</div>
+</div>
+</div>
+<div class="v13-panel hidden" id="v13LabPanel">
+<div class="v13-head">
+<div class="v13-head-title">Strategy Lab — V13_UI_V2</div>
+<div class="v13-head-actions">
+<button class="secondary" id="v13SaveStrategy">Save Strategy</button>
+<button class="secondary" id="v13CloseLab">Close</button>
+</div>
+</div>
+<div class="v13-body">
+<div class="v13-grid">
+<div class="v13-field">
+<label for="v13StrategyName">Strategy name</label>
+<input id="v13StrategyName" placeholder="Example: Trend Pullback V1" type="text"/>
+</div>
+<div class="v13-field">
+<label>Current app context</label>
+<div class="v13-output" id="v13ContextBox" style="min-height:36px"></div>
+</div>
+</div>
+<div class="v13-field">
+<label for="v13StrategyText">Strategy / data instructions</label>
+<textarea id="v13StrategyText" placeholder="Write freely. Example:
+Use 1D with 300 candles for direction.
+Use 4H with 500 candles for trend.
+Use 1H EMA34 and VWAP for setup.
+Use 15m with 800 candles for entry timing.
+Avoid longs near weekly resistance.
+Rate fresh entries only."></textarea>
+</div>
+<div class="v13-actions">
+<button id="v13CheckReq">Check Strategy Data Requirements</button>
+<button id="v13AnalyzeCurrent">Analyze Current Market</button>
+<button class="secondary" id="v13ClearResult">Clear Result</button>
+</div>
+<div class="v13-grid">
+<div class="v13-field">
+<label>Data requirements / data used preview</label>
+<div class="v13-output" id="v13ReqPreview">No check run yet.</div>
+</div>
+<div class="v13-field">
+<label>GPT result</label>
+<div class="v13-output" id="v13GptResult">No analysis run yet.</div>
+</div>
+</div>
+<div class="v13-small">
+      V13_UI_V2_PATCH_02 uses handov1 multi-timeframe data and IndexedDB candle cache. Position management can be added later.
+    </div>
+</div>
+</div>
+
+
+<div class="modal-backdrop hidden" id="customDateModal">
+<div class="modal">
+<h3>Custom report dates</h3>
+<div class="modal-row"><label for="customFromModal">From</label><input autocomplete="off" id="customFromModal" placeholder="dd/mm/yy" type="date"/></div>
+<div class="modal-row"><label for="customToModal">To</label><input autocomplete="off" id="customToModal" placeholder="dd/mm/yy" type="date"/></div>
+<div class="modal-note">Enter dates as dd/mm/yy.</div>
+<div class="modal-actions"><button class="secondary" id="customDateCancel">Cancel</button><button id="customDateApply">Apply</button></div>
+</div>
+</div>
+<div class="modal-backdrop hidden" id="inspectModal">
+<div class="modal" style="width:min(320px,calc(100vw - 28px))">
+<h3>Inspect</h3>
+<div class="modal-actions" style="justify-content:center">
+<button id="inspectIsolate">Isolate</button>
+<button class="secondary" id="inspectCancel">Cancel</button>
+</div>
+</div>
+</div>
+
+<!-- ASSESS_MODULE_CSS_START -->
+
+<!-- ASSESS_MODULE_CSS_END -->
+
+<!-- ASSESS_MODULE_JS_START -->
+
+<!-- ASSESS_MODULE_JS_END -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R1_START -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R1_END -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R2_START -->
+
+<!-- V13_UI_V2_PATCH_32_REPORT_MA_UI_REBUILD_R2_END -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_START -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_END -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_MASTACK_FIX_R4_NOTES
+R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now consumed once per indicator draw so VWAP width cannot leak into MA4/MA5 draw calls. MA4/MA5 remain drawn with their own configured widths. No MA_STACK_STRIP logic, strategy, order, GPT, scoring, or IndexedDB changes.
+-->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_MASTACK_FIX_R5_MA_VWAP_ISOLATION_START -->
+
+<!-- V13_UI_V2_PATCH_33_CLEAN_BASE_MASTACK_FIX_R5_MA_VWAP_ISOLATION_END -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_PL_ISOLATE_AND_OVERLAY_FIX_START -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_PL_ISOLATE_AND_OVERLAY_FIX_END -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_START -->
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R2_ISOLATE_AND_CLOSED_LINKS_FIX_END -->
+
+<!-- R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_START -->
+
+<div id="ssscDash" class="hidden" aria-label="SSSC MA Diagnostic Dashboard">
+  <div class="sssc-ui-head" id="ssscDashHead">
+    <div class="sssc-ui-titleline"><span class="sssc-ui-title">SSSC MA Diagnostic Dashboard</span><span class="sssc-ui-subtitle">Stack · Slope · Spread · Crossover | WebSocket-first live module</span></div>
+    <div class="sssc-ui-actions"><button id="ssscDashRefresh" type="button">Refresh</button><button id="ssscDashClose" type="button">Close</button></div>
+  </div>
+  <div class="sssc-ui-body">
+    <div class="sssc-ui-top" id="ssscDashTop"></div>
+    <div class="sssc-market-context" id="ssscMarketContext">Funding rate: — · Open interest: — · As of —</div>
+    <div class="sssc-ui-table-head"><div>TF</div><div>State / Phase</div><div></div><div>MOMENTUM</div><div>SCORE</div><div>Strength State</div></div>
+    <div class="sssc-ui-rows" id="ssscDashRows"></div>
+    <div class="sssc-ui-event"><h4><span>Event Strip</span><button id="ssscEventToggle" type="button">Expand</button></h4><div id="ssscDashEvents" class="sssc-collapse-body hidden"></div></div>
+    <div class="sssc-ui-detail hidden" id="ssscDashDetail"><h4><span id="ssscDashDetailTitle">TF Detail</span><button id="ssscDetailToggle" type="button">Collapse</button></h4><div class="sssc-ui-detail-grid" id="ssscDashDetailGrid"></div></div>
+    <div class="sssc-ui-footer" id="ssscDashFooter">Waiting for data.</div>
+  </div>
+</div>
+
+<!-- R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3_END -->
+
+</body>
+
+<!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_NOTES
+R1 changes:
+- Indicator eye / view-hide-all-overlays now hides MA4 and MA5 manual draw output and excludes them from auto-Y while hidden.
+- Simplified closed-trade total P/L box is larger and remains in its existing placement.
+- EX marker total P/L box uses parent-chain total P/L, solid fill, edge placement: profit near chart top, loss near chart bottom, with vertical collision stacking.
+- Isolate mode is now triggered by closed-trade P/L boxes only; position/trade marker clicks no longer trigger isolate.
+
+Base cleanup retained:
+- Deduplicated repeated early R5 MA/VWAP isolation blocks; one canonical isolation block remains.
+- Added module map / edit boundaries for future patch work.
+- Kept runtime behavior unchanged aside from removing duplicated early isolation executions.
+- Preserved current MA/VWAP isolation layer, MA_STACK_STRIP, Assess, report-period and parent-chain logic from the baseline.
+-->
+</html>

@@ -1,0 +1,166 @@
+(() => {
+  "use strict";
+
+  function createSignalDetectorV2Core(S){
+    if(!S)throw new Error("SCALP V2 signal configuration is required");
+    const n=value=>{const out=Number(value);return Number.isFinite(out)?out:null;};
+    const clamp=(value,min=0,max=100)=>Math.max(min,Math.min(max,value));
+    const mean=values=>values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null;
+    const sign=value=>value>0?1:value<0?-1:0;
+    const direction=value=>value>0?"LONG":value<0?"SHORT":null;
+    const clone=value=>value&&typeof value==="object"?JSON.parse(JSON.stringify(value)):value;
+    const periods=()=>[S.emaFast,S.emaSlow,S.emaFast,S.emaSlow,S.emaFast];
+    const closedRows=rows=>(Array.isArray(rows)?rows:[]).filter(row=>row&&row.final!==false);
+
+    function atrTelemetry(rows,period=S.atrPeriod,lookback=S.atrTrajectoryLookbackBars){
+      const source=closedRows(rows).slice(0,-1),ranges=[];
+      for(let i=1;i<source.length;i++){
+        const row=source[i],previous=source[i-1],high=n(row.high),low=n(row.low),previousClose=n(previous.close);
+        if(high==null||low==null||previousClose==null)continue;
+        ranges.push(Math.max(high-low,Math.abs(high-previousClose),Math.abs(low-previousClose)));
+      }
+      if(ranges.length<period)return {atr:null,priorAtr:null,atrChange:null};
+      const series=[];let current=mean(ranges.slice(0,period));series.push(current);
+      for(let i=period;i<ranges.length;i++){current=((period-1)*current+ranges[i])/period;series.push(current);}
+      const priorAtr=series.length>lookback?series[series.length-1-lookback]:null;
+      return {atr:current,priorAtr,atrChange:priorAtr>0?(current-priorAtr)/priorAtr:null};
+    }
+
+    function analyze(rows,fast,slow,index=rows.length-1){
+      if(index<3)return null;
+      const f=n(fast[index]),s=n(slow[index]),pf=n(fast[index-1]),ps=n(slow[index-1]),p2f=n(fast[index-2]),p2s=n(slow[index-2]);
+      if([f,s,pf,ps,p2f,p2s].some(value=>value==null))return null;
+      const volatility=atrTelemetry(rows.slice(0,index+1)),fastSlope=f-pf,previousFastSlope=pf-p2f;
+      return {i:index,f,s,pf,ps,gap:f-s,previousGap:pf-ps,separation:Math.abs(f-s),closedReferenceSeparation:Math.abs(pf-ps),fastSlope,previousFastSlope,fastAcceleration:fastSlope-previousFastSlope,slowSlope:s-ps,previousSlowSlope:ps-p2s,atr:volatility.atr,priorAtr:volatility.priorAtr,atrChange:volatility.atrChange};
+    }
+
+    function pressureScore(rows,eventIndex,eventDirection){
+      const event=rows[eventIndex],volume=n(event&&event.volume),buy=n(event&&event.takerBuyBase),open=n(event&&event.open),high=n(event&&event.high),low=n(event&&event.low),close=n(event&&event.close);
+      if(!(volume>0)||buy==null||buy<0||buy>volume||[open,high,low,close].some(value=>value==null))return {available:false,reason:"pressure-input-unavailable"};
+      const baseline=[];for(let i=eventIndex-1;i>=0&&baseline.length<S.pressureBaseline;i--){const value=n(rows[i]&&rows[i].volume);if(rows[i]&&rows[i].final!==false&&value>0)baseline.push(value);}
+      if(baseline.length<S.pressureBaseline)return {available:false,reason:`pressure-baseline-${baseline.length}-of-${S.pressureBaseline}`};
+      const relativeVolume=volume/mean(baseline),directionalShare=(eventDirection==="LONG"?buy:volume-buy)/volume,range=Math.max(high-low,Math.abs(close-open),Number.EPSILON),progress=clamp((eventDirection==="LONG"?close-open:open-close)/range,0,1),absorption=relativeVolume>=1.5&&progress<.18;
+      return {available:true,score:Math.round(clamp(50+(directionalShare-.5)*100+clamp((relativeVolume-1)*10,-10,15)*(directionalShare>=.5?1:-1)+(progress-.15)*20- (absorption?45:0))),directionalVolumeShare:directionalShare,relativeVolume,pressureDirection:directionalShare>=.57?"ALIGNED":directionalShare<=.43?"OPPOSING":"BALANCED",absorption};
+    }
+
+    function slowContext(fast,slow,index,eventDirection){
+      const dir=eventDirection==="LONG"?1:-1,current=n(slow[index]),previous=n(slow[index-1]),currentSlope=current-previous;
+      if(!(dir*currentSlope>0))return {mode:"REVERSAL_UNSCORED",score:null,wakeUp:null,maturity:null,age:0};
+      const start=Math.max(1,index-S.slowContextLookback+1),slopes=[];
+      for(let i=start;i<=index;i++){const value=n(slow[i]),prior=n(slow[i-1]);if(value!=null&&prior!=null)slopes.push(value-prior);}
+      let age=0;for(let i=slopes.length-1;i>=0&&dir*slopes[i]>0;i--)age++;
+      const earlier=slopes[Math.max(0,slopes.length-1-Math.floor(S.slowContextLookback/2))]||0,wakeUp=clamp(50+dir*(currentSlope-earlier)*20),maturity=clamp(100*(1-(Math.max(1,age)-1)/S.slowContextLookback));
+      return {mode:"SAME_DIRECTION",score:mean([wakeUp,maturity]),wakeUp,maturity,age,currentSlope,earlierSlope:earlier};
+    }
+
+    function exhaustion15m(hub){
+      if(!hub||typeof hub.getAuthoritativeMaSnapshot!=="function")return {available:false,score:50,reason:"15m-context-unavailable"};
+      const snap=hub.getAuthoritativeMaSnapshot(S.exhaustionTimeframe,{includeForming:false,periods:[S.emaSlow],requiredRows:S.minimumRows}),slow=snap&&snap.alignedByPeriod&&snap.alignedByPeriod[S.emaSlow]||[];
+      if(!snap||!snap.reliable||slow.length<5)return {available:false,score:50,reason:"15m-context-warming"};
+      const slopes=[];for(let i=slow.length-4;i<slow.length;i++){const value=n(slow[i]),prior=n(slow[i-1]);if(value==null||prior==null)return {available:false,score:50,reason:"15m-context-incomplete"};slopes.push(Math.abs(value-prior));}
+      const recent=slopes[slopes.length-1],priorPace=mean(slopes.slice(0,3)),deceleration=priorPace>0?(priorPace-recent)/priorPace:0;
+      return {available:true,score:clamp(50+deceleration*50),recentPace:recent,priorPace,deceleration};
+    }
+
+    function cleanliness(analyses){
+      const values=analyses.map(item=>item&&item.separation).filter(value=>value!=null),scale=Math.max(S.approachBandPrice,Number.EPSILON);
+      if(!values.length)return 0;
+      const average=mean(values),dispersion=average>0?Math.sqrt(mean(values.map(value=>(value-average)**2)))/average:1;
+      return clamp(100*Math.min(1,average/scale)/(1+dispersion));
+    }
+
+    function scoreEvent(tf,event,analysis,rows,fast,slow,context={}){
+      const dir=event.direction==="LONG"?1:-1,snap=clamp(Math.abs(analysis.fastAcceleration)/Math.max(S.snapFullPrice,Number.EPSILON)*100);
+      const followSlopes=(context.followAnalyses||[]).map(item=>Math.abs(item.fastSlope)),followThrough=clamp((mean(followSlopes)||Math.abs(analysis.fastSlope))/Math.max(S.followThroughFullPrice,Number.EPSILON)*100);
+      const atrTrajectory=clamp(50+(analysis.atrChange||0)/Math.max(S.atrTrajectoryFullChange,Number.EPSILON)*50),engagement=analysis.atr>0?clamp(((Math.abs(analysis.fastAcceleration)+(mean(followSlopes)||Math.abs(analysis.fastSlope)))/analysis.atr)/Math.max(S.engagementFullAtr,Number.EPSILON)*100):50;
+      const slowRead=slowContext(fast,slow,analysis.i,event.direction),exhaustion=exhaustion15m(context.hub),row=rows[analysis.i],price=n(row&&row.close),pricePosition=price==null?50:clamp(50+dir*(price-analysis.s)/Math.max(S.approachBandPrice,Number.EPSILON)*50);
+      const geometry=event.eventType==="CROSS"
+        ?{cleanliness:cleanliness(context.followAnalyses&&context.followAnalyses.length?context.followAnalyses:[analysis]),separationExpansion:clamp(analysis.separation/Math.max(S.approachBandPrice,Number.EPSILON)*100),pricePosition,rapidReversalStability:context.rapid?15:100}
+        :{approachCloseness:clamp(100*(1-context.closestSeparation/Math.max(S.approachBandPrice,Number.EPSILON))),rejectionExpansion:clamp((analysis.separation-context.closestSeparation)/Math.max(S.bounceExpansionPrice*2,Number.EPSILON)*100),priceFollowThrough:pricePosition,sameSideIntegrity:100};
+      const components={...geometry,snap,followThrough,engagement,atrTrajectory,exhaustion15m:exhaustion.score,dataReliabilityFreshness:100};
+      if(slowRead.score!=null){components.ema55WakeUp=slowRead.wakeUp;components.ema55Maturity=slowRead.maturity;}
+      const emaScore=Math.round(mean(Object.values(components))),pressure=pressureScore(rows,analysis.i,event.direction),emaContribution=pressure.available?emaScore*.70:emaScore,pressureContribution=pressure.available?pressure.score*.30:null,rankValue=Math.round(emaContribution+(pressureContribution||0));
+      return Object.freeze({...event,rank:rankValue>=80?"A":rankValue>=60?"B":rankValue>=1?"C":null,rankValue,emaScore,pressureScore:pressure.available?pressure.score:null,rankDiagnostics:Object.freeze({profile:"V2",timeframe:tf,candleTime:event.candleTime,rankValue,emaScore,emaContribution,emaComponents:Object.freeze(components),pressureAvailable:pressure.available,pressureScore:pressure.available?pressure.score:null,pressureContribution,pressure:Object.freeze({...pressure}),slowContext:Object.freeze(slowRead),exhaustion15m:Object.freeze(exhaustion)})});
+    }
+
+    function makeEvent(tf,type,eventDirection,row,now,raw={}){
+      const candleTime=n(row&&row.time)||0;
+      return {source:tf,eventId:[tf,type,eventDirection,candleTime,"V2"].join("|"),freshnessKey:[tf,type,eventDirection,candleTime].join("|"),eventType:type,direction:eventDirection,eventState:type==="BOUNCE"?"CONFIRMED":"LIVE",phase:type==="BOUNCE"?"CONFIRMED":"LIVE",qualified:true,projected:false,candleTime,publishedAt:now,reason:`V2 raw-price ${type.toLowerCase()} qualified`,raw:Object.freeze({...raw})};
+    }
+
+    function bounceCandidate(rows,fast,slow){
+      const end=rows.length-1,start=Math.max(3,end-S.bounceWindowBars+1),points=[];
+      for(let i=start;i<=end;i++){const item=analyze(rows,fast,slow,i),side=item&&sign(item.gap);if(item&&side)points.push({analysis:item,side});}
+      const current=points[points.length-1];if(!current||current.analysis.i!==end)return null;
+      let suffix=points.length-1;while(suffix>0&&points[suffix-1].side===current.side&&points[suffix-1].analysis.i===points[suffix].analysis.i-1)suffix--;
+      const same=points.slice(suffix);if(same.length<3)return null;
+      let closest=0;for(let i=1;i<same.length;i++)if(same[i].analysis.separation<same[closest].analysis.separation)closest=i;
+      if(closest===0||closest===same.length-1)return null;
+      const touch=same[closest].analysis,separation=current.analysis.separation,dir=direction(current.side);
+      const approachedStrongly=same.slice(0,closest+1).some(point=>-current.side*point.analysis.fastSlope>=S.minFastSlopePrice);
+      if(!approachedStrongly||touch.separation>S.observationBandPrice)return null;
+      if(touch.separation>S.approachBandPrice||touch.separation>S.touchTolerancePrice)return null;
+      if(separation<touch.separation+S.bounceExpansionPrice)return null;
+      if((dir==="LONG"?1:-1)*current.analysis.fastSlope<=0)return null;
+      return {direction:dir,analysis:current.analysis,closestSeparation:touch.separation,touchCandleTime:n(rows[touch.i]&&rows[touch.i].time)||0,followAnalyses:same.slice(closest+1).map(item=>item.analysis)};
+    }
+
+    class Detector{
+      constructor(options={}){this.getHub=typeof options.getHub==="function"?options.getHub:()=>null;this.pendingCrossByTf=new Map();this.lastEmittedByTf=new Map();this.diagnosticsByTf=new Map();}
+      reset(tf=null){if(tf){this.pendingCrossByTf.delete(tf);this.lastEmittedByTf.delete(tf);this.diagnosticsByTf.delete(tf);}else{this.pendingCrossByTf.clear();this.lastEmittedByTf.clear();this.diagnosticsByTf.clear();}}
+      diagnostics(){return {byTimeframe:Object.fromEntries([...this.diagnosticsByTf].map(([key,value])=>[key,clone(value)])),recent:[]};}
+      expireNovelty(tf,analysis,rows){
+        const prior=this.lastEmittedByTf.get(tf);if(!prior)return;
+        const currentDirection=direction(sign(analysis&&analysis.gap));
+        if(currentDirection&&currentDirection!==prior.direction){this.lastEmittedByTf.delete(tf);return;}
+        if(prior.type==="BOUNCE"){
+          const activeTouch=(Array.isArray(rows)?rows:[]).slice(-S.bounceWindowBars).some(row=>n(row&&row.time)===prior.anchorCandleTime);
+          if(!activeTouch)this.lastEmittedByTf.delete(tf);
+        }
+      }
+      novelEmission(tf,event,anchorCandleTime){
+        if(!event)return null;
+        const identity=[event.eventType,event.direction,n(anchorCandleTime)||0].join("|");
+        const prior=this.lastEmittedByTf.get(tf);
+        if(prior&&prior.identity===identity)return null;
+        this.lastEmittedByTf.set(tf,{identity,type:event.eventType,direction:event.direction,anchorCandleTime:n(anchorCandleTime)||0,emittedCandleTime:n(event.candleTime)||0});
+        return event;
+      }
+      evaluateTf(tf,update=null,now=Date.now()){
+        const hub=this.getHub(),closed=!!(update&&update.type==="kline"&&update.tf===tf&&update.closed===true);
+        if(!hub||typeof hub.getAuthoritativeMaSnapshot!=="function")return {ready:false,status:"V2 canonical EMA data unavailable",event:null,emittedEvent:null,detection:null};
+        const snap=hub.getAuthoritativeMaSnapshot(tf,{includeForming:true,periods:periods(),requiredRows:S.minimumRows}),rows=snap&&snap.rows||[],fast=snap&&snap.alignedByPeriod&&snap.alignedByPeriod[S.emaFast]||[],slow=snap&&snap.alignedByPeriod&&snap.alignedByPeriod[S.emaSlow]||[],analysis=analyze(rows,fast,slow);
+        if(!snap||!snap.reliable||!analysis)return {ready:false,status:snap&&snap.reason||"V2 EMA warming up",event:null,emittedEvent:null,detection:null};
+        this.expireNovelty(tf,analysis,rows);
+        let emittedEvent=null,event=null;
+        if(closed){
+          const pending=this.pendingCrossByTf.get(tf),currentTime=n(rows[analysis.i]&&rows[analysis.i].time)||0;
+          if(pending&&currentTime>pending.candleTime){
+            const base=makeEvent(tf,"CROSS",pending.direction,rows[pending.analysis.i],now,{...pending.analysis,crossQualifiedWithoutSeparationGate:true});
+            emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,pending.analysis,rows,fast,slow,{hub,followAnalyses:[analysis]}),pending.candleTime);this.pendingCrossByTf.delete(tf);
+          }
+          if(!emittedEvent&&sign(analysis.gap)&&sign(analysis.previousGap)&&sign(analysis.gap)!==sign(analysis.previousGap)){
+            const eventDirection=direction(sign(analysis.gap));this.pendingCrossByTf.set(tf,{direction:eventDirection,candleTime:currentTime,analysis});
+            event={...makeEvent(tf,"CROSS",eventDirection,rows[analysis.i],now,{...analysis,crossQualifiedWithoutSeparationGate:true}),qualified:false,eventState:"FOLLOW_THROUGH",phase:"FOLLOW_THROUGH",reason:"V2 cross candidate accepted; collecting post-event follow-through"};
+          }
+          if(!emittedEvent){
+            const bounce=bounceCandidate(rows,fast,slow);
+            if(bounce){
+              const base=makeEvent(tf,"BOUNCE",bounce.direction,rows[analysis.i],now,{...analysis,closestSeparation:bounce.closestSeparation});
+              emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,analysis,rows,fast,slow,{hub,closestSeparation:bounce.closestSeparation,followAnalyses:bounce.followAnalyses}),bounce.touchCandleTime);
+            }
+          }
+        }
+        event=emittedEvent||event;const status=event?`${event.eventState} ${event.direction} ${event.eventType}`:`V2 ${direction(sign(analysis.gap))||"FLAT"} EMA9/EMA55`;
+        this.diagnosticsByTf.set(tf,{tf,profile:"V2",currentGap:analysis.gap,separationPrice:analysis.separation,fastSlopePrice:analysis.fastSlope,emittedEvent:clone(emittedEvent),lastEmittedSetup:clone(this.lastEmittedByTf.get(tf)||null)});
+        return {ready:true,status,event,emittedEvent,oppositeCross:emittedEvent&&emittedEvent.eventType==="CROSS"?emittedEvent:null,detection:event,guide:n(rows[analysis.i]&&rows[analysis.i].close),analysis,diagnostics:this.diagnosticsByTf.get(tf)};
+      }
+    }
+
+    return Object.freeze({Detector,detectorTools:Object.freeze({atrTelemetry,analyze,pressureScore,slowContext,exhaustion15m,cleanliness,scoreEvent,bounceCandidate})});
+  }
+
+  const api=Object.freeze({createSignalDetectorV2Core});
+  if(typeof module!=="undefined"&&module.exports)module.exports=api;
+  if(typeof window!=="undefined")window.BT001_SCALP_SIGNAL_DETECTOR_V2_CORE=api;
+})();
