@@ -119,5 +119,47 @@ const {create}=require("./api/visibility-recovery-gate.module.js");
   assert.equal(gate.diagnostics().completedRuns,1,"resolved:true must advance the visibility success anchor normally");
   assert.equal(gate.diagnostics().lastCompletedAt,1);
 
+  let visibilityRepairOutcome={
+    resolved:false,stale:false,affectedTimeframes:["1m"],
+    unresolved:[{tf:"1m",resolved:false,error:"targeted repair unresolved"}]
+  };
+  let fullReseedCalls=0,visibilityRehydrates=0;
+  const runPublicVisibilityRecovery=vm.runInNewContext(`(${visibilitySource.trim()})`,{
+    Promise,Set,Math,Error,String,Array,KLINE_LIMIT:1500,WS_RECONNECT_MS:30000,
+    iv:()=>"1m",ensureBufferSymbol:()=>"BTCUSDT",cfg:()=>({symbol:"BTCUSDT"}),
+    repairKnownClosedGaps:async()=>visibilityRepairOutcome,
+    getClosedBuffer:()=>rows,intervalKeep:()=>1200,
+    prepareTimeframeBuffer:async(_tf,_target,options)=>{fullReseedCalls+=1;assert.equal(options.allowRetained,false);return {continuous:true};},
+    validateClosedBuffer:()=>[],rehydrateActiveChartFromHub:()=>{visibilityRehydrates+=1;},
+    now:()=>1000,restSyncLatest:async()=>true,
+    state:{ssscVisible:false,maStackVisible:false},diag:{lastWsTickTime:1000},
+    ensureSsscBuffers:async()=>{},ensureMaStackBuffers:async()=>{},socketOpen:()=>true,
+    connect:()=>{},scheduleReconnect:()=>{},refreshConnectionStatus:()=>{}
+  });
+  assert.equal(await runPublicVisibilityRecovery("visibility/focus return"),true);
+  assert.equal(fullReseedCalls,1,"an unresolved targeted visibility repair must force one authoritative REST reseed for the affected timeframe");
+  assert.equal(visibilityRehydrates,1,"a verified active-timeframe reseed must rehydrate and redraw the chart");
+
+  visibilityRepairOutcome={
+    resolved:false,stale:false,affectedTimeframes:["1m"],
+    unresolved:[{tf:"1m",resolved:false,error:"targeted repair failed"}]
+  };
+  const failedVisibilityRecovery=vm.runInNewContext(`(${visibilitySource.trim()})`,{
+    Promise,Set,Math,Error,String,Array,KLINE_LIMIT:1500,WS_RECONNECT_MS:30000,
+    iv:()=>"1m",ensureBufferSymbol:()=>"BTCUSDT",cfg:()=>({symbol:"BTCUSDT"}),
+    repairKnownClosedGaps:async()=>visibilityRepairOutcome,
+    getClosedBuffer:()=>rows,intervalKeep:()=>1200,
+    prepareTimeframeBuffer:async()=>{throw new Error("full REST fetch failed");},
+    validateClosedBuffer:()=>[],rehydrateActiveChartFromHub:()=>{},now:()=>1000,
+    restSyncLatest:async()=>true,state:{ssscVisible:false,maStackVisible:false},diag:{lastWsTickTime:1000},
+    ensureSsscBuffers:async()=>{},ensureMaStackBuffers:async()=>{},socketOpen:()=>true,
+    connect:()=>{},scheduleReconnect:()=>{},refreshConnectionStatus:()=>{}
+  });
+  await assert.rejects(
+    failedVisibilityRecovery("visibility/focus return"),
+    error=>/targeted repair failed/.test(error.message)&&/full REST fetch failed/.test(error.message),
+    "visibility recovery failures must surface both the targeted-repair and full-reseed errors"
+  );
+
   console.log("chart boundary integrity tests: PASS");
 })().catch(error=>{console.error(error);process.exitCode=1;});

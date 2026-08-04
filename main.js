@@ -4566,17 +4566,27 @@ const marketDataHub = (() => {
   async function repairKnownClosedGaps(reason="gap-check",options={}){
     ensureBufferSymbol();
     const repairs=[];
+    const affectedTimeframes=[];
     let issueCount=0;
     requiredKlineTimeframes().forEach(tf => {
       const issues=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason});
       issueCount+=issues.length;
       if(!issues.length)return;
-      const repair=repairMissingClosedCandles(tf,issues,reason);
-      repairs.push(options.throwOnError===true?repair:repair.catch(error=>({resolved:false,stale:false,error:error&&error.message||String(error),reason,tf})));
+      affectedTimeframes.push(tf);
+      const repair=repairMissingClosedCandles(tf,issues,reason)
+        .then(result=>({...result,tf}))
+        .catch(error=>{
+          if(options.throwOnError===true){
+            if(error&&typeof error==="object")error.visibilityRepairTf=tf;
+            throw error;
+          }
+          return {resolved:false,stale:false,error:error&&error.message||String(error),reason,tf};
+        });
+      repairs.push(repair);
     });
     const results=await Promise.all(repairs);
     const unresolved=results.filter(result=>!result||result.resolved!==true||result.stale===true);
-    return {resolved:unresolved.length===0,stale:results.some(result=>result&&result.stale===true),issueCount,results,unresolved};
+    return {resolved:unresolved.length===0,stale:results.some(result=>result&&result.stale===true),issueCount,affectedTimeframes,results,unresolved};
   }
   function connect({force=false,reason=""}={}){
     state.desiredLive = true;
@@ -4765,8 +4775,39 @@ const marketDataHub = (() => {
   }
 
   async function runPublicMarketVisibilityRecovery(reason){
-    const repairOutcome=await repairKnownClosedGaps(reason,{throwOnError:true});
-    if(!repairOutcome||repairOutcome.resolved!==true||repairOutcome.stale===true)throw new Error("Public market visibility candle-integrity repair remained unresolved");
+    const activeTf=iv();
+    const recoverySymbol=ensureBufferSymbol();
+    const guard=()=>String((cfg()&&cfg().symbol)||"").toUpperCase()===recoverySymbol;
+    const repairOutcome=await repairKnownClosedGaps(reason,{throwOnError:false});
+    if(!repairOutcome||repairOutcome.resolved!==true||repairOutcome.stale===true){
+      const fallbackTimeframes=new Set(
+        (repairOutcome&&repairOutcome.affectedTimeframes||[])
+          .concat((repairOutcome&&repairOutcome.unresolved||[]).map(result=>result&&result.tf).filter(Boolean))
+      );
+      if(!fallbackTimeframes.size)fallbackTimeframes.add(activeTf);
+      const fallbackFailures=[];
+      for(const tf of fallbackTimeframes){
+        try{
+          const target=Math.max(10,Math.min(KLINE_LIMIT,Math.max(getClosedBuffer(tf).length,intervalKeep(tf))));
+          const rebuilt=await prepareTimeframeBuffer(tf,target,{guard,allowRetained:false});
+          const remaining=validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:`${reason}/full-reseed-verify`});
+          if(!rebuilt||!guard()||remaining.length){
+            fallbackFailures.push({tf,error:!guard()?"symbol changed during recovery":`${remaining.length} integrity issue(s) remained after full REST reseed`});
+          }
+        }catch(error){
+          fallbackFailures.push({tf,error:error&&error.message||String(error)});
+        }
+      }
+      if(fallbackFailures.length){
+        const targeted=(repairOutcome&&repairOutcome.unresolved||[]).map(result=>`${result&&result.tf||"unknown"}: ${result&&result.error||"targeted repair unresolved"}`).join("; ");
+        const fallback=fallbackFailures.map(result=>`${result.tf}: ${result.error}`).join("; ");
+        const error=new Error(`Public market visibility candle-integrity repair remained unresolved; targeted: ${targeted||"no detail"}; full REST reseed: ${fallback}`);
+        error.repairOutcome=repairOutcome;
+        error.fallbackFailures=fallbackFailures;
+        throw error;
+      }
+      if(fallbackTimeframes.has(activeTf))rehydrateActiveChartFromHub(activeTf,now(),"visibility-full-reseed");
+    }
     const synced=await restSyncLatest(reason,{throwOnError:true});
     if(!synced)throw new Error("Public market visibility REST sync did not complete");
     const hydration=[];
