@@ -4085,8 +4085,9 @@ const marketDataHub = (() => {
     trimClosedBuffer(tf,limitOverride);
     const closedChanged=before !== closedContentKey(getClosedBuffer(tf));
     if(closedChanged&&!deferRevision) bumpClosedRevision(tf);
-    if(!deferValidation)validateClosedBuffer(tf,getClosedBuffer(tf),{repair:true,reason:`closed-${source}`});
-    return {closedChanged};
+    const continuityIssues=!deferValidation?validateClosedBuffer(tf,getClosedBuffer(tf),{repair:false,reason:`closed-${source}`}):[];
+    if(continuityIssues.length)beginGapReconciliation(tf,continuityIssues,`closed-${source}`);
+    return {closedChanged,continuous:continuityIssues.length===0,continuityIssues};
   }
   function prependClosedBuffer(tf,rows,limitOverride,{trimFromRight=false}={}){
     if(!tf || !Array.isArray(rows) || !rows.length) return getClosedBuffer(tf);
