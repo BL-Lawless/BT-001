@@ -26,7 +26,23 @@ assert.equal(qualified.rankDiagnostics.profile,"V2");
 
 const components=qualified.rankDiagnostics.emaComponents;
 for(const key of ["snap","followThrough","engagement","atrTrajectory","exhaustion15m","cleanliness"])assert(Object.prototype.hasOwnProperty.call(components,key),`${key} must be scored`);
-for(const removed of ["directionalAcceleration","atrNormalizedAcceleration","directionalSlope","velocityRelativeToAtr","ema55Context"])assert(!Object.prototype.hasOwnProperty.call(components,removed),`${removed} must not be duplicated in V2`);
+for(const removed of ["directionalAcceleration","atrNormalizedAcceleration","directionalSlope","velocityRelativeToAtr","ema55Context","dataReliabilityFreshness","sameSideIntegrity"])assert(!Object.prototype.hasOwnProperty.call(components,removed),`${removed} must not be an additive V2 component`);
+
+snapshot={reliable:false,reason:"stale canonical data",rows:nextRows,alignedByPeriod:{9:nextFast,55:nextSlow}};
+const unreliable=detector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},2001);
+assert.equal(unreliable.ready,false,"unreliable V2 data must remain a hard gate");
+assert.equal(unreliable.emittedEvent,null,"unreliable V2 data must never reach scoring or emission");
+snapshot={reliable:true,rows:nextRows,alignedByPeriod:{9:nextFast,55:nextSlow}};
+
+const weakAnalysis={...candidate.analysis,fastAcceleration:.01,fastSlope:.01,separation:.01,atr:2,atrChange:0,s:100,i:31};
+const strongAnalysis={...weakAnalysis,fastAcceleration:4,fastSlope:4,separation:12,atrChange:.3};
+const scoreRows=rows.map(row=>({...row,volume:0}));
+const weakQuality=tools.scoreEvent("1m",{...qualified,eventType:"CROSS",direction:"LONG"},weakAnalysis,scoreRows,fast,slow,{hub:null,followAnalyses:[weakAnalysis]});
+const strongQuality=tools.scoreEvent("1m",{...qualified,eventType:"CROSS",direction:"LONG"},strongAnalysis,scoreRows,fast,slow,{hub:null,followAnalyses:[strongAnalysis]});
+assert(strongQuality.rankValue>weakQuality.rankValue,"separation, snap, velocity, and engagement must genuinely differentiate the total V2 score");
+
+const integrityFast=fast.slice();integrityFast[integrityFast.length-2]=99;integrityFast[integrityFast.length-1]=101;
+assert.equal(tools.bounceCandidate(rows,integrityFast,slow),null,"an interrupted same-side history must not produce a V2 BOUNCE candidate");
 
 const disagreeingSlow=nextSlow.map((_,index)=>200-index);
 const reversal=tools.slowContext(nextFast,disagreeingSlow,nextSlow.length-1,"LONG");
@@ -45,6 +61,7 @@ let bounceSnapshot=()=>({reliable:true,rows:bounceRows,alignedByPeriod:{9:bounce
 const bounceHub={getAuthoritativeMaSnapshot:()=>bounceSnapshot()},bounceDetector=new Detector({getHub:()=>bounceHub});
 const firstBounce=bounceDetector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},3000).emittedEvent;
 assert(firstBounce&&firstBounce.eventType==="BOUNCE","fixture must produce the original V2 bounce");
+assert(!Object.prototype.hasOwnProperty.call(firstBounce.rankDiagnostics.emaComponents,"sameSideIntegrity"),"same-side integrity is a gate, not an additive V2 score");
 const firstSetup=bounceDetector.diagnostics().byTimeframe["1m"].lastEmittedSetup,firstIdentity=firstSetup.identity;
 for(let minute=0;minute<4;minute++){
   bounceRows=bounceRows.concat(candle(bounceRows.length));bounceSlow=bounceSlow.concat(100);bounceFast=bounceFast.concat(112+minute*2);
