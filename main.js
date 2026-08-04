@@ -3938,7 +3938,7 @@ const marketDataHub = (() => {
     for(let index=1;index<arr.length;index++){
       const previous=arr[index-1],current=arr[index];
       const previousTime=Number(previous&&previous.time),currentTime=Number(current&&current.time);
-      if(!Number.isFinite(previousTime)||!Number.isFinite(currentTime)||currentTime-previousTime!==stepSec)continue;
+      if(!Number.isFinite(previousTime)||!Number.isFinite(currentTime)||currentTime-previousTime===stepSec)continue;
       const priorClose=Number(previous.close),nextOpen=Number(current.open);
       const previousHigh=Number(previous.high),previousLow=Number(previous.low),currentHigh=Number(current.high),currentLow=Number(current.low);
       if(![priorClose,nextOpen,previousHigh,previousLow,currentHigh,currentLow].every(Number.isFinite))continue;

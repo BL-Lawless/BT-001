@@ -24,9 +24,12 @@ const {create}=require("./api/visibility-recovery-gate.module.js");
 
   const defective=Array.from({length:18},(_,index)=>candle(index));
   defective[6]=candle(6,{open:140,high:143,low:139,close:141});
-  const issues=Array.from(detect("1m",defective,{stepSec:60}));
-  assert(issues.length>=1,"an implausible close/open and wick discontinuity must be detected");
-  const enteringIssue=issues.find(issue=>issue.toTime===defective[6].time);
+  assert.equal(detect("1m",defective,{stepSec:60}).length,0,"a normal one-step candle boundary must never be flagged even when its prices jump");
+
+  const gapped=defective.map((row,index)=>({...row,time:row.time+(index>=6?60:0)}));
+  const issues=Array.from(detect("1m",gapped,{stepSec:60}));
+  assert(issues.length>=1,"an implausible close/open and wick discontinuity across a genuine time gap must be detected");
+  const enteringIssue=issues.find(issue=>issue.toTime===gapped[6].time);
   assert(enteringIssue&&enteringIssue.kind==="boundary-discontinuity");
   assert(enteringIssue.closeOpenGap>enteringIssue.threshold&&enteringIssue.wickGap>enteringIssue.threshold);
   assert(6<defective.length-5,"the fixture boundary must sit outside the normal five-candle visibility refresh");
@@ -34,7 +37,7 @@ const {create}=require("./api/visibility-recovery-gate.module.js");
   const repairStart=main.indexOf("async function repairMissingClosedCandles");
   const repairEnd=main.indexOf("function ingestRestRows",repairStart);
   const repairSource=main.slice(repairStart,repairEnd).trim();
-  let rows=defective.map(row=>({...row})),revisionBumps=0,redraws=0;
+  let rows=gapped.map(row=>({...row})),revisionBumps=0,redraws=0;
   const contentKey=row=>row?[row.time,row.open,row.high,row.low,row.close,row.volume,row.quoteVolume,row.tradeCount,row.takerBuyBase,row.takerBuyQuote,row.final===true?1:0].join(":"):"";
   const context={
     Math,Number,String,Array,Object,Promise,Set,
