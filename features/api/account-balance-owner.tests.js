@@ -5,6 +5,9 @@ const fs = require("fs");
 const path = require("path");
 
 const source = fs.readFileSync(path.resolve(__dirname,"..","..","main.js"),"utf8");
+// WF-EXT3-01/05: WF moved out of main.js into features/waterfall/waterfall.js - its own
+// consumption of the balance snapshot (wfReturnMetrics) now lives there.
+const wfSource = fs.readFileSync(path.resolve(__dirname,"..","..","features","waterfall","waterfall.js"),"utf8");
 
 assert(source.includes("function commitAccountBalance(change={})"),"balance writes must use one commit function");
 assert(!source.includes("accountBalanceState = v;"),"legacy scalar must not be assigned by individual source adapters");
@@ -14,8 +17,8 @@ assert(source.includes('new CustomEvent("bt001:account-balance-state"'),"balance
 assert(source.includes('status:previous.value == null ? "unavailable" : "stale"'),"missing credentials must distinguish empty and retained state");
 assert(source.includes('commitAccountBalance({status:"loading",lastAttemptAt:Date.now()});'),"refresh must publish loading state");
 assert(source.includes('commitAccountBalance({status:"error",error:e && e.message ? e.message : String(e)});'),"refresh failures must publish error state");
-assert(source.includes('balanceSnapshot.status !== "fresh"'),"WF derived return must require a fresh balance snapshot");
-assert(!source.includes("if(accountBalanceState == null) return unavailable;"),"WF must no longer infer validity from the raw scalar");
+assert(wfSource.includes('balanceSnapshot.status !== "fresh"'),"WF derived return must require a fresh balance snapshot");
+assert(!wfSource.includes("if(accountBalanceState == null) return unavailable;"),"WF must no longer infer validity from the raw scalar");
 
 const allowed = new Set(["unavailable","loading","fresh","stale","error"]);
 let state = {value:null,asset:"",source:"unavailable",status:"unavailable",revision:0,updatedAt:0,verifiedAt:0,lastAttemptAt:0,error:null};

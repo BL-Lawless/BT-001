@@ -322,6 +322,90 @@ const OPEN_POSITION_STATE = {
   activeParentChainIds:new Set(),
   openLots:[]
 };
+const OPEN_POSITION_VISUAL_STATUS = new Set(["unavailable","risk-only","reconstructing","reconstructed","stale","error"]);
+let openPositionVisualMeta = {
+  revision:0,
+  symbol:"",
+  status:"unavailable",
+  updatedAt:0,
+  authoritativePositionRevision:0,
+  source:"unavailable",
+  error:null
+};
+
+function currentAuthoritativePositionSnapshot(){
+  try{
+    return window.BT001_SHARED_POSITION && typeof window.BT001_SHARED_POSITION.snapshot === "function"
+      ? window.BT001_SHARED_POSITION.snapshot()
+      : null;
+  }catch(_e){
+    return null;
+  }
+}
+function cloneOpenPositionVisualValue(value,seen=new WeakMap()){
+  if(value == null || typeof value !== "object") return value;
+  if(seen.has(value)) return seen.get(value);
+  const copy = Array.isArray(value) ? [] : {};
+  seen.set(value,copy);
+  if(Array.isArray(value)) value.forEach(item => copy.push(cloneOpenPositionVisualValue(item,seen)));
+  else Object.keys(value).forEach(key => { copy[key] = cloneOpenPositionVisualValue(value[key],seen); });
+  return Object.freeze(copy);
+}
+function cloneOpenPositionVisualRows(rows){
+  return cloneOpenPositionVisualValue(Array.isArray(rows) ? rows : []);
+}
+function openPositionVisualRealizedPartials(links){
+  const byChain = {};
+  let total = 0;
+  (Array.isArray(links) ? links : []).forEach(link => {
+    const value = Number(link && link.netPnl);
+    if(!Number.isFinite(value)) return;
+    const chainId = stateChainId(link);
+    total += value;
+    if(chainId) byChain[chainId] = (byChain[chainId] || 0) + value;
+  });
+  return Object.freeze({total,byChain:Object.freeze({...byChain})});
+}
+function openPositionVisualSnapshot(){
+  return Object.freeze({
+    ...openPositionVisualMeta,
+    markers:cloneOpenPositionVisualRows(OPEN_POSITION_STATE.markers),
+    links:cloneOpenPositionVisualRows(OPEN_POSITION_STATE.links),
+    boxes:cloneOpenPositionVisualRows(OPEN_POSITION_STATE.boxes),
+    activeParentChainIds:Object.freeze(Array.from(OPEN_POSITION_STATE.activeParentChainIds || [])),
+    realizedPartials:openPositionVisualRealizedPartials(OPEN_POSITION_STATE.links)
+  });
+}
+function commitOpenPositionVisualState(next={},meta={}){
+  OPEN_POSITION_STATE.markers = Array.isArray(next.markers) ? next.markers : OPEN_POSITION_STATE.markers;
+  OPEN_POSITION_STATE.links = Array.isArray(next.links) ? next.links : OPEN_POSITION_STATE.links;
+  OPEN_POSITION_STATE.openLotLinks = Array.isArray(next.openLotLinks) ? next.openLotLinks : OPEN_POSITION_STATE.openLotLinks;
+  OPEN_POSITION_STATE.boxes = Array.isArray(next.boxes) ? next.boxes : OPEN_POSITION_STATE.boxes;
+  OPEN_POSITION_STATE.entryMarkerIds = next.entryMarkerIds instanceof Set ? next.entryMarkerIds : OPEN_POSITION_STATE.entryMarkerIds;
+  OPEN_POSITION_STATE.activeParentChainIds = next.activeParentChainIds instanceof Set ? next.activeParentChainIds : OPEN_POSITION_STATE.activeParentChainIds;
+  OPEN_POSITION_STATE.openLots = Array.isArray(next.openLots) ? next.openLots : OPEN_POSITION_STATE.openLots;
+  syncLegacyTradeGlobalsFromOwners();
+  const authoritative = currentAuthoritativePositionSnapshot();
+  const status = OPEN_POSITION_VISUAL_STATUS.has(meta.status) ? meta.status : "unavailable";
+  openPositionVisualMeta = {
+    revision:openPositionVisualMeta.revision + 1,
+    symbol:String(meta.symbol || (authoritative && authoritative.symbol) || openPositionVisualMeta.symbol || "").toUpperCase(),
+    status,
+    updatedAt:Date.now(),
+    authoritativePositionRevision:Number(meta.authoritativePositionRevision != null ? meta.authoritativePositionRevision : authoritative && authoritative.revision) || 0,
+    source:String(meta.source || "visual-commit"),
+    error:status === "error" ? String(meta.error || "Open-position visual state unavailable") : null
+  };
+  const snapshot = openPositionVisualSnapshot();
+  try{ window.dispatchEvent(new CustomEvent("bt001:open-position-visual-state",{detail:snapshot})); }catch(_e){}
+  return snapshot;
+}
+if(typeof window !== "undefined"){
+  window.BT001_OPEN_POSITION_VISUAL = Object.freeze({
+    version:"BT001_OPEN_POSITION_VISUAL_V1",
+    snapshot:openPositionVisualSnapshot
+  });
+}
 
 const CLOSED_TRADES_STATE = {
   markers:[],
@@ -331,8 +415,22 @@ const CLOSED_TRADES_STATE = {
   unresolvedCount:0,
   fullReconstruction:null,
   reportProjection:null,
-  wfMode:"none",
+  // WF-EXT-CT05: renamed from wfMode. Investigation confirmed the only reader of this
+  // field anywhere in main.js was WF's own wfDataMode() (~line 23584) - no other
+  // consumer referenced it - so it is safe to rename to a name that isn't WF-specific.
+  // Values are unchanged ("none"|"fast"|"detail") for compatibility.
+  reportDetailLevel:"none",
   fastReport:null
+};
+const CLOSED_TRADES_STATUS = new Set(["unavailable","ready","error"]);
+let closedTradesOwnerMeta = {
+  revision:0,
+  status:"unavailable",
+  symbol:"",
+  period:null,
+  updatedAt:0,
+  source:"unavailable",
+  error:null
 };
 
 function stateChainId(o){
@@ -358,28 +456,114 @@ function syncLegacyTradeGlobalsFromOwners(){
   unresolvedCount = CLOSED_TRADES_STATE.unresolvedCount;
 }
 
-function clearClosedTradesOwner(){
-  CLOSED_TRADES_STATE.markers = [];
-  CLOSED_TRADES_STATE.links = [];
-  CLOSED_TRADES_STATE.fundingIncomeRows = [];
-  CLOSED_TRADES_STATE.fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:""};
-  CLOSED_TRADES_STATE.unresolvedCount = 0;
-  CLOSED_TRADES_STATE.fullReconstruction = null;
-  CLOSED_TRADES_STATE.reportProjection = null;
-  CLOSED_TRADES_STATE.wfMode = "none";
-  CLOSED_TRADES_STATE.fastReport = null;
-  syncLegacyTradeGlobalsFromOwners();
+function cloneClosedTradesValue(value,seen=new WeakMap()){
+  if(value == null || typeof value !== "object") return value;
+  if(seen.has(value)) return seen.get(value);
+  const copy = Array.isArray(value) ? [] : {};
+  seen.set(value,copy);
+  if(Array.isArray(value)) value.forEach(item => copy.push(cloneClosedTradesValue(item,seen)));
+  else Object.keys(value).forEach(key => { copy[key] = cloneClosedTradesValue(value[key],seen); });
+  return Object.freeze(copy);
+}
+function cloneClosedTradesRows(rows){
+  return cloneClosedTradesValue(Array.isArray(rows) ? rows : []);
+}
+function freezeClosedTradesTop(value){
+  return value && typeof value === "object" && !Object.isFrozen(value) ? Object.freeze(value) : value;
+}
+function closedTradesPeriodIdentity(win){
+  return win ? Object.freeze({value:String(win.period || ""),start:win.start,end:win.end,label:win.label || ""}) : null;
 }
 
-function clearOpenPositionOwner(){
-  OPEN_POSITION_STATE.markers = [];
-  OPEN_POSITION_STATE.links = [];
-  OPEN_POSITION_STATE.openLotLinks = [];
-  OPEN_POSITION_STATE.boxes = [];
-  OPEN_POSITION_STATE.entryMarkerIds = new Set();
-  OPEN_POSITION_STATE.activeParentChainIds = new Set();
-  OPEN_POSITION_STATE.openLots = [];
+// WF-EXT-CT01/CT03: single read (snapshot) and single write (commit) path for closed-trade
+// data. commitClosedTrades() is the ONLY place that mutates CLOSED_TRADES_STATE fields and
+// publishes bt001:closed-trades-state - fast/detail loads, reconstruction routing, and clear
+// all funnel through it so no consumer ever observes a partially-updated state.
+function closedTradesSnapshot(){
+  return Object.freeze({
+    revision:closedTradesOwnerMeta.revision,
+    status:closedTradesOwnerMeta.status,
+    mode:CLOSED_TRADES_STATE.reportDetailLevel,
+    symbol:closedTradesOwnerMeta.symbol,
+    period:closedTradesOwnerMeta.period,
+    updatedAt:closedTradesOwnerMeta.updatedAt,
+    source:closedTradesOwnerMeta.source,
+    error:closedTradesOwnerMeta.error,
+    markers:cloneClosedTradesRows(CLOSED_TRADES_STATE.markers),
+    links:cloneClosedTradesRows(CLOSED_TRADES_STATE.links),
+    fundingIncomeRows:cloneClosedTradesRows(CLOSED_TRADES_STATE.fundingIncomeRows),
+    fundingIncomeFetchStats:Object.freeze({...CLOSED_TRADES_STATE.fundingIncomeFetchStats}),
+    unresolvedCount:CLOSED_TRADES_STATE.unresolvedCount,
+    fastReport:freezeClosedTradesTop(CLOSED_TRADES_STATE.fastReport),
+    reportProjection:freezeClosedTradesTop(CLOSED_TRADES_STATE.reportProjection),
+    fullReconstruction:freezeClosedTradesTop(CLOSED_TRADES_STATE.fullReconstruction)
+  });
+}
+
+function commitClosedTrades(next={},meta={}){
+  if(Array.isArray(next.markers)) CLOSED_TRADES_STATE.markers = next.markers;
+  if(Array.isArray(next.links)) CLOSED_TRADES_STATE.links = next.links;
+  if(Array.isArray(next.fundingIncomeRows)) CLOSED_TRADES_STATE.fundingIncomeRows = next.fundingIncomeRows;
+  if(next.fundingIncomeFetchStats) CLOSED_TRADES_STATE.fundingIncomeFetchStats = next.fundingIncomeFetchStats;
+  if(next.unresolvedCount != null) CLOSED_TRADES_STATE.unresolvedCount = next.unresolvedCount;
+  if("fullReconstruction" in next) CLOSED_TRADES_STATE.fullReconstruction = next.fullReconstruction;
+  if("reportProjection" in next) CLOSED_TRADES_STATE.reportProjection = next.reportProjection;
+  if("fastReport" in next) CLOSED_TRADES_STATE.fastReport = next.fastReport;
+  if(next.reportDetailLevel != null) CLOSED_TRADES_STATE.reportDetailLevel = next.reportDetailLevel;
   syncLegacyTradeGlobalsFromOwners();
+  const status = CLOSED_TRADES_STATUS.has(meta.status) ? meta.status : "unavailable";
+  closedTradesOwnerMeta = {
+    revision:closedTradesOwnerMeta.revision + 1,
+    status,
+    symbol:String(meta.symbol || "").toUpperCase(),
+    period:meta.period || null,
+    updatedAt:Date.now(),
+    source:String(meta.source || "commit"),
+    error:status === "error" ? String(meta.error || "Closed trades unavailable") : null
+  };
+  const snapshot = closedTradesSnapshot();
+  try{ window.dispatchEvent(new CustomEvent("bt001:closed-trades-state",{detail:snapshot})); }catch(_e){}
+  return snapshot;
+}
+
+function clearClosedTradesOwner(meta={}){
+  closedTradesLoadedSummaryStats = {wins:0,losses:0,profit:0,loss:0};
+  return commitClosedTrades({
+    markers:[],
+    links:[],
+    fundingIncomeRows:[],
+    fundingIncomeFetchStats:{rows:0,start:0,end:0,symbol:""},
+    unresolvedCount:0,
+    fullReconstruction:null,
+    reportProjection:null,
+    reportDetailLevel:"none",
+    fastReport:null
+  },{
+    status:"unavailable",
+    symbol:meta.symbol,
+    period:null,
+    source:meta.source || "clear"
+  });
+}
+
+function closedTradesOutcome(outcome,extra={}){
+  return Object.freeze({outcome,ok:outcome === "committed",...extra});
+}
+
+function clearOpenPositionOwner(meta={}){
+  return commitOpenPositionVisualState({
+    markers:[],
+    links:[],
+    openLotLinks:[],
+    boxes:[],
+    entryMarkerIds:new Set(),
+    activeParentChainIds:new Set(),
+    openLots:[]
+  },{
+    status:meta.status || "unavailable",
+    symbol:meta.symbol,
+    source:meta.source || "clear"
+  });
 }
 
 function routeReconstructionToTradeOwners(full,reportRec,risk,symbol){
@@ -429,53 +613,86 @@ function routeReconstructionToTradeOwners(full,reportRec,risk,symbol){
   const reportMarkers = Array.isArray(reportRec.markers) ? reportRec.markers : [];
   const reportLinks = Array.isArray(reportRec.links) ? reportRec.links : [];
 
-  CLOSED_TRADES_STATE.markers = reportMarkers.filter(m => !openMarkerIds.has(m && m.id) && !isOpenOwned(m));
-  CLOSED_TRADES_STATE.links = reportLinks.filter(l =>
+  const closedMarkers = reportMarkers.filter(m => !openMarkerIds.has(m && m.id) && !isOpenOwned(m));
+  const closedLinks = reportLinks.filter(l =>
     !openMarkerIds.has(l && l.entryMarkerId) &&
     !openMarkerIds.has(l && l.exitMarkerId) &&
     !isOpenOwned(l)
   );
-  CLOSED_TRADES_STATE.fundingIncomeRows = fundingIncomeRows;
-  CLOSED_TRADES_STATE.fundingIncomeFetchStats = fundingIncomeFetchStats;
-  CLOSED_TRADES_STATE.unresolvedCount = CLOSED_TRADES_STATE.markers.filter(m => m && m.unresolved).length;
-  CLOSED_TRADES_STATE.fullReconstruction = full;
-  CLOSED_TRADES_STATE.reportProjection = {
-    ...reportRec,
-    markers:CLOSED_TRADES_STATE.markers,
-    links:CLOSED_TRADES_STATE.links,
-    unresolved:CLOSED_TRADES_STATE.unresolvedCount
-  };
+  const closedUnresolvedCount = closedMarkers.filter(m => m && m.unresolved).length;
+  // WF-EXT-CT03: reconstruction routing commits through the same single path as the
+  // fast/detail loaders and clear() - no consumer ever observes markers/links updated
+  // without the matching reportProjection/unresolvedCount in the same publication.
+  commitClosedTrades({
+    markers:closedMarkers,
+    links:closedLinks,
+    fundingIncomeRows,
+    fundingIncomeFetchStats,
+    unresolvedCount:closedUnresolvedCount,
+    fullReconstruction:full,
+    reportProjection:{
+      ...reportRec,
+      markers:closedMarkers,
+      links:closedLinks,
+      unresolved:closedUnresolvedCount
+    }
+  },{
+    status:"ready",
+    symbol,
+    source:"trade-owner-reconstruction"
+  });
 
-  OPEN_POSITION_STATE.markers = openMarkers;
-  OPEN_POSITION_STATE.links = openLinks;
-  OPEN_POSITION_STATE.openLotLinks = openConnectors;
-  OPEN_POSITION_STATE.boxes = buildOpenBoxes(openLots,risk || [],symbol);
-  OPEN_POSITION_STATE.entryMarkerIds = openMarkerIds;
-  OPEN_POSITION_STATE.activeParentChainIds = openChainIds;
-  OPEN_POSITION_STATE.openLots = openLots;
+  let nextOpenMarkers = openMarkers;
+  let nextOpenLinks = openLinks;
+  let nextOpenLotLinks = openConnectors;
+  let nextOpenBoxes = buildOpenBoxes(openLots,risk || [],symbol);
+  let nextEntryMarkerIds = openMarkerIds;
+  let nextActiveParentChainIds = openChainIds;
+  let nextOpenLots = openLots;
 
+  let openVisualStatus = nextOpenMarkers.length || nextOpenLotLinks.length ? "reconstructed" : (nextOpenBoxes.length ? "risk-only" : "unavailable");
   if(activeRisk && !openMarkers.length && !openConnectors.length){
-    const chainHint =
+    const priorBox = previousOpen.boxes[0] || null;
+    const sameCampaignContext = !!(
+      priorBox && nextOpenBoxes[0] &&
+      String(priorBox.symbol || "").toUpperCase() === String(symbol || "").toUpperCase() &&
+      priorBox.side === nextOpenBoxes[0].side
+    );
+    const chainHint = sameCampaignContext ? (
       [...previousOpen.activeParentChainIds].find(Boolean) ||
       previousOpen.openLotLinks.map(stateChainId).find(Boolean) ||
       previousOpen.boxes.map(stateChainId).find(Boolean) ||
-      null;
+      null
+    ) : null;
 
-    OPEN_POSITION_STATE.markers = previousOpen.markers;
-    OPEN_POSITION_STATE.links = previousOpen.links;
-    OPEN_POSITION_STATE.openLotLinks = previousOpen.openLotLinks;
-    OPEN_POSITION_STATE.entryMarkerIds = previousOpen.entryMarkerIds;
-    OPEN_POSITION_STATE.activeParentChainIds = previousOpen.activeParentChainIds;
-    OPEN_POSITION_STATE.openLots = previousOpen.openLots;
-    OPEN_POSITION_STATE.boxes = buildOpenBoxes([],risk,symbol);
+    if(sameCampaignContext){
+      nextOpenMarkers = previousOpen.markers;
+      nextOpenLinks = previousOpen.links;
+      nextOpenLotLinks = previousOpen.openLotLinks;
+      nextEntryMarkerIds = previousOpen.entryMarkerIds;
+      nextActiveParentChainIds = previousOpen.activeParentChainIds;
+      nextOpenLots = previousOpen.openLots;
+    }
     if(chainHint){
-      OPEN_POSITION_STATE.boxes.forEach(b => {
+      nextOpenBoxes.forEach(b => {
         if(!stateChainId(b)) b.chainId = chainHint;
       });
     }
   }
 
-  syncLegacyTradeGlobalsFromOwners();
+  commitOpenPositionVisualState({
+    markers:nextOpenMarkers,
+    links:nextOpenLinks,
+    openLotLinks:nextOpenLotLinks,
+    boxes:nextOpenBoxes,
+    entryMarkerIds:nextEntryMarkerIds,
+    activeParentChainIds:nextActiveParentChainIds,
+    openLots:nextOpenLots
+  },{
+    status:openVisualStatus,
+    symbol,
+    source:"trade-owner-reconstruction"
+  });
   return {
     closed:CLOSED_TRADES_STATE,
     open:OPEN_POSITION_STATE,
@@ -1489,15 +1706,37 @@ async function refreshOpenPosition(opt={}){
     const reconstructionGuard=SHARED_POSITION_OWNER.guard();
     if(reconstructionNeeded){
       openPositionReconstructionInFlight=reconstructionGeneration;
+      commitOpenPositionVisualState({}, {
+        status:"reconstructing",
+        symbol:cfg().symbol,
+        authoritativePositionRevision:sharedResult.snapshot.revision,
+        source:"active-parent-reconstruction"
+      });
       loadActiveParentReconstruction(key,sec,off,active,reconstructionGuard).then(loaded=>{
         if(SHARED_POSITION_OWNER.isGuardCurrent(reconstructionGuard)){
           openPositionReconstructionGeneration=reconstructionGeneration;
           if(loaded&&loaded.rec&&reconstructionOpenMatchesPosition(loaded.rec,active)){
             applyOpenPositionReconstruction(loaded.rec,risk,cfg().symbol);
             scheduleAccountChartDraw("position-reconstruction");
+          }else{
+            commitOpenPositionVisualState({}, {
+              status:"risk-only",
+              symbol:cfg().symbol,
+              source:"active-parent-reconstruction-incomplete"
+            });
           }
         }
-      }).catch(error=>console.warn("Background open-position reconstruction failed",error)).finally(()=>{
+      }).catch(error=>{
+        if(SHARED_POSITION_OWNER.isGuardCurrent(reconstructionGuard)){
+          commitOpenPositionVisualState({}, {
+            status:"error",
+            symbol:cfg().symbol,
+            source:"active-parent-reconstruction",
+            error:error && error.message ? error.message : String(error)
+          });
+        }
+        console.warn("Background open-position reconstruction failed",error);
+      }).finally(()=>{
         if(openPositionReconstructionInFlight===reconstructionGeneration)openPositionReconstructionInFlight=-1;
       });
     }
@@ -2024,20 +2263,38 @@ function buildClosedTradeFastReport(rec,win,symbol,contextLimited){
   };
 }
 
-async function loadClosedTradesFastForPeriod(period,opt={}){
-  const silent = !!opt.silent;
+// WF-EXT-CT01/CT02: owner-level request functions. These hold the fetch/reconstruct
+// logic moved out of the old loadClosedTradesFastForPeriod/loadClosedTradesForPeriod
+// (WF-EXT-CT04 turns those into thin compatibility adapters below). No DOM/presentation
+// call lives here - progress narration is only emitted through an injected onProgress
+// hook so the owner never touches closedTradeStatus/updatePositionStrip/updateTabTitle/
+// draw directly. Every resolution is a distinguishable, typed outcome (WF-EXT-CT02):
+//   "committed" - data was written and published (report may legitimately be an empty
+//                 report - zero trades is NOT the same as no report, fixing WF-C02).
+//   "unavailable" - no API credentials; nothing was requested.
+//   "busy" - another load was already in flight; this request was dropped, not queued
+//            (see report for why coalescing/queueing was rejected).
+//   "stale" - the fetch completed but the symbol/period selection moved on, or a
+//             caller-supplied opt.acceptResult vetoed it; state was left untouched.
+//   "error" - the request threw; state was left untouched.
+async function loadFast(period,options={}){
+  const opt = options || {};
+  const onProgress = typeof opt.onProgress === "function" ? opt.onProgress : null;
   const {key,secret:sec} = activeApiCredentials();
 
   saveKeysLocal();
   if(!key || !sec){
     updateApiStatus();
-    return null;
+    return closedTradesOutcome("unavailable",{reason:"missing-credentials"});
   }
-  if(closedTradesLoading) return null;
+  if(closedTradesLoading) return closedTradesOutcome("busy",{});
   closedTradesLoading = true;
 
+  const requestSymbol = String(cfg().symbol || "").toUpperCase();
+  const requestPeriodValue = selectedClosedTradePeriod(period || opt.period).value;
+
   try{
-    if(!silent) closedTradeStatus("Loading WF closed positions...");
+    if(onProgress) onProgress("Loading WF closed positions...");
     await ensureClosedTradeSessionBoundary(period || opt.period);
     const win = closedTradePeriodWindowMs(period || opt.period);
     const off = opt.off != null ? opt.off : await timeOffset();
@@ -2049,25 +2306,167 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
     let rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
     let rec = reconstruct(rows,symbol);
     while(!requestBudget.limited && hasPeriodUnresolvedClose(rec,win) && start > maxContextStart){
-      if(!silent) closedTradeStatus("Resolving WF context...");
+      if(onProgress) onProgress("Resolving WF context...");
       start = Math.max(maxContextStart,start - bounds.step);
       rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
       rec = reconstruct(rows,symbol);
     }
     const contextLimited = requestBudget.limited || hasPeriodUnresolvedClose(rec,win);
     const fastReport = buildClosedTradeFastReport(rec,win,symbol,contextLimited);
-    // WF-C05: stale asynchronous loads must not replace the active report.
-    if(typeof opt.acceptResult === "function" && !opt.acceptResult(fastReport)) return null;
 
-    CLOSED_TRADES_STATE.fastReport = fastReport;
-    CLOSED_TRADES_STATE.wfMode = "fast";
+    // WF-EXT-CT02/CT06: intrinsic stale-result rejection. The owner now rejects a result
+    // whose requested symbol/period no longer matches the current selection by the time
+    // the async fetch resolves, on its own - independent of any caller-supplied guard.
+    // A caller-supplied opt.acceptResult is still honored as an *additional* veto (kept
+    // for WF's existing defense-in-depth guard - see WF-EXT-CT06 notes in the report),
+    // never a replacement for this check.
+    const stillCurrent = requestSymbol === String(cfg().symbol || "").toUpperCase() &&
+      requestPeriodValue === selectedClosedTradePeriod().value;
+    const callerAccepts = typeof opt.acceptResult !== "function" || opt.acceptResult(fastReport);
+    if(!stillCurrent || !callerAccepts){
+      return closedTradesOutcome("stale",{report:fastReport});
+    }
+
+    const snapshot = commitClosedTrades({
+      fastReport,
+      reportDetailLevel:"fast"
+    },{
+      status:"ready",
+      symbol,
+      period:closedTradesPeriodIdentity(win),
+      source:"load-fast"
+    });
     closedTradesLoadedSummaryStats = {
       wins:fastReport.summary.wins,
       losses:fastReport.summary.losses,
       profit:fastReport.summary.profit,
       loss:fastReport.summary.loss
     };
+    return closedTradesOutcome("committed",{report:fastReport,snapshot,requestBudgetLimited:requestBudget.limited});
+  }catch(e){
+    return closedTradesOutcome("error",{error:e});
+  }finally{
+    closedTradesLoading = false;
+    updateApiStatus();
+  }
+}
 
+async function loadDetail(period,options={}){
+  const opt = options || {};
+  const onProgress = typeof opt.onProgress === "function" ? opt.onProgress : null;
+  const {key,secret:sec} = activeApiCredentials();
+
+  saveKeysLocal();
+  if(!key || !sec){
+    updateApiStatus();
+    return closedTradesOutcome("unavailable",{reason:"missing-credentials"});
+  }
+  if(closedTradesLoading) return closedTradesOutcome("busy",{});
+  closedTradesLoading = true;
+
+  const requestSymbol = String(cfg().symbol || "").toUpperCase();
+  const requestPeriodValue = selectedClosedTradePeriod(period || opt.period).value;
+
+  try{
+    // Matches original gating exactly: only the initial message is silent-gated -
+    // the fetch-progress messages below were always shown regardless of opt.silent.
+    if(onProgress && !opt.silent) onProgress("Loading closed trades...");
+    await ensureClosedTradeSessionBoundary(period || opt.period);
+    const win = closedTradePeriodWindowMs(period || opt.period);
+    const off = opt.off != null ? opt.off : await timeOffset();
+    if(onProgress) onProgress("Fetching fills...");
+    let start = Math.max(0,win.start - RECON_LOOKBACK_WEEKS * WEEK_MS);
+    const requestBudget = createBinanceReconstructionBudget();
+    let rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
+    if(onProgress) onProgress("Reconstructing trades...");
+    let full = reconstruct(rows,cfg().symbol);
+    const maxBackfillStart = Math.max(0,win.start - Math.max(RECON_LOOKBACK_WEEKS,52) * WEEK_MS);
+    while(!requestBudget.limited && hasPeriodUnresolvedClose(full,win) && start > maxBackfillStart){
+      if(onProgress) onProgress("Fetching fills...");
+      start = Math.max(maxBackfillStart,start - TRADE_CHUNK_MS);
+      rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
+      if(onProgress) onProgress("Reconstructing trades...");
+      full = reconstruct(rows,cfg().symbol);
+    }
+    const fundingRows = await getFundingIncomeRange(key,sec,off,start,win.end,undefined,undefined,requestBudget).catch(e => {
+      console.warn("Funding income fetch failed",e);
+      fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:cfg().symbol};
+      return [];
+    });
+    fundingIncomeRows = fundingRows;
+
+    const rec = filterClosedReconstructionForPeriod(full,win);
+    rec.period = win;
+    rec.symbol = String(cfg().symbol || "").toUpperCase();
+
+    // See loadFast() above for the intrinsic stale-rejection rationale.
+    const stillCurrent = requestSymbol === String(cfg().symbol || "").toUpperCase() &&
+      requestPeriodValue === selectedClosedTradePeriod().value;
+    const callerAccepts = typeof opt.acceptResult !== "function" || opt.acceptResult(rec);
+    if(!stillCurrent || !callerAccepts){
+      return closedTradesOutcome("stale",{report:rec,full});
+    }
+
+    const summary = closedTradeLoadedSummary(rec);
+    closedTradesLoadedSummaryStats = {
+      wins:summary.wins,
+      losses:summary.losses,
+      profit:summary.profit,
+      loss:summary.loss
+    };
+
+    const snapshot = commitClosedTrades({
+      markers:rec.markers,
+      links:rec.links,
+      fundingIncomeRows,
+      fundingIncomeFetchStats,
+      unresolvedCount:rec.unresolved,
+      fullReconstruction:full,
+      reportProjection:rec,
+      reportDetailLevel:"detail"
+    },{
+      status:"ready",
+      symbol:rec.symbol,
+      period:closedTradesPeriodIdentity(win),
+      source:"load-detail"
+    });
+
+    return closedTradesOutcome("committed",{report:rec,full,snapshot,requestBudgetLimited:requestBudget.limited,summary});
+  }catch(e){
+    return closedTradesOutcome("error",{error:e});
+  }finally{
+    closedTradesLoading = false;
+    updateApiStatus();
+  }
+}
+
+function clear(){
+  return clearClosedTradesOwner({symbol:String(cfg().symbol || ""),source:"owner-clear"});
+}
+
+if(typeof window !== "undefined"){
+  window.BT001_CLOSED_TRADES = Object.freeze({
+    version:"BT001_CLOSED_TRADES_V1",
+    snapshot:closedTradesSnapshot,
+    loadFast,
+    loadDetail,
+    clear
+  });
+}
+
+// WF-EXT-CT04: compatibility adapters. External behavior for every existing caller
+// (the "Load Trades" button, custom-date application, market-change clearing, WF's own
+// period/symbol reloads) is unchanged - these adapters call the owner functions above
+// and re-add the exact presentation side effects (closedTradeStatus/updatePositionStrip/
+// updateTabTitle/draw) and legacy return shapes the owner no longer produces itself.
+async function loadClosedTradesFastForPeriod(period,opt={}){
+  const silent = !!opt.silent;
+  const result = await loadFast(period,{
+    ...opt,
+    onProgress:silent ? undefined : text => closedTradeStatus(text)
+  });
+  if(result.outcome === "committed"){
+    const fastReport = result.report;
     closedTradeStatus("",{mode:"operational"});
     if(fastReport.summaries.length){
       const limitedText = fastReport.summary.limitedCount > 0 ? " | limited: " + fastReport.summary.limitedCount : "";
@@ -2076,7 +2475,7 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
         " | Closed positions: " + fastReport.summaries.length +
         limitedText +
         " | net P/L: " + closedTradeSignedMoney(fastReport.summary.netTotal) +
-        (requestBudget.limited ? " | request limit reached — retry to load more" : ""),
+        (result.requestBudgetLimited ? " | request limit reached — retry to load more" : ""),
         {mode:"summary"}
       );
     }else{
@@ -2084,106 +2483,47 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
       if(!silent) closedTradeStatus("No closed positions in range");
     }
     return fastReport;
-  }catch(e){
-    console.error("WF fast load failed",e);
-    if(!silent) closedTradeStatus("WF closed positions: error");
-    return null;
-  }finally{
-    closedTradesLoading = false;
-    updateApiStatus();
   }
+  if(result.outcome === "error"){
+    console.error("WF fast load failed",result.error);
+    if(!silent) closedTradeStatus("WF closed positions: error");
+  }
+  return null;
 }
 
 async function loadClosedTradesForPeriod(period,opt={}){
   const silent = !!opt.silent;
-  const {key,secret:sec} = activeApiCredentials();
-
-  saveKeysLocal();
-  if(!key || !sec){
-    updateApiStatus();
-    return null;
-  }
-  if(closedTradesLoading) return null;
-  closedTradesLoading = true;
-
-  try{
-    if(!silent) closedTradeStatus("Loading closed trades...");
-
-    await ensureClosedTradeSessionBoundary(period || opt.period);
-    const win = closedTradePeriodWindowMs(period || opt.period);
-    const off = opt.off != null ? opt.off : await timeOffset();
-    closedTradeStatus("Fetching fills...");
-    let start = Math.max(0,win.start - RECON_LOOKBACK_WEEKS * WEEK_MS);
-    const requestBudget = createBinanceReconstructionBudget();
-    let rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
-    closedTradeStatus("Reconstructing trades...");
-    let full = reconstruct(rows,cfg().symbol);
-    const maxBackfillStart = Math.max(0,win.start - Math.max(RECON_LOOKBACK_WEEKS,52) * WEEK_MS);
-    while(!requestBudget.limited && hasPeriodUnresolvedClose(full,win) && start > maxBackfillStart){
-      closedTradeStatus("Fetching fills...");
-      start = Math.max(maxBackfillStart,start - TRADE_CHUNK_MS);
-      rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
-      closedTradeStatus("Reconstructing trades...");
-      full = reconstruct(rows,cfg().symbol);
-    }
-    fundingIncomeRows = await getFundingIncomeRange(key,sec,off,start,win.end,undefined,undefined,requestBudget).catch(e => {
-      console.warn("Funding income fetch failed",e);
-      fundingIncomeFetchStats = {rows:0,start:0,end:0,symbol:cfg().symbol};
-      return [];
-    });
-
-    const rec = filterClosedReconstructionForPeriod(full,win);
-    rec.period = win;
-    rec.symbol = String(cfg().symbol || "").toUpperCase();
-    // WF-C05: validate before any shared closed-trade state is mutated.
-    if(typeof opt.acceptResult === "function" && !opt.acceptResult(rec)) return null;
-    const summary = closedTradeLoadedSummary(rec);
-    const netPnl = summary.net;
-    closedTradesLoadedSummaryStats = {
-      wins:summary.wins,
-      losses:summary.losses,
-      profit:summary.profit,
-      loss:summary.loss
-    };
-
-    CLOSED_TRADES_STATE.markers = rec.markers;
-    CLOSED_TRADES_STATE.links = rec.links;
-    CLOSED_TRADES_STATE.fundingIncomeRows = fundingIncomeRows;
-    CLOSED_TRADES_STATE.fundingIncomeFetchStats = fundingIncomeFetchStats;
-    CLOSED_TRADES_STATE.unresolvedCount = rec.unresolved;
-    CLOSED_TRADES_STATE.fullReconstruction = full;
-    CLOSED_TRADES_STATE.reportProjection = rec;
-    CLOSED_TRADES_STATE.wfMode = "detail";
-    unresolvedCount = CLOSED_TRADES_STATE.unresolvedCount;
-    syncLegacyTradeGlobalsFromOwners();
-
+  const result = await loadDetail(period,{
+    ...opt,
+    onProgress:text => closedTradeStatus(text)
+  });
+  if(result.outcome === "committed"){
+    const rec = result.report;
+    const summary = result.summary;
     closedTradeStatus("",{mode:"operational"});
     if(summary.parents.length){
       closedTradeStatus(
-        "From: " + closedTradeStatusDay(win.start) +
-        " | To: " + closedTradeStatusDay(win.end) +
+        "From: " + closedTradeStatusDay(rec.period.start) +
+        " | To: " + closedTradeStatusDay(rec.period.end) +
         " | Trades: " + summary.parents.length +
-        " | net P/L: " + closedTradeSignedMoney(netPnl) +
-        (requestBudget.limited ? " | request limit reached — retry to load more" : ""),
+        " | net P/L: " + closedTradeSignedMoney(summary.net) +
+        (result.requestBudgetLimited ? " | request limit reached — retry to load more" : ""),
         {mode:"summary"}
       );
     }else{
       closedTradeStatus("",{mode:"summary"});
       if(!silent) closedTradeStatus("No closed trades in range");
     }
-
     updatePositionStrip(candles.length ? candles[candles.length-1] : null);
     updateTabTitle();
     draw();
-    return {full,report:rec};
-  }catch(e){
-    console.error("Load closed trades failed",e);
-    if(!silent) closedTradeStatus("Trades: error");
-    return null;
-  }finally{
-    closedTradesLoading = false;
-    updateApiStatus();
+    return {full:result.full,report:rec};
   }
+  if(result.outcome === "error"){
+    console.error("Load closed trades failed",result.error);
+    if(!silent) closedTradeStatus("Trades: error");
+  }
+  return null;
 }
 
 async function loadClosedTradesForVisibleRange(opt={}){
@@ -2199,8 +2539,13 @@ if(typeof window !== "undefined"){
   window.refreshOpenPosition = refreshOpenPosition;
   window.loadClosedTradesForVisibleRange = loadClosedTradesForVisibleRange;
   window.loadClosedTradesForPeriod = loadClosedTradesForPeriod;
+  window.loadClosedTradesFastForPeriod = loadClosedTradesFastForPeriod;
   window.loadClosedTradesToday = loadClosedTradesToday;
   window.refreshAccountBalance = refreshAccountBalance;
+  // WF-EXT-CT06: previously only exported once WF's monkey-patch wrapper ran (which no
+  // longer reassigns clearTrades) - exported directly here so window.clearTrades keeps
+  // existing for any external caller, unchanged from before this task.
+  window.clearTrades = clearTrades;
 }
 
 function updatePositionStrip(c){
@@ -5571,30 +5916,48 @@ function applyOpenPositionReconstruction(rec,risk,symbol){
   openConnectors.forEach(l => { if(l && l.entryMarkerId) entryIds.add(l.entryMarkerId); });
   openMarkers.forEach(m => { if(m && m.role === "entry") entryIds.add(m.id); });
 
-  OPEN_POSITION_STATE.markers = openMarkers;
-  OPEN_POSITION_STATE.links = openLinks;
-  OPEN_POSITION_STATE.openLotLinks = openConnectors;
-  OPEN_POSITION_STATE.boxes = buildOpenBoxes(openLots,risk || [],symbol);
-  OPEN_POSITION_STATE.entryMarkerIds = entryIds;
-  OPEN_POSITION_STATE.activeParentChainIds = chainIds;
-  OPEN_POSITION_STATE.openLots = openLots;
-  syncLegacyTradeGlobalsFromOwners();
+  return commitOpenPositionVisualState({
+    markers:openMarkers,
+    links:openLinks,
+    openLotLinks:openConnectors,
+    boxes:buildOpenBoxes(openLots,risk || [],symbol),
+    entryMarkerIds:entryIds,
+    activeParentChainIds:chainIds,
+    openLots
+  },{status:"reconstructed",symbol,source:"active-parent-reconstruction"});
 }
 
-function applyOpenPositionRiskOnly(risk,symbol){
+function applyOpenPositionRiskOnly(risk,symbol,meta={}){
   const boxes = buildOpenBoxes([],risk || [],symbol);
   if(boxes.length){
-    const chainHint =
+    const priorBox = (OPEN_POSITION_STATE.boxes || [])[0] || null;
+    const sameCampaignContext = !!(
+      priorBox &&
+      String(priorBox.symbol || "").toUpperCase() === String(symbol || "").toUpperCase() &&
+      priorBox.side === boxes[0].side
+    );
+    const chainHint = sameCampaignContext ? (
       [...(OPEN_POSITION_STATE.activeParentChainIds || new Set())].find(Boolean) ||
       (OPEN_POSITION_STATE.openLotLinks || []).map(stateChainId).find(Boolean) ||
       (OPEN_POSITION_STATE.boxes || []).map(stateChainId).find(Boolean) ||
-      null;
+      null
+    ) : null;
     if(chainHint) boxes.forEach(b => { if(!stateChainId(b)) b.chainId = chainHint; });
-    OPEN_POSITION_STATE.boxes = boxes;
+    const next = {boxes};
+    if(!sameCampaignContext){
+      Object.assign(next,{
+        markers:[],
+        links:[],
+        openLotLinks:[],
+        entryMarkerIds:new Set(),
+        activeParentChainIds:new Set(),
+        openLots:[]
+      });
+    }
+    return commitOpenPositionVisualState(next,{status:"risk-only",symbol,source:meta.source || "position-risk"});
   }else{
-    clearOpenPositionOwner();
+    return clearOpenPositionOwner({symbol,source:meta.flatSource || (meta.source ? meta.source + "-flat" : "position-risk-flat")});
   }
-  syncLegacyTradeGlobalsFromOwners();
 }
 
 async function loadActiveParentReconstruction(key,sec,off,active,guard=null){
@@ -6297,8 +6660,10 @@ async function loadTrades(opt={}){
 }
 
 function clearTrades(){
-  clearClosedTradesOwner();
-  closedTradesLoadedSummaryStats = {wins:0,losses:0,profit:0,loss:0};
+  // WF-EXT-CT04: adapter over the owner's clear() - data clearing + publication happens
+  // in the owner (clearClosedTradesOwner() -> commitClosedTrades()), the presentation
+  // side effects stay here.
+  clear();
   closedTradeStatus("",{mode:"operational"});
   closedTradeStatus("Trades: 0",{mode:"summary"});
   updatePositionStrip(candles.length ? candles[candles.length-1] : null);
@@ -14420,19 +14785,14 @@ startTradeAuto();
       const off = await timeOffset();
       const risk = await getPositions(key,sec,off);
       lastPositionSuccess14 = Date.now();
-      const boxes = buildOpenBoxes([],risk,cfg().symbol);
-      if(boxes.length){
-        OPEN_POSITION_STATE.boxes = boxes;
-      }else{
-        clearOpenPositionOwner();
-      }
-      syncLegacyTradeGlobalsFromOwners();
+      applyOpenPositionRiskOnly(risk,cfg().symbol,{source:"patch14-position-risk",flatSource:"patch14-position-risk-flat"});
       updatePositionStrip(candles.length ? candles[candles.length-1] : null);
       updateTabTitle();
       draw();
     }catch(e){
       if(Date.now() - lastPositionSuccess14 > 10000){
-        (openPositionBoxes || []).forEach(b => b.stale = true);
+        const staleBoxes = (OPEN_POSITION_STATE.boxes || []).map(box => ({...box,stale:true}));
+        commitOpenPositionVisualState({boxes:staleBoxes},{status:"stale",symbol:cfg().symbol,source:"patch14-position-risk-stale"});
         draw();
       }
     }finally{
@@ -15941,13 +16301,32 @@ startTradeAuto();
     if(typeof buildOpenBoxes !== "function") return;
     const boxes = buildOpenBoxes([],risk,currentSymbol21());
     if(boxes.length){
-      const chain = (openPositionBoxes && openPositionBoxes[0] && cid21(openPositionBoxes[0])) || (openLotLinks && openLotLinks[0] && cid21(openLotLinks[0])) || null;
+      const priorBox = openPositionBoxes && openPositionBoxes[0] || null;
+      const sameCampaignContext = !!(
+        priorBox &&
+        String(priorBox.symbol || "").toUpperCase() === String(currentSymbol21() || "").toUpperCase() &&
+        sideDir21(priorBox.side) === sideDir21(boxes[0].side)
+      );
+      const chain = sameCampaignContext
+        ? (priorBox && cid21(priorBox)) || (openLotLinks && openLotLinks[0] && cid21(openLotLinks[0])) || null
+        : null;
       boxes.forEach(b => { if(!cid21(b) && chain) b.chainId = chain; });
-      OPEN_POSITION_STATE.boxes = boxes;
+      const chainIds = new Set(sameCampaignContext ? Array.from(activeOpenParentChainIds || []).filter(Boolean) : []);
+      if(chain) chainIds.add(chain);
+      const entryIds = new Set(sameCampaignContext ? Array.from(openEntryMarkerIds || []).filter(Boolean) : []);
+      const markers = (fillMarkers || []).filter(marker => entryIds.has(marker && marker.id) || chainIds.has(cid21(marker)));
+      const links = (resultLinks || []).filter(link => (sameCampaignContext && !!(link && link.open)) || chainIds.has(cid21(link)));
+      commitOpenPositionVisualState({
+        markers,
+        links,
+        openLotLinks:sameCampaignContext && Array.isArray(openLotLinks) ? openLotLinks : [],
+        boxes,
+        entryMarkerIds:entryIds,
+        activeParentChainIds:chainIds
+      },{status:"risk-only",symbol:currentSymbol21(),source:"patch21-position-risk"});
     }else{
-      clearOpenPositionOwner();
+      clearOpenPositionOwner({symbol:currentSymbol21(),source:"patch21-position-risk-flat"});
     }
-    syncLegacyTradeGlobalsFromOwners();
     try{ if(typeof updatePositionStrip === "function") updatePositionStrip(latest21()); }catch(e){}
     try{ if(typeof updateTabTitle === "function") updateTabTitle(); }catch(e){}
   }
@@ -23264,1715 +23643,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
 
 (() => {
   "use strict";
-  const MODULE = "BT001_WATERFALL_WINDOW_V1";
-  if(typeof document === "undefined" || window.__bt001WaterfallWindowInstalled) return;
-  window.__bt001WaterfallWindowInstalled = true;
-
-  const q = id => document.getElementById(id);
-  const num = value => Number.isFinite(Number(value)) ? Number(value) : null;
-  const money = value => {
-    const n = num(value);
-    if(n == null) return "-";
-    const sign = n > 0 ? "+" : n < 0 ? "-" : "";
-    return sign + "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-  };
-  const moneyPlain = value => {
-    const n = num(value);
-    if(n == null) return "-";
-    return (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-  };
-  const pctText = value => {
-    const n = num(value);
-    return n == null ? "N/A" : (n > 0 ? "+" : "") + n.toFixed(2) + "%";
-  };
-  const shortDate = value => {
-    const n = num(value);
-    if(n == null || n <= 0) return "-";
-    const dt = new Date(n > 1e12 ? n : n * 1000);
-    if(Number.isNaN(dt.getTime())) return "-";
-    return dt.toLocaleDateString("en-GB",{day:"2-digit",month:"2-digit"});
-  };
-  const clamp = (value,min,max) => Math.min(max,Math.max(min,value));
-  const niceStep = range => {
-    const base = Math.max(1,Math.abs(range) / 4);
-    const power = Math.pow(10,Math.floor(Math.log10(base)));
-    const scaled = base / power;
-    const nice = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
-    return nice * power;
-  };
-  const fmtBigResult = value => {
-    const n = num(value);
-    if(n == null) return "-";
-    const rounded = Math.round(n);
-    const sign = rounded > 0 ? "+" : rounded < 0 ? "-" : "";
-    return sign + "$" + Math.abs(rounded).toLocaleString("en-US",{maximumFractionDigits:0});
-  };
-  const wfTitleDayText = ms => {
-    const dt = new Date(ms);
-    return String(dt.getDate()).padStart(2,"0") + " / " + dt.toLocaleString("en-GB",{month:"short"});
-  };
-  const WF_AXIS_MIN_ABS = 10;
-  const WF_MAX_BAR_WIDTH_PX = 90;
-  const WF_GREEN = "#047857";
-  const WF_RED = "#7f1d1d";
-  const WF_BLACK = "#1e2329";
-  const wfEscape = value => String(value == null ? "" : value)
-    .replace(/&/g,"&amp;")
-    .replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;");
-  const wfAttr = value => wfEscape(value)
-    .replace(/"/g,"&quot;")
-    .replace(/'/g,"&#39;");
-
-  let visible = false;
-  let hoverTradeIndex = null;
-  let lastModel = null;
-  const wfSyncState = {
-    loaded:false,
-    symbol:"",
-    period:"",
-    closeTimer:null,
-    closeRetry:0,
-    closeSyncBusy:false,
-    closeSyncBaseline:"",
-    liveRefreshKey:"",
-    liveRefreshTimer:null,
-    liveTicker:null,
-    sideWidthKey:"",
-    sideWidthPx:116,
-    resizeQueued:false,
-    livePriceHint:null,
-    liveFloatingHint:null,
-    hoverClientX:null,
-    hoverClientY:null,
-    hoverInsideChart:false,
-    suppressResizeRender:false,
-    expandedRect:null,
-    crosshair:{active:false,clientX:null,clientY:null,selectedLevel:null,scale:null,listenerBindings:0,updates:0,closedPartialKey:""}
-  };
-  function activeWfTradeKey(){
-    try{
-      return typeof window.getActiveClosedTradeIsolateKey === "function" ? window.getActiveClosedTradeIsolateKey() : null;
-    }catch(_e){
-      return null;
-    }
-  }
-  function tradeKey(trade){
-    return trade && (trade.parentTradeId || trade.chainId || trade.markerId || trade.id || null);
-  }
-  function currentSymbol(){
-    try{
-      return String((cfg() && cfg().symbol) || "").toUpperCase();
-    }catch(_e){
-      return "";
-    }
-  }
-  function currentPeriodValue(){
-    try{
-      return String((reportWeeksEl && reportWeeksEl.value) || "1d").toLowerCase();
-    }catch(_e){
-      return "1d";
-    }
-  }
-  function currentLivePrice(){
-    const hinted = num(wfSyncState.livePriceHint);
-    if(hinted != null) return hinted;
-    try{
-      if(typeof appCurrentPrice === "function"){
-        const appPrice = num(appCurrentPrice());
-        if(appPrice != null) return appPrice;
-      }
-    }catch(_e){}
-    const latest = Array.isArray(candles) && candles.length ? candles[candles.length - 1] : null;
-    const close = num(latest && latest.close);
-    if(close != null) return close;
-    return num(typeof lastMarkPrice !== "undefined" ? lastMarkPrice : null);
-  }
-  function wfLiveFloatingForBox(box,price){
-    const livePrice = num(price);
-    if(livePrice != null && typeof openBoxFloating === "function"){
-      const floating = num(openBoxFloating(box,livePrice));
-      if(floating != null) return floating;
-    }
-    return num(box && box.unrealizedPnl);
-  }
-  function wfLiveRefreshSignature(liveTrade){
-    const balance = num(accountBalanceState);
-    return [
-      liveTrade ? liveTrade.liveKey : "",
-      balance == null ? "na" : String(balance)
-    ].join("|");
-  }
-  function closedTradeSignature(rec){
-    const parents = typeof closedTradeParentTrades === "function" ? closedTradeParentTrades(rec || {}) : [];
-    return parents.map(trade => [
-      String(trade && trade.parentId || ""),
-      String(num(trade && trade.finalExit && trade.finalExit.time) || 0),
-      String(num(trade && trade.netTotal) || 0)
-    ].join(":")).join("|");
-  }
-  function closedTradeFastSignature(report){
-    const rows = report && Array.isArray(report.summaries) ? report.summaries : [];
-    const summary = report && report.summary || {};
-    return rows.map(row => [
-      String(row && row.id || ""),
-      String(num(row && row.closeTime) || 0),
-      String(num(row && row.net) || 0)
-    ].join(":")).join("|") + "|net:" + String(num(summary && summary.netTotal) || 0);
-  }
-  function wfDataMode(){
-    return String(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.wfMode || "none");
-  }
-  function activeWfReport(){
-    const mode = wfDataMode();
-    if(mode === "fast" && wfHasCurrentFastReport()) return CLOSED_TRADES_STATE.fastReport;
-    if(mode === "detail" && wfHasCurrentDetailReport()) return CLOSED_TRADES_STATE.reportProjection;
-    return null;
-  }
-  function activeWfSignature(){
-    const mode = wfDataMode();
-    if(mode === "fast") return closedTradeFastSignature(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.fastReport);
-    return closedTradeSignature(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection);
-  }
-  function wfHasCurrentFastReport(){
-    const report = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.fastReport;
-    const period = report && report.period;
-    return !!(
-      report &&
-      String(report.symbol || "").toUpperCase() === currentSymbol() &&
-      period &&
-      String(period.period || "").toLowerCase() === currentPeriodValue()
-    );
-  }
-  function wfHasCurrentDetailReport(){
-    const report = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection;
-    const period = report && report.period;
-    return !!(
-      report &&
-      String(report.symbol || "").toUpperCase() === currentSymbol() &&
-      period &&
-      String(period.period || "").toLowerCase() === currentPeriodValue()
-    );
-  }
-  async function reloadCurrentWfData(period,opt={}){
-    if(wfDataMode() === "detail") return loadClosedTradesForPeriod(period,opt);
-    return loadClosedTradesFastForPeriod(period,opt);
-  }
-  async function ensureFastWfData(opt={}){
-    if(typeof hasKeys !== "function" || !hasKeys()) return null;
-    if(!opt.force && wfHasCurrentFastReport()) return CLOSED_TRADES_STATE.fastReport;
-    return loadClosedTradesFastForPeriod(opt.period || currentPeriodValue(),opt);
-  }
-  function livePreviewTrade(){
-    const chainIds = Array.from((OPEN_POSITION_STATE && OPEN_POSITION_STATE.activeParentChainIds) || []).filter(Boolean);
-    const parentId = chainIds[0] || null;
-    if(!parentId) return null;
-    const markers = (OPEN_POSITION_STATE.markers || []).filter(m => stateChainId(m) === parentId).slice().sort((a,b) => (num(a && a.time) || 0) - (num(b && b.time) || 0));
-    const links = (OPEN_POSITION_STATE.links || []).filter(l => stateChainId(l) === parentId).slice();
-    const boxes = (OPEN_POSITION_STATE.boxes || []).filter(b => stateChainId(b) === parentId);
-    if(!markers.length && !boxes.length) return null;
-    const entries = markers.filter(m => m && m.role === "entry");
-    const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-    const realizedPartials = links.reduce((sum,link) => sum + (num(link && link.netPnl) || 0),0);
-    const livePrice = currentLivePrice();
-    const hintedFloating = num(wfSyncState.liveFloatingHint);
-    const floatingPL = hintedFloating != null ? hintedFloating : (boxes.length
-      ? boxes.reduce((sum,box) => {
-          const floating = wfLiveFloatingForBox(box,livePrice);
-          return sum + (floating || 0);
-        },0)
-      : null);
-    const netLivePL = floatingPL == null ? null : realizedPartials + floatingPL;
-    const startTime = num(entries[0] && entries[0].time);
-    const tooltipLines = [
-      "Current open position",
-      "Direction: " + (side === "SHORT" ? "Short" : "Long"),
-      "Duration: " + wfDurationText(startTime,Math.floor(Date.now() / 1000)),
-      "",
-      [{text:"Realized partials | ",color:WF_BLACK},{text:fm(realizedPartials),color:wfPnlColor(realizedPartials),bold:true}],
-      [{text:"Floating P/L | ",color:WF_BLACK},{text:floatingPL == null ? "N/A" : fm(floatingPL),color:floatingPL == null ? WF_BLACK : wfPnlColor(floatingPL),bold:true}],
-      "",
-      [{text:"Net live P/L | ",color:WF_BLACK,bold:true,large:true},{text:netLivePL == null ? "N/A" : fm(netLivePL),color:netLivePL == null ? WF_BLACK : wfPnlColor(netLivePL),bold:true,large:true}]
-    ];
-    return {
-      id:"wf_live_" + parentId,
-      parentTradeId:parentId,
-      chainId:parentId,
-      live:true,
-      dir:side === "SHORT" ? "S" : "L",
-      net:netLivePL,
-      realizedPartials,
-      floatingPL,
-      tooltipLines,
-      markerId:null,
-      liveKey:[
-        parentId,
-        String(realizedPartials),
-        floatingPL == null ? "na" : String(floatingPL),
-        livePrice == null ? "na" : String(livePrice),
-        String(startTime || 0)
-      ].join(":"),
-      start:0,
-      end:0
-    };
-  }
-  function wfLivePreviewBars(liveTrade,trades){
-    if(!liveTrade) return [];
-    const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
-    const realized = num(liveTrade.realizedPartials);
-    const floating = num(liveTrade.floatingPL);
-    const bars = [];
-    let cursor = cumulative;
-    if(realized != null && Math.abs(realized) > 1e-12){
-      bars.push({
-        ...liveTrade,
-        id:liveTrade.id + "_realized",
-        liveSegment:"realized",
-        net:realized,
-        start:cursor,
-        end:cursor + realized
-      });
-      cursor += realized;
-    }
-    if(floating != null && Math.abs(floating) > 1e-12){
-      bars.push({
-        ...liveTrade,
-        id:liveTrade.id + "_floating",
-        liveSegment:"floating",
-        net:floating,
-        start:cursor,
-        end:cursor + floating
-      });
-      cursor += floating;
-    }
-    if(!bars.length){
-      bars.push({
-        ...liveTrade,
-        id:liveTrade.id + "_flat",
-        liveSegment:"net",
-        net:num(liveTrade.net) || 0,
-        start:cumulative,
-        end:cumulative + (num(liveTrade.net) || 0)
-      });
-    }
-    return bars;
-  }
-  function markClosedTradesLoaded(loaded){
-    wfSyncState.loaded = !!loaded;
-    wfSyncState.symbol = loaded ? currentSymbol() : "";
-    wfSyncState.period = loaded ? currentPeriodValue() : "";
-    if(!loaded) wfSyncState.closeSyncBaseline = "";
-  }
-  function clearAutoCloseSync(){
-    if(wfSyncState.closeTimer){
-      clearTimeout(wfSyncState.closeTimer);
-      wfSyncState.closeTimer = null;
-    }
-    wfSyncState.closeRetry = 0;
-    wfSyncState.closeSyncBusy = false;
-    wfSyncState.closeSyncBaseline = "";
-  }
-  function scheduleAutoCloseSync(delayMs=1250){
-    if((!wfSyncState.loaded && !visible) || (wfSyncState.loaded && wfSyncState.symbol !== currentSymbol())) return;
-    if(wfSyncState.closeTimer || wfSyncState.closeSyncBusy) return;
-    wfSyncState.closeSyncBaseline = activeWfSignature();
-    const period = wfSyncState.period || currentPeriodValue();
-    const symbol = currentSymbol();
-    wfSyncState.closeTimer = setTimeout(async () => {
-      wfSyncState.closeTimer = null;
-      wfSyncState.closeSyncBusy = true;
-      try{
-        while(wfSyncState.closeRetry < 2){
-          let staleContext = false;
-          const acceptResult = () => {
-            const currentPeriod = currentPeriodValue();
-            const currentSymbolValue = currentSymbol();
-            const current = currentPeriod === String(period || "").toLowerCase() && currentSymbolValue === symbol;
-            if(!current) staleContext = true;
-            return current;
-          };
-          const result = await reloadCurrentWfData(period,{silent:true,acceptResult});
-          // WF-C05: a period/symbol change cancels this synchronization attempt.
-          if(staleContext || !acceptResult()) return;
-          const nextSignature = wfDataMode() === "fast"
-            ? closedTradeFastSignature(result)
-            : closedTradeSignature(result && result.report);
-          if(result && (!wfSyncState.closeSyncBaseline || (nextSignature && nextSignature !== wfSyncState.closeSyncBaseline))){
-            wfSyncState.closeRetry = 0;
-            wfSyncState.closeSyncBaseline = "";
-            return;
-          }
-          wfSyncState.closeRetry += 1;
-          if(wfSyncState.closeRetry < 2) await new Promise(resolve => setTimeout(resolve,3000));
-        }
-        showWfTradesStatus("Closed trade not ready yet");
-      }catch(error){
-        console.warn(MODULE + " live sync failed",error);
-        showWfTradesStatus("Closed trade sync failed");
-      }finally{
-        wfSyncState.closeSyncBusy = false;
-        wfSyncState.closeRetry = 0;
-        wfSyncState.closeSyncBaseline = "";
-      }
-    },Math.max(250,delayMs));
-  }
-  function updateWfLiveStripSnapshot(c){
-    const price = num(c && c.close);
-    wfSyncState.livePriceHint = price != null ? price : currentLivePrice();
-    if(Array.isArray(openPositionBoxes) && openPositionBoxes.length && typeof openBoxesFloating === "function"){
-      wfSyncState.liveFloatingHint = num(openBoxesFloating(wfSyncState.livePriceHint));
-    }else{
-      wfSyncState.liveFloatingHint = null;
-    }
-  }
-  function maybeRefreshLivePreview(){
-    if(!visible) return;
-    if(wfSyncState.liveRefreshTimer) return;
-    wfSyncState.liveRefreshTimer = setTimeout(() => {
-      wfSyncState.liveRefreshTimer = null;
-      if(!visible) return;
-      const live = livePreviewTrade();
-      const closedPartialKey=live ? [live.parentTradeId,String(num(live.realizedPartials)||0)].join(":") : "flat:0";
-      if(closedPartialKey!==wfSyncState.crosshair.closedPartialKey){
-        wfSyncState.crosshair.closedPartialKey=closedPartialKey;
-        if(wfSyncState.crosshair.active)renderWfCrosshair(live);
-      }
-      const nextKey = wfLiveRefreshSignature(live);
-      if(nextKey === wfSyncState.liveRefreshKey) return;
-      wfSyncState.liveRefreshKey = nextKey;
-      render();
-    },60);
-  }
-  function saveExpandedRect(win){
-    if(!win || win.classList.contains("is-collapsed")) return;
-    const rect = win.getBoundingClientRect();
-    wfSyncState.expandedRect = {
-      left:rect.left,
-      top:rect.top,
-      width:rect.width,
-      height:rect.height
-    };
-  }
-  function applyExpandedRect(win){
-    const rect = wfSyncState.expandedRect;
-    if(!win || !rect) return;
-    win.style.left = Math.max(6,rect.left) + "px";
-    win.style.top = Math.max(6,rect.top) + "px";
-    win.style.right = "auto";
-    win.style.width = Math.max(520,rect.width) + "px";
-    win.style.height = Math.max(360,rect.height) + "px";
-  }
-  function restoreWfHoverTarget(){
-    const chart = q("wfChart");
-    if(!chart || !wfSyncState.hoverInsideChart){
-      hoverTradeIndex = null;
-      renderHover();
-      return;
-    }
-    const chartRect = chart.getBoundingClientRect();
-    const x = wfSyncState.hoverClientX;
-    const y = wfSyncState.hoverClientY;
-    if(!(Number.isFinite(x) && Number.isFinite(y)) || x < chartRect.left || x > chartRect.right || y < chartRect.top || y > chartRect.bottom){
-      hoverTradeIndex = null;
-      wfSyncState.hoverInsideChart = false;
-      renderHover();
-      return;
-    }
-    const bar = hoverTradeIndex == null ? null : chart.querySelector(`.wf-bar[data-trade-index="${hoverTradeIndex}"]`);
-    if(!bar){
-      hoverTradeIndex = null;
-      renderHover();
-      return;
-    }
-    renderHover({clientX:x,clientY:y});
-  }
-  function wfCrosshairMoney(value,{signed=false}={}){
-    const amount=Math.round(Math.abs(Number(value) || 0)).toLocaleString("en-US");
-    if(Math.abs(Number(value) || 0)<0.005) return "$0";
-    if(Number(value)<0) return `−$${amount}`;
-    return `${signed ? "+" : ""}$${amount}`;
-  }
-  function wfCrosshairDifferenceText(selected,current){
-    return wfCrosshairMoney(Number(selected)-Number(current),{signed:true});
-  }
-  // CLOSED P&L ONLY -- closedSelectedNet is the cumulative net of every closed trade in view and
-  // realizedPartials is the open position's already-closed portion. The live position's netLivePL,
-  // shown elsewhere in the WF sidebar, includes floatingPL and must never be used here.
-  function wfCurrentCampaignClosedPartialPL(selectedNet,liveTrade){
-    const closedSelectedNet=arguments.length ? (num(selectedNet)||0) : (num(lastModel&&lastModel.closedSelectedNet)||0);
-    const live=arguments.length>1?liveTrade:livePreviewTrade();
-    const realizedPartials=live&&live.parentTradeId ? (num(live.realizedPartials)||0) : 0;
-    return closedSelectedNet+realizedPartials;
-  }
-  function hideWfCrosshair({clear=true}={}){
-    const crosshair=wfSyncState.crosshair;
-    crosshair.active=false;
-    if(clear){ crosshair.clientX=null;crosshair.clientY=null;crosshair.selectedLevel=null; }
-    const overlay=q("wfCrosshair");
-    const values=q("wfCrosshairValues");
-    if(overlay) overlay.classList.add("hidden");
-    if(values) values.classList.add("hidden");
-  }
-  function renderWfCrosshair(liveTrade){
-    const chart=q("wfChart"),win=q("wfWindow"),crosshair=wfSyncState.crosshair,scale=crosshair.scale;
-    const overlay=q("wfCrosshair"),values=q("wfCrosshairValues");
-    if(!visible || !chart || !win || win.classList.contains("is-collapsed") || !overlay || !values || !crosshair.active || !scale || !Number.isFinite(crosshair.selectedLevel)){
-      if(overlay) overlay.classList.add("hidden");
-      if(values) values.classList.add("hidden");
-      return;
-    }
-    const chartRect=chart.getBoundingClientRect();
-    const localX=clamp(Number(crosshair.clientX)-chartRect.left,scale.plotLeft,Math.max(scale.plotLeft,chart.clientWidth-scale.plotRight));
-    const plotY=clamp(scale.valueToY(crosshair.selectedLevel),0,scale.plotHeight);
-    const localY=scale.plotTop+plotY;
-    const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(lastModel&&lastModel.closedSelectedNet,arguments.length?liveTrade:livePreviewTrade());
-    const vertical=overlay.querySelector(".wf-crosshair-v");
-    const horizontal=overlay.querySelector(".wf-crosshair-h");
-    const selected=overlay.querySelector(".wf-crosshair-selected");
-    const amount=values && values.querySelector(".wf-crosshair-amount");
-    if(!vertical || !horizontal || !selected || !amount){ overlay.classList.add("hidden");values.classList.add("hidden");return; }
-    const hairline=`${1/(window.devicePixelRatio || 1)}px`;
-    overlay.style.setProperty("--wf-crosshair-hairline",hairline);
-    vertical.style.left=`${localX}px`;vertical.style.top=`${scale.plotTop}px`;vertical.style.height=`${scale.plotHeight}px`;
-    horizontal.style.left=`${scale.plotLeft}px`;horizontal.style.right=`${scale.plotRight}px`;horizontal.style.top=`${localY}px`;
-    selected.style.top=`${localY}px`;
-    selected.textContent=wfCrosshairMoney(crosshair.selectedLevel,{signed:true});
-    amount.textContent=wfCrosshairDifferenceText(crosshair.selectedLevel,currentCampaignClosedPartials);
-    overlay.classList.remove("hidden");
-    values.classList.remove("hidden");
-    overlay.dataset.selectedLevel=String(crosshair.selectedLevel);
-    values.dataset.currentCampaignClosedPartials=String(currentCampaignClosedPartials);
-    values.dataset.amountToLevel=String(crosshair.selectedLevel-currentCampaignClosedPartials);
-    crosshair.updates+=1;
-  }
-  function updateWfCrosshairFromPointer(event){
-    const chart=q("wfChart"),win=q("wfWindow"),crosshair=wfSyncState.crosshair,scale=crosshair.scale;
-    if(!visible || !chart || !win || win.classList.contains("is-collapsed") || !scale){ hideWfCrosshair();return; }
-    const rect=chart.getBoundingClientRect();
-    const x=event.clientX-rect.left,y=event.clientY-rect.top;
-    const inside=x>=scale.plotLeft && x<=chart.clientWidth-scale.plotRight && y>=scale.plotTop && y<=scale.plotTop+scale.plotHeight;
-    if(!inside){ hideWfCrosshair();return; }
-    crosshair.active=true;crosshair.clientX=event.clientX;crosshair.clientY=event.clientY;
-    crosshair.selectedLevel=scale.yToValue(y-scale.plotTop);
-    renderWfCrosshair();
-  }
-  function runWfCrosshairSelfTests(){
-    const domainMin=-2000,domainMax=3000,height=250;
-    const valueToY=value=>((domainMax-value)/(domainMax-domainMin))*height;
-    const yToValue=y=>domainMax-(y/height)*(domainMax-domainMin);
-    const probes=[-2000,-500,0,1250,3000];
-    const closedTrades=[{net:-150},{net:220},{net:35},{net:-5}];
-    const selectedNet=closedTrades.reduce((sum,trade)=>sum+(num(trade.net)||0),0);
-    const cases={
-      positiveDifference:wfCrosshairDifferenceText(2000,1500)==="+$500",
-      negativeDifference:wfCrosshairDifferenceText(1000,1500)==="−$500",
-      negativeSelectedPositiveLive:wfCrosshairDifferenceText(-500,1500)==="−$2,000",
-      negativeSelectedMoreNegativeLive:wfCrosshairDifferenceText(-500,-1000)==="+$500",
-      zeroLive:wfCrosshairDifferenceText(500,0)==="+$500",
-      zeroSelected:wfCrosshairDifferenceText(0,500)==="−$500",
-      equality:wfCrosshairDifferenceText(1500,1500)==="$0",
-      signedFormatting:wfCrosshairMoney(1234,{signed:true})==="+$1,234" && wfCrosshairMoney(-1234,{signed:true})==="−$1,234" && wfCrosshairMoney(0,{signed:true})==="$0",
-      axisRoundTrip:probes.every(value=>Math.abs(yToValue(valueToY(value))-value)<1e-8),
-      liveBaselineIncludesSelectedNetAndPartials:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:900})===143,
-      floatingExcluded:wfCrosshairDifferenceText(155,wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-800}))==="+$12",
-      // CLOSED P&L ONLY, locked in explicitly: cumulative closed-trade net plus realizedPartials must
-      // drive the distance baseline no matter how large floatingPL is, in either direction.
-      floatingExclusionHoldsForHugePositiveFloating:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:1e9})===143,
-      floatingExclusionHoldsForHugeNegativeFloating:wfCurrentCampaignClosedPartialPL(selectedNet,{parentTradeId:"campaign-a",realizedPartials:43,floatingPL:-1e9})===143,
-      // With no live position, the full cumulative sum of all closed trades is the baseline.
-      flatCampaignUsesAllClosedTrades:wfCurrentCampaignClosedPartialPL(selectedNet,null)===100,
-      flatCampaignWithNoClosedTrades:wfCurrentCampaignClosedPartialPL(0,null)===0,
-      flatUsesCumulativeClosedNetAsBaseline:wfCrosshairDifferenceText(500,wfCurrentCampaignClosedPartialPL(selectedNet,null))==="+$400"
-    };
-    return {passed:Object.values(cases).every(Boolean),cases};
-  }
-  function startLiveRefreshLoop(){
-    if(wfSyncState.liveTicker) return;
-    wfSyncState.liveTicker = setInterval(() => {
-      try{ maybeRefreshLivePreview(); }catch(_e){}
-    },350);
-  }
-  function stopLiveRefreshLoop(){
-    if(!wfSyncState.liveTicker) return;
-    clearInterval(wfSyncState.liveTicker);
-    wfSyncState.liveTicker = null;
-    if(wfSyncState.liveRefreshTimer){
-      clearTimeout(wfSyncState.liveRefreshTimer);
-      wfSyncState.liveRefreshTimer = null;
-    }
-  }
-  function queueWfResizeRender(){
-    if(wfSyncState.resizeQueued || !visible) return;
-    wfSyncState.resizeQueued = true;
-    requestAnimationFrame(() => {
-      wfSyncState.resizeQueued = false;
-      if(visible) render();
-    });
-  }
-  const WF_DIRECTION_FONT_MAX_PX = 10;
-  const WF_DIRECTION_FONT_MIN_PX = 6;
-  const WF_RESULT_FONT_MAX_PX = 24;
-  const WF_RESULT_FONT_MIN_PX = 11;
-  let wfMeasureCanvas = null;
-  function wfRenderedTextWidth(node){
-    if(!node) return 0;
-    try{
-      const range = document.createRange();
-      range.selectNodeContents(node);
-      const width = range.getBoundingClientRect().width;
-      if(typeof range.detach === "function") range.detach();
-      if(Number.isFinite(width) && width > 0) return width;
-    }catch(_e){}
-    try{
-      wfMeasureCanvas = wfMeasureCanvas || document.createElement("canvas");
-      const context = wfMeasureCanvas.getContext("2d");
-      const style = window.getComputedStyle(node);
-      context.font = `${style.fontStyle} ${style.fontVariant} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-      const text = String(node.textContent || "");
-      const letterSpacing = Number.parseFloat(style.letterSpacing) || 0;
-      return context.measureText(text).width + Math.max(0,text.length-1) * letterSpacing;
-    }catch(_e){
-      return node.scrollWidth || 0;
-    }
-  }
-  function wfUsableInnerWidth(node){
-    if(!node) return 0;
-    const rect = node.getBoundingClientRect();
-    const style = window.getComputedStyle(node);
-    return Math.max(0,rect.width
-      - (Number.parseFloat(style.borderLeftWidth) || 0)
-      - (Number.parseFloat(style.borderRightWidth) || 0)
-      - (Number.parseFloat(style.paddingLeft) || 0)
-      - (Number.parseFloat(style.paddingRight) || 0));
-  }
-  function fitWfDirectionLabels(chart){
-    if(!chart) return;
-    chart.querySelectorAll(".wf-bar-col").forEach(column => {
-      const bar = column.querySelector(".wf-bar");
-      const label = column.querySelector(".wf-bar-dir");
-      if(!bar || !label) return;
-      label.hidden = false;
-      label.removeAttribute("aria-hidden");
-      label.style.fontSize = `${WF_DIRECTION_FONT_MAX_PX}px`;
-      const usableWidth = wfUsableInnerWidth(bar);
-      const targetWidth = usableWidth * 0.86;
-      let renderedWidth = wfRenderedTextWidth(label);
-      if(!(targetWidth > 0)){
-        label.hidden = true;
-        label.setAttribute("aria-hidden","true");
-        return;
-      }
-      if(!(renderedWidth > 0)) return;
-      if(renderedWidth > targetWidth){
-        let fontSize = Math.min(WF_DIRECTION_FONT_MAX_PX,WF_DIRECTION_FONT_MAX_PX * targetWidth / renderedWidth);
-        if(fontSize < WF_DIRECTION_FONT_MIN_PX){
-          label.hidden = true;
-          label.setAttribute("aria-hidden","true");
-          return;
-        }
-        fontSize = Math.floor(fontSize * 4) / 4;
-        label.style.fontSize = `${fontSize}px`;
-        renderedWidth = wfRenderedTextWidth(label);
-        while(fontSize > WF_DIRECTION_FONT_MIN_PX && renderedWidth > targetWidth){
-          fontSize = Math.max(WF_DIRECTION_FONT_MIN_PX,fontSize-0.25);
-          label.style.fontSize = `${fontSize}px`;
-          renderedWidth = wfRenderedTextWidth(label);
-        }
-        if(renderedWidth > targetWidth + 0.25){
-          label.hidden = true;
-          label.setAttribute("aria-hidden","true");
-        }
-      }
-    });
-  }
-  function wfCompactMoney(value){
-    const n = num(value);
-    if(n == null) return "-";
-    const magnitude = Math.abs(n);
-    if(magnitude < 1000) return money(n);
-    const units = [[1e12,"T"],[1e9,"B"],[1e6,"M"],[1e3,"K"]];
-    const unit = units.find(item => magnitude >= item[0]) || units[units.length-1];
-    const scaled = magnitude / unit[0];
-    const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
-    const text = scaled.toFixed(decimals).replace(/\.0+$/g,"").replace(/(\.\d*?)0+$/g,"$1");
-    return `${n > 0 ? "+" : n < 0 ? "-" : ""}$${text}${unit[1]}`;
-  }
-  function fitWfResultValues(result){
-    if(!result) return;
-    result.querySelectorAll(".wf-result-value").forEach(valueNode => {
-      const exactText = String(valueNode.dataset.exactText || valueNode.textContent || "");
-      const compactText = String(valueNode.dataset.compactText || exactText);
-      const metric = valueNode.closest(".wf-result-metric") || result;
-      const targetWidth = wfUsableInnerWidth(metric) - 2;
-      valueNode.textContent = exactText;
-      valueNode.style.fontSize = `${WF_RESULT_FONT_MAX_PX}px`;
-      valueNode.classList.remove("is-compact");
-      if(!(targetWidth > 0)) return;
-      let renderedWidth = wfRenderedTextWidth(valueNode);
-      if(renderedWidth <= targetWidth) return;
-      let fontSize = Math.max(WF_RESULT_FONT_MIN_PX,Math.min(WF_RESULT_FONT_MAX_PX,WF_RESULT_FONT_MAX_PX * targetWidth / renderedWidth));
-      fontSize = Math.floor(fontSize * 2) / 2;
-      valueNode.style.fontSize = `${fontSize}px`;
-      renderedWidth = wfRenderedTextWidth(valueNode);
-      while(fontSize > WF_RESULT_FONT_MIN_PX && renderedWidth > targetWidth){
-        fontSize = Math.max(WF_RESULT_FONT_MIN_PX,fontSize-0.5);
-        valueNode.style.fontSize = `${fontSize}px`;
-        renderedWidth = wfRenderedTextWidth(valueNode);
-      }
-      if(renderedWidth <= targetWidth) return;
-      valueNode.textContent = compactText;
-      valueNode.classList.add("is-compact");
-      valueNode.style.fontSize = `${WF_RESULT_FONT_MAX_PX}px`;
-      renderedWidth = wfRenderedTextWidth(valueNode);
-      fontSize = renderedWidth > targetWidth
-        ? Math.max(WF_RESULT_FONT_MIN_PX,Math.floor((WF_RESULT_FONT_MAX_PX * targetWidth / renderedWidth) * 2) / 2)
-        : WF_RESULT_FONT_MAX_PX;
-      valueNode.style.fontSize = `${fontSize}px`;
-    });
-  }
-  function updateWfSideWidth(win,result){
-    if(!win || !result) return;
-    const labelNodes = Array.from(result.querySelectorAll(".wf-result-label"));
-    const valueNodes = Array.from(result.querySelectorAll(".wf-result-value"));
-    if(!valueNodes.length) return;
-    const nextKey = valueNodes.map(node => node.dataset.exactText || node.textContent || "").join("|")
-      + "|" + labelNodes.map(node => node.textContent || "").join("|")
-      + "|" + Math.round(win.clientWidth || 0);
-    if(nextKey === wfSyncState.sideWidthKey && wfSyncState.sideWidthPx > 0) return;
-    const labelWidth = labelNodes.reduce((width,node) => Math.max(width,node.scrollWidth || 0),0);
-    const maximum = Math.max(96,Math.floor((win.clientWidth || 520) * 0.30));
-    const nextWidth = Math.min(maximum,Math.max(116,Math.ceil(labelWidth + 16)));
-    const changed = Math.abs(nextWidth - wfSyncState.sideWidthPx) >= 2;
-    wfSyncState.sideWidthKey = nextKey;
-    wfSyncState.sideWidthPx = nextWidth;
-    win.style.setProperty("--wf-side-width",nextWidth + "px");
-    if(changed) queueWfResizeRender();
-  }
-
-  function profitRatioCell(value){
-    const n = num(value);
-    if(!(n >= 0)) return {text:"N/A",cls:"is-na"};
-    if(n < 1) return {text:n.toFixed(2),cls:"is-bad"};
-    if(n < 1.25) return {text:n.toFixed(2),cls:"is-neutral"};
-    if(n < 1.5) return {text:n.toFixed(2),cls:"is-amber"};
-    if(n < 2) return {text:n.toFixed(2),cls:"is-good"};
-    return {text:n.toFixed(2),cls:"is-strong"};
-  }
-  function wfPnlColor(value){
-    const n = num(value);
-    if(n == null || Math.abs(n) < 1e-12) return WF_BLACK;
-    return n > 0 ? WF_GREEN : WF_RED;
-  }
-  function returnPctCell(value){
-    const n = num(value && typeof value === "object" ? value.value : value);
-    if(n == null) return {text:"N/A",cls:"is-flat"};
-    if(n <= -5) return {text:pctText(n),cls:"is-deep-loss"};
-    if(n <= -2) return {text:pctText(n),cls:"is-loss"};
-    if(n <= -0.25) return {text:pctText(n),cls:"is-soft-loss"};
-    if(n < 0.25) return {text:pctText(n),cls:"is-flat"};
-    if(n < 1) return {text:pctText(n),cls:"is-soft-gain"};
-    if(n < 3) return {text:pctText(n),cls:"is-gain"};
-    return {text:pctText(n),cls:"is-strong-gain"};
-  }
-  function wfReturnMetrics(selectedNet){
-    const unavailable = {value:null,startBalance:null,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
-    // WF-C02: absence of a valid report is not a genuinely flat period.
-    if(selectedNet == null) return unavailable;
-    const selected = num(selectedNet);
-    if(selected == null) return unavailable;
-    const rec = activeWfReport();
-    const explicitStart = [
-      rec && rec.startBalance,
-      rec && rec.selectedPeriodStartBalance,
-      rec && rec.startingBalance
-    ].map(num).find(value => value != null && value > 0) || null;
-    if(explicitStart){
-      const value = selected / explicitStart * 100;
-      return Number.isFinite(value)
-        ? {value,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"start-balance"}
-        : {value:null,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
-    }
-    // WF-EXT-AB05: derived returns require a currently verified balance. Loading, stale,
-    // unavailable, and error snapshots remain N/A rather than using a retained scalar value.
-    const balanceSnapshot = window.BT001_ACCOUNT_BALANCE && typeof window.BT001_ACCOUNT_BALANCE.snapshot === "function"
-      ? window.BT001_ACCOUNT_BALANCE.snapshot()
-      : null;
-    if(!balanceSnapshot || balanceSnapshot.status !== "fresh") return unavailable;
-    const currentBalance = num(balanceSnapshot.value);
-    if(currentBalance == null) return unavailable;
-    const derivedStartBalance = currentBalance - selected;
-    if(!(derivedStartBalance > 0)) return {value:null,startBalance:null,currentBalance,derivedStartBalance,source:"unavailable"};
-    const value = selected / derivedStartBalance * 100;
-    return Number.isFinite(value)
-      ? {value,startBalance:null,currentBalance,derivedStartBalance,source:"derived"}
-      : {value:null,startBalance:null,currentBalance,derivedStartBalance,source:"unavailable"};
-  }
-  function wfReturnDiagnostics(metrics){
-    if(!metrics || !metrics.source) return "";
-    if(metrics.source === "start-balance"){
-      return "Return source: selected-period starting balance | Start: " + moneyPlain(metrics.startBalance);
-    }
-    if(metrics.source === "derived"){
-      return "Return source: derived from current balance | Current: " + moneyPlain(metrics.currentBalance) + " | Derived start: " + moneyPlain(metrics.derivedStartBalance);
-    }
-    return "Return source: unavailable";
-  }
-  function wfWatermarks(trades){
-    const rows = Array.isArray(trades) ? trades : [];
-    let high = {index:null,value:0};
-    rows.forEach((trade,index) => {
-      const top = Math.max(num(trade && trade.start) || 0,num(trade && trade.end) || 0);
-      if(top > high.value) high = {index,value:top};
-    });
-    return {high};
-  }
-  function wfHwmMetrics(watermarks,currentDisplayedNet){
-    const peak = Math.max(0,num(watermarks && watermarks.high && watermarks.high.value) || 0);
-    const current = num(currentDisplayedNet) || 0;
-    let delta = current-peak;
-    if(Math.abs(delta) < 1e-9) delta = 0;
-    return {peak,current,delta};
-  }
-  function wfDurationText(startValue,endValue){
-    const start = num(startValue);
-    const end = num(endValue);
-    if(start == null || end == null || end < start) return "00:00";
-    const diffMs = start > 1e12 || end > 1e12 ? (end - start) : (end - start) * 1000;
-    const totalMinutes = Math.max(0,Math.floor(diffMs / 60000));
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    return String(hours).padStart(2,"0") + ":" + String(minutes).padStart(2,"0");
-  }
-  function wfHeaderModeText(mode){
-    return mode === "detail" ? "Detailed Reconstruct" : "Totals";
-  }
-
-  function ensureToggle(){
-    let input = q("tglWaterfall");
-    if(input) return input;
-    const tradesLabel = tglResults && tglResults.closest ? tglResults.closest("label") : null;
-    if(!tradesLabel || !tradesLabel.parentNode) return null;
-    const label = document.createElement("label");
-    label.className = "toggle";
-    label.id = "wfToggleLabel";
-    label.innerHTML = '<input id="tglWaterfall" type="checkbox"/><span>WF</span>';
-    tradesLabel.insertAdjacentElement("afterend",label);
-    input = q("tglWaterfall");
-    if(input && !input.__wfBound){
-      input.__wfBound = true;
-      input.addEventListener("change",() => {
-        if(input.checked) show();
-        else hide();
-      },false);
-    }
-    return input;
-  }
-
-  function ensureWindow(){
-    let win = q("wfWindow");
-    if(win) return win;
-    win = document.createElement("div");
-    win.id = "wfWindow";
-    win.className = "wf-window hidden";
-    win.innerHTML = `<div class="wf-head" id="wfHead">
-        <div class="wf-title" id="wfWindowTitle"></div>
-        <div class="wf-actions">
-          <button id="wfCollapse" type="button" title="Collapse">-</button>
-          <button id="wfClose" type="button" title="Close">x</button>
-        </div>
-      </div>
-      <div class="wf-body" id="wfBody">
-        <div class="wf-chart-card">
-          <div class="wf-chart-shell">
-            <div class="wf-chart" id="wfChart"></div>
-            <div class="wf-result" id="wfResult"></div>
-          </div>
-        </div>
-        <div class="wf-summary">
-          <table class="wf-summary-table" id="wfSummaryTable"></table>
-        </div>
-      </div>
-      ${["n","e","s","w","ne","se","sw","nw"].map(dir => `<div class="wf-resize-handle wf-resize-${dir}" data-resize="${dir}"></div>`).join("")}
-      <div class="wf-hover-tip hidden" id="wfHoverTip"></div>`;
-    document.body.appendChild(win);
-    bindWindow(win);
-    return win;
-  }
-
-  function bindWindow(win){
-    const head = q("wfHead");
-    const collapseBtn = q("wfCollapse");
-    const closeBtn = q("wfClose");
-    let drag = null;
-    if(head && !head.__wfDragBound){
-      head.__wfDragBound = true;
-      head.addEventListener("pointerdown",event => {
-        if(event.target.closest("button")) return;
-        saveExpandedRect(win);
-        const rect = win.getBoundingClientRect();
-        drag = {x:event.clientX,y:event.clientY,left:rect.left,top:rect.top};
-        try{head.setPointerCapture(event.pointerId);}catch(_e){}
-        event.preventDefault();
-      },false);
-      head.addEventListener("pointermove",event => {
-        if(!drag) return;
-        win.style.left = Math.max(6,drag.left + event.clientX - drag.x) + "px";
-        win.style.top = Math.max(6,drag.top + event.clientY - drag.y) + "px";
-        win.style.right = "auto";
-      },false);
-      const endDrag = event => {
-        saveExpandedRect(win);
-        drag = null;
-        try{head.releasePointerCapture(event.pointerId);}catch(_e){}
-      };
-      head.addEventListener("pointerup",endDrag,false);
-      head.addEventListener("pointercancel",endDrag,false);
-    }
-    if(!win.__wfResizeBound){
-      win.__wfResizeBound = true;
-      win.querySelectorAll(".wf-resize-handle").forEach(handle => {
-        handle.addEventListener("pointerdown",event => {
-          if(win.classList.contains("is-collapsed")) return;
-          saveExpandedRect(win);
-          const rect = win.getBoundingClientRect();
-          const start = {
-            x:event.clientX,
-            y:event.clientY,
-            left:rect.left,
-            top:rect.top,
-            width:rect.width,
-            height:rect.height,
-            dir:handle.dataset.resize || ""
-          };
-          const minWidth = 520;
-          const minHeight = 360;
-          try{handle.setPointerCapture(event.pointerId);}catch(_e){}
-          event.preventDefault();
-          event.stopPropagation();
-          const move = moveEvent => {
-            const dx = moveEvent.clientX - start.x;
-            const dy = moveEvent.clientY - start.y;
-            let left = start.left;
-            let top = start.top;
-            let width = start.width;
-            let height = start.height;
-            if(start.dir.includes("e")) width = start.width + dx;
-            if(start.dir.includes("s")) height = start.height + dy;
-            if(start.dir.includes("w")){
-              width = start.width - dx;
-              left = start.left + dx;
-            }
-            if(start.dir.includes("n")){
-              height = start.height - dy;
-              top = start.top + dy;
-            }
-            if(width < minWidth){
-              if(start.dir.includes("w")) left -= minWidth - width;
-              width = minWidth;
-            }
-            if(height < minHeight){
-              if(start.dir.includes("n")) top -= minHeight - height;
-              height = minHeight;
-            }
-            left = clamp(left,6,window.innerWidth - 80);
-            top = clamp(top,6,window.innerHeight - 60);
-            width = Math.min(width,window.innerWidth - left - 6);
-            height = Math.min(height,window.innerHeight - top - 6);
-            win.style.left = left + "px";
-            win.style.top = top + "px";
-            win.style.right = "auto";
-            win.style.width = width + "px";
-            win.style.height = height + "px";
-            saveExpandedRect(win);
-            if(visible) render();
-          };
-          const up = endEvent => {
-            document.removeEventListener("pointermove",move,true);
-            document.removeEventListener("pointerup",up,true);
-            document.removeEventListener("pointercancel",up,true);
-            try{handle.releasePointerCapture(endEvent.pointerId);}catch(_e){}
-          };
-          document.addEventListener("pointermove",move,true);
-          document.addEventListener("pointerup",up,true);
-          document.addEventListener("pointercancel",up,true);
-        },false);
-      });
-      if(typeof ResizeObserver === "function"){
-        const observer = new ResizeObserver(() => {
-          if(wfSyncState.suppressResizeRender) return;
-          if(visible && !win.classList.contains("is-collapsed")) render();
-        });
-        observer.observe(win);
-      }
-    }
-    const chart = q("wfChart");
-    if(chart && !chart.__wfHoverBound){
-      chart.__wfHoverBound = true;
-      wfSyncState.crosshair.listenerBindings+=1;
-      chart.addEventListener("pointermove",event => {
-        wfSyncState.hoverClientX = event.clientX;
-        wfSyncState.hoverClientY = event.clientY;
-        wfSyncState.hoverInsideChart = true;
-        updateWfCrosshairFromPointer(event);
-        const bar = event.target.closest ? event.target.closest(".wf-bar[data-trade-index]") : null;
-        if(!bar){
-          hoverTradeIndex = null;
-          renderHover();
-          return;
-        }
-        const next = Number(bar.dataset.tradeIndex);
-        hoverTradeIndex = Number.isFinite(next) ? next : null;
-        renderHover(event);
-      },false);
-      chart.addEventListener("pointerleave",() => {
-        wfSyncState.hoverInsideChart = false;
-        hoverTradeIndex = null;
-        hideWfCrosshair();
-        renderHover();
-      },false);
-      chart.addEventListener("click",event => {
-        const bar = event.target.closest ? event.target.closest(".wf-bar[data-trade-index]") : null;
-        if(!bar) return;
-        const next = Number(bar.dataset.tradeIndex);
-        if(next < 0) return;
-        const trade = lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[next] : null;
-        if(trade) bridgeTradeIsolate(trade);
-      },false);
-    }
-    if(collapseBtn && !collapseBtn.__wfBound){
-      collapseBtn.__wfBound = true;
-      collapseBtn.addEventListener("click",() => {
-        if(win.classList.contains("is-collapsed")){
-          wfSyncState.suppressResizeRender = true;
-          applyExpandedRect(win);
-          win.classList.remove("is-collapsed");
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              wfSyncState.suppressResizeRender = false;
-              if(visible) render();
-            });
-          });
-          return;
-        }
-        saveExpandedRect(win);
-        hideWfCrosshair();
-        const headNode = q("wfHead");
-        const headerHeight = headNode ? Math.ceil(headNode.getBoundingClientRect().height) + 2 : 28;
-        win.style.height = headerHeight + "px";
-        win.classList.add("is-collapsed");
-      },false);
-    }
-    if(closeBtn && !closeBtn.__wfBound){
-      closeBtn.__wfBound = true;
-      closeBtn.addEventListener("click",() => {
-        const toggle = ensureToggle();
-        if(toggle) toggle.checked = false;
-        hide();
-      },false);
-    }
-  }
-
-  function buildFastTradeRows(report){
-    const rows = report && Array.isArray(report.summaries) ? report.summaries : [];
-    let cumulative = 0;
-    return rows.map((row,index) => {
-      const net = num(row && row.net) || 0;
-      const realized = net;
-      const fees = num(row && row.fees);
-      const qty = num(row && row.qty);
-      const openTime = num(row && row.openTime);
-      const closeTime = num(row && row.closeTime);
-      const side = String(row && row.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-      const duration = openTime != null && closeTime != null ? wfDurationText(openTime,closeTime) : "";
-      const tooltipLines = [];
-      tooltipLines.push("Direction: " + (side === "SHORT" ? "Short" : "Long"));
-      if(duration) tooltipLines.push("Duration: " + duration);
-      if(qty != null) tooltipLines.push("Closed Volume: " + fq(qty));
-      tooltipLines.push([{text:"Realized P/L: ",color:WF_BLACK},{text:fm(realized),color:wfPnlColor(realized),bold:true}]);
-      if(fees != null) tooltipLines.push([{text:"Commission / Fees: ",color:WF_BLACK},{text:fm(fees),color:wfPnlColor(fees),bold:true}]);
-      if(row && row.limited) tooltipLines.push("Limited detail: partial context");
-      const trade = {
-        id:row && row.id ? row.id : ("wf_fast_" + index),
-        parentTradeId:row && row.parentTradeId ? row.parentTradeId : null,
-        chainId:row && (row.detailChainId || row.parentTradeId) ? (row.detailChainId || row.parentTradeId) : null,
-        index,
-        when:closeTime == null ? "-" : shortDate(closeTime),
-        net,
-        realized,
-        fees,
-        fundingDelta:null,
-        dir:String(row && row.dir || closedTradeFastSummaryDirection(side)),
-        tooltipLines,
-        finalExit:null,
-        links:[],
-        finalExitTime:closeTime,
-        markerId:row && row.markerId ? row.markerId : null,
-        start:cumulative,
-        end:cumulative + net,
-        limited:!!(row && row.limited)
-      };
-      cumulative = trade.end;
-      return trade;
-    });
-  }
-
-  function buildTradeRows(){
-    const mode = wfDataMode();
-    if(mode === "fast") return wfHasCurrentFastReport() ? buildFastTradeRows(CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.fastReport) : [];
-    if(mode === "detail" && !wfHasCurrentDetailReport()) return [];
-    const rec = CLOSED_TRADES_STATE && CLOSED_TRADES_STATE.reportProjection;
-    const parents = typeof closedTradeParentTrades === "function" ? closedTradeParentTrades(rec || {}) : [];
-    const trades = parents.map((trade,index) => {
-      const realized = (trade.links && trade.links.length)
-        ? trade.links.reduce((sum,link) => sum + closedTradeRealizedValue(link),0)
-        : (trade.exits || []).reduce((sum,marker) => sum + closedTradeNumber(marker && (marker.binanceRealizedPnl ?? marker.realizedPnl ?? marker.pnl)),0);
-      const fees = (trade.links && trade.links.length)
-        ? trade.links.reduce((sum,link) => sum + closedTradeSignedFeeValue(link && (link.fees ?? link.fee)),0)
-        : (trade.exits || []).reduce((sum,marker) => sum + closedTradeSignedFeeValue(marker && marker.fee),0);
-      const fundingDelta = (num(trade && trade.netTotal) || 0) - ((num(realized) || 0) + (num(fees) || 0));
-      const net = (num(realized) || 0) + (num(fees) || 0) + (num(fundingDelta) || 0);
-      const firstEntryTime = num(trade && trade.entries && trade.entries[0] && trade.entries[0].time);
-      const finalExitTime = num(trade && trade.finalExit && trade.finalExit.time);
-      const dir = String(trade && trade.entries && trade.entries[0] && trade.entries[0].side || "").toUpperCase() === "SHORT" ? "S" : "L";
-      const dirText = dir === "S" ? "Short" : "Long";
-      const tooltipLines = [
-        "Direction: " + dirText,
-        "Duration: " + wfDurationText(firstEntryTime,finalExitTime)
-      ];
-      if(trade.entries && trade.entries.length){
-        tooltipLines.push("Entries (" + trade.entries.length + "):");
-        trade.entries.forEach(marker => {
-          const entryPnl = (trade.links || [])
-            .filter(link => link && link.entryMarkerId === marker.id)
-            .reduce((sum,link) => sum + closedTradeNumber(link && link.netPnl),0);
-          tooltipLines.push([
-            {text:(marker.letter || "E") + " " + fq(marker.qty) + " | ",color:WF_BLACK},
-            {text:fm(entryPnl),color:wfPnlColor(entryPnl),bold:true}
-          ]);
-        });
-      }
-      if(trade.exits && trade.exits.length){
-        tooltipLines.push("Exits (" + trade.exits.length + "):");
-        trade.exits.forEach(marker => {
-          const exitLinks = (trade.links || []).filter(link => link && link.exitMarkerId === marker.id);
-          const exitPnl = exitLinks.length
-            ? exitLinks.reduce((sum,link) => sum + closedTradeNumber(link && link.netPnl),0)
-            : closedTradeNumber(marker && (marker.binanceRealizedPnl ?? marker.realizedPnl ?? marker.pnl));
-          tooltipLines.push([
-            {text:(marker.letter || (marker.isFinalExit ? "EX" : "P")) + " " + fq(marker.qty) + " | ",color:WF_BLACK},
-            {text:fm(exitPnl),color:wfPnlColor(exitPnl),bold:true}
-          ]);
-        });
-      }
-      tooltipLines.push("");
-      tooltipLines.push([{text:"Closing PnL | ",color:WF_BLACK},{text:fm(realized),color:wfPnlColor(realized),bold:true}]);
-      tooltipLines.push([{text:"Trading Fee | ",color:WF_BLACK},{text:fm(fees),color:wfPnlColor(fees),bold:true}]);
-      tooltipLines.push([{text:"Funding Fee | ",color:WF_BLACK},{text:fm(fundingDelta),color:wfPnlColor(fundingDelta),bold:true}]);
-      tooltipLines.push("");
-      tooltipLines.push([
-        {text:"Net P/L | ",color:WF_BLACK,bold:true,large:true},
-        {text:fm(net),color:wfPnlColor(net),bold:true,large:true}
-      ]);
-      return {
-        id: trade.parentId || ("wf_" + index),
-        parentTradeId: trade.parentId || null,
-        chainId: trade.parentId || null,
-        index,
-        when: shortDate(trade.finalExit && trade.finalExit.time),
-        net,
-        realized,
-        fees,
-        fundingDelta,
-        dir,
-        tooltipLines,
-        finalExit:trade.finalExit || null,
-        links:trade.links || [],
-        finalExitTime: num(trade.finalExit && trade.finalExit.time),
-        markerId: trade.finalExit && trade.finalExit.id ? trade.finalExit.id : null,
-        start:0,
-        end:0
-      };
-    }).sort((a,b) => (a.finalExitTime || 0) - (b.finalExitTime || 0));
-    let cumulative = 0;
-    trades.forEach(trade => {
-      trade.start = cumulative;
-      cumulative += num(trade.net) || 0;
-      trade.end = cumulative;
-    });
-    return trades;
-  }
-
-  function selectedPeriodDates(){
-    if(reportWeeksEl && String(reportWeeksEl.value || "").toLowerCase() === "custom" && typeof parseCustomDate === "function"){
-      const start = parseCustomDate(customFromEl ? customFromEl.value : "",false);
-      const end = parseCustomDate(customToEl ? customToEl.value : "",true);
-      if(Number.isFinite(start) && Number.isFinite(end) && end >= start){
-        return {start,end};
-      }
-    }
-    const win = closedTradePeriodWindowMs(reportWeeksEl && reportWeeksEl.value);
-    return {start:win.start,end:win.end};
-  }
-
-  function buildViewModel(){
-    const mode = wfDataMode();
-    const wfReport = activeWfReport();
-    const hasValidReport = !!wfReport;
-    const trades = buildTradeRows();
-    const liveTrade = livePreviewTrade();
-    const fastSummary = mode === "fast" && wfReport && wfReport.summary ? wfReport.summary : null;
-    const selectedNetBase = mode === "fast"
-      ? (num(fastSummary && fastSummary.netTotal) || 0)
-      : trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
-    const selectedNet = selectedNetBase;
-    const watermarks = wfWatermarks(trades);
-    const liveNet = num(liveTrade && liveTrade.net) || 0;
-    const returnMetrics = wfReturnMetrics(hasValidReport ? selectedNet : null);
-    const wins = trades.filter(trade => trade.net > 0);
-    const losses = trades.filter(trade => trade.net < 0);
-    const totalWin = wins.reduce((sum,trade) => sum + trade.net,0);
-    const totalLoss = losses.reduce((sum,trade) => sum + trade.net,0);
-    const largestWin = wins.length ? Math.max(...wins.map(trade => trade.net)) : null;
-    const largestLoss = losses.length ? Math.min(...losses.map(trade => trade.net)) : null;
-    const grossWins = wins.reduce((sum,trade) => sum + Math.max(0,num(trade.net) || 0),0);
-    const grossLosses = losses.reduce((sum,trade) => sum + Math.abs(Math.min(0,num(trade.net) || 0)),0);
-    const headlineNet = selectedNet + liveNet;
-    const hwm = wfHwmMetrics(watermarks,headlineNet);
-    const headlineGrossWins = grossWins + Math.max(0,liveNet);
-    const headlineGrossLosses = grossLosses + Math.abs(Math.min(0,liveNet));
-    const headlineProfitRatio = headlineGrossLosses > 0 ? headlineGrossWins / headlineGrossLosses : null;
-    const returnPct = liveTrade && hasValidReport ? wfReturnMetrics(headlineNet) : returnMetrics;
-    const livePreviewBars = wfLivePreviewBars(liveTrade,trades);
-    const chartTrades = livePreviewBars.length ? trades.concat(livePreviewBars) : trades.slice();
-    const values = [0].concat(chartTrades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
-    const minCumulative = values.length ? Math.min(...values) : 0;
-    const maxCumulative = values.length ? Math.max(...values) : 0;
-    const span = Math.max(1,maxCumulative - minCumulative);
-    const pad = span * 0.08;
-    const domainMin = Math.min(-WF_AXIS_MIN_ABS,minCumulative - pad,0);
-    const domainMax = Math.max(WF_AXIS_MIN_ABS,maxCumulative + pad,0);
-    const period = selectedPeriodDates();
-    return {
-      trades,
-      chartTrades,
-      watermarks,
-      liveTrade,
-      livePreviewBars,
-      wins:wins.length,
-      losses:losses.length,
-      averageWin:wins.length ? totalWin / wins.length : null,
-      averageLoss:losses.length ? totalLoss / losses.length : null,
-      largestWin,
-      largestLoss,
-      totalWin,
-      totalLoss,
-      profitRatio:headlineProfitRatio,
-      selectedNet:headlineNet,
-      closedSelectedNet:selectedNet,
-      floatingNet:liveNet,
-      hwm,
-      returnPct,
-      mode,
-      domainMin,
-      domainMax,
-      period
-    };
-  }
-
-  function renderSummary(model){
-    const table = q("wfSummaryTable");
-    if(!table) return;
-    const ratio = profitRatioCell(model.profitRatio);
-    const returnPct = returnPctCell(model.returnPct);
-    const returnTitle = wfEscape(wfReturnDiagnostics(model.returnPct));
-    table.innerHTML = `<colgroup>
-        <col>
-        <col>
-        <col>
-        <col>
-        <col>
-        <col class="wf-ratio-col">
-        <col class="wf-return-col">
-      </colgroup>
-      <thead>
-        <tr>
-          <th></th>
-          <th>Count</th>
-          <th>Average</th>
-          <th>Largest</th>
-          <th>Total</th>
-          <th class="wf-ratio-head">Profit Ratio</th>
-          <th class="wf-return-head">Return %</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <th>Wins</th>
-          <td>${model.wins}</td>
-          <td>${money(model.averageWin)}</td>
-          <td>${money(model.largestWin)}</td>
-          <td>${money(model.totalWin)}</td>
-          <td class="wf-ratio-cell ${ratio.cls}" rowspan="2">${ratio.text}</td>
-          <td class="wf-return-cell ${returnPct.cls}" rowspan="2" title="${returnTitle}">${returnPct.text}</td>
-        </tr>
-        <tr>
-          <th>Losses</th>
-          <td>${model.losses}</td>
-          <td>${money(model.averageLoss)}</td>
-          <td>${money(model.largestLoss)}</td>
-          <td>${money(model.totalLoss)}</td>
-        </tr>
-      </tbody>`;
-  }
-
-  function renderChart(model){
-    const chart = q("wfChart");
-    const result = q("wfResult");
-    const title = q("wfWindowTitle");
-    if(!chart) return;
-    if(title && model.period) title.textContent = "Closed positions | From : " + wfTitleDayText(model.period.start) + " To : " + wfTitleDayText(model.period.end) + " | " + wfHeaderModeText(model.mode);
-    const watermarks = model.watermarks;
-    const netValue = num(model.selectedNet) || 0;
-    const resultClass = netValue < 0
-      ? "is-loss"
-      : Math.abs(netValue) < 1e-12
-        ? "is-neutral"
-        : "is-gain";
-    if(result){
-      const hwm = model.hwm;
-      const hwmClass = hwm.delta < 0 ? "is-loss" : hwm.delta > 0 ? "is-gain" : "is-neutral";
-      const netExact = fmtBigResult(model.selectedNet);
-      const netTitle = [
-        `Closed Net P/L: ${money(model.closedSelectedNet)}`,
-        `Floating P/L: ${money(model.floatingNet)}`,
-        `Current Net P/L: ${money(model.selectedNet)}`
-      ].join("\n");
-      const hwmExact = fmtBigResult(hwm.delta);
-      const hwmTitle = [
-        `Closed-trade HWM: ${money(hwm.peak)}`,
-        `Current Net P/L: ${money(hwm.current)}`,
-        `Distance from closed HWM: ${money(hwm.delta)}`
-      ].join("\n");
-      result.innerHTML = `<div class="wf-crosshair-values hidden" id="wfCrosshairValues" aria-hidden="true">
-          <div class="wf-crosshair-label wf-crosshair-amount"></div>
-        </div>
-        <div class="wf-result-metric">
-          <div class="wf-result-label">Net P/L</div>
-          <div class="wf-result-value ${resultClass}" data-result-kind="net" title="${wfAttr(netTitle)}">${wfEscape(netExact)}</div>
-        </div>
-        <div class="wf-result-separator" aria-hidden="true"></div>
-        <div class="wf-result-metric">
-          <div class="wf-result-label">HWM Δ</div>
-          <div class="wf-result-value ${hwmClass}" data-result-kind="hwm" title="${wfAttr(hwmTitle)}">${wfEscape(hwmExact)}</div>
-        </div>`;
-      const netNode = result.querySelector('[data-result-kind="net"]');
-      const hwmNode = result.querySelector('[data-result-kind="hwm"]');
-      if(netNode){
-        netNode.dataset.exactText = netExact;
-        netNode.dataset.compactText = wfCompactMoney(model.selectedNet);
-      }
-      if(hwmNode){
-        hwmNode.dataset.exactText = hwmExact;
-        hwmNode.dataset.compactText = wfCompactMoney(hwm.delta);
-      }
-      fitWfResultValues(result);
-    }
-    if(!model.trades.length && !model.liveTrade){
-      wfSyncState.crosshair.scale=null;
-      hideWfCrosshair();
-      chart.innerHTML = `<div class="wf-empty">${model.mode === "fast" ? "No closed positions in the selected period." : "No closed trades in the selected period."}</div>`;
-      return;
-    }
-    const plotTop = 10;
-    const plotLeft = 48;
-    const plotRight = 10;
-    const plotBottom = 18;
-    const plotHeight = Math.max(1,chart.clientHeight - plotTop - plotBottom);
-    let domainMin = num(model.domainMin) != null ? num(model.domainMin) : -WF_AXIS_MIN_ABS;
-    let domainMax = num(model.domainMax) != null ? num(model.domainMax) : WF_AXIS_MIN_ABS;
-    const minDomainSpan = WF_AXIS_MIN_ABS * 2;
-    if(domainMax - domainMin < minDomainSpan){
-      const mid = (domainMax + domainMin) / 2;
-      domainMin = mid - minDomainSpan / 2;
-      domainMax = mid + minDomainSpan / 2;
-    }
-    const majorStep = niceStep(domainMax - domainMin);
-    const majorTicks = [];
-    const firstTick = Math.floor(domainMin / majorStep) * majorStep;
-    for(let tick = firstTick; tick <= domainMax + majorStep * 0.5; tick += majorStep){
-      majorTicks.push(Number(tick.toFixed(8)));
-    }
-    const minorTicks = [];
-    const minorStep = majorStep / 2;
-    for(let tick = firstTick - minorStep; tick <= domainMax + minorStep; tick += minorStep){
-      const rounded = Number(tick.toFixed(8));
-      if(majorTicks.some(major => Math.abs(major - rounded) < 1e-8)) continue;
-      if(rounded < domainMin - 1e-8 || rounded > domainMax + 1e-8) continue;
-      minorTicks.push(rounded);
-    }
-    const valueToY = value => {
-      const domain = domainMax - domainMin;
-      if(!(domain > 0)) return plotHeight / 2;
-      return ((domainMax - value) / domain) * plotHeight;
-    };
-    const yToValue = y => {
-      const domain=domainMax-domainMin;
-      if(!(domain>0)) return (domainMax+domainMin)/2;
-      return domainMax-(clamp(Number(y) || 0,0,plotHeight)/plotHeight)*domain;
-    };
-    wfSyncState.crosshair.scale={domainMin,domainMax,plotTop,plotLeft,plotRight,plotBottom,plotHeight,valueToY,yToValue};
-    const labelTicks = [];
-    const zeroY = valueToY(0);
-    const majorLines = majorTicks.map(tick => {
-      const y = valueToY(tick);
-      if(y < -0.5 || y > plotHeight + 0.5) return "";
-      if(!labelTicks.length || Math.abs(y - labelTicks[labelTicks.length - 1].y) >= 14){
-        labelTicks.push({tick,y});
-      }
-      return `<div class="wf-gridline is-major" style="top:${y}px"></div>`;
-    }).join("");
-    const axisLabels = labelTicks.map(({tick,y}) => {
-      const cls = Math.abs(tick) < 1e-8 ? "wf-axis-label is-zero" : "";
-      const labelY = Math.abs(tick) < 1e-8 ? zeroY : y;
-      return `<div class="${cls || "wf-axis-label"}" style="top:${labelY}px">${moneyPlain(tick).replace("$","")}</div>`;
-    }
-    ).join("");
-    const minorLines = minorTicks.map(tick => {
-      const y = valueToY(tick);
-      if(y < -0.5 || y > plotHeight + 0.5) return "";
-      return `<div class="wf-gridline is-minor" style="top:${y}px"></div>`;
-    }).join("");
-    const chartTrades = Array.isArray(model.chartTrades) ? model.chartTrades : model.trades;
-    const tradeCount = Math.max(1,chartTrades.length);
-    const gapPx = tradeCount > 90 ? 0 : 1;
-    const activeKey = activeWfTradeKey();
-    const barsHtml = chartTrades.map((trade,index) => {
-      const topValue = Math.max(trade.start,trade.end);
-      const bottomValue = Math.min(trade.start,trade.end);
-      const topY = Math.max(0,Math.min(plotHeight,valueToY(topValue)));
-      const bottomY = Math.max(0,Math.min(plotHeight,valueToY(bottomValue)));
-      const heightPx = Math.max(2,bottomY - topY);
-      const dirTop = trade.dir === "S"
-        ? Math.max(0,topY - 12)
-        : Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
-      const cls = [trade.net >= 0 ? "is-gain" : "is-loss"];
-      if(trade.live) cls.push("is-live");
-      if(trade.live && trade.liveSegment === "realized") cls.push("is-live-realized");
-      if(trade.live && trade.liveSegment === "floating") cls.push("is-live-floating");
-      if(activeKey && tradeKey(trade) === activeKey) cls.push("is-selected");
-      const connector = index < chartTrades.length - 1
-        ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
-        : "";
-      const barInner = trade.live ? `<span class="wf-bar-live-flag">Live</span>` : "";
-      const mark = watermarks.high && watermarks.high.index === index && !trade.live
-        ? `<div class="wf-watermark is-high" style="top:${topY}px">
-            <span class="wf-watermark-label">${money(watermarks.high.value)}</span>
-            <span class="wf-watermark-line"></span>
-          </div>`
-        : "";
-      return `<div class="wf-bar-col">
-          <div class="wf-bar ${cls.join(" ")}" data-trade-index="${trade.live ? -1 : index}" style="top:${topY}px;height:${heightPx}px">${barInner}</div>
-          <span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>
-          ${connector}
-          ${mark}
-        </div>`;
-    }).join("");
-    chart.innerHTML = `<div class="wf-plot">
-        <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
-        <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}</div>
-        <div class="wf-crosshair hidden" id="wfCrosshair" aria-hidden="true">
-          <div class="wf-crosshair-v"></div><div class="wf-crosshair-h"></div>
-          <div class="wf-crosshair-label wf-crosshair-selected wf-crosshair-axis-value"></div>
-        </div>
-      </div>`;
-    fitWfDirectionLabels(chart);
-    renderWfCrosshair();
-  }
-
-  function wfTooltipLines(trade){
-    return trade && Array.isArray(trade.tooltipLines) ? trade.tooltipLines.slice() : [];
-  }
-  function showWfTradesStatus(text){
-    closedTradeStatus(text,{mode:"operational"});
-    clearTimeout(showWfTradesStatus.__timer);
-    showWfTradesStatus.__timer = setTimeout(() => {
-      if(String(closedTradesOperationalText || "") === String(text || "")) closedTradeStatus("",{mode:"operational"});
-    },1800);
-  }
-  function findTradePlHit(trade){
-    const markerId = trade && trade.markerId ? trade.markerId : null;
-    if(!markerId || !Array.isArray(overlayHitItems)) return null;
-    if(typeof syncOverlayHitOwnership === "function") syncOverlayHitOwnership();
-    for(let i = overlayHitItems.length - 1; i >= 0; i--){
-      const item = overlayHitItems[i];
-      if(!item || item.kind !== "plbox" || item.markerId !== markerId) continue;
-      if(typeof window.__v13Patch36IsClosedTradePlBox === "function" && !window.__v13Patch36IsClosedTradePlBox(item)) continue;
-      return item;
-    }
-    return null;
-  }
-  function bridgeTradeIsolate(trade){
-    if(!(tglResults && tglResults.checked)){
-      showWfTradesStatus("Turn Trades ON to isolate trade");
-      return;
-    }
-    const identity = {
-      markerId:trade && trade.markerId ? trade.markerId : null,
-      chainId:trade && (trade.parentTradeId || trade.chainId || trade.id || null),
-      parentTradeId:trade && (trade.parentTradeId || trade.chainId || trade.id || null)
-    };
-    if(identity.markerId && typeof window.activateClosedTradeIsolateByIdentity === "function"){
-      if(window.activateClosedTradeIsolateByIdentity(identity)){
-        if(typeof window.focusClosedTradeIsolate === "function") window.focusClosedTradeIsolate();
-        return;
-      }
-    }
-    let hit = findTradePlHit(trade);
-    if(!hit && typeof draw === "function"){
-      try{ draw(); }catch(_e){}
-      hit = findTradePlHit(trade);
-    }
-    if(hit && typeof window.activateIsolateFromPlLabel === "function"){
-      window.activateIsolateFromPlLabel(hit);
-      if(typeof window.focusClosedTradeIsolate === "function") window.focusClosedTradeIsolate();
-      return;
-    }
-  }
-
-  function renderHover(event){
-    const tip = q("wfHoverTip");
-    if(!tip) return;
-    if(hoverTradeIndex == null){
-      tip.classList.add("hidden");
-      tip.innerHTML = "";
-      tip.style.left = "";
-      tip.style.top = "";
-      tip.style.maxHeight = "";
-      tip.style.columnCount = "";
-      tip.style.maxWidth = "";
-      tip.style.overflowY = "";
-      return;
-    }
-    const trade = hoverTradeIndex < 0
-      ? (lastModel && lastModel.liveTrade ? lastModel.liveTrade : null)
-      : (lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[hoverTradeIndex] : null);
-    const lines = wfTooltipLines(trade);
-    if(!lines.length || !event){
-      tip.classList.add("hidden");
-      tip.innerHTML = "";
-      tip.style.left = "";
-      tip.style.top = "";
-      tip.style.maxHeight = "";
-      tip.style.columnCount = "";
-      tip.style.maxWidth = "";
-      tip.style.overflowY = "";
-      return;
-    }
-    tip.innerHTML = `<div class="wf-tip-columns">${lines.map(line => {
-      if(line === "") return `<div class="wf-tip-spacer"></div>`;
-      if(Array.isArray(line)){
-        const lineClass = line.some(part => part && part.large) ? " class=\"wf-tip-line-lg\"" : "";
-        return `<div${lineClass}>${line.map(part => {
-          const classes = [];
-          if(part && part.bold) classes.push("wf-tip-bold");
-          if(part && part.large) classes.push("wf-tip-large");
-          return `<span class="${classes.join(" ")}" style="color:${String(part && part.color || WF_BLACK)}">${wfEscape(part && part.text || "")}</span>`;
-        }).join("")}</div>`;
-      }
-      return `<div>${wfEscape(line)}</div>`;
-    }).join("")}</div>`;
-    const win = ensureWindow();
-    const chart = q("wfChart");
-    const rect = win.getBoundingClientRect();
-    const chartRect = chart ? chart.getBoundingClientRect() : rect;
-    let left = event.clientX - rect.left + 14;
-    let top = event.clientY - rect.top + 14;
-    tip.classList.remove("hidden");
-    tip.style.maxHeight = "";
-    tip.style.columnCount = "";
-    tip.style.maxWidth = Math.max(180,Math.floor(chartRect.width - 16)) + "px";
-    const maxHeight = Math.max(120,Math.floor(chartRect.height - 12));
-    const maxWidth = Math.max(180,Math.floor(chartRect.width - 16));
-    for(let columns = 1; columns <= 4; columns += 1){
-      tip.style.columnCount = columns > 1 ? String(columns) : "";
-      tip.style.maxHeight = maxHeight + "px";
-      tip.style.overflowY = columns >= 4 ? "auto" : "hidden";
-      const measured = tip.getBoundingClientRect();
-      if(measured.height <= maxHeight + 1 && measured.width <= maxWidth + 1) break;
-    }
-    const tipRect = tip.getBoundingClientRect();
-    const chartLeft = chartRect.left - rect.left;
-    const chartTop = chartRect.top - rect.top;
-    const chartRight = chartRect.right - rect.left;
-    const chartBottom = chartRect.bottom - rect.top;
-    if(left + tipRect.width > chartRight - 8) left = Math.max(chartLeft + 8,left - tipRect.width - 28);
-    if(top + tipRect.height > chartBottom - 8) top = Math.max(chartTop + 8,top - tipRect.height - 28);
-    left = clamp(left,chartLeft + 8,Math.max(chartLeft + 8,chartRight - tipRect.width - 8));
-    top = clamp(top,chartTop + 8,Math.max(chartTop + 8,chartBottom - tipRect.height - 8));
-    tip.style.left = left + "px";
-    tip.style.top = top + "px";
-  }
-
-  function render(){
-    const win = ensureWindow();
-    if(!win || !visible) return;
-    const model = buildViewModel();
-    lastModel = model;
-    renderSummary(model);
-    renderChart(model);
-    updateWfSideWidth(win,q("wfResult"));
-    restoreWfHoverTarget();
-  }
-
-  function show(){
-    visible = true;
-    const win = ensureWindow();
-    if(!win) return;
-    win.classList.remove("hidden");
-    startLiveRefreshLoop();
-    applyExpandedRect(win);
-    render();
-    if(wfDataMode() === "detail" && wfHasCurrentDetailReport()) return;
-    ensureFastWfData({silent:false}).catch(error => {
-      console.warn(MODULE + " fast WF auto-load failed",error);
-    });
-  }
-
-  function hide(){
-    visible = false;
-    stopLiveRefreshLoop();
-    hideWfCrosshair();
-    const win = q("wfWindow");
-    if(win) win.classList.add("hidden");
-  }
-
-  function install(){
-    ensureToggle();
-    ensureWindow();
-    if(reportWeeksEl && !reportWeeksEl.__bt001WfFastReloadBound){
-      reportWeeksEl.__bt001WfFastReloadBound = true;
-      reportWeeksEl.addEventListener("change",() => {
-        hideWfCrosshair();
-        ensureFastWfData({force:true,silent:true,period:currentPeriodValue()}).catch(error => {
-          console.warn(MODULE + " fast WF period reload failed",error);
-        });
-      },false);
-    }
-    if(typeof hasKeys === "function" && hasKeys()){
-      setTimeout(() => {
-        ensureFastWfData({silent:true}).catch(error => {
-          console.warn(MODULE + " fast WF initial load failed",error);
-        });
-      },60);
-    }
-  }
-
-  const prevLoadClosedTradesFastForPeriod = loadClosedTradesFastForPeriod;
-  loadClosedTradesFastForPeriod = async function(){
-    const result = await prevLoadClosedTradesFastForPeriod.apply(this,arguments);
-    if(result) markClosedTradesLoaded(true);
-    if(visible) render();
-    return result;
-  };
-  if(typeof window !== "undefined") window.loadClosedTradesFastForPeriod = loadClosedTradesFastForPeriod;
-
-  const prevLoadClosedTradesForPeriod = loadClosedTradesForPeriod;
-  loadClosedTradesForPeriod = async function(){
-    const result = await prevLoadClosedTradesForPeriod.apply(this,arguments);
-    if(result) markClosedTradesLoaded(true);
-    if(visible) render();
-    return result;
-  };
-  if(typeof window !== "undefined") window.loadClosedTradesForPeriod = loadClosedTradesForPeriod;
-
-  if(typeof clearTrades === "function"){
-    const prevClearTrades = clearTrades;
-    clearTrades = function(){
-      clearAutoCloseSync();
-      markClosedTradesLoaded(false);
-      const result = prevClearTrades.apply(this,arguments);
-      if(visible) render();
-      return result;
-    };
-    if(typeof window !== "undefined") window.clearTrades = clearTrades;
-  }
-
-  if(typeof refreshAccountBalance === "function"){
-    const prevRefreshAccountBalance = refreshAccountBalance;
-    refreshAccountBalance = async function(){
-      const result = await prevRefreshAccountBalance.apply(this,arguments);
-      maybeRefreshLivePreview();
-      return result;
-    };
-    if(typeof window !== "undefined") window.refreshAccountBalance = refreshAccountBalance;
-  }
-
-  if(typeof refreshOpenPosition === "function"){
-    const prevRefreshOpenPosition = refreshOpenPosition;
-    refreshOpenPosition = async function(){
-      const result = await prevRefreshOpenPosition.apply(this,arguments);
-      maybeRefreshLivePreview();
-      return result;
-    };
-    if(typeof window !== "undefined") window.refreshOpenPosition = refreshOpenPosition;
-  }
-
-  if(typeof draw === "function" && !window.__bt001WfLiveDrawBridge){
-    window.__bt001WfLiveDrawBridge = true;
-    const prevDrawForWfLive = draw;
-    draw = window.draw = function(){
-      const result = prevDrawForWfLive.apply(this,arguments);
-      maybeRefreshLivePreview();
-      return result;
-    };
-  }
-
-  if(typeof updatePositionStrip === "function" && !window.__bt001WfLivePositionStripBridge){
-    window.__bt001WfLivePositionStripBridge = true;
-    const prevUpdatePositionStripForWfLive = updatePositionStrip;
-    updatePositionStrip = function(){
-      const result = prevUpdatePositionStripForWfLive.apply(this,arguments);
-      updateWfLiveStripSnapshot(arguments[0]);
-      maybeRefreshLivePreview();
-      return result;
-    };
-    if(typeof window !== "undefined") window.updatePositionStrip = updatePositionStrip;
-  }
-
-  if(typeof window !== "undefined" && !window.__bt001WfLiveSyncBound){
-    window.__bt001WfLiveSyncBound = true;
-    window.addEventListener("v13:open-position-change",event => {
-      const detail = event && event.detail || {};
-      if(detail && detail.closed && !(detail && detail.sideChanged && detail.current)) scheduleAutoCloseSync(1250);
-      else if(detail && detail.opened) clearAutoCloseSync();
-      maybeRefreshLivePreview();
-    },false);
-  }
-
-  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",install,{once:true});
-  else install();
-
-window.BT001_WATERFALL_WINDOW = {
-  version:MODULE,show,hide,render,
-  _selfTest:runWfCrosshairSelfTests,
-  _diagnostics:() => {
-    const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),values=q("wfCrosshairValues"),closedPartials=wfCurrentCampaignClosedPartialPL();
-    const valuesRect=values && values.getBoundingClientRect();
-    return {
-      visible,listenerBindings:crosshair.listenerBindings,active:crosshair.active,updates:crosshair.updates,
-      selectedLevel:crosshair.selectedLevel,currentCampaignClosedPartials:closedPartials,
-      amountToLevel:Number.isFinite(crosshair.selectedLevel) ? crosshair.selectedLevel-closedPartials : null,
-      selectedText:overlay && overlay.querySelector(".wf-crosshair-selected") && overlay.querySelector(".wf-crosshair-selected").textContent || "",
-      amountText:values && values.querySelector(".wf-crosshair-amount") && values.querySelector(".wf-crosshair-amount").textContent || "",
-      labelRect:valuesRect ? {left:valuesRect.left,top:valuesRect.top,right:valuesRect.right,bottom:valuesRect.bottom,width:valuesRect.width,height:valuesRect.height} : null,
-      scale:scale ? {domainMin:scale.domainMin,domainMax:scale.domainMax,plotTop:scale.plotTop,plotLeft:scale.plotLeft,plotRight:scale.plotRight,plotBottom:scale.plotBottom,plotHeight:scale.plotHeight} : null
-    };
-  }
-};
-})();
-
-(() => {
-  "use strict";
   const MODULE = "BT001_DAILY_VOLUME_SPLIT_AND_AXIS_RANGE_VISUALS";
   if(typeof draw !== "function" || window.__bt001DailyVisualsInstalled) return;
   window.__bt001DailyVisualsInstalled = true;
@@ -25691,3 +24361,43 @@ window.BT001_WATERFALL_WINDOW = {
     return result;
   };
 })();
+
+/* =========================================================
+   WF-EXT3-02 — window exports for features/waterfall/waterfall.js
+   WF moved out of main.js into its own deferred script (loads after this
+   file, see index.html). These are the main.js-scoped helpers/state WF
+   references that are not part of the four Phase 3 owner interfaces
+   (BT001_ACCOUNT_BALANCE / BT001_OPEN_POSITION_VISUAL / BT001_CLOSED_TRADES /
+   BT001_SHARED_POSITION) or the Trade Isolate window.* functions. Investigation
+   (Phase 4 Step 1) judged every one of these worth exposing rather than
+   duplicating in WF's own file - they are either genuinely app-wide (cfg,
+   hasKeys, fq, fm), financial-correctness-sensitive (openBoxFloating,
+   stateChainId, the closed-trade math helpers), or the canonical
+   reader/writer of state something else in main.js also writes/reads
+   (closedTradeStatus/closedTradesOperationalText, overlayHitItems) - so a
+   duplicate copy in WF risks silently drifting from the original over time.
+   candles/lastMarkPrice/overlayHitItems/closedTradesOperationalText are
+   reassigned (not just mutated in place) elsewhere in main.js, so they are
+   exposed as getters rather than one-time value snapshots.
+========================================================= */
+if(typeof window !== "undefined"){
+  window.cfg = cfg;
+  window.hasKeys = hasKeys;
+  window.syncOverlayHitOwnership = syncOverlayHitOwnership;
+  window.openBoxFloating = openBoxFloating;
+  window.parseCustomDate = parseCustomDate;
+  window.fq = fq;
+  window.fm = fm;
+  window.stateChainId = stateChainId;
+  window.closedTradeStatus = closedTradeStatus;
+  window.closedTradeNumber = closedTradeNumber;
+  window.closedTradeParentTrades = closedTradeParentTrades;
+  window.closedTradePeriodWindowMs = closedTradePeriodWindowMs;
+  window.closedTradeRealizedValue = closedTradeRealizedValue;
+  window.closedTradeSignedFeeValue = closedTradeSignedFeeValue;
+  window.closedTradeFastSummaryDirection = closedTradeFastSummaryDirection;
+  window.__bt001CurrentCandles = () => candles;
+  window.__bt001LastMarkPrice = () => lastMarkPrice;
+  window.__bt001OverlayHitItems = () => overlayHitItems;
+  window.__bt001ClosedTradesOperationalText = () => closedTradesOperationalText;
+}

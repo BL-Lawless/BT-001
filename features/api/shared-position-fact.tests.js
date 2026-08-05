@@ -20,6 +20,9 @@ const vm=require("vm");
   assert.equal(streamResult.passed,true,JSON.stringify(streamResult.cases,null,2));
 
   const main=fs.readFileSync(path.join(root,"main.js"),"utf8");
+  // WF-EXT3-01/05: WF moved out of main.js into features/waterfall/waterfall.js - its own
+  // consumption of the shared position event now lives there.
+  const waterfall=fs.readFileSync(path.join(root,"features/waterfall/waterfall.js"),"utf8");
   const calculator=fs.readFileSync(path.join(root,"features/calculator/presentation/calculatorModule.js"),"utf8");
   const grad=fs.readFileSync(path.join(root,"features/grad-calculator/presentation/gradCalculatorModule.js"),"utf8");
   const pressure=fs.readFileSync(path.join(root,"features/pressure-signal/index.js"),"utf8");
@@ -40,7 +43,7 @@ const vm=require("vm");
   assert(grad.includes('window.addEventListener("v13:open-position-change",applySharedPosition'),"GR must consume the immediate shared fact event");
   assert(grad.includes('source:"gr-positionRisk"')&&grad.includes("sharedOwner.ingestRestRisk"),"GR positionRisk must feed and consume the shared owner");
   assert(main.includes('onDraw:detail=>scheduleAccountChartDraw'),"shared update bursts must use the single RAF draw scheduler");
-  assert(main.includes('window.addEventListener("v13:open-position-change",event =>')&&main.includes("maybeRefreshLivePreview();"),"Waterfall must consume the shared position event");
+  assert(waterfall.includes('window.addEventListener("v13:open-position-change",event =>')&&waterfall.includes("maybeRefreshLivePreview();"),"Waterfall must consume the shared position event");
   assert(pressure.includes('actionLifecycle.listen(window,"v13:open-position-change","position-change")')||pressure.includes('window.addEventListener("v13:open-position-change",reconcilePresentationContext37'),"Action/Position Management must consume the shared position event");
 
   console.log("shared position fact tests: PASS",ownerCases,streamResult.cases);
