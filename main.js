@@ -1978,6 +1978,8 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
     }
     const contextLimited = requestBudget.limited || hasPeriodUnresolvedClose(rec,win);
     const fastReport = buildClosedTradeFastReport(rec,win,symbol,contextLimited);
+    // WF-C05: stale asynchronous loads must not replace the active report.
+    if(typeof opt.acceptResult === "function" && !opt.acceptResult(fastReport)) return null;
 
     CLOSED_TRADES_STATE.fastReport = fastReport;
     CLOSED_TRADES_STATE.wfMode = "fast";
@@ -2055,6 +2057,8 @@ async function loadClosedTradesForPeriod(period,opt={}){
     const rec = filterClosedReconstructionForPeriod(full,win);
     rec.period = win;
     rec.symbol = String(cfg().symbol || "").toUpperCase();
+    // WF-C05: validate before any shared closed-trade state is mutated.
+    if(typeof opt.acceptResult === "function" && !opt.acceptResult(rec)) return null;
     const summary = closedTradeLoadedSummary(rec);
     const netPnl = summary.net;
     closedTradesLoadedSummaryStats = {
@@ -23225,11 +23229,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const sign = rounded > 0 ? "+" : rounded < 0 ? "-" : "";
     return sign + "$" + Math.abs(rounded).toLocaleString("en-US",{maximumFractionDigits:0});
   };
-  const dayText = ms => {
-    const dt = new Date(ms);
-    const pad = value => String(value).padStart(2,"0");
-    return pad(dt.getDate()) + "/" + pad(dt.getMonth() + 1) + "/" + dt.getFullYear();
-  };
   const wfTitleDayText = ms => {
     const dt = new Date(ms);
     return String(dt.getDate()).padStart(2,"0") + " / " + dt.toLocaleString("en-GB",{month:"short"});
@@ -23500,19 +23499,29 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     if(wfSyncState.closeTimer || wfSyncState.closeSyncBusy) return;
     wfSyncState.closeSyncBaseline = activeWfSignature();
     const period = wfSyncState.period || currentPeriodValue();
+    const symbol = currentSymbol();
     wfSyncState.closeTimer = setTimeout(async () => {
       wfSyncState.closeTimer = null;
       wfSyncState.closeSyncBusy = true;
       try{
         while(wfSyncState.closeRetry < 2){
-          const result = await reloadCurrentWfData(period,{silent:true});
+          let staleContext = false;
+          const acceptResult = () => {
+            const currentPeriod = currentPeriodValue();
+            const currentSymbolValue = currentSymbol();
+            const current = currentPeriod === String(period || "").toLowerCase() && currentSymbolValue === symbol;
+            if(!current) staleContext = true;
+            return current;
+          };
+          const result = await reloadCurrentWfData(period,{silent:true,acceptResult});
+          // WF-C05: a period/symbol change cancels this synchronization attempt.
+          if(staleContext || !acceptResult()) return;
           const nextSignature = wfDataMode() === "fast"
             ? closedTradeFastSignature(result)
             : closedTradeSignature(result && result.report);
           if(result && (!wfSyncState.closeSyncBaseline || (nextSignature && nextSignature !== wfSyncState.closeSyncBaseline))){
             wfSyncState.closeRetry = 0;
             wfSyncState.closeSyncBaseline = "";
-            if(visible) render();
             return;
           }
           wfSyncState.closeRetry += 1;
@@ -23888,7 +23897,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     return {text:pctText(n),cls:"is-strong-gain"};
   }
   function wfReturnMetrics(selectedNet){
-    const selected = num(selectedNet) || 0;
+    const unavailable = {value:null,startBalance:null,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
+    // WF-C02: absence of a valid report is not a genuinely flat period.
+    if(selectedNet == null) return unavailable;
+    const selected = num(selectedNet);
+    if(selected == null) return unavailable;
     const rec = activeWfReport();
     const explicitStart = [
       rec && rec.startBalance,
@@ -23901,8 +23914,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         ? {value,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"start-balance"}
         : {value:null,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
     }
+    // WF-C03: Number(null) is zero, so reject missing balance before numeric coercion.
+    if(accountBalanceState == null) return unavailable;
     const currentBalance = num(accountBalanceState);
-    if(currentBalance == null) return {value:null,startBalance:null,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
+    if(currentBalance == null) return unavailable;
     const derivedStartBalance = currentBalance - selected;
     if(!(derivedStartBalance > 0)) return {value:null,startBalance:null,currentBalance,derivedStartBalance,source:"unavailable"};
     const value = selected / derivedStartBalance * 100;
@@ -23935,9 +23950,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     let delta = current-peak;
     if(Math.abs(delta) < 1e-9) delta = 0;
     return {peak,current,delta};
-  }
-  function wfLineText(line){
-    return Array.isArray(line) ? line.map(part => String(part && part.text || "")).join("") : String(line || "");
   }
   function wfDurationText(startValue,endValue){
     const start = num(startValue);
@@ -24323,6 +24335,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function buildViewModel(){
     const mode = wfDataMode();
     const wfReport = activeWfReport();
+    const hasValidReport = !!wfReport;
     const trades = buildTradeRows();
     const liveTrade = livePreviewTrade();
     const fastSummary = mode === "fast" && wfReport && wfReport.summary ? wfReport.summary : null;
@@ -24331,10 +24344,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       : trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
     const selectedNet = selectedNetBase;
     const watermarks = wfWatermarks(trades);
-    const fundingExcluded = trades.reduce((sum,trade) => sum + (num(trade.fundingDelta) || 0),0);
     const liveNet = num(liveTrade && liveTrade.net) || 0;
-    const returnMetrics = wfReturnMetrics(selectedNet);
-    const endBalance = num(accountBalanceState);
+    const returnMetrics = wfReturnMetrics(hasValidReport ? selectedNet : null);
     const wins = trades.filter(trade => trade.net > 0);
     const losses = trades.filter(trade => trade.net < 0);
     const totalWin = wins.reduce((sum,trade) => sum + trade.net,0);
@@ -24343,18 +24354,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const largestLoss = losses.length ? Math.min(...losses.map(trade => trade.net)) : null;
     const grossWins = wins.reduce((sum,trade) => sum + Math.max(0,num(trade.net) || 0),0);
     const grossLosses = losses.reduce((sum,trade) => sum + Math.abs(Math.min(0,num(trade.net) || 0)),0);
-    const profitRatio = grossLosses > 0 ? grossWins / grossLosses : null;
     const headlineNet = selectedNet + liveNet;
     const hwm = wfHwmMetrics(watermarks,headlineNet);
     const headlineGrossWins = grossWins + Math.max(0,liveNet);
     const headlineGrossLosses = grossLosses + Math.abs(Math.min(0,liveNet));
     const headlineProfitRatio = headlineGrossLosses > 0 ? headlineGrossWins / headlineGrossLosses : null;
-    const returnPct = liveTrade ? wfReturnMetrics(headlineNet) : returnMetrics;
-    const noteParts = [];
-    if(Math.abs(fundingExcluded) > 1e-9) noteParts.push("Trade-only; excludes transfers/unallocated funding");
-    if(returnPct && returnPct.source === "derived") noteParts.push("Return % derived from current balance minus selected-period net P/L");
-    const note = noteParts.join(" | ");
-    const average = trades.length ? selectedNet / trades.length : null;
+    const returnPct = liveTrade && hasValidReport ? wfReturnMetrics(headlineNet) : returnMetrics;
     const livePreviewBars = wfLivePreviewBars(liveTrade,trades);
     const chartTrades = livePreviewBars.length ? trades.concat(livePreviewBars) : trades.slice();
     const values = [0].concat(chartTrades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
@@ -24373,7 +24378,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       livePreviewBars,
       wins:wins.length,
       losses:losses.length,
-      average,
       averageWin:wins.length ? totalWin / wins.length : null,
       averageLoss:losses.length ? totalLoss / losses.length : null,
       largestWin,
@@ -24385,10 +24389,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       closedSelectedNet:selectedNet,
       floatingNet:liveNet,
       hwm,
-      startBalance:returnPct.startBalance || returnPct.derivedStartBalance || null,
-      endBalance,
       returnPct,
-      note,
       mode,
       domainMin,
       domainMax,
@@ -24448,9 +24449,6 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const title = q("wfWindowTitle");
     if(!chart) return;
     if(title && model.period) title.textContent = "Closed positions | From : " + wfTitleDayText(model.period.start) + " To : " + wfTitleDayText(model.period.end) + " | " + wfHeaderModeText(model.mode);
-    if(false && title && model.period){
-      title.textContent = "Waterfall — From " + dayText(model.period.start) + " to " + dayText(model.period.end);
-    }
     const watermarks = model.watermarks;
     const netValue = num(model.selectedNet) || 0;
     const resultClass = netValue < 0
