@@ -485,6 +485,48 @@ function routeReconstructionToTradeOwners(full,reportRec,risk,symbol){
 
 let dailyState = null;
 let accountBalanceState = null;
+// WF-EXT-AB02: balance freshness is event-driven because this app does not poll balance on a
+// fixed cadence. A retained value becomes stale when its quote-asset context no longer matches,
+// or missing credentials prevent verification; age alone does not invalidate a matching value.
+const ACCOUNT_BALANCE_STATUS = new Set(["unavailable","loading","fresh","stale","error"]);
+let accountBalanceOwnerState = {
+  value:null,
+  asset:"",
+  source:"unavailable",
+  status:"unavailable",
+  revision:0,
+  updatedAt:0,
+  verifiedAt:0,
+  lastAttemptAt:0,
+  error:null
+};
+function accountBalanceContextAsset(){
+  try{ return String(quote(cfg().symbol) || "").toUpperCase(); }catch(_e){ return ""; }
+}
+function accountBalanceSnapshot(){
+  const snapshot = {...accountBalanceOwnerState};
+  const contextAsset = accountBalanceContextAsset();
+  if(snapshot.status === "fresh" && snapshot.value != null && snapshot.asset && contextAsset && snapshot.asset !== contextAsset){
+    snapshot.status = "stale";
+  }
+  return Object.freeze(snapshot);
+}
+function commitAccountBalance(change={}){
+  const next = {...accountBalanceOwnerState,...change};
+  next.status = ACCOUNT_BALANCE_STATUS.has(next.status) ? next.status : "unavailable";
+  next.value = next.value == null ? null : Number(next.value);
+  if(next.value != null && !Number.isFinite(next.value)) next.value = null;
+  next.asset = String(next.asset || "").toUpperCase();
+  next.source = String(next.source || "unavailable");
+  next.error = next.status === "error" ? String(next.error || "Account balance unavailable") : null;
+  next.revision = accountBalanceOwnerState.revision + 1;
+  accountBalanceOwnerState = next;
+  // WF-EXT-AB04: compatibility mirror for legacy consumers.
+  accountBalanceState = next.value;
+  const snapshot = accountBalanceSnapshot();
+  try{ window.dispatchEvent(new CustomEvent("bt001:account-balance-state",{detail:snapshot})); }catch(_e){}
+  return snapshot;
+}
 let exchangeTimeOffsetMs = null;
 const EXCHANGE_CANDLE_CLOSE_BUFFER_MS = 350;
 
@@ -1195,11 +1237,19 @@ function updateAccountBalanceFromRisk(risk){
     for(const k of keys){
       const v = Number(row && row[k]);
       if(isFinite(v) && v > 0){
-        accountBalanceState = v;
-        return;
+        const now = Date.now();
+        return commitAccountBalance({
+          value:v,
+          asset:String(row && row.asset || accountBalanceContextAsset()),
+          source:"risk-row",
+          status:"fresh",
+          updatedAt:now,
+          verifiedAt:now
+        });
       }
     }
   }
+  return null;
 }
 
 function updateAccountBalanceFromBalance(rows){
@@ -1219,12 +1269,21 @@ function updateAccountBalanceFromBalance(rows){
     for(const k of keys){
       const v = Number(row && row[k]);
       if(isFinite(v) && v >= 0){
-        accountBalanceState = v;
+        const now = Date.now();
+        commitAccountBalance({
+          value:v,
+          asset:rowAsset || asset,
+          source:"balance-endpoint",
+          status:"fresh",
+          updatedAt:now,
+          verifiedAt:now
+        });
         updatePositionStrip(candles.length ? candles[candles.length-1] : null);
-        return;
+        return accountBalanceSnapshot();
       }
     }
   }
+  return null;
 }
 
 async function getAccountBalance(key,sec,off){
@@ -1239,18 +1298,30 @@ async function refreshAccountBalance(opt={}){
 
   saveKeysLocal();
   if(!key || !sec){
+    const previous = accountBalanceSnapshot();
+    commitAccountBalance({
+      status:previous.value == null ? "unavailable" : "stale",
+      asset:previous.asset || accountBalanceContextAsset(),
+      source:previous.source,
+      lastAttemptAt:Date.now()
+    });
     updateApiStatus();
     return null;
   }
   if(accountBalanceLoading) return null;
   accountBalanceLoading = true;
+  commitAccountBalance({status:"loading",lastAttemptAt:Date.now()});
   try{
     const off = opt.off != null ? opt.off : await timeOffset();
     const rows = await getAccountBalance(key,sec,off);
-    updateAccountBalanceFromBalance(rows);
+    const applied = updateAccountBalanceFromBalance(rows);
+    if(!applied){
+      commitAccountBalance({status:"error",error:"No applicable account balance row"});
+    }
     updateTabTitle();
     return rows;
   }catch(e){
+    commitAccountBalance({status:"error",error:e && e.message ? e.message : String(e)});
     if(!silent) console.error("Account balance refresh failed",e);
     else console.warn("Account balance refresh failed",e);
     return null;
@@ -1258,6 +1329,13 @@ async function refreshAccountBalance(opt={}){
     accountBalanceLoading = false;
     updateApiStatus();
   }
+}
+if(typeof window !== "undefined"){
+  window.BT001_ACCOUNT_BALANCE = Object.freeze({
+    version:"BT001_ACCOUNT_BALANCE_OWNER_V1",
+    snapshot:accountBalanceSnapshot,
+    refresh:opt=>refreshAccountBalance(opt)
+  });
 }
 
 let openPositionLoading = false;
@@ -23914,9 +23992,13 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         ? {value,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"start-balance"}
         : {value:null,startBalance:explicitStart,currentBalance:null,derivedStartBalance:null,source:"unavailable"};
     }
-    // WF-C03: Number(null) is zero, so reject missing balance before numeric coercion.
-    if(accountBalanceState == null) return unavailable;
-    const currentBalance = num(accountBalanceState);
+    // WF-EXT-AB05: derived returns require a currently verified balance. Loading, stale,
+    // unavailable, and error snapshots remain N/A rather than using a retained scalar value.
+    const balanceSnapshot = window.BT001_ACCOUNT_BALANCE && typeof window.BT001_ACCOUNT_BALANCE.snapshot === "function"
+      ? window.BT001_ACCOUNT_BALANCE.snapshot()
+      : null;
+    if(!balanceSnapshot || balanceSnapshot.status !== "fresh") return unavailable;
+    const currentBalance = num(balanceSnapshot.value);
     if(currentBalance == null) return unavailable;
     const derivedStartBalance = currentBalance - selected;
     if(!(derivedStartBalance > 0)) return {value:null,startBalance:null,currentBalance,derivedStartBalance,source:"unavailable"};

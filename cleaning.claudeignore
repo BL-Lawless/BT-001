@@ -1,0 +1,19 @@
+# Ignore all historical data, databases, and logs
+.csv
+.json
+.parquet
+.log
+.db
+.sqlite
+
+# Ignore environment and dependencies
+node_modules
+venv
+.venv
+__pycache__
+build
+dist
+
+# Ignore media or docs that aren't strictly code
+.md
+.pdf
