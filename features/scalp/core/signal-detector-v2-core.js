@@ -31,7 +31,8 @@
       const f=n(fast[index]),s=n(slow[index]),pf=n(fast[index-1]),ps=n(slow[index-1]),p2f=n(fast[index-2]),p2s=n(slow[index-2]);
       if([f,s,pf,ps,p2f,p2s].some(value=>value==null))return null;
       const volatility=atrTelemetry(rows.slice(0,index+1)),fastSlope=f-pf,previousFastSlope=pf-p2f;
-      return {i:index,f,s,pf,ps,gap:f-s,previousGap:pf-ps,separation:Math.abs(f-s),closedReferenceSeparation:Math.abs(pf-ps),fastSlope,previousFastSlope,fastAcceleration:fastSlope-previousFastSlope,slowSlope:s-ps,previousSlowSlope:ps-p2s,atr:volatility.atr,priorAtr:volatility.priorAtr,atrChange:volatility.atrChange};
+      const atr=volatility.atr,normalize=value=>atr>0?value/atr:null;
+      return {i:index,f,s,pf,ps,gap:f-s,previousGap:pf-ps,separation:Math.abs(f-s),separationAtr:normalize(Math.abs(f-s)),closedReferenceSeparation:Math.abs(pf-ps),fastSlope,fastSlopeAtr:normalize(fastSlope),previousFastSlope,previousFastSlopeAtr:normalize(previousFastSlope),fastAcceleration:fastSlope-previousFastSlope,fastAccelerationAtr:normalize(fastSlope-previousFastSlope),slowSlope:s-ps,slowSlopeAtr:normalize(s-ps),previousSlowSlope:ps-p2s,previousSlowSlopeAtr:normalize(ps-p2s),atr,priorAtr:volatility.priorAtr,atrChange:volatility.atrChange};
     }
 
     function pressureScore(rows,eventIndex,eventDirection){
@@ -43,49 +44,56 @@
       return {available:true,score:Math.round(clamp(50+(directionalShare-.5)*100+clamp((relativeVolume-1)*10,-10,15)*(directionalShare>=.5?1:-1)+(progress-.15)*20- (absorption?45:0))),directionalVolumeShare:directionalShare,relativeVolume,pressureDirection:directionalShare>=.57?"ALIGNED":directionalShare<=.43?"OPPOSING":"BALANCED",absorption};
     }
 
-    function slowContext(fast,slow,index,eventDirection){
+    function slowContext(fast,slow,index,eventDirection,atrValue){
       const dir=eventDirection==="LONG"?1:-1,current=n(slow[index]),previous=n(slow[index-1]),currentSlope=current-previous;
+      if(!(atrValue>0))return {mode:"ATR_UNAVAILABLE",score:null,wakeUp:null,maturity:null,age:0};
       if(!(dir*currentSlope>0))return {mode:"REVERSAL_UNSCORED",score:null,wakeUp:null,maturity:null,age:0};
       const start=Math.max(1,index-S.slowContextLookback+1),slopes=[];
       for(let i=start;i<=index;i++){const value=n(slow[i]),prior=n(slow[i-1]);if(value!=null&&prior!=null)slopes.push(value-prior);}
       let age=0;for(let i=slopes.length-1;i>=0&&dir*slopes[i]>0;i--)age++;
-      const earlier=slopes[Math.max(0,slopes.length-1-Math.floor(S.slowContextLookback/2))]||0,wakeUp=clamp(50+dir*(currentSlope-earlier)*20),maturity=clamp(100*(1-(Math.max(1,age)-1)/S.slowContextLookback));
-      return {mode:"SAME_DIRECTION",score:mean([wakeUp,maturity]),wakeUp,maturity,age,currentSlope,earlierSlope:earlier};
+      const earlier=slopes[Math.max(0,slopes.length-1-Math.floor(S.slowContextLookback/2))]||0,currentSlopeAtr=currentSlope/atrValue,earlierSlopeAtr=earlier/atrValue,wakeUp=clamp(50+dir*(currentSlopeAtr-earlierSlopeAtr)/Math.max(S.slowWakeUpFullAtr,Number.EPSILON)*50),maturity=clamp(100*(1-(Math.max(1,age)-1)/S.slowContextLookback));
+      return {mode:"SAME_DIRECTION",score:mean([wakeUp,maturity]),wakeUp,maturity,age,currentSlopeAtr,earlierSlopeAtr};
     }
 
-    function exhaustion15m(hub){
-      if(!hub||typeof hub.getAuthoritativeMaSnapshot!=="function")return {available:false,score:50,reason:"15m-context-unavailable"};
-      const snap=hub.getAuthoritativeMaSnapshot(S.exhaustionTimeframe,{includeForming:false,periods:[S.emaSlow],requiredRows:S.minimumRows}),slow=snap&&snap.alignedByPeriod&&snap.alignedByPeriod[S.emaSlow]||[];
-      if(!snap||!snap.reliable||slow.length<5)return {available:false,score:50,reason:"15m-context-warming"};
-      const slopes=[];for(let i=slow.length-4;i<slow.length;i++){const value=n(slow[i]),prior=n(slow[i-1]);if(value==null||prior==null)return {available:false,score:50,reason:"15m-context-incomplete"};slopes.push(Math.abs(value-prior));}
-      const recent=slopes[slopes.length-1],priorPace=mean(slopes.slice(0,3)),deceleration=priorPace>0?(priorPace-recent)/priorPace:0;
-      return {available:true,score:clamp(50+deceleration*50),recentPace:recent,priorPace,deceleration};
+    function ssscConviction(tf,eventDirection,getSnapshot,now=Date.now()){
+      const requiredTf=tf==="15m"?"1h":"15m",snapshot=typeof getSnapshot==="function"?getSnapshot():null,eventAt=Date.parse(snapshot&&snapshot.event_at||"");
+      if(!snapshot||!Number.isFinite(eventAt)||now-eventAt>S.ssscSnapshotMaxAgeMs)return {available:false,timeframe:requiredTf,multiplier:S.ssscUnavailableMultiplier,reason:"sssc-snapshot-unavailable-or-stale"};
+      const read=snapshot.timeframes&&snapshot.timeframes[requiredTf],readDirection=n(read&&read.direction),momentum=n(read&&read.directionalAcceleration);
+      if(!read||read.available!==true||readDirection==null||momentum==null||readDirection===0)return {available:false,timeframe:requiredTf,multiplier:S.ssscUnavailableMultiplier,reason:"sssc-timeframe-not-warmed"};
+      const agrees=(eventDirection==="LONG"?1:-1)*readDirection>0,building=momentum>0;
+      return {available:true,timeframe:requiredTf,direction:readDirection,directionalAcceleration:momentum,agrees,building,multiplier:agrees?(building?1:S.ssscAgreeDeceleratingMultiplier):S.ssscDisagreeMultiplier,reason:agrees?(building?"direction-agrees-momentum-building":"direction-agrees-momentum-decelerating"):"direction-disagrees"};
     }
 
     function cleanliness(analyses){
-      const values=analyses.map(item=>item&&item.separation).filter(value=>value!=null),scale=Math.max(S.approachBandPrice,Number.EPSILON);
+      const values=analyses.map(item=>item&&item.separationAtr).filter(value=>value!=null),scale=Math.max(S.approachBandAtr,Number.EPSILON);
       if(!values.length)return 0;
       const average=mean(values),dispersion=average>0?Math.sqrt(mean(values.map(value=>(value-average)**2)))/average:1;
       return clamp(100*Math.min(1,average/scale)/(1+dispersion));
     }
 
     function scoreEvent(tf,event,analysis,rows,fast,slow,context={}){
-      const dir=event.direction==="LONG"?1:-1,snap=clamp(Math.abs(analysis.fastAcceleration)/Math.max(S.snapFullPrice,Number.EPSILON)*100);
-      const followSlopes=(context.followAnalyses||[]).map(item=>Math.abs(item.fastSlope)),followThrough=clamp((mean(followSlopes)||Math.abs(analysis.fastSlope))/Math.max(S.followThroughFullPrice,Number.EPSILON)*100);
-      const atrTrajectory=clamp(50+(analysis.atrChange||0)/Math.max(S.atrTrajectoryFullChange,Number.EPSILON)*50),engagement=analysis.atr>0?clamp(((Math.abs(analysis.fastAcceleration)+(mean(followSlopes)||Math.abs(analysis.fastSlope)))/analysis.atr)/Math.max(S.engagementFullAtr,Number.EPSILON)*100):50;
-      const slowRead=slowContext(fast,slow,analysis.i,event.direction),exhaustion=exhaustion15m(context.hub),row=rows[analysis.i],price=n(row&&row.close),pricePosition=price==null?50:clamp(50+dir*(price-analysis.s)/Math.max(S.approachBandPrice,Number.EPSILON)*50);
+      const dir=event.direction==="LONG"?1:-1,snap=clamp(Math.abs(analysis.fastAccelerationAtr||0)/Math.max(S.snapFullAtr,Number.EPSILON)*100);
+      const followSlopes=(context.followAnalyses||[]).map(item=>Math.abs(item.fastSlopeAtr||0)),followThrough=clamp((mean(followSlopes)||Math.abs(analysis.fastSlopeAtr||0))/Math.max(S.followThroughFullAtr,Number.EPSILON)*100);
+      const atrTrajectory=clamp(50+(analysis.atrChange||0)/Math.max(S.atrTrajectoryFullChange,Number.EPSILON)*50),engagement=analysis.atr>0?clamp((Math.abs(analysis.fastAccelerationAtr||0)+(mean(followSlopes)||Math.abs(analysis.fastSlopeAtr||0)))/Math.max(S.engagementFullAtr,Number.EPSILON)*100):50;
+      const slowRead=slowContext(fast,slow,analysis.i,event.direction,analysis.atr),sssc=ssscConviction(tf,event.direction,context.getSsscSnapshot,context.now),wick=wickProtection(rows,analysis.i,analysis.atr),row=rows[analysis.i],price=n(row&&row.close),pricePosition=price==null||!(analysis.atr>0)?50:clamp(50+dir*((price-analysis.s)/analysis.atr)/Math.max(S.approachBandAtr,Number.EPSILON)*50);
       const geometry=event.eventType==="CROSS"
-        ?{cleanliness:cleanliness(context.followAnalyses&&context.followAnalyses.length?context.followAnalyses:[analysis]),separationExpansion:clamp(analysis.separation/Math.max(S.approachBandPrice,Number.EPSILON)*100),pricePosition,rapidReversalStability:context.rapid?15:100}
-        :{approachCloseness:clamp(100*(1-context.closestSeparation/Math.max(S.approachBandPrice,Number.EPSILON))),rejectionExpansion:clamp((analysis.separation-context.closestSeparation)/Math.max(S.bounceExpansionPrice*2,Number.EPSILON)*100),priceFollowThrough:pricePosition};
-      const components={...geometry,snap,followThrough,engagement,atrTrajectory,exhaustion15m:exhaustion.score};
+        ?{cleanliness:cleanliness(context.followAnalyses&&context.followAnalyses.length?context.followAnalyses:[analysis]),separationExpansion:clamp((analysis.separationAtr||0)/Math.max(S.approachBandAtr,Number.EPSILON)*100)*wick.multiplier,pricePosition}
+        :{approachCloseness:clamp(100*(1-context.closestSeparationAtr/Math.max(S.approachBandAtr,Number.EPSILON))),rejectionExpansion:clamp(((analysis.separationAtr||0)-context.closestSeparationAtr)/Math.max(S.bounceExpansionAtr*2,Number.EPSILON)*100)*wick.multiplier,priceFollowThrough:pricePosition};
+      const components={...geometry,snap:snap*wick.multiplier,followThrough:followThrough*wick.multiplier,engagement,atrTrajectory};
       if(slowRead.score!=null){components.ema55WakeUp=slowRead.wakeUp;components.ema55Maturity=slowRead.maturity;}
-      const emaScore=Math.round(mean(Object.values(components))),pressure=pressureScore(rows,analysis.i,event.direction),emaContribution=pressure.available?emaScore*.70:emaScore,pressureContribution=pressure.available?pressure.score*.30:null,rankValue=Math.round(emaContribution+(pressureContribution||0));
-      return Object.freeze({...event,rank:rankValue>=80?"A":rankValue>=60?"B":rankValue>=1?"C":null,rankValue,emaScore,pressureScore:pressure.available?pressure.score:null,rankDiagnostics:Object.freeze({profile:"V2",timeframe:tf,candleTime:event.candleTime,rankValue,emaScore,emaContribution,emaComponents:Object.freeze(components),pressureAvailable:pressure.available,pressureScore:pressure.available?pressure.score:null,pressureContribution,pressure:Object.freeze({...pressure}),slowContext:Object.freeze(slowRead),exhaustion15m:Object.freeze(exhaustion)})});
+      const emaScore=Math.round(mean(Object.values(components))),pressure=pressureScore(rows,analysis.i,event.direction),volumeMultiplier=pressure.available&&pressure.relativeVolume<S.relativeVolumeWeakThreshold?1-S.maxWeakVolumeDiscount*(1-pressure.relativeVolume/S.relativeVolumeWeakThreshold):1,geometryScore=Math.round(emaScore*sssc.multiplier),rankValue=Math.round(geometryScore*volumeMultiplier);
+      return Object.freeze({...event,rank:rankValue>=80?"A":rankValue>=60?"B":rankValue>=1?"C":null,rankValue,emaScore,pressureScore:pressure.available?pressure.score:null,rankDiagnostics:Object.freeze({profile:"V2",timeframe:tf,candleTime:event.candleTime,rankValue,emaScore,geometryScore,ssscMultiplier:sssc.multiplier,volumeMultiplier,emaComponents:Object.freeze(components),pressureAvailable:pressure.available,pressureScore:pressure.available?pressure.score:null,pressure:Object.freeze({...pressure}),slowContext:Object.freeze(slowRead),sssc:Object.freeze(sssc),wickProtection:Object.freeze(wick)})});
+    }
+
+    function wickProtection(rows,index,atrValue){
+      const row=rows[index],open=n(row&&row.open),high=n(row&&row.high),low=n(row&&row.low),close=n(row&&row.close),range=high!=null&&low!=null?high-low:null,body=open!=null&&close!=null?Math.abs(close-open):null;
+      const protectedCandle=range>0&&atrValue>0&&body/range<S.wickBodyRatioThreshold&&range/atrValue>=S.wickRangeAtrThreshold;
+      return {protected:protectedCandle,bodyRatio:range>0?body/range:null,rangeAtr:atrValue>0&&range!=null?range/atrValue:null,multiplier:protectedCandle?S.wickScoreMultiplier:1};
     }
 
     function makeEvent(tf,type,eventDirection,row,now,raw={}){
       const candleTime=n(row&&row.time)||0;
-      return {source:tf,eventId:[tf,type,eventDirection,candleTime,"V2"].join("|"),freshnessKey:[tf,type,eventDirection,candleTime].join("|"),eventType:type,direction:eventDirection,eventState:type==="BOUNCE"?"CONFIRMED":"LIVE",phase:type==="BOUNCE"?"CONFIRMED":"LIVE",qualified:true,projected:false,candleTime,publishedAt:now,reason:`V2 raw-price ${type.toLowerCase()} qualified`,raw:Object.freeze({...raw})};
+      return {source:tf,eventId:[tf,type,eventDirection,candleTime,"V2"].join("|"),freshnessKey:[tf,type,eventDirection,candleTime].join("|"),eventType:type,direction:eventDirection,eventState:type==="BOUNCE"?"CONFIRMED":"LIVE",phase:type==="BOUNCE"?"CONFIRMED":"LIVE",qualified:true,projected:false,candleTime,publishedAt:now,reason:`V2 ATR-normalized ${type.toLowerCase()} qualified`,raw:Object.freeze({...raw})};
     }
 
     function bounceCandidate(rows,fast,slow){
@@ -97,17 +105,18 @@
       let closest=0;for(let i=1;i<same.length;i++)if(same[i].analysis.separation<same[closest].analysis.separation)closest=i;
       if(closest===0||closest===same.length-1)return null;
       const touch=same[closest].analysis,separation=current.analysis.separation,dir=direction(current.side);
-      const approachedStrongly=same.slice(0,closest+1).some(point=>-current.side*point.analysis.fastSlope>=S.minFastSlopePrice);
-      if(!approachedStrongly||touch.separation>S.observationBandPrice)return null;
-      if(touch.separation>S.approachBandPrice||touch.separation>S.touchTolerancePrice)return null;
-      if(separation<touch.separation+S.bounceExpansionPrice)return null;
-      if((dir==="LONG"?1:-1)*current.analysis.fastSlope<=0)return null;
-      return {direction:dir,analysis:current.analysis,closestSeparation:touch.separation,touchCandleTime:n(rows[touch.i]&&rows[touch.i].time)||0,followAnalyses:same.slice(closest+1).map(item=>item.analysis)};
+      if(!(touch.atr>0&&current.analysis.atr>0))return null;
+      const approachedStrongly=same.slice(0,closest+1).some(point=>-current.side*(point.analysis.fastSlopeAtr||0)>=S.minFastSlopeAtr);
+      if(!approachedStrongly||touch.separationAtr>S.observationBandAtr)return null;
+      if(touch.separationAtr>S.approachBandAtr||touch.separationAtr>S.touchToleranceAtr)return null;
+      if(current.analysis.separationAtr<touch.separationAtr+S.bounceExpansionAtr)return null;
+      if((dir==="LONG"?1:-1)*(current.analysis.fastSlopeAtr||0)<=0)return null;
+      return {direction:dir,analysis:current.analysis,closestSeparation:touch.separation,closestSeparationAtr:touch.separationAtr,touchCandleTime:n(rows[touch.i]&&rows[touch.i].time)||0,followAnalyses:same.slice(closest+1).map(item=>item.analysis)};
     }
 
     class Detector{
-      constructor(options={}){this.getHub=typeof options.getHub==="function"?options.getHub:()=>null;this.pendingCrossByTf=new Map();this.lastEmittedByTf=new Map();this.diagnosticsByTf=new Map();}
-      reset(tf=null){if(tf){this.pendingCrossByTf.delete(tf);this.lastEmittedByTf.delete(tf);this.diagnosticsByTf.delete(tf);}else{this.pendingCrossByTf.clear();this.lastEmittedByTf.clear();this.diagnosticsByTf.clear();}}
+      constructor(options={}){this.getHub=typeof options.getHub==="function"?options.getHub:()=>null;this.getSsscSnapshot=typeof options.getSsscSnapshot==="function"?options.getSsscSnapshot:()=>null;this.pendingCrossByTf=new Map();this.lastCrossByTf=new Map();this.lastEmittedByTf=new Map();this.diagnosticsByTf=new Map();}
+      reset(tf=null){if(tf){this.pendingCrossByTf.delete(tf);this.lastCrossByTf.delete(tf);this.lastEmittedByTf.delete(tf);this.diagnosticsByTf.delete(tf);}else{this.pendingCrossByTf.clear();this.lastCrossByTf.clear();this.lastEmittedByTf.clear();this.diagnosticsByTf.clear();}}
       diagnostics(){return {byTimeframe:Object.fromEntries([...this.diagnosticsByTf].map(([key,value])=>[key,clone(value)])),recent:[]};}
       expireNovelty(tf,analysis,rows){
         const prior=this.lastEmittedByTf.get(tf);if(!prior)return;
@@ -136,28 +145,32 @@
         if(closed){
           const pending=this.pendingCrossByTf.get(tf),currentTime=n(rows[analysis.i]&&rows[analysis.i].time)||0;
           if(pending&&currentTime>pending.candleTime){
-            const base=makeEvent(tf,"CROSS",pending.direction,rows[pending.analysis.i],now,{...pending.analysis,crossQualifiedWithoutSeparationGate:true});
-            emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,pending.analysis,rows,fast,slow,{hub,followAnalyses:[analysis]}),pending.candleTime);this.pendingCrossByTf.delete(tf);
+            const stillSameSide=direction(sign(analysis.gap))===pending.direction,significant=(analysis.separationAtr||0)>=S.crossMeaningfulGapAtr,lastCross=this.lastCrossByTf.get(tf),intervalSeconds={"1m":60,"3m":180,"5m":300,"15m":900}[tf]||60,rapid=lastCross&&lastCross.direction!==pending.direction&&currentTime-lastCross.candleTime<=S.rapidReversalBars*intervalSeconds;
+            if(stillSameSide&&significant&&!rapid){
+              const base=makeEvent(tf,"CROSS",pending.direction,rows[analysis.i],now,{...analysis,crossAnchorCandleTime:pending.candleTime,crossMeaningfulGapAtr:S.crossMeaningfulGapAtr});
+              emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,analysis,rows,fast,slow,{followAnalyses:[analysis],getSsscSnapshot:this.getSsscSnapshot,now}),pending.candleTime);
+              if(emittedEvent)this.lastCrossByTf.set(tf,{direction:pending.direction,candleTime:currentTime});
+            }
+            if(!stillSameSide||significant||rapid)this.pendingCrossByTf.delete(tf);
           }
           if(!emittedEvent&&sign(analysis.gap)&&sign(analysis.previousGap)&&sign(analysis.gap)!==sign(analysis.previousGap)){
             const eventDirection=direction(sign(analysis.gap));this.pendingCrossByTf.set(tf,{direction:eventDirection,candleTime:currentTime,analysis});
-            event={...makeEvent(tf,"CROSS",eventDirection,rows[analysis.i],now,{...analysis,crossQualifiedWithoutSeparationGate:true}),qualified:false,eventState:"FOLLOW_THROUGH",phase:"FOLLOW_THROUGH",reason:"V2 cross candidate accepted; collecting post-event follow-through"};
           }
           if(!emittedEvent){
             const bounce=bounceCandidate(rows,fast,slow);
             if(bounce){
-              const base=makeEvent(tf,"BOUNCE",bounce.direction,rows[analysis.i],now,{...analysis,closestSeparation:bounce.closestSeparation});
-              emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,analysis,rows,fast,slow,{hub,closestSeparation:bounce.closestSeparation,followAnalyses:bounce.followAnalyses}),bounce.touchCandleTime);
+              const base=makeEvent(tf,"BOUNCE",bounce.direction,rows[analysis.i],now,{...analysis,closestSeparation:bounce.closestSeparation,closestSeparationAtr:bounce.closestSeparationAtr});
+              emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,analysis,rows,fast,slow,{closestSeparationAtr:bounce.closestSeparationAtr,followAnalyses:bounce.followAnalyses,getSsscSnapshot:this.getSsscSnapshot,now}),bounce.touchCandleTime);
             }
           }
         }
         event=emittedEvent||event;const status=event?`${event.eventState} ${event.direction} ${event.eventType}`:`V2 ${direction(sign(analysis.gap))||"FLAT"} EMA9/EMA55`;
-        this.diagnosticsByTf.set(tf,{tf,profile:"V2",currentGap:analysis.gap,separationPrice:analysis.separation,fastSlopePrice:analysis.fastSlope,emittedEvent:clone(emittedEvent),lastEmittedSetup:clone(this.lastEmittedByTf.get(tf)||null)});
+        this.diagnosticsByTf.set(tf,{tf,profile:"V2",currentGap:analysis.gap,separationAtr:analysis.separationAtr,fastSlopeAtr:analysis.fastSlopeAtr,emittedEvent:clone(emittedEvent),lastEmittedSetup:clone(this.lastEmittedByTf.get(tf)||null)});
         return {ready:true,status,event,emittedEvent,oppositeCross:emittedEvent&&emittedEvent.eventType==="CROSS"?emittedEvent:null,detection:event,guide:n(rows[analysis.i]&&rows[analysis.i].close),analysis,diagnostics:this.diagnosticsByTf.get(tf)};
       }
     }
 
-    return Object.freeze({Detector,detectorTools:Object.freeze({atrTelemetry,analyze,pressureScore,slowContext,exhaustion15m,cleanliness,scoreEvent,bounceCandidate})});
+    return Object.freeze({Detector,detectorTools:Object.freeze({atrTelemetry,analyze,pressureScore,slowContext,ssscConviction,wickProtection,cleanliness,scoreEvent,bounceCandidate})});
   }
 
   const api=Object.freeze({createSignalDetectorV2Core});

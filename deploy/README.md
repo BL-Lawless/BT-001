@@ -9,6 +9,7 @@ Expected layout:
 - service account: `nader_moustafa`
 - repository: `/home/nader_moustafa/BT-001`
 - untracked environment file: `/home/nader_moustafa/BT-001/.env`
+- shared atomic SSSC snapshot: `/home/nader_moustafa/BT-001/artifacts/sssc-latest.json`
 - units: `/etc/systemd/system/sssc-logger.service`,
   `/etc/systemd/system/scalp-signal-logger.service`, and
   `/etc/systemd/system/sig-b-logger.service`
@@ -23,6 +24,10 @@ After cloning with the deploy key, install production dependencies with `npm ci 
 
 Before deploying the parallel Scalp V2 logger, run `deploy/sql/scalp_v2_signals.sql` once in the
 Supabase SQL editor.
+
+Set `SSSC_SNAPSHOT_PATH` to the same absolute path for both logger services. Deploy the whole
+repository (including `headless/sssc-snapshot-file.js`); `sssc-logger` creates the snapshot file
+atomically and `scalp-signal-logger` reads it locally. Restart both services after updating.
 
 Before enabling futures funding/open-interest collection, run
 `deploy/sql/futures_market_snapshots.sql` once in the Supabase SQL editor. The additive collector

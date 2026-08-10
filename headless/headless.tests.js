@@ -1,5 +1,8 @@
 "use strict";
 const assert=require("assert");
+const fs=require("fs");
+const os=require("os");
+const path=require("path");
 const {readConfig,parsePeriods}=require("./config.js");
 const {createNodeExchangeClock}=require("./clock.js");
 const {createSupabaseLogger}=require("./supabase-client.js");
@@ -7,6 +10,7 @@ const {createBinanceDataSource,parseRestKline}=require("./binance-data-source.js
 const {createLoggerRunner}=require("./logger-runner.js");
 const {buildSsscRunner,createMarketFreshnessTracker}=require("./run-sssc.js");
 const {createScalpMarketHub}=require("./scalp-market-hub.js");
+const {writeAtomicSnapshot,readSnapshot}=require("./sssc-snapshot-file.js");
 
 async function run(){
   const cases={};
@@ -15,6 +19,15 @@ async function run(){
   const config=readConfig({SUPABASE_URL:"https://example.supabase.co/",SUPABASE_ANON_KEY:"anon",BT001_MACHINE_ID:"vm-explicit",BT001_SYMBOL:"btcusdt",SSSC_MA_PERIODS:"9,21,55,100,200"});
   assert.equal(config.machineId,"vm-explicit");assert.equal(config.symbol,"BTCUSDT");assert.equal(config.supabaseUrl,"https://example.supabase.co");
   assert.throws(()=>parsePeriods("9,21"),/exactly five/);cases.configRequiresExplicitMachineIdentity=true;
+
+  const snapshotDir=fs.mkdtempSync(path.join(os.tmpdir(),"bt001-sssc-")),snapshotFile=path.join(snapshotDir,"latest.json");
+  try{
+    assert.equal(writeAtomicSnapshot(snapshotFile,{event_at:"one"}),true);
+    assert.equal(writeAtomicSnapshot(snapshotFile,{event_at:"two"}),true);
+    assert.deepEqual(readSnapshot(snapshotFile),{event_at:"two"});
+    assert.equal(fs.readdirSync(snapshotDir).filter(name=>name.endsWith(".tmp")).length,0);
+  }finally{fs.rmSync(snapshotDir,{recursive:true,force:true});}
+  cases.ssscSnapshotFileReplacesAtomically=true;
 
   let local=1000;
   const clock=createNodeExchangeClock({localNow:()=>local,fetchServerTime:async()=>{local=1020;return 1100;},fetch:async()=>{throw new Error("unused");}});

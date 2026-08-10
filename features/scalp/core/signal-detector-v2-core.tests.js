@@ -11,13 +11,11 @@ const hub={getAuthoritativeMaSnapshot:tf=>tf==="15m"?{reliable:true,rows,aligned
 const detector=new Detector({getHub:()=>hub});
 
 const candidate=detector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},1000);
-assert.equal(candidate.event.eventState,"FOLLOW_THROUGH");
-assert.equal(candidate.event.qualified,false);
-assert.equal(candidate.event.raw.crossQualifiedWithoutSeparationGate,true);
-assert(Math.abs(candidate.analysis.gap)<config.signalV2.touchTolerancePrice,"fixture must cross by far less than every raw gate");
+assert.equal(candidate.event,null,"a sub-threshold cross must not surface as a candidate");
+assert(candidate.analysis.separationAtr<config.signalV2.crossMeaningfulGapAtr);
 
 const nextRows=rows.concat({...rows.at(-1),time:33*60000,close:101});
-const nextFast=fast.concat(100.02),nextSlow=slow.concat(100);
+const nextFast=fast.concat(100.5),nextSlow=slow.concat(100);
 snapshot={reliable:true,rows:nextRows,alignedByPeriod:{9:nextFast,55:nextSlow}};
 const qualified=detector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},2000).emittedEvent;
 assert(qualified&&qualified.qualified);
@@ -25,7 +23,8 @@ assert.equal(qualified.eventType,"CROSS");
 assert.equal(qualified.rankDiagnostics.profile,"V2");
 
 const components=qualified.rankDiagnostics.emaComponents;
-for(const key of ["snap","followThrough","engagement","atrTrajectory","exhaustion15m","cleanliness"])assert(Object.prototype.hasOwnProperty.call(components,key),`${key} must be scored`);
+for(const key of ["snap","followThrough","engagement","atrTrajectory","cleanliness"])assert(Object.prototype.hasOwnProperty.call(components,key),`${key} must be scored`);
+assert.equal(qualified.rankDiagnostics.sssc.multiplier,config.signalV2.ssscUnavailableMultiplier);
 for(const removed of ["directionalAcceleration","atrNormalizedAcceleration","directionalSlope","velocityRelativeToAtr","ema55Context","dataReliabilityFreshness","sameSideIntegrity"])assert(!Object.prototype.hasOwnProperty.call(components,removed),`${removed} must not be an additive V2 component`);
 
 snapshot={reliable:false,reason:"stale canonical data",rows:nextRows,alignedByPeriod:{9:nextFast,55:nextSlow}};
@@ -45,18 +44,18 @@ const integrityFast=fast.slice();integrityFast[integrityFast.length-2]=99;integr
 assert.equal(tools.bounceCandidate(rows,integrityFast,slow),null,"an interrupted same-side history must not produce a V2 BOUNCE candidate");
 
 const disagreeingSlow=nextSlow.map((_,index)=>200-index);
-const reversal=tools.slowContext(nextFast,disagreeingSlow,nextSlow.length-1,"LONG");
+const reversal=tools.slowContext(nextFast,disagreeingSlow,nextSlow.length-1,"LONG",2);
 assert.equal(reversal.mode,"REVERSAL_UNSCORED");
 assert.equal(reversal.score,null);
 
 const agreeingSlow=nextSlow.map((_,index)=>index<25?100:100+(index-24)*.2);
-const sameDirection=tools.slowContext(nextFast,agreeingSlow,agreeingSlow.length-1,"LONG");
+const sameDirection=tools.slowContext(nextFast,agreeingSlow,agreeingSlow.length-1,"LONG",2);
 assert.equal(sameDirection.mode,"SAME_DIRECTION");
 assert(sameDirection.wakeUp!=null&&sameDirection.maturity!=null&&sameDirection.age>0);
 
 function candle(index){return {time:(index+1)*60,open:100,high:103,low:97,close:101,volume:100,takerBuyBase:55,final:true};}
 let bounceRows=Array.from({length:90},(_,index)=>candle(index)),bounceSlow=bounceRows.map(()=>100),bounceFast=bounceRows.map(()=>110);
-const firstShape=[110,108,106,104,102,101,104,107,110];firstShape.forEach((value,index)=>{bounceFast[bounceFast.length-firstShape.length+index]=value;});
+const firstShape=[110,108,106,104,102,100.2,104,107,110];firstShape.forEach((value,index)=>{bounceFast[bounceFast.length-firstShape.length+index]=value;});
 let bounceSnapshot=()=>({reliable:true,rows:bounceRows,alignedByPeriod:{9:bounceFast,55:bounceSlow}});
 const bounceHub={getAuthoritativeMaSnapshot:()=>bounceSnapshot()},bounceDetector=new Detector({getHub:()=>bounceHub});
 const firstBounce=bounceDetector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},3000).emittedEvent;
@@ -74,7 +73,7 @@ for(let minute=0;minute<13;minute++){
   bounceRows=bounceRows.concat(candle(bounceRows.length));bounceSlow=bounceSlow.concat(100);bounceFast=bounceFast.concat(112);
   bounceDetector.evaluateTf("1m",{type:"kline",tf:"1m",closed:true},5000+minute);
 }
-const secondShape=[110,108,106,104,102,101,104];
+const secondShape=[110,108,106,104,102,100.2,104];
 for(let index=0;index<secondShape.length;index++){
   bounceRows=bounceRows.concat(candle(bounceRows.length));bounceSlow=bounceSlow.concat(100);bounceFast=bounceFast.concat(secondShape[index]);
 }
@@ -87,8 +86,8 @@ assert.equal(crossGuard.novelEmission("1m",crossEvent,90),crossEvent);
 assert.equal(crossGuard.novelEmission("1m",{...crossEvent,candleTime:101},90),null,"the same crossover anchor must be suppressed");
 assert(crossGuard.novelEmission("1m",{...crossEvent,candleTime:102},91),"a new crossover anchor must emit");
 
-assert.equal(config.signalV2.touchTolerancePrice,5);
-assert.equal(config.signalV2.approachBandPrice,15);
-assert.equal(config.signalV2.minFastSlopePrice,1.5);
-assert(!Object.keys(config.signalV2).some(key=>["crossMeaningfulGapAtr","toleranceAtr","approachAtr","minFastSlopeAtr"].includes(key)));
+assert.equal(config.signalV2.touchToleranceAtr,.05);
+assert.equal(config.signalV2.approachBandAtr,.15);
+assert.equal(config.signalV2.minFastSlopeAtr,.015);
+assert(!Object.keys(config.signalV2).some(key=>key.endsWith("Price")));
 console.log("SCALP V2 detector core tests: PASS");

@@ -69,6 +69,7 @@
     const {getSnapshot,getCalculation,getSymbol,getSupabase}=options;
     const now=typeof options.now==="function"?options.now:Date.now;
     const warn=typeof options.warn==="function"?options.warn:()=>{};
+    const writeLocal=typeof options.writeLocalSnapshot==="function"?options.writeLocalSnapshot:null;
     let started=false;
     function capture(){
       try{
@@ -83,6 +84,7 @@
           symbol:typeof getSymbol==="function"?getSymbol():"",machineId,now
         });
         if(!payload)return false;
+        if(writeLocal){try{writeLocal(payload);}catch(error){warn("[SSSC local] Snapshot write failed",error);}}
         try{if(typeof supabase.setLatestSnapshot==="function")supabase.setLatestSnapshot(payload);else supabase.log("sssc_snapshots",payload);}catch(_error){}
         return true;
       }catch(_error){return false;}
