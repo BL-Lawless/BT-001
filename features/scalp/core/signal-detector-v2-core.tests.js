@@ -25,6 +25,10 @@ assert.equal(qualified.rankDiagnostics.profile,"V2");
 const components=qualified.rankDiagnostics.emaComponents;
 for(const key of ["snap","followThrough","engagement","atrTrajectory","cleanliness"])assert(Object.prototype.hasOwnProperty.call(components,key),`${key} must be scored`);
 assert.equal(qualified.rankDiagnostics.sssc.multiplier,config.signalV2.ssscUnavailableMultiplier);
+assert.equal(qualified.ratingLayers.gates.passed,true);
+assert(["A","B"].includes(qualified.ratingLayers.ceilingTier));
+assert(Number.isInteger(qualified.ratingLayers.weightedSecondaryScore));
+assert.equal(qualified.ratingLayers.weightedSecondaryScore,qualified.rankDiagnostics.secondary.score);
 for(const removed of ["directionalAcceleration","atrNormalizedAcceleration","directionalSlope","velocityRelativeToAtr","ema55Context","dataReliabilityFreshness","sameSideIntegrity"])assert(!Object.prototype.hasOwnProperty.call(components,removed),`${removed} must not be an additive V2 component`);
 
 snapshot={reliable:false,reason:"stale canonical data",rows:nextRows,alignedByPeriod:{9:nextFast,55:nextSlow}};
@@ -33,12 +37,32 @@ assert.equal(unreliable.ready,false,"unreliable V2 data must remain a hard gate"
 assert.equal(unreliable.emittedEvent,null,"unreliable V2 data must never reach scoring or emission");
 snapshot={reliable:true,rows:nextRows,alignedByPeriod:{9:nextFast,55:nextSlow}};
 
-const weakAnalysis={...candidate.analysis,fastAcceleration:.01,fastSlope:.01,separation:.01,atr:2,atrChange:0,s:100,i:31};
-const strongAnalysis={...weakAnalysis,fastAcceleration:4,fastSlope:4,separation:12,atrChange:.3};
-const scoreRows=rows.map(row=>({...row,volume:0}));
+const weakAnalysis={...candidate.analysis,fastAcceleration:.01,fastAccelerationAtr:.005,fastSlope:.01,fastSlopeAtr:.005,separation:.01,separationAtr:.005,atr:2,atrChange:0,s:100,i:31};
+const strongAnalysis={...weakAnalysis,fastAcceleration:4,fastAccelerationAtr:2,fastSlope:4,fastSlopeAtr:2,separation:12,separationAtr:6,atrChange:.3};
+const scoreRows=rows.map(row=>({...row,open:99,high:101,low:98,close:100,volume:0}));
 const weakQuality=tools.scoreEvent("1m",{...qualified,eventType:"CROSS",direction:"LONG"},weakAnalysis,scoreRows,fast,slow,{hub:null,followAnalyses:[weakAnalysis]});
 const strongQuality=tools.scoreEvent("1m",{...qualified,eventType:"CROSS",direction:"LONG"},strongAnalysis,scoreRows,fast,slow,{hub:null,followAnalyses:[strongAnalysis]});
-assert(strongQuality.rankValue>weakQuality.rankValue,"separation, snap, velocity, and engagement must genuinely differentiate the total V2 score");
+assert.equal(weakQuality.qualified,false,"an approach below the floor must be rejected without a grade");
+assert.equal(weakQuality.rank,null);
+assert(weakQuality.ratingLayers.gates.failed.includes("approach-below-floor"));
+assert.equal(weakQuality.ratingLayers.weightedSecondaryScore,null,"Layer 3 must not run before Layer 1 passes");
+assert.equal(strongQuality.ratingLayers.ceilingTier,"A","a decisive approach must open the A ceiling");
+
+const secondary=tools.secondaryRating({available:true,agrees:true,building:true},{available:true,relativeVolume:config.signalV2.relativeVolumeWeakThreshold});
+assert.equal(secondary.ssscWeight,.55);
+assert.equal(secondary.volumeWeight,.45);
+assert.equal(secondary.score,82,"secondary score must apply the configured 55/45 weights");
+
+const compressionRows=Array.from({length:config.signalV2.compressionLookbackBars},(_,index)=>({open:100,high:100.5,low:99.5,close:100+(index%2?.1:-.1),final:true}));
+const compression=tools.compressionState(compressionRows,compressionRows.length-1,1);
+assert.equal(compression.active,true,"a tight oscillating window must report compression");
+const compressedApproach=tools.approachQuality(compressionRows,{i:compressionRows.length-1,atr:1,fastSlopeAtr:.05,fastAccelerationAtr:.05},"LONG");
+assert.equal(compressedApproach.floorThreshold,config.signalV2.approachQualityFloorAtr*config.signalV2.compressionFloorRaiseMultiplier);
+
+const wickRows=compressionRows.map(row=>({...row}));wickRows.at(-1).high=102;wickRows.at(-1).low=98;wickRows.at(-1).open=100;wickRows.at(-1).close=100.1;
+const wickApproach=tools.approachQuality(wickRows,{i:wickRows.length-1,atr:1,fastSlopeAtr:.2,fastAccelerationAtr:.2},"LONG");
+assert.equal(wickApproach.floorPassed,false,"a large-wick small-body candle must invalidate approach quality");
+assert.equal(wickApproach.reason,"approach-invalidated-by-wick");
 
 const integrityFast=fast.slice();integrityFast[integrityFast.length-2]=99;integrityFast[integrityFast.length-1]=101;
 assert.equal(tools.bounceCandidate(rows,integrityFast,slow),null,"an interrupted same-side history must not produce a V2 BOUNCE candidate");
@@ -89,5 +113,12 @@ assert(crossGuard.novelEmission("1m",{...crossEvent,candleTime:102},91),"a new c
 assert.equal(config.signalV2.touchToleranceAtr,.05);
 assert.equal(config.signalV2.approachBandAtr,.15);
 assert.equal(config.signalV2.minFastSlopeAtr,.015);
+assert.equal(config.signalV2.approachQualityFloorAtr,.06);
+assert.equal(config.signalV2.approachQualityCeilingAtr,.14);
+assert.equal(config.signalV2.compressionLookbackBars,8);
+assert.equal(config.signalV2.compressionRangeAtrThreshold,2);
+assert.equal(config.signalV2.compressionFloorRaiseMultiplier,1.5);
+assert.equal(config.signalV2.secondarySsscWeight,.55);
+assert.equal(config.signalV2.secondaryVolumeWeight,.45);
 assert(!Object.keys(config.signalV2).some(key=>key.endsWith("Price")));
 console.log("SCALP V2 detector core tests: PASS");

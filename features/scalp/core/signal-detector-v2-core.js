@@ -71,6 +71,25 @@
       return clamp(100*Math.min(1,average/scale)/(1+dispersion));
     }
 
+    function compressionState(rows,index,atrValue){
+      const window=closedRows(rows).slice(Math.max(0,index-S.compressionLookbackBars+1),index+1),highs=window.map(row=>n(row.high)),lows=window.map(row=>n(row.low)),closes=window.map(row=>n(row.close));
+      if(window.length<S.compressionLookbackBars||!(atrValue>0)||highs.some(value=>value==null)||lows.some(value=>value==null)||closes.some(value=>value==null))return {active:false,available:false,lookbackBars:S.compressionLookbackBars,rangeAtr:null,directionChanges:0,reason:"compression-input-unavailable"};
+      let directionChanges=0,priorDirection=0;
+      for(let i=1;i<closes.length;i++){const currentDirection=sign(closes[i]-closes[i-1]);if(currentDirection&&priorDirection&&currentDirection!==priorDirection)directionChanges++;if(currentDirection)priorDirection=currentDirection;}
+      const rangeAtr=(Math.max(...highs)-Math.min(...lows))/atrValue,active=rangeAtr<=S.compressionRangeAtrThreshold&&directionChanges>=S.compressionMinDirectionChanges;
+      return {active,available:true,lookbackBars:S.compressionLookbackBars,rangeAtr,directionChanges,rangeAtrThreshold:S.compressionRangeAtrThreshold,minDirectionChanges:S.compressionMinDirectionChanges,reason:active?"tight-oscillating-range":"range-not-compressed"};
+    }
+
+    function approachQuality(rows,analysis,eventDirection){
+      const dir=eventDirection==="LONG"?1:-1,directionalSlope=dir*(analysis.fastSlopeAtr||0),directionalAcceleration=dir*(analysis.fastAccelerationAtr||0),value=Math.max(0,directionalSlope)+Math.max(0,directionalAcceleration),compression=compressionState(rows,analysis.i,analysis.atr),floor=S.approachQualityFloorAtr*(compression.active?S.compressionFloorRaiseMultiplier:1),wick=wickProtection(rows,analysis.i,analysis.atr),floorPassed=value>=floor&&!wick.protected,ceilingTier=value>=S.approachQualityCeilingAtr?"A":"B";
+      return {floorPassed,ceilingTier,value,directionalSlopeAtr:directionalSlope,directionalAccelerationAtr:directionalAcceleration,floorThreshold:floor,baseFloorThreshold:S.approachQualityFloorAtr,ceilingThreshold:S.approachQualityCeilingAtr,wickIntegrityPassed:!wick.protected,compression:Object.freeze(compression),wickIntegrity:Object.freeze(wick),reason:wick.protected?"approach-invalidated-by-wick":value<floor?"approach-below-floor":"approach-floor-passed"};
+    }
+
+    function secondaryRating(sssc,pressure){
+      const ssscScore=sssc.available?(sssc.agrees?(sssc.building?100:75):0):0,volumeRatio=pressure.available?pressure.relativeVolume:0,volumeScore=clamp(volumeRatio/Math.max(S.relativeVolumeWeakThreshold,Number.EPSILON)*60,0,100),weightTotal=S.secondarySsscWeight+S.secondaryVolumeWeight||1,score=Math.round((ssscScore*S.secondarySsscWeight+volumeScore*S.secondaryVolumeWeight)/weightTotal);
+      return {score,ssscScore,volumeScore,relativeVolume:pressure.available?pressure.relativeVolume:null,ssscWeight:S.secondarySsscWeight,volumeWeight:S.secondaryVolumeWeight};
+    }
+
     function scoreEvent(tf,event,analysis,rows,fast,slow,context={}){
       const dir=event.direction==="LONG"?1:-1,snap=clamp(Math.abs(analysis.fastAccelerationAtr||0)/Math.max(S.snapFullAtr,Number.EPSILON)*100);
       const followSlopes=(context.followAnalyses||[]).map(item=>Math.abs(item.fastSlopeAtr||0)),followThrough=clamp((mean(followSlopes)||Math.abs(analysis.fastSlopeAtr||0))/Math.max(S.followThroughFullAtr,Number.EPSILON)*100);
@@ -81,8 +100,10 @@
         :{approachCloseness:clamp(100*(1-context.closestSeparationAtr/Math.max(S.approachBandAtr,Number.EPSILON))),rejectionExpansion:clamp(((analysis.separationAtr||0)-context.closestSeparationAtr)/Math.max(S.bounceExpansionAtr*2,Number.EPSILON)*100)*wick.multiplier,priceFollowThrough:pricePosition};
       const components={...geometry,snap:snap*wick.multiplier,followThrough:followThrough*wick.multiplier,engagement,atrTrajectory};
       if(slowRead.score!=null){components.ema55WakeUp=slowRead.wakeUp;components.ema55Maturity=slowRead.maturity;}
-      const emaScore=Math.round(mean(Object.values(components))),pressure=pressureScore(rows,analysis.i,event.direction),volumeMultiplier=pressure.available&&pressure.relativeVolume<S.relativeVolumeWeakThreshold?1-S.maxWeakVolumeDiscount*(1-pressure.relativeVolume/S.relativeVolumeWeakThreshold):1,geometryScore=Math.round(emaScore*sssc.multiplier),rankValue=Math.round(geometryScore*volumeMultiplier);
-      return Object.freeze({...event,rank:rankValue>=80?"A":rankValue>=60?"B":rankValue>=1?"C":null,rankValue,emaScore,pressureScore:pressure.available?pressure.score:null,rankDiagnostics:Object.freeze({profile:"V2",timeframe:tf,candleTime:event.candleTime,rankValue,emaScore,geometryScore,ssscMultiplier:sssc.multiplier,volumeMultiplier,emaComponents:Object.freeze(components),pressureAvailable:pressure.available,pressureScore:pressure.available?pressure.score:null,pressure:Object.freeze({...pressure}),slowContext:Object.freeze(slowRead),sssc:Object.freeze(sssc),wickProtection:Object.freeze(wick)})});
+      const emaScore=Math.round(mean(Object.values(components))),pressure=pressureScore(rows,analysis.i,event.direction),approach=approachQuality(rows,analysis,event.direction),gapPassed=(analysis.separationAtr||0)>=S.crossMeaningfulGapAtr||event.eventType==="BOUNCE",whipsawPassed=context.whipsawPassed!==false,gates={passed:gapPassed&&whipsawPassed&&approach.floorPassed,gapSize:gapPassed,whipsawExclusion:whipsawPassed,approachQualityFloor:approach.floorPassed,failed:[...(!gapPassed?["gap-size"]:[]),...(!whipsawPassed?["whipsaw-exclusion"]:[]),...(!approach.floorPassed?[approach.reason]:[])]};
+      if(!gates.passed){const ratingLayers=Object.freeze({gates:Object.freeze(gates),ceilingTier:approach.ceilingTier,weightedSecondaryScore:null});return Object.freeze({...event,qualified:false,rank:null,rankValue:null,rejectionReason:gates.failed.join(","),ratingLayers,rankDiagnostics:Object.freeze({profile:"V2",timeframe:tf,candleTime:event.candleTime,rankValue:null,emaScore,approachQuality:Object.freeze(approach),compression:approach.compression,wickIntegrity:approach.wickIntegrity,ratingLayers})});}
+      const secondary=secondaryRating(sssc,pressure),rank=approach.ceilingTier==="A"?(secondary.score>=70?"A":secondary.score>=40?"B":"C"):(secondary.score>=40?"B":"C"),rankValue=rank==="A"?80+Math.round(secondary.score*.2):rank==="B"?60+Math.round(secondary.score*.19):Math.max(1,Math.round(secondary.score*.59)),ratingLayers=Object.freeze({gates:Object.freeze(gates),ceilingTier:approach.ceilingTier,weightedSecondaryScore:secondary.score});
+      return Object.freeze({...event,rank,rankValue,emaScore,pressureScore:pressure.available?pressure.score:null,ratingLayers,rankDiagnostics:Object.freeze({profile:"V2",timeframe:tf,candleTime:event.candleTime,rankValue,emaScore,emaComponents:Object.freeze(components),pressureAvailable:pressure.available,pressureScore:pressure.available?pressure.score:null,pressure:Object.freeze({...pressure}),slowContext:Object.freeze(slowRead),sssc:Object.freeze(sssc),approachQuality:Object.freeze(approach),compression:approach.compression,wickIntegrity:approach.wickIntegrity,secondary:Object.freeze(secondary),ratingLayers})});
     }
 
     function wickProtection(rows,index,atrValue){
@@ -148,7 +169,8 @@
             const stillSameSide=direction(sign(analysis.gap))===pending.direction,significant=(analysis.separationAtr||0)>=S.crossMeaningfulGapAtr,lastCross=this.lastCrossByTf.get(tf),intervalSeconds={"1m":60,"3m":180,"5m":300,"15m":900}[tf]||60,rapid=lastCross&&lastCross.direction!==pending.direction&&currentTime-lastCross.candleTime<=S.rapidReversalBars*intervalSeconds;
             if(stillSameSide&&significant&&!rapid){
               const base=makeEvent(tf,"CROSS",pending.direction,rows[analysis.i],now,{...analysis,crossAnchorCandleTime:pending.candleTime,crossMeaningfulGapAtr:S.crossMeaningfulGapAtr});
-              emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,analysis,rows,fast,slow,{followAnalyses:[analysis],getSsscSnapshot:this.getSsscSnapshot,now}),pending.candleTime);
+              const rated=scoreEvent(tf,base,analysis,rows,fast,slow,{followAnalyses:[analysis],getSsscSnapshot:this.getSsscSnapshot,now,whipsawPassed:!rapid});
+              if(rated.qualified)emittedEvent=this.novelEmission(tf,rated,pending.candleTime);else event=rated;
               if(emittedEvent)this.lastCrossByTf.set(tf,{direction:pending.direction,candleTime:currentTime});
             }
             if(!stillSameSide||significant||rapid)this.pendingCrossByTf.delete(tf);
@@ -160,7 +182,8 @@
             const bounce=bounceCandidate(rows,fast,slow);
             if(bounce){
               const base=makeEvent(tf,"BOUNCE",bounce.direction,rows[analysis.i],now,{...analysis,closestSeparation:bounce.closestSeparation,closestSeparationAtr:bounce.closestSeparationAtr});
-              emittedEvent=this.novelEmission(tf,scoreEvent(tf,base,analysis,rows,fast,slow,{closestSeparationAtr:bounce.closestSeparationAtr,followAnalyses:bounce.followAnalyses,getSsscSnapshot:this.getSsscSnapshot,now}),bounce.touchCandleTime);
+              const rated=scoreEvent(tf,base,analysis,rows,fast,slow,{closestSeparationAtr:bounce.closestSeparationAtr,followAnalyses:bounce.followAnalyses,getSsscSnapshot:this.getSsscSnapshot,now});
+              if(rated.qualified)emittedEvent=this.novelEmission(tf,rated,bounce.touchCandleTime);else event=rated;
             }
           }
         }
@@ -170,7 +193,7 @@
       }
     }
 
-    return Object.freeze({Detector,detectorTools:Object.freeze({atrTelemetry,analyze,pressureScore,slowContext,ssscConviction,wickProtection,cleanliness,scoreEvent,bounceCandidate})});
+    return Object.freeze({Detector,detectorTools:Object.freeze({atrTelemetry,analyze,pressureScore,slowContext,ssscConviction,wickProtection,compressionState,approachQuality,secondaryRating,cleanliness,scoreEvent,bounceCandidate})});
   }
 
   const api=Object.freeze({createSignalDetectorV2Core});
