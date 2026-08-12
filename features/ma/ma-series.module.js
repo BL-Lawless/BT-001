@@ -69,6 +69,7 @@
       period: settings.period(n),
       color: settings.color(n),
       alpha: settings.alpha(n),
+      stroke: settings.strokeFor(n),
       width: settings.width(n),
       enabled: settings.enabled(n),
       label: "EMA" + settings.period(n),

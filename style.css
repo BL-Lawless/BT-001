@@ -831,30 +831,30 @@ button:hover{filter:brightness(1.04)}
    V13_UI_V2_PATCH_18 — UI PATCH
 ========================================================= */
 .p18-ex-pl-tag{font-weight:700}
-#patch8IndicatorCard .patch8-indicator-grid{grid-template-columns:88px 92px 84px minmax(120px,1fr) minmax(120px,1fr) !important}
-#patch8IndicatorCard .patch8-indicator-grid input[type="range"]{width:100%}
+#maSettingsCard .patch8-indicator-grid{grid-template-columns:88px 92px 84px minmax(120px,1fr) minmax(120px,1fr) !important}
+#maSettingsCard .patch8-indicator-grid input[type="range"]{width:100%}
 
 /* =========================================================
    V13_UI_V2_PATCH_19 — Settings layout / closed-link controls
 ========================================================= */
-#patch8IndicatorCard .patch8-indicator-grid{
+#maSettingsCard .patch8-indicator-grid{
   grid-template-columns:96px 56px 96px minmax(112px,1fr) minmax(112px,1fr) !important;
   column-gap:12px !important;
   row-gap:10px !important;
   align-items:center !important;
 }
-#patch8IndicatorCard .patch8-indicator-grid input[type="number"]{
+#maSettingsCard .patch8-indicator-grid input[type="number"]{
   width:52px !important;
   min-width:52px !important;
   padding-left:4px !important;
   padding-right:4px !important;
   text-align:center !important;
 }
-#patch8IndicatorCard .patch8-indicator-grid input[type="color"]{
+#maSettingsCard .patch8-indicator-grid input[type="color"]{
   width:96px !important;
   min-width:96px !important;
 }
-#patch8IndicatorCard .patch8-indicator-grid input[type="range"]{
+#maSettingsCard .patch8-indicator-grid input[type="range"]{
   width:100% !important;
   max-width:128px !important;
 }

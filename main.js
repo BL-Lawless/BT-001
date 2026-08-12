@@ -2981,38 +2981,12 @@ function EMA(src,p){
 
 const CANONICAL_MA_SLOTS = [1,2,3,4,5];
 const CANONICAL_MA_DEFAULTS = {
-  1:{period:9,color:"#ff7900",toggle:"tglEMA20"},
-  2:{period:21,color:"#0000ff",toggle:"tglEMA50"},
-  3:{period:55,color:"#d600a9",toggle:"tglEMA3"},
-  4:{period:100,color:"#0b7a00",toggle:"tglEMA4"},
-  5:{period:200,color:"#008c7a",toggle:"tglEMA5"}
+  1:{period:9,toggle:"tglEMA20"},
+  2:{period:21,toggle:"tglEMA50"},
+  3:{period:55,toggle:"tglEMA3"},
+  4:{period:100,toggle:"tglEMA4"},
+  5:{period:200,toggle:"tglEMA5"}
 };
-
-function canonicalMAStorageKey(n,suffix){
-  if(n <= 3){
-    if(suffix === "Period") return STORE + `ema_period_${n}`;
-    if(suffix === "Color") return `btc_futures_chart_v13_05_ema${n}_color`;
-    if(suffix === "Alpha") return `btc_futures_chart_v13_05_ema${n}_alpha`;
-    if(suffix === "Width") return `btc_futures_chart_v13_18_ema${n}_width`;
-  }
-  return `btc_futures_chart_v13_32r1_ma${n}${suffix}`;
-}
-
-function canonicalMAStroke(n){
-  const defaults = CANONICAL_MA_DEFAULTS[n] || {};
-  const hex = localStorage.getItem(canonicalMAStorageKey(n,"Color")) || defaults.color || "#111827";
-  const alphaRaw = Number(localStorage.getItem(canonicalMAStorageKey(n,"Alpha")));
-  const alpha = Number.isFinite(alphaRaw) ? clamp(alphaRaw,0,100) / 100 : 1;
-  let h = String(hex || "#111827").replace("#","");
-  if(h.length === 3) h = h.split("").map(c => c + c).join("");
-  h = (h + "000000").slice(0,6);
-  return `rgba(${parseInt(h.slice(0,2),16)||0},${parseInt(h.slice(2,4),16)||0},${parseInt(h.slice(4,6),16)||0},${alpha})`;
-}
-
-function canonicalMAWidth(n){
-  const raw = Number(localStorage.getItem(canonicalMAStorageKey(n,"Width")));
-  return Number.isFinite(raw) ? clamp(raw,1,10) : 2;
-}
 
 function canonicalMAEnabled(n){
   const meta = CANONICAL_MA_DEFAULTS[n] || {};
@@ -3179,14 +3153,14 @@ function indicators(){
 }
 indicators.__usesMAFeature = true;
 
-function canonicalChartMASeries(){
+function canonicalChartMASlots(){
   try{
-    if(window.MA_FEATURE && typeof window.MA_FEATURE.getActiveChartMASeries === "function"){
-      const active = window.MA_FEATURE.getActiveChartMASeries();
-      if(active && typeof active === "object") return active;
+    if(window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function"){
+      const slots = window.MA_FEATURE.getCanonicalMASlots();
+      if(Array.isArray(slots) && slots.length === 5) return slots;
     }
   }catch(_e){}
-  return maSeriesBySlot;
+  return [];
 }
 
 
@@ -4257,7 +4231,7 @@ const marketDataHub = (() => {
         const provider =
           (window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function")
             ? window.MA_FEATURE.getCanonicalMASlots
-            : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+            : null;
         const slots = provider ? provider() : null;
         if(!Array.isArray(slots) || slots.length !== 5) return null;
         return slots.map((slot,i) => ({
@@ -7313,41 +7287,56 @@ function drawHoverTooltip(){
   }
 }
 
-function candleTip(c){
-  const d = new Date(c.time*1000);
+const candleTooltipRowProviders = new Map();
+window.BT001_CANDLE_TOOLTIP_ROWS = {
+  register(id,provider){
+    const key = String(id || "").trim();
+    if(!key || typeof provider !== "function") return false;
+    candleTooltipRowProviders.set(key,provider);
+    return true;
+  },
+  unregister(id){ return candleTooltipRowProviders.delete(String(id || "").trim()); },
+  rows(c){
+    const rows = [];
+    candleTooltipRowProviders.forEach(provider => {
+      try{
+        const contributed = provider(c);
+        if(Array.isArray(contributed)) rows.push(...contributed);
+      }catch(_e){}
+    });
+    return rows;
+  }
+};
 
+function candleTip(c){
   const lines = [
-    formatDateDdMmmYy(d),
-    "O : " + ip(c.open),
-    "H : " + ip(c.high),
-    "L : " + ip(c.low),
-    "C : " + ip(c.close),
-    "V : " + fv(c.volume)
+    {text:formatDateTime(c.time*1000)},
+    {text:"O : " + ip(c.open)},
+    {text:"H : " + ip(c.high)},
+    {text:"L : " + ip(c.low)},
+    {text:"C : " + ip(c.close)},
+    {text:"V : " + fv(c.volume)},
+    ...window.BT001_CANDLE_TOOLTIP_ROWS.rows(c)
   ];
 
   ctx.save();
-
   ctx.font = "11px Arial";
-
   const pad = 7;
   const lh = 14;
-  const w = Math.max(...lines.map(s => ctx.measureText(s).width)) + pad*2;
+  const w = Math.max(...lines.map(line => ctx.measureText(String(line.text)).width)) + pad*2;
   const h = lines.length * lh + pad*2;
-
-  const x = 20;
-  const y = 26;
-
+  const x = Math.max(8,canvas.clientWidth - RIGHT_AXIS - w - 12);
+  const y = 8;
   ctx.fillStyle = "rgba(255,255,255,.96)";
   ctx.strokeStyle = "#d9dce1";
   ctx.fillRect(x,y,w,h);
   ctx.strokeRect(x,y,w,h);
-
-  ctx.fillStyle = "#1e2329";
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
-
-  lines.forEach((s,i) => ctx.fillText(s,x+pad,y+pad+i*lh));
-
+  lines.forEach((line,i) => {
+    ctx.fillStyle = line.color || "#1e2329";
+    ctx.fillText(String(line.text),x+pad,y+pad+i*lh);
+  });
   ctx.restore();
 }
 
@@ -7846,22 +7835,11 @@ function draw(){
 
   const im = idxMap(vis);
 
-  const maOverlayApi = window.MA_FEATURE || null;
-  const chartMaSeries = canonicalChartMASeries();
+  const chartMaSlots = canonicalChartMASlots();
   const chartVwap = currentVWAPSeries();
-  [1,2,3,4,5].forEach(n => {
-    const on = maOverlayApi && typeof maOverlayApi.enabled === "function"
-      ? maOverlayApi.enabled(n)
-      : canonicalMAEnabled(n);
-    if(!on) return;
-    const series = chartMaSeries[n];
-    const stroke = maOverlayApi && typeof maOverlayApi.strokeFor === "function"
-      ? maOverlayApi.strokeFor(n)
-      : canonicalMAStroke(n);
-    const lineWidth = maOverlayApi && typeof maOverlayApi.width === "function"
-      ? maOverlayApi.width(n)
-      : canonicalMAWidth(n);
-    drawInd(series,vis,im,mapX,mapY,stroke,lineWidth);
+  chartMaSlots.forEach(slot => {
+    if(!slot.enabled) return;
+    drawInd(slot.series,vis,im,mapX,mapY,slot.stroke,slot.width);
   });
   if(tglVWAP.checked) drawInd(chartVwap,vis,im,mapX,mapY,getIndicatorStroke("vwap","#f59e0b"),2);
 
@@ -10955,18 +10933,7 @@ startTradeAuto();
 
   function injectSettings(){
     const grid = document.querySelector('.settings-grid');
-    if(!grid || document.getElementById('patch5EmaCard')) return;
-    const emaCard = document.createElement('div');
-    emaCard.className = 'settings-card';
-    emaCard.id = 'patch5EmaCard';
-    emaCard.innerHTML = `
-      <div class="settings-card-title">Indicator styles</div>
-      <div class="settings-card-desc">MA and VWAP color and transparency.</div>
-      <div class="patch5-row"><span>MA1</span>${settingInput('patch5Ema1Color','color', localStorage.getItem(KEYS.ema1Color)||defaults.ema1Color)} ${settingInput('patch5Ema1Alpha','range', localStorage.getItem(KEYS.ema1Alpha)||defaults.ema1Alpha,'min="0" max="100" step="1"')}</div>
-      <div class="patch5-row"><span>MA2</span>${settingInput('patch5Ema2Color','color', localStorage.getItem(KEYS.ema2Color)||defaults.ema2Color)} ${settingInput('patch5Ema2Alpha','range', localStorage.getItem(KEYS.ema2Alpha)||defaults.ema2Alpha,'min="0" max="100" step="1"')}</div>
-      <div class="patch5-row"><span>MA3</span>${settingInput('patch5Ema3Color','color', localStorage.getItem(KEYS.ema3Color)||defaults.ema3Color)} ${settingInput('patch5Ema3Alpha','range', localStorage.getItem(KEYS.ema3Alpha)||defaults.ema3Alpha,'min="0" max="100" step="1"')}</div>
-      <div class="patch5-row"><span>VWAP</span>${settingInput('patch5VWAPColor','color', localStorage.getItem(KEYS.vwapColor)||defaults.vwapColor)} ${settingInput('patch5VWAPAlpha','range', localStorage.getItem(KEYS.vwapAlpha)||defaults.vwapAlpha,'min="0" max="100" step="1"')}</div>`;
-    grid.appendChild(emaCard);
+    if(!grid || document.getElementById('patch5ClosedCard')) return;
 
     const closedCard = document.createElement('div');
     closedCard.className = 'settings-card';
@@ -10978,10 +10945,6 @@ startTradeAuto();
     grid.appendChild(closedCard);
 
     const binds = [
-      ['patch5Ema1Color',KEYS.ema1Color],['patch5Ema1Alpha',KEYS.ema1Alpha],
-      ['patch5Ema2Color',KEYS.ema2Color],['patch5Ema2Alpha',KEYS.ema2Alpha],
-      ['patch5Ema3Color',KEYS.ema3Color],['patch5Ema3Alpha',KEYS.ema3Alpha],
-      ['patch5VWAPColor',KEYS.vwapColor],['patch5VWAPAlpha',KEYS.vwapAlpha],
       ['patch5ClosedWidth',KEYS.closedWidth]
     ];
     binds.forEach(([id,key]) => {
@@ -10997,13 +10960,6 @@ startTradeAuto();
         localStorage.setItem(key, el.value);
         draw();
       });
-    });
-
-    [['patch5Ema1Period',emaPeriod1El],['patch5Ema2Period',emaPeriod2El],['patch5Ema3Period',emaPeriod3El]].forEach(([id,target]) => {
-      const el = document.getElementById(id);
-      if(!el || !target) return;
-      el.addEventListener('input', () => { target.value = el.value; saveEmaSettings(); });
-      el.addEventListener('change', () => { target.value = el.value; saveEmaSettings(); });
     });
   }
 
@@ -11221,108 +11177,6 @@ startTradeAuto();
 
 (() => {
   "use strict";
-
-  const P8_STYLE_KEYS = {
-    ema1Color:"btc_futures_chart_v13_05_ema1_color", ema1Alpha:"btc_futures_chart_v13_05_ema1_alpha",
-    ema2Color:"btc_futures_chart_v13_05_ema2_color", ema2Alpha:"btc_futures_chart_v13_05_ema2_alpha",
-    ema3Color:"btc_futures_chart_v13_05_ema3_color", ema3Alpha:"btc_futures_chart_v13_05_ema3_alpha",
-    vwapColor:"btc_futures_chart_v13_05_vwap_color", vwapAlpha:"btc_futures_chart_v13_05_vwap_alpha"
-  };
-  const P8_STYLE_DEFAULTS = {
-    ema1Color:"#3b82f6", ema1Alpha:"100",
-    ema2Color:"#a855f7", ema2Alpha:"100",
-    ema3Color:"#14b8a6", ema3Alpha:"100",
-    vwapColor:"#2f8a4b", vwapAlpha:"100"
-  };
-
-  function p8CardTitle(card){
-    const t = card && card.querySelector && card.querySelector('.settings-card-title');
-    return t ? t.textContent.trim() : '';
-  }
-
-  function p8Val(id,fallback){
-    const el = document.getElementById(id);
-    return el && el.value ? el.value : fallback;
-  }
-
-  function p8StyleVal(key){
-    return localStorage.getItem(P8_STYLE_KEYS[key]) || P8_STYLE_DEFAULTS[key];
-  }
-
-  function p8Row(name,periodId,colorId,alphaId,colorKey,alphaKey,periodValue){
-    const period = periodId
-      ? `<input id="${periodId}" type="number" min="1" max="999" step="1" value="${periodValue}">`
-      : `<span style="color:var(--muted)">-</span>`;
-    return `
-      <div>${name}</div>
-      <div>${period}</div>
-      <input id="${colorId}" type="color" value="${p8StyleVal(colorKey)}">
-      <input id="${alphaId}" type="range" min="0" max="100" step="1" value="${p8StyleVal(alphaKey)}">`;
-  }
-
-  function installPatch8IndicatorSettings(){
-    const grid = document.querySelector('.settings-grid');
-    if(!grid || document.getElementById('patch8IndicatorCard')) return;
-
-    const cards = Array.from(grid.querySelectorAll('.settings-card'));
-    cards.forEach(card => {
-      const title = p8CardTitle(card);
-      if(title === 'EMAs' || title === 'Indicator styles') card.classList.add('patch8-hidden-card');
-    });
-
-    const card = document.createElement('div');
-    card.className = 'settings-card patch8-indicator-card';
-    card.id = 'patch8IndicatorCard';
-    card.innerHTML = `
-      <div class="settings-card-title">Indicators</div>
-      <div class="settings-card-desc">Set period, color, and transparency in one row per indicator.</div>
-      <div class="patch8-indicator-grid">
-        <div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div>
-        ${p8Row('MA1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','ema1Color','ema1Alpha',p8Val('emaPeriod1','9'))}
-        ${p8Row('MA2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','ema2Color','ema2Alpha',p8Val('emaPeriod2','21'))}
-        ${p8Row('MA3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','ema3Color','ema3Alpha',p8Val('emaPeriod3','55'))}
-        ${p8Row('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','vwapColor','vwapAlpha','')}
-      </div>`;
-
-    const closed = document.getElementById('patch5ClosedCard');
-    if(closed && closed.parentNode === grid) grid.insertBefore(card, closed);
-    else grid.appendChild(card);
-
-    const periodMap = [
-      ['patch8Ema1Period','emaPeriod1'],
-      ['patch8Ema2Period','emaPeriod2'],
-      ['patch8Ema3Period','emaPeriod3']
-    ];
-    periodMap.forEach(([from,to]) => {
-      const src = document.getElementById(from);
-      const dst = document.getElementById(to);
-      if(!src || !dst) return;
-      const sync = () => {
-        dst.value = src.value;
-        if(typeof saveEmaSettings === 'function') saveEmaSettings();
-        else if(typeof draw === 'function') draw();
-      };
-      src.addEventListener('input', sync);
-      src.addEventListener('change', sync);
-    });
-
-    const styleMap = [
-      ['patch8Ema1Color','ema1Color'],['patch8Ema1Alpha','ema1Alpha'],
-      ['patch8Ema2Color','ema2Color'],['patch8Ema2Alpha','ema2Alpha'],
-      ['patch8Ema3Color','ema3Color'],['patch8Ema3Alpha','ema3Alpha'],
-      ['patch8VWAPColor','vwapColor'],['patch8VWAPAlpha','vwapAlpha']
-    ];
-    styleMap.forEach(([id,key]) => {
-      const el = document.getElementById(id);
-      if(!el) return;
-      const sync = () => {
-        localStorage.setItem(P8_STYLE_KEYS[key], el.value);
-        if(typeof draw === 'function') draw();
-      };
-      el.addEventListener('input', sync);
-      el.addEventListener('change', sync);
-    });
-  }
 
   function p8Gross(side,en,ex,q){
     return String(side).toUpperCase() === 'SHORT' ? (Number(en)-Number(ex))*Number(q) : (Number(ex)-Number(en))*Number(q);
@@ -11614,7 +11468,6 @@ startTradeAuto();
     p8FocusIsolatedTrade();
   }, true);
 
-  installPatch8IndicatorSettings();
 })();
 
 (() => {
@@ -12614,22 +12467,11 @@ startTradeAuto();
     }
 
     const im = idxMap(vis);
-    const maOverlayApi = window.MA_FEATURE || null;
-    const chartMaSeries = canonicalChartMASeries();
+    const chartMaSlots = canonicalChartMASlots();
     const chartVwap = currentVWAPSeries();
-    [1,2,3,4,5].forEach(n => {
-      const on = maOverlayApi && typeof maOverlayApi.enabled === 'function'
-        ? maOverlayApi.enabled(n)
-        : canonicalMAEnabled(n);
-      if(!on) return;
-      const series = chartMaSeries[n];
-      const stroke = maOverlayApi && typeof maOverlayApi.strokeFor === 'function'
-        ? maOverlayApi.strokeFor(n)
-        : canonicalMAStroke(n);
-      const lineWidth = maOverlayApi && typeof maOverlayApi.width === 'function'
-        ? maOverlayApi.width(n)
-        : canonicalMAWidth(n);
-      drawInd(series,vis,im,mapX,mapY,stroke,lineWidth);
+    chartMaSlots.forEach(slot => {
+      if(!slot.enabled) return;
+      drawInd(slot.series,vis,im,mapX,mapY,slot.stroke,slot.width);
     });
     if(tglVWAP.checked) drawInd(chartVwap,vis,im,mapX,mapY,getIndicatorStroke('vwap','#f59e0b'),2);
 
@@ -15745,19 +15587,6 @@ startTradeAuto();
     ema3:'btc_futures_chart_v13_18_ema3_width',
     vwap:'btc_futures_chart_v13_18_vwap_width'
   };
-  const STYLE_KEYS18 = {
-    ema1Color:'btc_futures_chart_v13_05_ema1_color', ema1Alpha:'btc_futures_chart_v13_05_ema1_alpha',
-    ema2Color:'btc_futures_chart_v13_05_ema2_color', ema2Alpha:'btc_futures_chart_v13_05_ema2_alpha',
-    ema3Color:'btc_futures_chart_v13_05_ema3_color', ema3Alpha:'btc_futures_chart_v13_05_ema3_alpha',
-    vwapColor:'btc_futures_chart_v13_05_vwap_color', vwapAlpha:'btc_futures_chart_v13_05_vwap_alpha'
-  };
-  const STYLE_DEF18 = {
-    ema1Color:'#3b82f6', ema1Alpha:'100',
-    ema2Color:'#a855f7', ema2Alpha:'100',
-    ema3Color:'#14b8a6', ema3Alpha:'100',
-    vwapColor:'#f59e0b', vwapAlpha:'100'
-  };
-
   function currentIndicatorWidth18(key,fallback=2){
     const v = Number(localStorage.getItem(THICK_KEYS18[key] || '') || fallback);
     return Number.isFinite(v) ? Math.max(1,Math.min(10,v)) : fallback;
@@ -15786,89 +15615,6 @@ startTradeAuto();
     return el;
   }
   const tglFloatingPL18 = ensureFloatingToggle18();
-
-  function v18(id,fallback=''){
-    const el = document.getElementById(id);
-    return el && el.value !== '' ? el.value : fallback;
-  }
-  function styleVal18(key){ return localStorage.getItem(STYLE_KEYS18[key]) || STYLE_DEF18[key] || ''; }
-  function widthVal18(key){ return localStorage.getItem(THICK_KEYS18[key]) || '2'; }
-  function row18(name,periodId,colorId,alphaId,widthId,key,periodFallback){
-    const period = periodId
-      ? `<input id="${periodId}" type="number" min="1" max="999" step="1" value="${v18(periodId, v18(periodId.replace('patch8Ema','emaPeriod').replace('Period',''), periodFallback))}">`
-      : `<span style="color:var(--muted)">-</span>`;
-    return `
-      <div>${name}</div>
-      <div>${period}</div>
-      <input id="${colorId}" type="color" value="${styleVal18(key+'Color')}">
-      <input id="${alphaId}" type="range" min="0" max="100" step="1" value="${styleVal18(key+'Alpha')}">
-      <input id="${widthId}" type="range" min="1" max="10" step="0.5" value="${widthVal18(key)}" title="Thickness">`;
-  }
-
-  function rebuildIndicatorSettings18(){
-    const card = document.getElementById('patch8IndicatorCard');
-    if(!card) return;
-    const desc = card.querySelector('.settings-card-desc');
-    if(desc) desc.textContent = 'Set period, color, transparency, and thickness in one row per indicator.';
-    const grid = card.querySelector('.patch8-indicator-grid');
-    if(!grid) return;
-    grid.innerHTML = `
-      <div class="patch8-head">Indicator</div><div class="patch8-head">Value</div><div class="patch8-head">Color</div><div class="patch8-head">Transparency</div><div class="patch8-head">Thickness</div>
-      ${row18('MA1','patch8Ema1Period','patch8Ema1Color','patch8Ema1Alpha','patch18Ema1Width','ema1',v18('emaPeriod1','9'))}
-      ${row18('MA2','patch8Ema2Period','patch8Ema2Color','patch8Ema2Alpha','patch18Ema2Width','ema2',v18('emaPeriod2','21'))}
-      ${row18('MA3','patch8Ema3Period','patch8Ema3Color','patch8Ema3Alpha','patch18Ema3Width','ema3',v18('emaPeriod3','55'))}
-      ${row18('VWAP',null,'patch8VWAPColor','patch8VWAPAlpha','patch18VWAPWidth','vwap','')}`;
-
-    const periodMap = [
-      ['patch8Ema1Period','emaPeriod1'],
-      ['patch8Ema2Period','emaPeriod2'],
-      ['patch8Ema3Period','emaPeriod3']
-    ];
-    periodMap.forEach(([from,to]) => {
-      const src = document.getElementById(from);
-      const dst = document.getElementById(to);
-      if(!src || !dst) return;
-      const sync = () => {
-        dst.value = src.value;
-        if(typeof saveEmaSettings === 'function') saveEmaSettings();
-        else if(typeof draw === 'function') draw();
-      };
-      src.addEventListener('input', sync);
-      src.addEventListener('change', sync);
-    });
-
-    const styleMap = [
-      ['patch8Ema1Color','ema1Color'],['patch8Ema1Alpha','ema1Alpha'],
-      ['patch8Ema2Color','ema2Color'],['patch8Ema2Alpha','ema2Alpha'],
-      ['patch8Ema3Color','ema3Color'],['patch8Ema3Alpha','ema3Alpha'],
-      ['patch8VWAPColor','vwapColor'],['patch8VWAPAlpha','vwapAlpha']
-    ];
-    styleMap.forEach(([id,key]) => {
-      const el = document.getElementById(id);
-      if(!el) return;
-      const sync = () => {
-        localStorage.setItem(STYLE_KEYS18[key], el.value);
-        if(typeof draw === 'function') draw();
-      };
-      el.addEventListener('input', sync);
-      el.addEventListener('change', sync);
-    });
-
-    const widthMap = [
-      ['patch18Ema1Width','ema1'],['patch18Ema2Width','ema2'],['patch18Ema3Width','ema3'],['patch18VWAPWidth','vwap']
-    ];
-    widthMap.forEach(([id,key]) => {
-      const el = document.getElementById(id);
-      if(!el) return;
-      const sync = () => {
-        localStorage.setItem(THICK_KEYS18[key], String(Math.max(1,Math.min(10,Number(el.value)||2))));
-        if(typeof draw === 'function') draw();
-      };
-      el.addEventListener('input', sync);
-      el.addEventListener('change', sync);
-    });
-  }
-  rebuildIndicatorSettings18();
 
   // Make drawInd use the latest indicator key's thickness without rewriting the chart renderer.
   const prevGetStroke18 = typeof getIndicatorStroke === 'function' ? getIndicatorStroke : null;
@@ -16014,24 +15760,7 @@ startTradeAuto();
     bindRange19('patch19ClosedAlpha',CLOSED_ALPHA_KEY19,'patch19ClosedAlphaVal',v => Math.max(0,Math.min(100,Number(v)||100)));
   }
 
-  function tightenIndicatorRows19(){
-    const card = document.getElementById('patch8IndicatorCard');
-    if(!card) return;
-    const nums = card.querySelectorAll('.patch8-indicator-grid input[type="number"]');
-    nums.forEach(el => {
-      el.style.width = '52px';
-      el.style.minWidth = '52px';
-      el.style.textAlign = 'center';
-    });
-    const ranges = card.querySelectorAll('.patch8-indicator-grid input[type="range"]');
-    ranges.forEach(el => {
-      el.style.width = '100%';
-      el.style.maxWidth = '128px';
-    });
-  }
-
   rebuildClosedLinksCard19();
-  tightenIndicatorRows19();
 
   try{ if(typeof draw === 'function') draw(); }catch(e){ console.error('PATCH_19 draw failed',e); }
 })();
@@ -23181,7 +22910,7 @@ If there is NO open position, use this Section 2 instead:
       const provider =
         (window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function")
           ? window.MA_FEATURE.getCanonicalMASlots
-          : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+          : null;
       const slots = provider ? provider() : null;
       if(Array.isArray(slots) && slots.length === 5){
         const normalized = slots.map((slot,i) => {

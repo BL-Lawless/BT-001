@@ -18,11 +18,9 @@
     chart(context) {
       adoptIds(context, [
         "chartCandleSettingsCard",
-        "patch8IndicatorCard",
+        "maSettingsCard",
         "patch5ClosedCard",
         "v21TrackpadCard",
-        "legacyEmaSettingsCard",
-        "patch5EmaCard"
       ]);
     },
     sessions(context) {

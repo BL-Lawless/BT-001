@@ -434,7 +434,7 @@
     try{
       const provider = window.MA_FEATURE && typeof window.MA_FEATURE.getCanonicalMASlots === "function"
         ? window.MA_FEATURE.getCanonicalMASlots
-        : (typeof window.getCanonicalMASlots === "function" ? window.getCanonicalMASlots : null);
+        : null;
       const slots = provider ? provider() : null;
       if(Array.isArray(slots) && slots.length === 5){
         return slots.map((slot,index) => ({slotId:`MA${index + 1}`,period:Math.max(1,Math.round(Number(slot && slot.period) || [9,21,55,100,200][index]))}));

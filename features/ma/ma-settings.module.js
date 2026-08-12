@@ -200,7 +200,7 @@
   }
 
   function rebuildSettings() {
-    const card = $id("patch8IndicatorCard");
+    const card = $id("maSettingsCard");
     if (!card) return;
     const old = $id("v32r1MASettings");
     if (old) old.remove();
