@@ -64,6 +64,9 @@ assert(source.includes("reportDetailLevel:"),"owner must use the neutral reportD
 // caller is) remain active.
 assert(source.includes("opt.acceptResult"),"owner must still honor a caller-supplied stale-period veto as an additional guard");
 assert(source.includes("const stillCurrent = requestSymbol"),"owner must have its own intrinsic stale-result rejection");
+assert(source.includes("const request = closedTradeRequestContext(period,opt);"),"fast/detail owner loads must require an explicit resolved request context");
+assert(source.includes("displayControlsRequestIsCurrent(request)"),"owner stale rejection must include the display-controls revision and range");
+assert(source.includes("const win = request.win;"),"owner loads must consume the caller's resolved range");
 
 console.log("closed trades owner static assertions: PASS");
 

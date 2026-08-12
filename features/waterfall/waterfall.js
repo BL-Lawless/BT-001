@@ -117,7 +117,9 @@
   }
   function currentPeriodValue(){
     try{
-      return String((reportWeeksEl && reportWeeksEl.value) || "1d").toLowerCase();
+      const controls = window.BT001_DISPLAY_CONTROLS;
+      const snapshot = controls && typeof controls.snapshot === "function" ? controls.snapshot() : null;
+      return String((snapshot && snapshot.period && snapshot.period.value) || "1d").toLowerCase();
     }catch(_e){
       return "1d";
     }
@@ -219,14 +221,30 @@
       String(period.period || "").toLowerCase() === currentPeriodValue()
     );
   }
+  function displayControlsLoadRequest(period,opt={}){
+    const controls = window.BT001_DISPLAY_CONTROLS;
+    let snapshot = controls && typeof controls.snapshot === "function" ? controls.snapshot() : null;
+    if(snapshot && period && String(period).toLowerCase() !== snapshot.period.value && typeof controls.setPeriod === "function"){
+      snapshot = controls.setPeriod(period,{source:"waterfall-reload"});
+    }
+    const range = snapshot && typeof controls.periodWindow === "function" ? controls.periodWindow() : null;
+    return snapshot ? {
+      ...opt,
+      displayControlsRevision:snapshot.revision,
+      periodValue:snapshot.period.value,
+      resolvedRange:{startMs:range.startMs,endMs:range.endMs}
+    } : opt;
+  }
   async function reloadCurrentWfData(period,opt={}){
-    if(wfDataMode() === "detail") return window.loadClosedTradesForPeriod(period,opt);
-    return window.loadClosedTradesFastForPeriod(period,opt);
+    const request = displayControlsLoadRequest(period,opt);
+    if(wfDataMode() === "detail") return window.loadClosedTradesForPeriod(period,request);
+    return window.loadClosedTradesFastForPeriod(period,request);
   }
   async function ensureFastWfData(opt={}){
     if(typeof window.hasKeys !== "function" || !window.hasKeys()) return null;
     if(!opt.force && wfHasCurrentFastReport()) return closedTradesOwnerSnapshot().fastReport;
-    return window.loadClosedTradesFastForPeriod(opt.period || currentPeriodValue(),opt);
+    const period = opt.period || currentPeriodValue();
+    return window.loadClosedTradesFastForPeriod(period,displayControlsLoadRequest(period,opt));
   }
   function livePreviewTrade(){
     const visual = window.BT001_OPEN_POSITION_VISUAL && typeof window.BT001_OPEN_POSITION_VISUAL.snapshot === "function"
@@ -1213,15 +1231,9 @@
   }
 
   function selectedPeriodDates(){
-    if(reportWeeksEl && String(reportWeeksEl.value || "").toLowerCase() === "custom" && typeof window.parseCustomDate === "function"){
-      const start = window.parseCustomDate(customFromEl ? customFromEl.value : "",false);
-      const end = window.parseCustomDate(customToEl ? customToEl.value : "",true);
-      if(Number.isFinite(start) && Number.isFinite(end) && end >= start){
-        return {start,end};
-      }
-    }
-    const win = window.closedTradePeriodWindowMs(reportWeeksEl && reportWeeksEl.value);
-    return {start:win.start,end:win.end};
+    const controls = window.BT001_DISPLAY_CONTROLS;
+    const win = controls && typeof controls.periodWindow === "function" ? controls.periodWindow() : null;
+    return {start:win && win.startMs,end:win && win.endMs};
   }
 
   function buildViewModel(){
@@ -1682,14 +1694,22 @@
   function install(){
     ensureToggle();
     ensureWindow();
-    if(reportWeeksEl && !reportWeeksEl.__bt001WfFastReloadBound){
-      reportWeeksEl.__bt001WfFastReloadBound = true;
-      reportWeeksEl.addEventListener("change",() => {
+    const controls = window.BT001_DISPLAY_CONTROLS;
+    if(controls && typeof controls.subscribe === "function" && !window.__bt001WfDisplayControlsBound){
+      window.__bt001WfDisplayControlsBound = true;
+      let subscribedPeriod = currentPeriodValue();
+      controls.subscribe(snapshot => {
+        const nextPeriod = String((snapshot && snapshot.period && snapshot.period.value) || "1d").toLowerCase();
+        if(nextPeriod === subscribedPeriod) return;
+        subscribedPeriod = nextPeriod;
         hideWfCrosshair();
-        ensureFastWfData({force:true,silent:true,period:currentPeriodValue()}).catch(error => {
-          console.warn(MODULE + " fast WF period reload failed",error);
+        Promise.resolve().then(() => {
+          if(currentPeriodValue() !== nextPeriod) return;
+          ensureFastWfData({force:true,silent:true,period:nextPeriod}).catch(error => {
+            console.warn(MODULE + " fast WF period reload failed",error);
+          });
         });
-      },false);
+      });
     }
     if(typeof window.hasKeys === "function" && window.hasKeys()){
       setTimeout(() => {

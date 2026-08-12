@@ -6,6 +6,9 @@ const visibility=main.slice(main.indexOf("function handleVisibilityReturn()"),ma
 assert(load.indexOf("inspectTimeframeBuffer(requestedInterval)")<load.indexOf("if(loading)"),"retained presentation must be considered before an active full load queues the selection");
 assert(load.indexOf("draw();")<load.indexOf("setTimeout(()=>{"),"retained candles must paint before background repair starts");
 assert(load.includes("requestGeneration === chartLoadGeneration")&&load.includes("queued.generation===chartLoadGeneration"),"obsolete timeframe work must be generation guarded");
+assert(load.includes("const tradesOff = !window.BT001_DISPLAY_CONTROLS.snapshot().visibility.trades;"),"loadChart must source Trades visibility from the display-controls owner");
+assert(load.includes("const targetRight = preserveView && tradesOff ? Math.min(0, Number(keepRight) || 0) : keepRight;"),"loadChart must preserve the Trades-off right-offset constraint");
+assert(!main.includes("const tradesOff = !(tglResults && tglResults.checked);"),"loadChart must not read the Trades checkbox directly");
 assert(load.includes("rebuildRequirements(false)"),"retained timeframe presentation must not force-restart a compatible public socket");
 assert(main.includes("allowRetained:false")&&main.includes("symbol:state.bufferSymbol,timeframe:tf,valid,usable:valid"),"full consumer rebuilds and centralized retained-buffer validation must remain explicit");
 assert(main.includes('repairMissingClosedCandles(tf,retained.gaps,"retained-buffer-repair"'),"retained internal gaps must use targeted canonical repair");

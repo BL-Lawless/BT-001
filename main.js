@@ -41,9 +41,6 @@ const BLACK_CROSSHAIR_CURSOR = "url(\"data:image/svg+xml,%3Csvg xmlns='http://ww
 const marketEl = $("market");
 const intervalEl = $("interval");
 const reportWeeksEl = $("reportWeeks");
-const customRangeEl = $("customRange");
-const customFromEl = $("customFrom");
-const customToEl = $("customTo");
 const reloadEl = $("reload");
 const resetViewEl = $("resetView");
 
@@ -1054,21 +1051,6 @@ window.BT001SymbolTradingSettings = {
 };
 function iv(){ return intervalEl.value; }
 
-function parseCustomDate(value,endOfDay=false){
-  const raw = String(value || "").trim();
-  const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
-  if(!m) return null;
-
-  const day = Number(m[1]);
-  const month = Number(m[2]) - 1;
-  let year = Number(m[3]);
-  if(year < 100) year += 2000;
-
-  const d = new Date(year,month,day,endOfDay ? 23 : 0,endOfDay ? 59 : 0,endOfDay ? 59 : 0,endOfDay ? 999 : 0);
-  if(d.getFullYear() !== year || d.getMonth() !== month || d.getDate() !== day) return null;
-  return d.getTime();
-}
-
 function selectedReportPresetMs(){
   switch(reportWeeksEl.value){
     case "1d": return 24 * 60 * 60 * 1000;
@@ -1082,18 +1064,7 @@ function selectedReportPresetMs(){
   }
 }
 
-function customReportRangeMs(){
-  const start = parseCustomDate(customFromEl ? customFromEl.value : "",false);
-  const end = parseCustomDate(customToEl ? customToEl.value : "",true);
-  if(start == null || end == null || end <= start) return null;
-  return {start,end};
-}
-
 function reportRangeMs(){
-  if(reportWeeksEl.value === "custom"){
-    const custom = customReportRangeMs();
-    if(custom) return custom;
-  }
   const win = closedTradeSessionWindowMs(reportWeeksEl.value,Date.now());
   return {start:win.start,end:win.end};
 }
@@ -1881,6 +1852,113 @@ function closedTradePeriodWindowMs(period){
   return closedTradeSessionWindowMs(period,Date.now());
 }
 
+const DISPLAY_CONTROLS_SUBSCRIBERS = new Set();
+let displayControlsState = null;
+
+function freezeDisplayControlsSnapshot(state){
+  return Object.freeze({
+    revision:state.revision,
+    updatedAt:state.updatedAt,
+    visibility:Object.freeze({...state.visibility}),
+    period:Object.freeze({...state.period}),
+    capabilities:Object.freeze({...state.capabilities})
+  });
+}
+
+function displayControlsSnapshot(){
+  return freezeDisplayControlsSnapshot(displayControlsState);
+}
+
+function publishDisplayControls(meta={}){
+  const snapshot = displayControlsSnapshot();
+  DISPLAY_CONTROLS_SUBSCRIBERS.forEach(listener => {
+    try{ listener(snapshot,meta); }catch(error){ console.warn("BT001_DISPLAY_CONTROLS subscriber failed",error); }
+  });
+  try{ window.dispatchEvent(new CustomEvent("bt001:display-controls-state",{detail:snapshot})); }catch(_e){}
+  return snapshot;
+}
+
+function commitDisplayControls(next,meta={}){
+  const previous = displayControlsState;
+  const changed = !previous ||
+    previous.visibility.trades !== next.visibility.trades ||
+    previous.visibility.positions !== next.visibility.positions ||
+    previous.visibility.lots !== next.visibility.lots ||
+    previous.period.value !== next.period.value ||
+    previous.period.label !== next.period.label ||
+    previous.period.startMs !== next.period.startMs ||
+    previous.period.endMs !== next.period.endMs ||
+    previous.capabilities.positionsEnabled !== next.capabilities.positionsEnabled ||
+    previous.capabilities.lotsEnabled !== next.capabilities.lotsEnabled;
+  if(!changed) return displayControlsSnapshot();
+  displayControlsState = {
+    ...next,
+    revision:previous ? previous.revision + 1 : 1,
+    updatedAt:Date.now()
+  };
+  return publishDisplayControls(meta);
+}
+
+function setDisplayControlsVisibility(patch={},meta={}){
+  const current = displayControlsState.visibility;
+  const trades = Object.prototype.hasOwnProperty.call(patch,"trades") ? !!patch.trades : current.trades;
+  const positions = trades && (Object.prototype.hasOwnProperty.call(patch,"positions") ? !!patch.positions : current.positions);
+  const lots = trades && (Object.prototype.hasOwnProperty.call(patch,"lots") ? !!patch.lots : current.lots);
+  if(tglResults) tglResults.checked = trades;
+  if(tglPositions){ tglPositions.checked = positions; tglPositions.disabled = !trades; }
+  if(tglLots){ tglLots.checked = lots; tglLots.disabled = !trades; }
+  return commitDisplayControls({
+    ...displayControlsState,
+    visibility:{trades,positions,lots},
+    capabilities:{positionsEnabled:trades,lotsEnabled:trades}
+  },meta);
+}
+
+function setDisplayControlsPeriod(value,meta={}){
+  const selected = selectedClosedTradePeriod(value || displayControlsState.period.value);
+  const win = closedTradePeriodWindowMs(selected.value);
+  if(reportWeeksEl && reportWeeksEl.value !== selected.value) reportWeeksEl.value = selected.value;
+  return commitDisplayControls({
+    ...displayControlsState,
+    period:{value:selected.value,label:selected.label,startMs:win.start,endMs:win.end}
+  },meta);
+}
+
+function displayControlsPeriodWindow(){
+  const win = closedTradePeriodWindowMs(displayControlsState.period.value);
+  return Object.freeze({startMs:win.start,endMs:win.end});
+}
+
+function subscribeDisplayControls(listener){
+  if(typeof listener !== "function") return () => {};
+  DISPLAY_CONTROLS_SUBSCRIBERS.add(listener);
+  return () => DISPLAY_CONTROLS_SUBSCRIBERS.delete(listener);
+}
+
+{
+  const selected = selectedClosedTradePeriod(reportWeeksEl && reportWeeksEl.value);
+  const win = closedTradePeriodWindowMs(selected.value);
+  const trades = !!(tglResults && tglResults.checked);
+  const positions = trades && !!(tglPositions && tglPositions.checked);
+  const lots = trades && !!(tglLots && tglLots.checked);
+  displayControlsState = {
+    revision:1,
+    updatedAt:Date.now(),
+    visibility:{trades,positions,lots},
+    period:{value:selected.value,label:selected.label,startMs:win.start,endMs:win.end},
+    capabilities:{positionsEnabled:trades,lotsEnabled:trades}
+  };
+}
+
+window.BT001_DISPLAY_CONTROLS = Object.freeze({
+  version:"BT001_DISPLAY_CONTROLS_V1",
+  snapshot:displayControlsSnapshot,
+  setVisibility:setDisplayControlsVisibility,
+  setPeriod:setDisplayControlsPeriod,
+  periodWindow:displayControlsPeriodWindow,
+  subscribe:subscribeDisplayControls
+});
+
 function visibleClosedTradeWindowMs(){
   const latest = candles && candles.length ? candles[candles.length - 1] : null;
   const r = typeof range === "function" ? range() : null;
@@ -2277,9 +2355,52 @@ function buildClosedTradeFastReport(rec,win,symbol,contextLimited){
 //   "stale" - the fetch completed but the symbol/period selection moved on, or a
 //             caller-supplied opt.acceptResult vetoed it; state was left untouched.
 //   "error" - the request threw; state was left untouched.
+function captureDisplayControlsLoadRequest(period,options={}){
+  if(Number.isFinite(Number(options.displayControlsRevision)) &&
+    Number.isFinite(Number(options.resolvedRange && options.resolvedRange.startMs)) &&
+    Number.isFinite(Number(options.resolvedRange && options.resolvedRange.endMs)) &&
+    options.periodValue) return options;
+  const controls = window.BT001_DISPLAY_CONTROLS;
+  if(!controls || typeof controls.setPeriod !== "function") return options;
+  let snapshot = controls.snapshot();
+  if(period && selectedClosedTradePeriod(period).value !== snapshot.period.value){
+    snapshot = controls.setPeriod(period,{source:options.source || "closed-trades-request"});
+  }
+  const range = controls.periodWindow();
+  return {
+    ...options,
+    displayControlsRevision:snapshot.revision,
+    periodValue:snapshot.period.value,
+    resolvedRange:{startMs:range.startMs,endMs:range.endMs}
+  };
+}
+
+function closedTradeRequestContext(period,options={}){
+  const startMs = Number(options.resolvedRange && options.resolvedRange.startMs);
+  const endMs = Number(options.resolvedRange && options.resolvedRange.endMs);
+  const revision = Number(options.displayControlsRevision);
+  const selected = selectedClosedTradePeriod(options.periodValue || period);
+  if(!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !Number.isFinite(revision)) return null;
+  return {
+    revision,
+    periodValue:selected.value,
+    win:{start:startMs,end:endMs,label:selected.label,period:selected.value}
+  };
+}
+
+function displayControlsRequestIsCurrent(request){
+  const controls = window.BT001_DISPLAY_CONTROLS;
+  if(!request || !controls || typeof controls.snapshot !== "function") return false;
+  const current = controls.snapshot();
+  return current.revision === request.revision &&
+    current.period.value === request.periodValue;
+}
+
 async function loadFast(period,options={}){
   const opt = options || {};
   const onProgress = typeof opt.onProgress === "function" ? opt.onProgress : null;
+  const request = closedTradeRequestContext(period,opt);
+  if(!request) return closedTradesOutcome("error",{error:new Error("Explicit display-controls range is required")});
   const {key,secret:sec} = activeApiCredentials();
 
   saveKeysLocal();
@@ -2291,12 +2412,12 @@ async function loadFast(period,options={}){
   closedTradesLoading = true;
 
   const requestSymbol = String(cfg().symbol || "").toUpperCase();
-  const requestPeriodValue = selectedClosedTradePeriod(period || opt.period).value;
+  const requestPeriodValue = request.periodValue;
 
   try{
     if(onProgress) onProgress("Loading WF closed positions...");
-    await ensureClosedTradeSessionBoundary(period || opt.period);
-    const win = closedTradePeriodWindowMs(period || opt.period);
+    await ensureClosedTradeSessionBoundary(requestPeriodValue);
+    const win = request.win;
     const off = opt.off != null ? opt.off : await timeOffset();
     const symbol = String(cfg().symbol || "").toUpperCase();
     const bounds = closedTradeFastContextBounds(win.period);
@@ -2321,7 +2442,7 @@ async function loadFast(period,options={}){
     // for WF's existing defense-in-depth guard - see WF-EXT-CT06 notes in the report),
     // never a replacement for this check.
     const stillCurrent = requestSymbol === String(cfg().symbol || "").toUpperCase() &&
-      requestPeriodValue === selectedClosedTradePeriod().value;
+      displayControlsRequestIsCurrent(request);
     const callerAccepts = typeof opt.acceptResult !== "function" || opt.acceptResult(fastReport);
     if(!stillCurrent || !callerAccepts){
       return closedTradesOutcome("stale",{report:fastReport});
@@ -2354,6 +2475,8 @@ async function loadFast(period,options={}){
 async function loadDetail(period,options={}){
   const opt = options || {};
   const onProgress = typeof opt.onProgress === "function" ? opt.onProgress : null;
+  const request = closedTradeRequestContext(period,opt);
+  if(!request) return closedTradesOutcome("error",{error:new Error("Explicit display-controls range is required")});
   const {key,secret:sec} = activeApiCredentials();
 
   saveKeysLocal();
@@ -2365,14 +2488,14 @@ async function loadDetail(period,options={}){
   closedTradesLoading = true;
 
   const requestSymbol = String(cfg().symbol || "").toUpperCase();
-  const requestPeriodValue = selectedClosedTradePeriod(period || opt.period).value;
+  const requestPeriodValue = request.periodValue;
 
   try{
     // Matches original gating exactly: only the initial message is silent-gated -
     // the fetch-progress messages below were always shown regardless of opt.silent.
     if(onProgress && !opt.silent) onProgress("Loading closed trades...");
-    await ensureClosedTradeSessionBoundary(period || opt.period);
-    const win = closedTradePeriodWindowMs(period || opt.period);
+    await ensureClosedTradeSessionBoundary(requestPeriodValue);
+    const win = request.win;
     const off = opt.off != null ? opt.off : await timeOffset();
     if(onProgress) onProgress("Fetching fills...");
     let start = Math.max(0,win.start - RECON_LOOKBACK_WEEKS * WEEK_MS);
@@ -2401,7 +2524,7 @@ async function loadDetail(period,options={}){
 
     // See loadFast() above for the intrinsic stale-rejection rationale.
     const stillCurrent = requestSymbol === String(cfg().symbol || "").toUpperCase() &&
-      requestPeriodValue === selectedClosedTradePeriod().value;
+      displayControlsRequestIsCurrent(request);
     const callerAccepts = typeof opt.acceptResult !== "function" || opt.acceptResult(rec);
     if(!stillCurrent || !callerAccepts){
       return closedTradesOutcome("stale",{report:rec,full});
@@ -2455,11 +2578,13 @@ if(typeof window !== "undefined"){
 }
 
 // WF-EXT-CT04: compatibility adapters. External behavior for every existing caller
-// (the "Load Trades" button, custom-date application, market-change clearing, WF's own
+// (the "Load Trades" button, market-change clearing, WF's own
 // period/symbol reloads) is unchanged - these adapters call the owner functions above
 // and re-add the exact presentation side effects (closedTradeStatus/updatePositionStrip/
 // updateTabTitle/draw) and legacy return shapes the owner no longer produces itself.
 async function loadClosedTradesFastForPeriod(period,opt={}){
+  opt = captureDisplayControlsLoadRequest(period,opt);
+  period = opt.periodValue;
   const silent = !!opt.silent;
   const result = await loadFast(period,{
     ...opt,
@@ -2492,6 +2617,8 @@ async function loadClosedTradesFastForPeriod(period,opt={}){
 }
 
 async function loadClosedTradesForPeriod(period,opt={}){
+  opt = captureDisplayControlsLoadRequest(period,opt);
+  period = opt.periodValue;
   const silent = !!opt.silent;
   const result = await loadDetail(period,{
     ...opt,
@@ -5489,7 +5616,7 @@ async function loadChart(opt={}){
   const keepLoaded = preserveView
     ? Math.max(Array.isArray(candles) ? candles.length : 0, keepVisible || 0)
     : 0;
-  const tradesOff = !(tglResults && tglResults.checked);
+  const tradesOff = !window.BT001_DISPLAY_CONTROLS.snapshot().visibility.trades;
   const targetRight = preserveView && tradesOff ? Math.min(0, Number(keepRight) || 0) : keepRight;
 
   loading = true;
@@ -8091,14 +8218,12 @@ intervalEl.addEventListener("change",handleIntervalChange);
 syncClosedTradesSummaryVisibility();
 
 function updateReportControls(){
-  if(customRangeEl){
-    customRangeEl.classList.add("hidden");
-  }
   const reportControl = reportWeeksEl && reportWeeksEl.closest ? reportWeeksEl.closest(".report-control") : null;
   if(reportControl) reportControl.classList.remove("hidden");
 }
 
 function reloadTradesForReport(){
+  if(window.BT001_DISPLAY_CONTROLS) window.BT001_DISPLAY_CONTROLS.setPeriod(reportWeeksEl.value,{source:"period-change"});
   updateReportControls();
   updateApiStatus();
 
@@ -8106,11 +8231,10 @@ function reloadTradesForReport(){
 }
 
 reportWeeksEl.addEventListener("change", reloadTradesForReport);
-[customFromEl,customToEl].forEach(el => {
-  if(el) el.addEventListener("change", reloadTradesForReport);
+loadTradesEl.addEventListener("click",() => {
+  const opt = captureDisplayControlsLoadRequest(null,{silent:false,source:"load-trades-button"});
+  return loadTrades(opt);
 });
-
-loadTradesEl.addEventListener("click",() => loadTrades({silent:false}));
 
 [apiKeyEl,apiSecretEl].forEach(el => {
   el.addEventListener("change",() => {
@@ -8139,6 +8263,13 @@ rememberKeysEl.addEventListener("change",() => {
   tglDollarValues,
   tglLots
 ].forEach(el => el && el.addEventListener("change",() => {
+  if(window.BT001_DISPLAY_CONTROLS && (el === tglResults || el === tglPositions || el === tglLots)){
+    window.BT001_DISPLAY_CONTROLS.setVisibility({
+      trades:!!tglResults.checked,
+      positions:!!tglPositions.checked,
+      lots:!!tglLots.checked
+    },{source:"toggle-change"});
+  }
   try{
     if(window.MA_FEATURE && typeof window.MA_FEATURE.handleToggleChange === "function"){
       window.MA_FEATURE.handleToggleChange(el);
@@ -10876,46 +11007,6 @@ startTradeAuto();
     });
   }
 
-  // Custom date modal
-  const customDateModal = document.getElementById('customDateModal');
-  const customFromModal = document.getElementById('customFromModal');
-  const customToModal = document.getElementById('customToModal');
-  const customDateApply = document.getElementById('customDateApply');
-  const customDateCancel = document.getElementById('customDateCancel');
-  let lastNonCustomReport = reportWeeksEl.value === 'custom' ? '1w' : reportWeeksEl.value;
-  function openCustomDateModal(){
-    if(customFromModal) customFromModal.value = customFromEl ? customFromEl.value : '';
-    if(customToModal) customToModal.value = customToEl ? customToEl.value : '';
-    customDateModal.classList.remove('hidden');
-  }
-  function closeCustomDateModal(){ customDateModal.classList.add('hidden'); }
-  reportWeeksEl.addEventListener('change', () => {
-    if(reportWeeksEl.value === 'custom'){
-      openCustomDateModal();
-    }else{
-      lastNonCustomReport = reportWeeksEl.value;
-    }
-  });
-  customDateApply.addEventListener('click', async () => {
-    if(customFromEl) customFromEl.value = customFromModal.value.trim();
-    if(customToEl) customToEl.value = customToModal.value.trim();
-    closeCustomDateModal();
-    if(typeof updateReportControls === 'function') updateReportControls();
-    if(typeof clearTrades === 'function') clearTrades();
-    if(typeof updateApiStatus === 'function') updateApiStatus();
-    if(typeof hasKeys === 'function' && hasKeys() && typeof loadTrades === 'function'){
-      await loadTrades({silent:false});
-    }
-    if(typeof focusChartAtCustomStart === 'function') focusChartAtCustomStart();
-    else if(typeof draw === 'function') draw();
-  });
-  customDateCancel.addEventListener('click', () => {
-    closeCustomDateModal();
-    reportWeeksEl.value = lastNonCustomReport || '1w';
-    if(typeof reloadTradesForReport === 'function') reloadTradesForReport();
-  });
-  customDateModal.addEventListener('click', e => { if(e.target === customDateModal) customDateCancel.click(); });
-
   // isolate mode helpers
   const inspectModal = document.getElementById('inspectModal');
   const isolateState = {active:false, chainIds:new Set(), markerIds:new Set(), closedLinkIds:new Set(), openEntryIds:new Set()};
@@ -11124,45 +11215,6 @@ startTradeAuto();
     toggles.classList.add("chart-indicator-toggles");
     wrap.appendChild(toggles);
   }
-
-  window.focusChartAtCustomStart = function(){
-    try{
-      if(!Array.isArray(candles) || !candles.length) return;
-      if(typeof customReportRangeMs !== "function") return;
-
-      const r = customReportRangeMs();
-      if(!r || !isFinite(r.start)) return;
-
-      const startSec = Math.floor(r.start / 1000);
-      let idx = 0;
-      let best = Infinity;
-
-      for(let i=0;i<candles.length;i++){
-        const d = Math.abs(Number(candles[i].time) - startSec);
-        if(d < best){
-          best = d;
-          idx = i;
-        }
-      }
-
-      visibleCount = clamp(
-        visibleCount || DEF_VISIBLE,
-        Math.min(MIN_VISIBLE,candles.length),
-        Math.max(1,candles.length)
-      );
-
-      const desiredEnd = Math.min(candles.length, idx + visibleCount);
-      rightOffset = candles.length - desiredEnd;
-      manualY = false;
-      yMin = null;
-      yMax = null;
-
-      clampView();
-      draw();
-    }catch(e){
-      console.warn("Custom start focus failed", e);
-    }
-  };
 
   installChartIndicatorToggles();
 })();
@@ -14212,7 +14264,7 @@ startTradeAuto();
     ctx.restore();
   };
 
-  // Ensure dropdown focus behavior also covers dynamically shown/custom controls.
+  // Ensure dropdown focus behavior covers the current report, interval, and market controls.
   ['reportWeeks','interval','market'].forEach(id => {
     const el = document.getElementById(id);
     if(el && !el.__p13FocusSecond){
@@ -14307,6 +14359,13 @@ startTradeAuto();
     if(tglPositions) tglPositions.disabled = !tradesOn;
     if(tglLots) tglLots.disabled = !tradesOn;
     if(tglDollarValues) tglDollarValues.checked = false;
+    if(window.BT001_DISPLAY_CONTROLS){
+      window.BT001_DISPLAY_CONTROLS.setVisibility({
+        trades:tradesOn,
+        positions:!!(tglPositions && tglPositions.checked),
+        lots:!!(tglLots && tglLots.checked)
+      },{source:"patch14-toggle-policy"});
+    }
     try{ draw(); }catch(e){}
   }
 
@@ -15460,9 +15519,10 @@ startTradeAuto();
   }
 
   tradeOverlays = function(vis,mapX,mapY,slot,clip){
-    const tradesOn = !!(tglResults && tglResults.checked);
-    const positionsOn = tradesOn && !!(tglPositions && tglPositions.checked);
-    const lotsOn = tradesOn && !!(tglLots && tglLots.checked);
+    const visibility = window.BT001_DISPLAY_CONTROLS.snapshot().visibility;
+    const tradesOn = !!visibility.trades;
+    const positionsOn = tradesOn && !!visibility.positions;
+    const lotsOn = tradesOn && !!visibility.lots;
     const placedLabels = [];
     ctx.save();
     ctx.beginPath();
@@ -15876,25 +15936,6 @@ startTradeAuto();
     ctx.fillText(txt,chosen.cx,chosen.cy+.5);
     ctx.restore();
   }
-  function drawBigExTags18(vis,mapX,mapY,slot,clip){
-    if(!(tglResults && tglResults.checked)) return;
-    if(!(tglPositions && tglPositions.checked)) return;
-    const placed = [];
-    for(const m of fillMarkers || []){
-      if(m.symbol !== (typeof cfg === 'function' ? cfg().symbol : m.symbol)) continue;
-      if(m.role !== 'close' || !m.isFinalExit || m.unresolved) continue;
-      if(typeof inTime === 'function' && !inTime(m.time,vis)) continue;
-      if(typeof isIsolateActive === 'function' && isIsolateActive() && typeof isMarkerVisibleInIsolate === 'function' && !isMarkerVisibleInIsolate(m.id)) continue;
-      const x = typeof markerTimeX === 'function' ? markerTimeX(m,vis,mapX,slot) : null;
-      if(x === null || x === undefined) continue;
-      const y = mapY(n18(m.price));
-      const rec = tradeRecord18(parentIdFromMarker18(m.id));
-      const ev = rec && rec.exits ? rec.exits.find(e => e.marker.id === m.id) : null;
-      const val = (ev && ev.type === 'EX' && rec) ? rec.total : (ev ? ev.pnl : n18(m.pnl));
-      bigExTag18(fm(val),x,y,val,clip,placed);
-    }
-  }
-
   const prevTradeOverlays18 = typeof tradeOverlays === 'function' ? tradeOverlays : null;
   if(prevTradeOverlays18){
     tradeOverlays = function(vis,mapX,mapY,slot,clip){
@@ -18869,10 +18910,6 @@ startTradeAuto();
   function dateOnly26(ms){
     return formatDateDdMmmYy(ms);
   }
-  function localMidnight26(ts){
-    const d = new Date(ts || Date.now());
-    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
-  }
   function nextLocalMidnight26(ts){
     const d = new Date(ts);
     return new Date(d.getFullYear(), d.getMonth(), d.getDate()+1, 0, 0, 0, 0).getTime();
@@ -18915,7 +18952,7 @@ startTradeAuto();
     return st.left + st.slot/2 + ((t - first) / st.sec) * st.slot;
   }
 
-  /* 1D Load Trades / report period from local midnight. */
+  /* Ensure the 1D report option exists. UTC boundaries are owned by BT001_DISPLAY_CONTROLS. */
   function ensureOneDayReport26(){
     const sel = document.getElementById("reportWeeks");
     if(!sel) return;
@@ -18926,32 +18963,8 @@ startTradeAuto();
       sel.insertBefore(opt, sel.firstChild || null);
     }
     sel.value = "1d";
-    try{ if(typeof syncCustomRangeVisibility === "function") syncCustomRangeVisibility(); }catch(e){}
   }
   ensureOneDayReport26();
-
-  if(typeof selectedReportPresetMs === "function" && !window.__v13Patch26ReportWrapped){
-    window.__v13Patch26ReportWrapped = true;
-    const prevSelected26 = selectedReportPresetMs;
-    selectedReportPresetMs = function(){
-      if(reportWeeksEl && reportWeeksEl.value === "1d") return Math.max(1,Date.now() - localMidnight26(Date.now()));
-      return prevSelected26.apply(this,arguments);
-    };
-    const prevRange26 = typeof reportRangeMs === "function" ? reportRangeMs : null;
-    if(prevRange26){
-      reportRangeMs = function(){
-        if(reportWeeksEl && reportWeeksEl.value === "1d"){
-          const end = Date.now();
-          return {start:localMidnight26(end),end};
-        }
-        return prevRange26.apply(this,arguments);
-      };
-    }
-    const prevWeeks26 = typeof weeks === "function" ? weeks : null;
-    if(prevWeeks26){ weeks = function(){ return reportWeeksEl && reportWeeksEl.value === "1d" ? 1 : prevWeeks26.apply(this,arguments); }; }
-    const prevLabel26 = typeof reportLabel === "function" ? reportLabel : null;
-    if(prevLabel26){ reportLabel = function(){ return reportWeeksEl && reportWeeksEl.value === "1d" ? "1D" : prevLabel26.apply(this,arguments); }; }
-  }
 
   /* Browser title: event-driven refresh hooks, timer remains fallback. */
   function updateTitleNow26(){
@@ -19193,7 +19206,7 @@ startTradeAuto();
   }
 
   if(reportWeeksEl){
-    reportWeeksEl.addEventListener("change",() => { if(reportWeeksEl.value !== "custom") localStorage.setItem("btc_futures_chart_v13_26_last_report",reportWeeksEl.value); },true);
+    reportWeeksEl.addEventListener("change",() => { localStorage.setItem("btc_futures_chart_v13_26_last_report",reportWeeksEl.value); },true);
   }
 
   scheduleTitle26();
@@ -19584,30 +19597,13 @@ If there is NO open position, use this Section 2 instead:
     specs.forEach(([v,t])=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); });
     sel.value=specs.some(x=>x[0]===current)?current:'1d';
     localStorage.setItem(K('reportPeriod'),sel.value);
-  }
-  function startOfLocalDay(d=new Date()){ return new Date(d.getFullYear(),d.getMonth(),d.getDate(),0,0,0,0).getTime(); }
-  function parseDateValue(v,end=false){
-    const s=String(v||'').trim(); let d=null;
-    if(/^\d{4}-\d{2}-\d{2}$/.test(s)){ const [y,m,day]=s.split('-').map(Number); d=new Date(y,m-1,day,end?23:0,end?59:0,end?59:0,end?999:0); }
-    else { const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/); if(m){ let y=Number(m[3]); if(y<100)y+=2000; d=new Date(y,Number(m[2])-1,Number(m[1]),end?23:0,end?59:0,end?59:0,end?999:0); } }
-    return d&&!Number.isNaN(d.getTime())?d.getTime():null;
-  }
-  function msToInput(ms){ const d=new Date(ms); const pad=x=>String(x).padStart(2,'0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
-  function installDatePickers(){
-    const from=$id('customFrom'), to=$id('customTo');
-    [from,to].forEach(el=>{ if(!el) return; el.type='date'; el.placeholder='yyyy-mm-dd'; });
-    const sf=localStorage.getItem(K('customFrom')), st=localStorage.getItem(K('customTo'));
-    if(from&&sf&&!from.value) from.value=sf;
-    if(to&&st&&!to.value) to.value=st;
-    if(from&&!from.__v32r1Saved){ from.__v32r1Saved=true; from.addEventListener('change',()=>{localStorage.setItem(K('customFrom'),from.value);},true); }
-    if(to&&!to.__v32r1Saved){ to.__v32r1Saved=true; to.addEventListener('change',()=>{localStorage.setItem(K('customTo'),to.value);},true); }
+    if(window.BT001_DISPLAY_CONTROLS) window.BT001_DISPLAY_CONTROLS.setPeriod(sel.value,{source:'patch32-report-restore'});
   }
   function installReportHandlers(){
     if(reportWeeksEl&&!reportWeeksEl.__v32r1Bound){
       reportWeeksEl.__v32r1Bound=true;
       reportWeeksEl.addEventListener('change',()=>{
         localStorage.setItem(K('reportPeriod'),reportWeeksEl.value);
-        installDatePickers();
         try{ if(typeof updateReportControls==='function') updateReportControls(); }catch(_e){}
       },true);
     }
@@ -19623,14 +19619,6 @@ If there is NO open position, use this Section 2 instead:
       case '3m': return 93*24*60*60*1000;
       case '1w': default: return WEEK_MS;
     }
-  };
-  customReportRangeMs=function(){
-    const from=$id('customFrom'), to=$id('customTo');
-    const start=parseDateValue(from?from.value:'',false), end=parseDateValue(to?to.value:'',true);
-    if(start==null||end==null||end<=start) return null;
-    localStorage.setItem(K('customFrom'),msToInput(start));
-    localStorage.setItem(K('customTo'),msToInput(end));
-    return {start,end};
   };
   reportRangeMs=function(){
     const now=Date.now();
@@ -19730,7 +19718,7 @@ If there is NO open position, use this Section 2 instead:
     },true);
   }
   function install(){
-    installReportOptions(); installDatePickers(); installReportHandlers();
+    installReportOptions(); installReportHandlers();
     if(!window.MA_FEATURE){ installMAToggles(); installMASettings(); calcExtraMAs(); }
     installStrictIsolateClickGuard();
     try{ if(typeof updateReportControls==='function') updateReportControls(); }catch(_e){}
@@ -24385,7 +24373,6 @@ if(typeof window !== "undefined"){
   window.hasKeys = hasKeys;
   window.syncOverlayHitOwnership = syncOverlayHitOwnership;
   window.openBoxFloating = openBoxFloating;
-  window.parseCustomDate = parseCustomDate;
   window.fq = fq;
   window.fm = fm;
   window.stateChainId = stateChainId;
