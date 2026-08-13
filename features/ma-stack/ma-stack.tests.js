@@ -6,6 +6,8 @@ const path = require("path");
 const vm = require("vm");
 
 const root = path.resolve(__dirname, "..", "..");
+const coreSource = fs.readFileSync(path.join(__dirname, "ma-stack-core.js"), "utf8");
+const runtimeSource = fs.readFileSync(path.join(__dirname, "ma-stack-runtime.js"), "utf8");
 const moduleSource = fs.readFileSync(path.join(__dirname, "ma-stack.js"), "utf8");
 const mainSource = fs.readFileSync(path.join(root, "main.js"), "utf8");
 const htmlSource = fs.readFileSync(path.join(root, "index.html"), "utf8");
@@ -115,8 +117,21 @@ function createRuntime() {
   };
   context.window = context;
   vm.createContext(context);
+  vm.runInContext(coreSource, context, { filename: "ma-stack-core.js" });
+  vm.runInContext(runtimeSource, context, { filename: "ma-stack-runtime.js" });
   vm.runInContext(moduleSource, context, { filename: "ma-stack.js" });
   return { context, api: context.MA_STACK_STRIP, document, rows, periods, timers, hub, get visible() { return visible; }, get ensureCalls() { return ensureCalls; }, get snapshotCalls() { return snapshotCalls; } };
+}
+
+function createCoreOnlyRuntime(periods) {
+  const context = { console: { log() {}, info() {}, warn() {}, error() {} }, Date, Map, Set };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(coreSource, context, { filename: "ma-stack-core.js" });
+  return {
+    core: context.__BT001_MA_STACK_BUILD__.core,
+    slots: periods.map((period, i) => ({ slot: i + 1, slotId: `MA${i + 1}`, period }))
+  };
 }
 
 (async () => {
@@ -138,6 +153,14 @@ function createRuntime() {
   assert.equal(classified.source.type, "fixture");
   assert(runtime.snapshotCalls >= 1, "authoritative snapshot was not requested");
   assert(["up", "down", "mixed", "transition", "compression"].includes(classified.state));
+
+  const isolatedRuntime = createCoreOnlyRuntime(runtime.periods);
+  const isolatedCore = isolatedRuntime.core;
+  const isolatedRows = runtime.rows.slice();
+  const isolated = isolatedCore.classify(isolatedRows, { tfKey: "fixture", tfInterval: "15m", sourceType: "isolated-test", sourcePath: "isolated-test", sourceIndex: isolatedRows.length - 1 }, { slots: isolatedRuntime.slots });
+  assert(isolated && isolated.rank && isolated.rank.diagnostics, "isolated core classification failed");
+  assert.equal(typeof isolatedCore.emaSeries, "function");
+  assert.equal(isolatedCore.emaSeries([1, 2, 3, 4, 5], 3).length, 5);
 
   const events = api.markerEvents({ key: "15m", interval: "15m" }, runtime.rows);
   assert(Array.isArray(events), "markerEvents did not return an array");
@@ -161,11 +184,20 @@ function createRuntime() {
 
   assert(moduleSource.includes('tip.id = "v33MAStackTooltip"'), "tooltip DOM identity changed");
   assert(cssSource.includes("#v33MAStackMetric") && cssSource.includes(".v33-ma-stack-box") && cssSource.includes("#v33MAStackTooltip"));
-  assert(htmlSource.indexOf("features/ma/ma-index.js") < htmlSource.indexOf("features/ma-stack/ma-stack.js"));
-  assert(htmlSource.indexOf("features/ma-stack/ma-stack.js") < htmlSource.indexOf("main.js"));
+  const maOwnerIndex = htmlSource.indexOf("features/ma/ma-index.js");
+  const coreIndex = htmlSource.indexOf("features/ma-stack/ma-stack-core.js");
+  const runtimeIndex = htmlSource.indexOf("features/ma-stack/ma-stack-runtime.js");
+  const facadeIndex = htmlSource.indexOf("features/ma-stack/ma-stack.js");
+  const mainIndex = htmlSource.indexOf("main.js");
+  assert(maOwnerIndex < coreIndex && coreIndex < runtimeIndex && runtimeIndex < facadeIndex && facadeIndex < mainIndex, "MA Stack script dependency order changed");
   assert(!/const MA_STACK_STRIP = \(\(\) =>/.test(mainSource), "strip implementation remains in main.js");
   assert(mainSource.includes("const MA_STACK_STRIP = window.MA_STACK_STRIP;"), "Event Lab compatibility alias missing");
   ["stackPeriods", "hubRowToKline", "markerEvents", "stackSlots"].forEach(name => assert(mainSource.includes(`MA_STACK_STRIP.${name}`), `${name} Event Lab contract missing`));
+  assert(!/function render\s*\(/.test(coreSource + runtimeSource + moduleSource), "dead render() remains");
+  assert(!/function fetchTf\s*\(/.test(coreSource + runtimeSource + moduleSource), "dead fetchTf() remains");
+  assert(coreSource.includes("root.core ="), "core build slice missing");
+  assert(runtimeSource.includes("root.runtime ="), "runtime build slice missing");
+  assert(moduleSource.includes("root.presentation ="), "presentation build slice missing");
 
   console.log("MA Stack extraction tests: PASS", { apiMethods: 9, canonicalPeriods: true, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
 })().catch(error => {
