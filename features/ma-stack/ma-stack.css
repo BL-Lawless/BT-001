@@ -222,6 +222,9 @@
 #v33MAStackTooltip .v33-ma-stack-tip-row{
   color:#334155;
 }
+#v33MAStackTooltip .v33-ma-stack-tip-adx.is-actionable{
+  font-weight:700;
+}
 #v33MAStackTooltip .v33-ma-stack-tip-event{
   color:#111827;
   font-weight:700;

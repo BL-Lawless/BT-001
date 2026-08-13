@@ -7,6 +7,9 @@
   ];
   root.LIVE_TFS ||= new Set(["1m","3m","5m","15m","30m"]);
   const TFs = root.TFs;
+  if(!root.volatility) throw new Error("MA Stack volatility foundation is unavailable");
+  const volatility = root.volatility;
+  const GAP_ATR = Object.freeze({nearCross:0.15,compression:0.20,releaseOrigin:0.25,bounce:0.35,releaseDestination:0.40,crossRisk:0.50,bounceExpansion:0.12});
     function emaSeries(values,p){
       if(!Array.isArray(values) || values.length < p) return [];
       const a=2/(p+1), out=[]; let cur=0;
@@ -56,8 +59,13 @@
       return "EMAs";
     }
     function cleanMaPairTypeText(ev){
+      if(ev && ev.displayType) return String(ev.displayType);
       const raw = String(ev && ev.type || "").toLowerCase().trim();
       if(raw === "crossover") return Number(ev && ev.dir) < 0 ? "Bear Crossover" : "Bull Crossover";
+      if(raw === "failed crossover"){
+        const outcomeDir = -Number(ev && ev.dir);
+        return outcomeDir > 0 ? "Bullish Failed Crossover" : outcomeDir < 0 ? "Bearish Failed Crossover" : "Failed Crossover";
+      }
       if(raw === "bounce/no-cross") return "Bounce";
       return raw
         .replace(/[-/]+/g," ")
@@ -150,29 +158,29 @@
       return ev;
     }
     function signOf(v){ return v > 0 ? 1 : v < 0 ? -1 : 0; }
-    function isConfirmedBounce(diff, fast, slow, idx){
+    function isConfirmedBounce(diff, fast, slow, idx, atr){
       const start = idx - 5;
       if(start < 0) return false;
-      const signs = [], pct = [];
+      const signs = [], gapAtr = [];
       for(let k=start;k<=idx;k++){
         const d = diff[k];
-        const s = slow[k];
-        if(!Number.isFinite(d)||!Number.isFinite(s)||!Number.isFinite(fast[k])) return false;
+        const atrValue = atr && atr[k];
+        if(!Number.isFinite(d)||!Number.isFinite(slow[k])||!Number.isFinite(fast[k])||!Number.isFinite(atrValue)||atrValue<=0) return false;
         const sg = signOf(d);
         if(!sg) return false;
         signs.push(sg);
-        pct.push(Math.abs(d)/Math.max(1,Math.abs(s)));
+        gapAtr.push(Math.abs(d)/atrValue);
       }
       if(!signs.every(s => s === signs[0])) return false;
       let minLocal = 0;
-      for(let k=1;k<pct.length;k++) if(pct[k] < pct[minLocal]) minLocal = k;
+      for(let k=1;k<gapAtr.length;k++) if(gapAtr[k] < gapAtr[minLocal]) minLocal = k;
       if(minLocal < 2 || minLocal > 3) return false;
       let shrinkCount = 0;
-      for(let k=1;k<=minLocal;k++) if(pct[k] < pct[k-1]) shrinkCount++;
-      if(shrinkCount < 2 || pct[minLocal] > 0.0012) return false;
-      const expandsTwice = pct[minLocal+1] > pct[minLocal] && pct[minLocal+2] > pct[minLocal+1];
-      const expandsMeaningfully = pct[pct.length-1] > Math.max(pct[minLocal]*1.35,pct[minLocal]+0.00025);
-      if(!expandsTwice && !expandsMeaningfully) return false;
+      for(let k=1;k<=minLocal;k++) if(gapAtr[k] < gapAtr[k-1]) shrinkCount++;
+      if(shrinkCount < 2 || gapAtr[minLocal] > GAP_ATR.bounce) return false;
+      const expandsTwice = gapAtr[minLocal+1] > gapAtr[minLocal] && gapAtr[minLocal+2] > gapAtr[minLocal+1];
+      const expandsMeaningfully = gapAtr[gapAtr.length-1]-gapAtr[minLocal] >= GAP_ATR.bounceExpansion;
+      if(!expandsTwice || !expandsMeaningfully) return false;
       const minIdx = start + minLocal;
       const fastAway = signs[0] > 0 ? fast[idx] > fast[minIdx] : fast[idx] < fast[minIdx];
       return fastAway;
@@ -213,13 +221,15 @@
           const pairText = pairLabel(slots,a,b);
           const pairClass = b === a + 1 ? "adjacent" : (b - a >= 3 ? "wide" : "deep");
           const pairPrefix = pairClass === "adjacent" ? "" : (pairClass === "wide" ? "wide-pair " : "deep ");
+          const slowPairWording = Number(slots[a]&&slots[a].period)>=55 && Number(slots[b]&&slots[b].period)>=55;
           const diff = fast.map((v,k)=>Number.isFinite(v)&&Number.isFinite(slow[k]) ? v - slow[k] : NaN);
           for(let i=start;i<len;i++){
             const f2=fast[i-2], s2=slow[i-2], f0=fast[i-1], s0=slow[i-1], f1=fast[i], s1=slow[i];
             if(![f2,s2,f0,s0,f1,s1].every(Number.isFinite)) continue;
             const prev=f0-s0, cur=f1-s1, older=f2-s2, age=len-1-i;
-            const ref=Math.max(1,Math.abs(s1));
-            const prevPct=Math.abs(prev)/ref, curPct=Math.abs(cur)/ref, olderPct=Math.abs(older)/ref;
+            const atrValue=ctx.atrSeries&&ctx.atrSeries[i];
+            const atrReady=Number.isFinite(atrValue)&&atrValue>0;
+            const prevGap=atrReady?Math.abs(prev)/atrValue:Infinity,curGap=atrReady?Math.abs(cur)/atrValue:Infinity,olderGap=atrReady?Math.abs(older)/atrValue:Infinity;
             const eventTime = ctx.times && ctx.times[i] ? ctx.times[i] : i;
             const curSign = signOf(cur);
             if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bull crossover`,age,dir:1,time:eventTime,rank:95});
@@ -227,15 +237,16 @@
             const failedDir = failedCrossDirection(diff,i);
             if(failedDir) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}failed crossover`,age,dir:failedDir,time:eventTime,rank:96});
             const sameSide = Math.sign(cur) === Math.sign(prev) && Math.sign(cur) !== 0;
-            const movingTogether = sameSide && curPct < prevPct && prevPct <= olderPct;
-            const deepBounceOk = pairClass === "adjacent" || (ctx.alignment >= 40 && ctx.setup && curSign === ctx.setup && ctx.spreadDelta >= -0.005);
-            const confirmedBounce = isConfirmedBounce(diff,fast,slow,i);
-            const firstBounceConfirmation = confirmedBounce && !isConfirmedBounce(diff,fast,slow,i-1);
-            if(sameSide && deepBounceOk && firstBounceConfirmation) add({eventClass:"MA-pair",type:"bounce/no-cross",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
-            if(sameSide && olderPct <= 0.0009 && curPct > Math.max(olderPct*1.55,0.0012)) add({eventClass:"MA-pair",type:"compression release",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression release`,age,dir:curSign,time:eventTime,rank:70});
-            if(movingTogether && curPct <= 0.0018) add({eventClass:"MA-pair",type:"cross risk",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}cross risk`,age,dir:0,time:eventTime,rank:52});
-            else if(curPct <= 0.0007) add({eventClass:"MA-pair",type:"compression",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression`,age,dir:0,time:eventTime,rank:45});
-            if(sameSide && curPct > prevPct*1.35 && ctx.spreadDelta > 0.01) add({eventClass:"MA-pair",type:"expansion",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}expansion`,age,dir:curSign,time:eventTime,rank:58});
+            const movingTogether = sameSide && curGap < prevGap && prevGap <= olderGap;
+            const deepBounceOk = pairClass === "adjacent" || (ctx.alignment >= 40 && ctx.setup && curSign === ctx.setup);
+            const confirmedBounce = isConfirmedBounce(diff,fast,slow,i,ctx.atrSeries);
+            const firstBounceConfirmation = confirmedBounce && !isConfirmedBounce(diff,fast,slow,i-1,ctx.atrSeries);
+            const bounceLabel = slowPairWording ? `${pairText} MA-pair re-expansion` : `${pairText} ${pairPrefix}bounce / no-cross`;
+            if(sameSide && deepBounceOk && firstBounceConfirmation) add({eventClass:"MA-pair",type:"bounce/no-cross",displayType:slowPairWording?"MA-pair Re-expansion":"Bounce",pairClass,ref:pairRef,label:bounceLabel,age,dir:curSign,time:eventTime,rank:78});
+            if(sameSide && olderGap <= GAP_ATR.releaseOrigin && curGap >= GAP_ATR.releaseDestination && curGap-olderGap >= GAP_ATR.bounceExpansion) add({eventClass:"MA-pair",type:"compression release",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression release`,age,dir:curSign,time:eventTime,rank:70});
+            if(movingTogether && curGap <= GAP_ATR.crossRisk) add({eventClass:"MA-pair",type:"cross risk",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}cross risk`,age,dir:0,time:eventTime,rank:52});
+            else if(curGap <= GAP_ATR.compression) add({eventClass:"MA-pair",type:"compression",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression`,age,dir:0,time:eventTime,rank:45});
+            if(sameSide && atrReady && curGap-prevGap >= GAP_ATR.bounceExpansion && ctx.spreadDelta > 0.01) add({eventClass:"MA-pair",type:"expansion",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}expansion`,age,dir:curSign,time:eventTime,rank:58});
           }
         }
       }
@@ -273,7 +284,7 @@
       return best;
     }
     function unavailable(reason,provisional=false){
-      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,pricePosition:1,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
+      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,pricePosition:1,adx:null,adxPrevious:null,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows,debugCtx,snapshot){
       const provisional = !!(debugCtx && debugCtx.includeForming);
@@ -285,6 +296,7 @@
       const closes = candles.map(r=>Number(r[4]));
       const times = candles.map(r=>Number(r[0]) || 0);
       if(closes.length < maxPeriod + 10) return unavailable("Insufficient data",provisional);
+      const volatilitySnapshot = volatility.snapshot(candles,volatility.DEFAULT_PERIOD,5);
       const latest = closes[closes.length-1];
       let series = periods.map(p=>emaSeries(closes,p));
       let vals = series.map(s=>s[s.length-1]);
@@ -339,7 +351,9 @@
       const upSlope = slopeSigns.filter(x=>x>0).length, downSlope = slopeSigns.filter(x=>x<0).length;
       const slopeAgree = Math.max(upSlope,downSlope);
       const tight = spreadPct < 0.15;
-      const nearCross = vals.slice(0,-1).some((v,i)=> latest && Math.abs(v-vals[i+1])/latest < 0.0005);
+      const nearCross = Number.isFinite(volatilitySnapshot.atr) && volatilitySnapshot.atr>0
+        ? vals.slice(0,-1).some((v,i)=>Math.abs(v-vals[i+1])/volatilitySnapshot.atr < GAP_ATR.nearCross)
+        : false;
       const setup = setupDir(upPairs,downPairs,upSlope,downSlope);
       let state="mixed", icon="MX", stateLabel="Mixed";
       if(upPairs){ state="up"; icon="UP"; stateLabel="Up stack"; }
@@ -413,7 +427,7 @@
       const rawStrength = alignment*.24 + spreadScore*.18 + expansionScore*.14 + slopeScore*.16 + slopeAgreeScore*.12 + accelScore*.08 + compressionRelease*.08 - flattenPenalty - chopPenalty - overextensionPenalty;
       const structureFloor = alignment >= 40 ? Math.min(35,14 + alignment*.20 + slopeAgreeScore*.05) : alignment >= 20 ? Math.min(25,10 + alignment*.22) : 0;
       const strength = clamp100(Math.max(rawStrength,structureFloor));
-      const ctx = {spreadDelta,nearCross,setup,times,alignment};
+      const ctx = {spreadDelta,nearCross,setup,times,alignment,atrSeries:volatilitySnapshot.atrSeries};
       const rawMaEvent = detectMaPair(series,slots,ctx,18);
       const priceEvent = detectPriceMA(candles,series,slots,{setup},10);
       const validStructure = rawMaEvent ? 70 : 35;
@@ -431,7 +445,7 @@
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
       rank.state = state;
       rank.summaryState = phase;
-      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,pricePosition:pricePosition(latest,vals),maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
+      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,pricePosition:pricePosition(latest,vals),adx:volatilitySnapshot.adx,adxPrevious:volatilitySnapshot.adxShadow,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
     }
     function stackComparison(vals){
       const base = Math.max(Math.abs(Number(vals && vals[3])),Math.abs(Number(vals && vals[4])),1);

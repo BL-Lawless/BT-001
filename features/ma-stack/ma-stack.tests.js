@@ -6,6 +6,7 @@ const path = require("path");
 const vm = require("vm");
 
 const root = path.resolve(__dirname, "..", "..");
+const volatilitySource = fs.readFileSync(path.join(__dirname, "ma-stack-volatility.js"), "utf8");
 const coreSource = fs.readFileSync(path.join(__dirname, "ma-stack-core.js"), "utf8");
 const runtimeSource = fs.readFileSync(path.join(__dirname, "ma-stack-runtime.js"), "utf8");
 const moduleSource = fs.readFileSync(path.join(__dirname, "ma-stack.js"), "utf8");
@@ -119,6 +120,7 @@ function createRuntime() {
   };
   context.window = context;
   vm.createContext(context);
+  vm.runInContext(volatilitySource, context, { filename: "ma-stack-volatility.js" });
   vm.runInContext(coreSource, context, { filename: "ma-stack-core.js" });
   vm.runInContext(runtimeSource, context, { filename: "ma-stack-runtime.js" });
   vm.runInContext(moduleSource, context, { filename: "ma-stack.js" });
@@ -129,9 +131,12 @@ function createCoreOnlyRuntime(periods) {
   const context = { console: { log() {}, info() {}, warn() {}, error() {} }, Date, Map, Set };
   context.window = context;
   vm.createContext(context);
+  vm.runInContext(volatilitySource, context, { filename: "ma-stack-volatility.js" });
   vm.runInContext(coreSource, context, { filename: "ma-stack-core.js" });
   return {
     core: context.__BT001_MA_STACK_BUILD__.core,
+    volatility: context.__BT001_MA_STACK_BUILD__.volatility,
+    presentation: context.__BT001_MA_STACK_BUILD__.presentation,
     slots: periods.map((period, i) => ({ slot: i + 1, slotId: `MA${i + 1}`, period }))
   };
 }
@@ -153,6 +158,7 @@ function createCoreOnlyRuntime(periods) {
   const classified = api.classifyTimeframe("15m", { includeForming: false });
   assert(classified && classified.slots.length === 5, "authoritative classification failed");
   assert.equal(classified.source.type, "fixture");
+  assert(Number.isFinite(classified.adx) && Number.isFinite(classified.adxPrevious), "classification did not expose current and five-candle-shadow ADX");
   assert(runtime.snapshotCalls >= 1, "authoritative snapshot was not requested");
   assert(["up", "down", "mixed", "transition", "compression"].includes(classified.state));
   assert.equal(classified.provisional, false, "explicit closed-only result was not labeled final");
@@ -168,33 +174,103 @@ function createCoreOnlyRuntime(periods) {
 
   const isolatedRuntime = createCoreOnlyRuntime(runtime.periods);
   const isolatedCore = isolatedRuntime.core;
+  const isolatedVolatility = isolatedRuntime.volatility;
   const isolatedRows = runtime.rows.slice();
   const isolated = isolatedCore.classify(isolatedRows, { tfKey: "fixture", tfInterval: "15m", sourceType: "isolated-test", sourcePath: "isolated-test", sourceIndex: isolatedRows.length - 1 }, { slots: isolatedRuntime.slots });
   assert(isolated && isolated.rank && isolated.rank.diagnostics, "isolated core classification failed");
   assert.equal(typeof isolatedCore.emaSeries, "function");
   assert.equal(isolatedCore.emaSeries([1, 2, 3, 4, 5], 3).length, 5);
+  const failedBullishOutcome = { type:"failed crossover",dir:-1,label:"EMA 9 / EMA 21 failed crossover",age:0 };
+  const failedBearishOutcome = { type:"failed crossover",dir:1,label:"EMA 9 / EMA 21 failed crossover",age:0 };
+  assert.equal(isolatedCore.cleanMaPairTypeText(failedBullishOutcome),"Bullish Failed Crossover");
+  assert.equal(isolatedCore.cleanMaPairTypeText(failedBearishOutcome),"Bearish Failed Crossover");
+  assert.equal(isolatedCore.freshMaPairEventText(failedBullishOutcome),"EMAs 9 / 21 Bullish Failed Crossover | current candle");
+  assert.equal(isolatedCore.freshMaPairEventText(failedBearishOutcome),"EMAs 9 / 21 Bearish Failed Crossover | current candle");
+  assert.equal(failedBullishOutcome.type,"failed crossover","failed-crossover presentation changed the internal event type");
+  assert.equal(isolatedCore.cleanMaPairTypeText({type:"crossover",dir:1}),"Bull Crossover","plain crossover wording changed");
+
+  const trRows = [
+    [0,10,11,9,10],
+    [1,10,13,9,12],
+    [2,12,15,12,14],
+    [3,14,14,10,11]
+  ];
+  assert.equal(isolatedVolatility.trueRange(trRows[1],10),4,"true range did not include the largest gap/range component");
+  assert.deepStrictEqual(Array.from(isolatedVolatility.trueRangeSeries(trRows).slice(1)),[4,3,4]);
+  const atr2 = isolatedVolatility.atrSeries(trRows,2);
+  assert.equal(atr2[2],3.5,"ATR seed average is incorrect");
+  assert.equal(atr2[3],3.75,"Wilder ATR smoothing is incorrect");
+
+  const monotonicRows = Array.from({length:45},(_value,index)=>[index,100+index,102+index,99+index,101+index]);
+  const adxSnapshot = isolatedVolatility.snapshot(monotonicRows,14,5);
+  assert(Math.abs(adxSnapshot.adx-100)<1e-9,"monotonic-trend ADX should converge to 100");
+  assert.equal(adxSnapshot.adxShadow,adxSnapshot.adxSeries[monotonicRows.length-6],"ADX shadow did not use exactly five candles ago");
+  const closedVolatility = isolatedVolatility.snapshot(monotonicRows.slice(0,-1),14,5);
+  const formingRows = monotonicRows.concat([[45,145,175,80,146]]);
+  const liveVolatility = isolatedVolatility.snapshot(formingRows,14,5);
+  assert.notEqual(liveVolatility.atr,closedVolatility.atr,"forming-inclusive ATR did not consume the supplied forming candle");
+  const alternateTfRows = Array.from({length:45},(_value,index)=>[index,200+index*2,205+index*2,195+index*2,202+index*2]);
+  assert.notEqual(isolatedVolatility.snapshot(alternateTfRows,14,5).atr,closedVolatility.atr,"independent timeframe data produced a shared ATR result");
 
   const twoSlots = isolatedRuntime.slots.slice(0,2);
-  const eventCtx = length => ({ times:Array.from({length},(_value,index)=>index+1), alignment:80, setup:1, spreadDelta:0.02 });
+  const eventCtx = length => ({ times:Array.from({length},(_value,index)=>index+1), alignment:80, setup:1, spreadDelta:0.02, atrSeries:Array(length).fill(100) });
   const slowEventSeries = Array(11).fill(100);
   const failedFastSeries = [99,99,99,99,101,102,99,98,97,96,95];
   const failedAges = [7,8,9,10,11].map(length => isolatedCore.detectMaPair([failedFastSeries.slice(0,length),slowEventSeries.slice(0,length)],twoSlots,eventCtx(length),11));
   assert.deepStrictEqual(failedAges.map(event=>event && event.age),[0,1,2,3,4],"failed crossover did not age from its original cross-back candle");
+  assert.equal(failedAges[0].dir,1,"failed-crossover dir no longer represents the original bullish cross");
+  assert.equal(isolatedCore.cleanMaPairTypeText(failedAges[0]),"Bearish Failed Crossover","bullish-cross failure did not display its bearish outcome");
   assert.deepStrictEqual(failedAges.map(event=>isolatedCore.freshMaPairEventText(event)),[
-    "EMAs 3 / 4 Failed Crossover | current candle",
-    "EMAs 3 / 4 Failed Crossover | 1 candle ago",
-    "EMAs 3 / 4 Failed Crossover | 2 candles ago",
-    "EMAs 3 / 4 Failed Crossover | 3 candles ago",
+    "EMAs 3 / 4 Bearish Failed Crossover | current candle",
+    "EMAs 3 / 4 Bearish Failed Crossover | 1 candle ago",
+    "EMAs 3 / 4 Bearish Failed Crossover | 2 candles ago",
+    "EMAs 3 / 4 Bearish Failed Crossover | 3 candles ago",
     "No fresh event"
   ]);
+  const bullishOutcomeFast = [101,101,101,101,99,98,101];
+  const bullishOutcomeFailure = isolatedCore.detectMaPair([bullishOutcomeFast,slowEventSeries.slice(0,7)],twoSlots,eventCtx(7),11);
+  assert(bullishOutcomeFailure && bullishOutcomeFailure.type==="failed crossover" && bullishOutcomeFailure.dir===-1,"bearish-cross failure event construction changed");
+  assert.equal(isolatedCore.cleanMaPairTypeText(bullishOutcomeFailure),"Bullish Failed Crossover","bearish-cross failure did not display its bullish outcome");
   const newerCrossFast = failedFastSeries.slice(0,8).concat([101]);
   const newerCross = isolatedCore.detectMaPair([newerCrossFast,slowEventSeries.slice(0,9)],twoSlots,eventCtx(9),11);
   assert(newerCross && newerCross.type === "crossover" && newerCross.age === 0 && newerCross.dir === 1,"newer crossover did not replace the older failed crossover");
 
-  const bounceFastSeries = [100.2,100.15,100.1,100.05,100.08,100.12,100.16,100.2,100.24,100.28];
+  const bounceFastSeries = [130,120,110,108,118,130,135,140,145,150];
   const bounceAges = [6,7,8,9,10].map(length => isolatedCore.detectMaPair([bounceFastSeries.slice(0,length),slowEventSeries.slice(0,length)],twoSlots,eventCtx(length),10));
   assert.deepStrictEqual(bounceAges.map(event=>event && event.age),[0,1,2,3,4],"confirmed bounce did not remain anchored to its first confirmation candle");
   assert.equal(isolatedCore.freshMaPairEventText(bounceAges[4]),"No fresh event","bounce remained fresh beyond its three-candle memory");
+
+  const slowSlots = [{slot:1,slotId:"MA1",period:100},{slot:2,slotId:"MA2",period:200}];
+  const slowBase = Array(6).fill(63822);
+  const pairContext = {times:[1,2,3,4,5,6],alignment:100,setup:1,spreadDelta:0.02,atrSeries:Array(6).fill(120)};
+  const microscopicDiff = [100,85,76.5,76,76.01,76.02];
+  const microscopic = isolatedCore.detectMaPair([microscopicDiff.map((gap,index)=>slowBase[index]+gap),slowBase],slowSlots,pairContext,6);
+  assert(!microscopic || microscopic.type!=="bounce/no-cross","two-cent EMA100/200 expansion still triggered a confirmed bounce");
+  const nearMicroscopicDiff = [70,55,42,40,40.01,40.02];
+  const nearMicroscopic = isolatedCore.detectMaPair([nearMicroscopicDiff.map((gap,index)=>slowBase[index]+gap),slowBase],slowSlots,pairContext,6);
+  assert(!nearMicroscopic || nearMicroscopic.type!=="bounce/no-cross","ATR-near two-cent expansion bypassed the material expansion gate");
+  const materialDiff = [100,70,50,40,60,90];
+  const material = isolatedCore.detectMaPair([materialDiff.map((gap,index)=>slowBase[index]+gap),slowBase],slowSlots,pairContext,6);
+  assert(material && material.type==="bounce/no-cross","material EMA100/200 re-expansion was not detected");
+  assert(material.label.includes("MA-pair re-expansion") && material.displayType==="MA-pair Re-expansion","slow-pair wording was not corrected");
+  const fastSlots = [{slot:1,slotId:"MA1",period:9},{slot:2,slotId:"MA2",period:21}];
+  const fastDiff = [30,20,10,8,18,30];
+  const fastBounce = isolatedCore.detectMaPair([fastDiff.map((gap,index)=>slowBase[index]+gap),slowBase],fastSlots,pairContext,6);
+  assert(fastBounce && fastBounce.type==="bounce/no-cross" && fastBounce.displayType==="Bounce","fast-pair bounce behavior/wording regressed");
+
+  const constantGapFast = Array(8).fill(1030),constantGapSlow = Array(8).fill(1000);
+  const tightByAtr = isolatedCore.detectMaPair([constantGapFast,constantGapSlow],fastSlots,{...eventCtx(8),atrSeries:Array(8).fill(200)},8);
+  const looseByAtr = isolatedCore.detectMaPair([constantGapFast,constantGapSlow],fastSlots,{...eventCtx(8),atrSeries:Array(8).fill(100)},8);
+  assert(tightByAtr && tightByAtr.type==="compression","ATR-relative compression did not recognize a 0.15 ATR gap");
+  assert(!looseByAtr || looseByAtr.type!=="compression","same dollar gap remained compressed at 0.30 ATR");
+  const narrowingDiff = [70,68,66,64,62,60,55,50];
+  const crossRisk = isolatedCore.detectMaPair([narrowingDiff.map(gap=>1000+gap),Array(8).fill(1000)],fastSlots,{...eventCtx(8),atrSeries:Array(8).fill(120)},8);
+  const noCrossRisk = isolatedCore.detectMaPair([narrowingDiff.map(gap=>1000+gap),Array(8).fill(1000)],fastSlots,{...eventCtx(8),atrSeries:Array(8).fill(80)},8);
+  assert(crossRisk && crossRisk.type==="cross risk","ATR-relative cross risk did not recognize a narrowing 0.42 ATR gap");
+  assert(!noCrossRisk || noCrossRisk.type!=="cross risk","same dollar gap remained cross risk above 0.50 ATR");
+  const releaseDiff = [70,65,60,55,50,30,29,60];
+  const release = isolatedCore.detectMaPair([releaseDiff.map(gap=>1000+gap),Array(8).fill(1000)],fastSlots,{...eventCtx(8),atrSeries:Array(8).fill(120)},8);
+  assert(release && release.type==="compression release","ATR-relative compression release origin/destination was not detected");
 
   const positionCases = [
     {price:90,mas:[100,110,120,130,140],expected:1},
@@ -266,6 +342,11 @@ function createCoreOnlyRuntime(periods) {
   assert(stripHtml.includes('data-position="1"') && stripHtml.includes('data-position="6"'),"price-position endpoint rendering missing");
   ["1m","3m","5m","15m","30m"].forEach(tf => assert(stripHtml.includes(`data-tf="${tf}"`) && stripHtml.includes(`data-interval="${tf}"`), `${tf} DOM anchor missing`));
   assert(cssSource.includes(".v33-ma-stack-box .v33-ma-live-badge"), "LIVE badge styling missing");
+  const tooltipBelow = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"1m"},{...isolated,adx:24.9,adxPrevious:20});
+  const tooltipBoundary = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"1m"},{...isolated,adx:25,adxPrevious:20});
+  assert(tooltipBelow.indexOf("Quality:") < tooltipBelow.indexOf("ADX:") && tooltipBelow.indexOf("ADX:") < tooltipBelow.indexOf("Spread:"),"ADX tooltip row is not immediately below Quality");
+  assert(!tooltipBelow.includes("v33-ma-stack-tip-adx is-actionable"),"ADX below 25 rendered bold");
+  assert(tooltipBoundary.includes("v33-ma-stack-tip-adx is-actionable") && tooltipBoundary.includes("ADX: 25 (from 20)"),"ADX 25 boundary did not render bold with shadow value");
 
   api.start();
   assert.equal(runtime.visible, true);
@@ -287,11 +368,12 @@ function createCoreOnlyRuntime(periods) {
   assert(moduleSource.includes('tip.id = "v33MAStackTooltip"'), "tooltip DOM identity changed");
   assert(cssSource.includes("#v33MAStackMetric") && cssSource.includes(".v33-ma-stack-box") && cssSource.includes("#v33MAStackTooltip"));
   const maOwnerIndex = htmlSource.indexOf("features/ma/ma-index.js");
+  const volatilityIndex = htmlSource.indexOf("features/ma-stack/ma-stack-volatility.js");
   const coreIndex = htmlSource.indexOf("features/ma-stack/ma-stack-core.js");
   const runtimeIndex = htmlSource.indexOf("features/ma-stack/ma-stack-runtime.js");
   const facadeIndex = htmlSource.indexOf("features/ma-stack/ma-stack.js");
   const mainIndex = htmlSource.indexOf("main.js");
-  assert(maOwnerIndex < coreIndex && coreIndex < runtimeIndex && runtimeIndex < facadeIndex && facadeIndex < mainIndex, "MA Stack script dependency order changed");
+  assert(maOwnerIndex < volatilityIndex && volatilityIndex < coreIndex && coreIndex < runtimeIndex && runtimeIndex < facadeIndex && facadeIndex < mainIndex, "MA Stack script dependency order changed");
   assert(!/const MA_STACK_STRIP = \(\(\) =>/.test(mainSource), "strip implementation remains in main.js");
   assert(mainSource.includes("const MA_STACK_STRIP = window.MA_STACK_STRIP;"), "Event Lab compatibility alias missing");
   ["stackPeriods", "hubRowToKline", "markerEvents", "stackSlots"].forEach(name => assert(mainSource.includes(`MA_STACK_STRIP.${name}`), `${name} Event Lab contract missing`));
@@ -301,7 +383,7 @@ function createCoreOnlyRuntime(periods) {
   assert(runtimeSource.includes("root.runtime ="), "runtime build slice missing");
   assert(moduleSource.includes("root.presentation ="), "presentation build slice missing");
 
-  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, eventAging: true, bounceAging: true, newerEventHandoff: true, pricePositions: 6, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
+  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, volatilityIndependent: true, atrWilder: true, adxWilder: true, adxShadow: 5, atrNormalizedEvents: true, microscopicBounceRejected: true, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, eventAging: true, bounceAging: true, newerEventHandoff: true, pricePositions: 6, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

@@ -82,15 +82,23 @@
     function escHtml(v){ return String(v == null ? "" : v).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch])); }
     function compactTooltipHtml(tf,r){
       const alignment = Math.max(0,Math.min(5,Math.round((Number(r.alignment)||0)/20)));
-      const rows = [
+      const rowsBeforeAdx = [
         `State: ${stateText(r)}`,
         `MA Stack Alignment: ${alignment}/5`,
         `Strength: ${Number.isFinite(r.strength) ? r.strength : 0}%`,
-        `Quality: ${Number.isFinite(r.quality) ? r.quality : 0}%`,
+        `Quality: ${Number.isFinite(r.quality) ? r.quality : 0}%`
+      ];
+      const adxCurrent = Number.isFinite(Number(r.adx)) ? Math.round(Number(r.adx)) : null;
+      const adxPrevious = Number.isFinite(Number(r.adxPrevious)) ? Math.round(Number(r.adxPrevious)) : null;
+      const adxActionable = Number.isFinite(Number(r.adx)) && Number(r.adx)>=25;
+      const adxText = `ADX: ${adxCurrent==null?"-":adxCurrent} (from ${adxPrevious==null?"-":adxPrevious})`;
+      const rowsAfterAdx = [
         `Spread: ${titleLine(r.title,"Spread")}`
       ];
       return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)}</div>`+
-        rows.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
+        rowsBeforeAdx.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
+        `<div class="v33-ma-stack-tip-row v33-ma-stack-tip-adx${adxActionable?' is-actionable':''}">${escHtml(adxText)}</div>`+
+        rowsAfterAdx.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
         `<div class="v33-ma-stack-tip-spacer"></div>`+
         `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipSummary(r && r.maEvent,r))}</div>`;
     }
@@ -255,7 +263,7 @@
         btn.addEventListener("blur",hideMaStackTooltip,false);
       });
     }
-  root.presentation = {ensureDom,renderEnhanced};
+  root.presentation = {ensureDom,renderEnhanced,compactTooltipHtml};
   function markerEvents(tf,rows){ return root.core.markerEvents(tf,rows,{slots:root.runtime.stackSlots()}); }
   const api = {
     start:root.runtime.start,
