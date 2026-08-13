@@ -182,12 +182,55 @@ function createCoreOnlyRuntime(periods) {
   assert.equal(isolatedCore.emaSeries([1, 2, 3, 4, 5], 3).length, 5);
   const failedBullishOutcome = { type:"failed crossover",dir:-1,label:"EMA 9 / EMA 21 failed crossover",age:0 };
   const failedBearishOutcome = { type:"failed crossover",dir:1,label:"EMA 9 / EMA 21 failed crossover",age:0 };
-  assert.equal(isolatedCore.cleanMaPairTypeText(failedBullishOutcome),"Bullish Failed Crossover");
-  assert.equal(isolatedCore.cleanMaPairTypeText(failedBearishOutcome),"Bearish Failed Crossover");
-  assert.equal(isolatedCore.freshMaPairEventText(failedBullishOutcome),"EMAs 9 / 21 Bullish Failed Crossover | current candle");
-  assert.equal(isolatedCore.freshMaPairEventText(failedBearishOutcome),"EMAs 9 / 21 Bearish Failed Crossover | current candle");
+  assert.equal(isolatedCore.cleanMaPairTypeText(failedBullishOutcome),"Failed Crossover | Bullish");
+  assert.equal(isolatedCore.cleanMaPairTypeText(failedBearishOutcome),"Failed Crossover | Bearish");
+  assert.equal(isolatedCore.cleanMaPairTypeText({type:"failed crossover",dir:0}),"Failed Crossover");
+  assert.equal(isolatedCore.freshMaPairEventText(failedBullishOutcome),"EMAs 9 / 21 Failed Crossover | Bullish | current candle");
+  assert.equal(isolatedCore.freshMaPairEventText(failedBearishOutcome),"EMAs 9 / 21 Failed Crossover | Bearish | current candle");
   assert.equal(failedBullishOutcome.type,"failed crossover","failed-crossover presentation changed the internal event type");
   assert.equal(isolatedCore.cleanMaPairTypeText({type:"crossover",dir:1}),"Bull Crossover","plain crossover wording changed");
+
+  const rankCases = [
+    ["crossover",700],
+    ["failed crossover",700],
+    ["bounce/no-cross",550],
+    ["compression release",400],
+    ["expansion",300],
+    ["cross risk",200],
+    ["compression",100],
+    ["stack transition",200]
+  ];
+  rankCases.forEach(([type,base]) => {
+    assert.equal(isolatedCore.pairEventRank({type,pairClass:"deep"}),base,`${type} non-adjacent severity tier is incorrect`);
+    assert.equal(isolatedCore.pairEventRank({type,pairClass:"adjacent"}),base+25,`${type} adjacent bonus is incorrect`);
+  });
+  assert.equal(isolatedCore.pairEventRank({type:"stack transition"}),200,"stack transition without pairClass did not reach its severity tier");
+  assert.equal(isolatedCore.pairEventRank({type:"deep defense",pairClass:"wide"}),550,"deep-defense severity tier is incorrect");
+
+  const freshWideCrossover = {type:"crossover",pairClass:"wide",age:0,rank:95,ref:"MA1/MA5"};
+  const staleWideCrossRisk = {type:"cross risk",pairClass:"wide",age:3,rank:52,ref:"MA1/MA4"};
+  assert.equal(isolatedCore.pairEventScore(freshWideCrossover),800.095);
+  assert.equal(isolatedCore.pairEventScore(staleWideCrossRisk),297.052);
+  assert.strictEqual(isolatedCore.selectHigherPriorityPairEvent(staleWideCrossRisk,freshWideCrossover),freshWideCrossover,"fresh crossover did not replace stale cross risk");
+
+  const stackTransitionCandidate = {type:"stack transition",age:0,rank:45,ref:"stack"};
+  const adjacentCompressionCandidate = {type:"compression",pairClass:"adjacent",age:0,rank:45,ref:"MA1/MA2"};
+  assert.strictEqual(isolatedCore.selectHigherPriorityPairEvent(adjacentCompressionCandidate,stackTransitionCandidate),stackTransitionCandidate,"pairClass-less stack transition did not outrank lower-tier compression");
+  const transitionSeries = [Array(8).fill(1030),Array(8).fill(1000)];
+  const transitionSelected = isolatedCore.detectMaPair(transitionSeries,[{slot:1,slotId:"MA1",period:9},{slot:2,slotId:"MA2",period:21}],{
+    times:[1,2,3,4,5,6,7,8],alignment:60,setup:1,spreadDelta:0,nearCross:true,atrSeries:Array(8).fill(200)
+  },8);
+  assert(transitionSelected && transitionSelected.type==="stack transition" && transitionSelected.ref==="stack","production selector did not allow stack transition to outrank detected compression");
+
+  const simultaneousCandidates = [
+    {type:"compression release",pairClass:"adjacent",age:0,rank:70,ref:"MA1/MA2"},
+    {type:"bounce/no-cross",pairClass:"adjacent",age:0,rank:78,ref:"MA2/MA3"},
+    {type:"failed crossover",pairClass:"wide",age:2,rank:96,ref:"MA1/MA5"},
+    {type:"cross risk",pairClass:"deep",age:0,rank:52,ref:"MA2/MA4"},
+    {type:"expansion",pairClass:"adjacent",age:0,rank:58,ref:"MA3/MA4"}
+  ];
+  const simultaneousBest = simultaneousCandidates.reduce((best,event)=>isolatedCore.selectHigherPriorityPairEvent(best,event),null);
+  assert.strictEqual(simultaneousBest,simultaneousCandidates[2],"multi-candidate selection did not prefer the decisive failed crossover");
 
   const trRows = [
     [0,10,11,9,10],
@@ -219,18 +262,18 @@ function createCoreOnlyRuntime(periods) {
   const failedAges = [7,8,9,10,11].map(length => isolatedCore.detectMaPair([failedFastSeries.slice(0,length),slowEventSeries.slice(0,length)],twoSlots,eventCtx(length),11));
   assert.deepStrictEqual(failedAges.map(event=>event && event.age),[0,1,2,3,4],"failed crossover did not age from its original cross-back candle");
   assert.equal(failedAges[0].dir,1,"failed-crossover dir no longer represents the original bullish cross");
-  assert.equal(isolatedCore.cleanMaPairTypeText(failedAges[0]),"Bearish Failed Crossover","bullish-cross failure did not display its bearish outcome");
+  assert.equal(isolatedCore.cleanMaPairTypeText(failedAges[0]),"Failed Crossover | Bearish","bullish-cross failure did not display its bearish outcome");
   assert.deepStrictEqual(failedAges.map(event=>isolatedCore.freshMaPairEventText(event)),[
-    "EMAs 3 / 4 Bearish Failed Crossover | current candle",
-    "EMAs 3 / 4 Bearish Failed Crossover | 1 candle ago",
-    "EMAs 3 / 4 Bearish Failed Crossover | 2 candles ago",
-    "EMAs 3 / 4 Bearish Failed Crossover | 3 candles ago",
+    "EMAs 3 / 4 Failed Crossover | Bearish | current candle",
+    "EMAs 3 / 4 Failed Crossover | Bearish | 1 candle ago",
+    "EMAs 3 / 4 Failed Crossover | Bearish | 2 candles ago",
+    "EMAs 3 / 4 Failed Crossover | Bearish | 3 candles ago",
     "No fresh event"
   ]);
   const bullishOutcomeFast = [101,101,101,101,99,98,101];
   const bullishOutcomeFailure = isolatedCore.detectMaPair([bullishOutcomeFast,slowEventSeries.slice(0,7)],twoSlots,eventCtx(7),11);
   assert(bullishOutcomeFailure && bullishOutcomeFailure.type==="failed crossover" && bullishOutcomeFailure.dir===-1,"bearish-cross failure event construction changed");
-  assert.equal(isolatedCore.cleanMaPairTypeText(bullishOutcomeFailure),"Bullish Failed Crossover","bearish-cross failure did not display its bullish outcome");
+  assert.equal(isolatedCore.cleanMaPairTypeText(bullishOutcomeFailure),"Failed Crossover | Bullish","bearish-cross failure did not display its bullish outcome");
   const newerCrossFast = failedFastSeries.slice(0,8).concat([101]);
   const newerCross = isolatedCore.detectMaPair([newerCrossFast,slowEventSeries.slice(0,9)],twoSlots,eventCtx(9),11);
   assert(newerCross && newerCross.type === "crossover" && newerCross.age === 0 && newerCross.dir === 1,"newer crossover did not replace the older failed crossover");

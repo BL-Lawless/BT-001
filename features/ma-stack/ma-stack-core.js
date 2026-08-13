@@ -64,7 +64,7 @@
       if(raw === "crossover") return Number(ev && ev.dir) < 0 ? "Bear Crossover" : "Bull Crossover";
       if(raw === "failed crossover"){
         const outcomeDir = -Number(ev && ev.dir);
-        return outcomeDir > 0 ? "Bullish Failed Crossover" : outcomeDir < 0 ? "Bearish Failed Crossover" : "Failed Crossover";
+        return outcomeDir > 0 ? "Failed Crossover | Bullish" : outcomeDir < 0 ? "Failed Crossover | Bearish" : "Failed Crossover";
       }
       if(raw === "bounce/no-cross") return "Bounce";
       return raw
@@ -108,12 +108,23 @@
     function pairEventRank(ev){
       if(!ev) return 0;
       const t = String(ev.type || "").toLowerCase();
-      const adjacent = ev.pairClass === "adjacent";
-      if(adjacent && (t === "crossover" || t === "failed crossover" || t === "bounce/no-cross")) return 500;
-      if(adjacent && (t === "compression release" || t === "stack transition")) return 400;
-      if(!adjacent && (t === "bounce/no-cross" || t === "deep defense")) return 300;
-      if(!adjacent && (t === "compression" || t === "cross risk")) return 200;
-      return adjacent ? 100 : 50;
+      let base = 0;
+      if(t === "crossover" || t === "failed crossover") base = 700;
+      else if(t === "bounce/no-cross" || t === "deep defense") base = 550;
+      else if(t === "compression release") base = 400;
+      else if(t === "expansion") base = 300;
+      else if(t === "cross risk" || t === "stack transition") base = 200;
+      else if(t === "compression") base = 100;
+      return base + (ev.pairClass === "adjacent" ? 25 : 0);
+    }
+    function pairEventScore(ev){
+      if(!ev) return -1;
+      return pairEventRank(ev) + (100 - Math.min(99,ev.age || 0)) + (ev.rank || 0) / 1000;
+    }
+    function selectHigherPriorityPairEvent(best,ev){
+      if(!ev) return best || null;
+      if(ev.age > 5 && best && best.age <= 5) return best;
+      return !best || pairEventScore(ev) > pairEventScore(best) ? ev : best;
     }
     function actionableMaPair(ev){
       if(!ev) return false;
@@ -207,11 +218,7 @@
       const start = Math.max(2, len - (lookback || 18));
       let best = null;
       const add = ev => {
-        if(!ev) return;
-        if(ev.age > 5 && best && best.age <= 5) return;
-        const score = pairEventRank(ev) + (100 - Math.min(99,ev.age || 0)) + (ev.rank || 0) / 1000;
-        const bestScore = best ? pairEventRank(best) + (100 - Math.min(99,best.age || 0)) + (best.rank || 0) / 1000 : -1;
-        if(!best || score > bestScore) best = ev;
+        best = selectHigherPriorityPairEvent(best,ev);
       };
       for(let a=0; a<slots.length-1; a++){
         for(let b=a+1; b<slots.length; b++){
@@ -250,7 +257,7 @@
           }
         }
       }
-      if(ctx.nearCross && !best) add({eventClass:"MA-pair",type:"stack transition",ref:"stack",label:"Stack transition",age:0,dir:0,time:ctx.times && ctx.times[len-1] ? ctx.times[len-1] : len-1,rank:45});
+      if(ctx.nearCross) add({eventClass:"MA-pair",type:"stack transition",ref:"stack",label:"Stack transition",age:0,dir:0,time:ctx.times && ctx.times[len-1] ? ctx.times[len-1] : len-1,rank:45});
       return best;
     }
     function detectPriceMA(rows, series, slots, ctx, lookback){
@@ -833,5 +840,5 @@
       }
       return out;
     }
-  root.core = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,pricePosition,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
+  root.core = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,pairEventScore,selectHigherPriorityPairEvent,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,pricePosition,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
 })();
