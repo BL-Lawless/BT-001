@@ -10,6 +10,7 @@
   if(!root.volatility) throw new Error("MA Stack volatility foundation is unavailable");
   const volatility = root.volatility;
   const GAP_ATR = Object.freeze({nearCross:0.15,compression:0.20,releaseOrigin:0.25,bounce:0.35,releaseDestination:0.40,crossRisk:0.50,bounceExpansion:0.12});
+  const SCORE_ATR = Object.freeze({stackSpread:4.0,expansionOffset:0.20,expansionRange:0.60,slopeMove:0.30,acceleration:0.20,tightStack:1.0,releaseOrigin:1.20,releaseDelta:0.15,flattenDelta:-0.10,flatSlope:0.08,preCompression:1.50,priceProximity:0.25});
     function emaSeries(values,p){
       if(!Array.isArray(values) || values.length < p) return [];
       const a=2/(p+1), out=[]; let cur=0;
@@ -272,7 +273,9 @@
         const row = rows[i] || [], prevRow = rows[i-1] || [];
         const o=Number(row[1]), h=Number(row[2]), l=Number(row[3]), c=Number(row[4]), pc=Number(prevRow[4]);
         if(!Number.isFinite(o)||!Number.isFinite(h)||!Number.isFinite(l)||!Number.isFinite(c)||!Number.isFinite(pc)) continue;
-        const age=len-1-i, tol=Math.max(c*0.0008,1);
+        const atrValue=Number(ctx && ctx.atrSeries && ctx.atrSeries[i]);
+        if(!Number.isFinite(atrValue) || atrValue <= 0) continue;
+        const age=len-1-i, tol=atrValue*SCORE_ATR.priceProximity;
         for(let idx=0; idx<series.length; idx++){
           const ema=series[idx]&&series[idx][i], pema=series[idx]&&series[idx][i-1];
           if(!Number.isFinite(ema)||!Number.isFinite(pema)) continue;
@@ -348,13 +351,22 @@
       const prevSpread = Math.max(...prev)-Math.min(...prev);
       const prevSpreadPct = latest ? prevSpread/latest*100 : spreadPct;
       const prev2Spread = Math.max(...prev2)-Math.min(...prev2);
-      const prev2SpreadPct = latest ? prev2Spread/latest*100 : prevSpreadPct;
       const spreadDelta = spreadPct - prevSpreadPct;
-      const spreadAccel = spreadDelta - (prevSpreadPct - prev2SpreadPct);
       const slopeSigns = vals.map((v,i)=>v-prev[i]);
       const prevSlopeSigns = prev.map((v,i)=>v-prev2[i]);
-      const slopeMagPct = vals.reduce((s,v,i)=>s+Math.abs(v-prev[i])/Math.max(1,latest),0)/vals.length*100;
-      const accelPct = slopeSigns.reduce((s,v,i)=>s+Math.abs(v-prevSlopeSigns[i])/Math.max(1,latest),0)/vals.length*100;
+      const atrSeries = volatilitySnapshot.atrSeries;
+      const currentAtr = Number(atrSeries && atrSeries[closes.length-1]);
+      const prevAtr = Number(atrSeries && atrSeries[prevIdx]);
+      const prev2Atr = Number(atrSeries && atrSeries[prev2Idx]);
+      if(![currentAtr,prevAtr,prev2Atr].every(value=>Number.isFinite(value) && value>0)) return unavailable("ATR normalization unavailable",provisional);
+      const spreadAtr = spread/currentAtr;
+      const prevSpreadAtr = prevSpread/prevAtr;
+      const prev2SpreadAtr = prev2Spread/prev2Atr;
+      const spreadDeltaAtr = spreadAtr-prevSpreadAtr;
+      const slopeMovesAtr = slopeSigns.map(value=>value/currentAtr);
+      const previousSlopeMovesAtr = prevSlopeSigns.map(value=>value/prevAtr);
+      const slopeMagAtr = slopeMovesAtr.reduce((sum,value)=>sum+Math.abs(value),0)/slopeMovesAtr.length;
+      const accelAtr = slopeMovesAtr.reduce((sum,value,index)=>sum+Math.abs(value-previousSlopeMovesAtr[index]),0)/slopeMovesAtr.length;
       const upSlope = slopeSigns.filter(x=>x>0).length, downSlope = slopeSigns.filter(x=>x<0).length;
       const slopeAgree = Math.max(upSlope,downSlope);
       const tight = spreadPct < 0.15;
@@ -422,25 +434,25 @@
           phase = rank.summary || "Transition / Compression";
         }
       }
-      const spreadScore = clamp100(spreadPct/0.55*100);
-      const expansionScore = clamp100((spreadDelta+0.04)/0.12*100);
-      const slopeScore = clamp100(slopeMagPct/0.08*100);
+      const scoreTight = spreadAtr < SCORE_ATR.tightStack;
+      const spreadScore = clamp100(spreadAtr/SCORE_ATR.stackSpread*100);
+      const expansionScore = clamp100((spreadDeltaAtr+SCORE_ATR.expansionOffset)/SCORE_ATR.expansionRange*100);
+      const slopeScore = clamp100(slopeMagAtr/SCORE_ATR.slopeMove*100);
       const slopeAgreeScore = clamp100(slopeAgree/5*100);
-      const accelScore = clamp100(accelPct/0.04*100);
-      const compressionRelease = tight ? 45 : (prevSpreadPct < 0.18 && spreadDelta > 0.015 ? 85 : 55);
-      const flattenPenalty = spreadDelta < -0.01 || slopeMagPct < 0.012 ? 14 : 0;
-      const chopPenalty = (!upPairs && !downPairs && !tight) || nearCross ? 18 : 0;
-      const overextensionPenalty = spreadPct > 1.2 ? Math.min(18,(spreadPct-1.2)*12) : 0;
-      const rawStrength = alignment*.24 + spreadScore*.18 + expansionScore*.14 + slopeScore*.16 + slopeAgreeScore*.12 + accelScore*.08 + compressionRelease*.08 - flattenPenalty - chopPenalty - overextensionPenalty;
+      const accelScore = clamp100(accelAtr/SCORE_ATR.acceleration*100);
+      const compressionRelease = scoreTight ? 45 : (prevSpreadAtr < SCORE_ATR.releaseOrigin && spreadDeltaAtr > SCORE_ATR.releaseDelta ? 85 : 55);
+      const flattenPenalty = spreadDeltaAtr < SCORE_ATR.flattenDelta || slopeMagAtr < SCORE_ATR.flatSlope ? 14 : 0;
+      const chopPenalty = (!upPairs && !downPairs && !scoreTight) || nearCross ? 18 : 0;
+      const rawStrength = alignment*.24 + spreadScore*.18 + expansionScore*.14 + slopeScore*.16 + slopeAgreeScore*.12 + accelScore*.08 + compressionRelease*.08 - flattenPenalty - chopPenalty;
       const structureFloor = alignment >= 40 ? Math.min(35,14 + alignment*.20 + slopeAgreeScore*.05) : alignment >= 20 ? Math.min(25,10 + alignment*.22) : 0;
       const strength = clamp100(Math.max(rawStrength,structureFloor));
       const ctx = {spreadDelta,nearCross,setup,times,alignment,atrSeries:volatilitySnapshot.atrSeries};
       const rawMaEvent = detectMaPair(series,slots,ctx,18);
-      const priceEvent = detectPriceMA(candles,series,slots,{setup},10);
+      const priceEvent = detectPriceMA(candles,series,slots,{setup,atrSeries},10);
       const validStructure = rawMaEvent ? 70 : 35;
       const eventFreshScore = rawMaEvent ? Math.max(0,100-rawMaEvent.age*18) : 0;
       const priceConfirm = priceEvent && priceEvent.dir && setup && priceEvent.dir === setup ? 80 : priceEvent ? 45 : 35;
-      const preCompression = prev2SpreadPct < 0.22 ? 82 : 45;
+      const preCompression = prev2SpreadAtr < SCORE_ATR.preCompression ? 82 : 45;
       const quality = clamp100(preCompression*.16 + validStructure*.16 + expansionScore*.14 + slopeAgreeScore*.14 + alignment*.14 + priceConfirm*.12 + eventFreshScore*.10 + (chopPenalty?25:75)*.04 - chopPenalty*.55);
       const maEvent = normalizeMaPairEvent(rawMaEvent,{alignment,strength,quality,state});
       const maIntent = maPairIntent(maEvent,{setup,state,strength,quality,alignment});

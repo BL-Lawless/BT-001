@@ -141,6 +141,43 @@ function createCoreOnlyRuntime(periods) {
   };
 }
 
+function scaledTrendRows(targetAtr, intervalMs = 60_000) {
+  const length = 500;
+  const endPrice = 63_822;
+  const slope = targetAtr * 0.10;
+  return Array.from({ length }, (_, index) => {
+    const close = endPrice - slope * (length - 1 - index);
+    return [
+      1_700_000_000_000 + index * intervalMs,
+      close - slope * 0.20,
+      close + targetAtr / 2,
+      close - targetAtr / 2,
+      close,
+      100,
+      1_700_000_000_000 + (index + 1) * intervalMs - 1,
+      1_000
+    ];
+  });
+}
+
+function scaledCompressionSnapshot(targetAtr, slots) {
+  const length = 500;
+  const endPrice = 63_822;
+  const baseline = endPrice - targetAtr * 20;
+  const alignedBySlot = {};
+  const valuesBySlot = {};
+  slots.forEach((slot, slotIndex) => {
+    const values = Array.from({ length }, (_, index) => {
+      const releaseProgress = index <= 488 ? 0 : index >= 499 ? 1 : (index - 488) / 11;
+      const spreadAtr = 1.2 + (12 - 1.2) * releaseProgress;
+      return baseline + targetAtr * spreadAtr * (4 - slotIndex) / 4 + targetAtr * 0.10 * (index - 499);
+    });
+    alignedBySlot[slot.slotId] = values;
+    valuesBySlot[slot.slotId] = values.at(-1);
+  });
+  return { slots, alignedBySlot, valuesBySlot };
+}
+
 (async () => {
   const runtime = createRuntime();
   const api = runtime.api;
@@ -172,6 +209,16 @@ function createCoreOnlyRuntime(periods) {
   assert.equal(runtime.snapshotRequests.at(-2).options.includeForming, true);
   assert.equal(runtime.snapshotRequests.at(-1).options.includeForming, false);
 
+  const timeframePolicies = [
+    ["1m", true], ["3m", true], ["5m", true], ["15m", true], ["30m", true],
+    ["1h", false], ["4h", false], ["1d", false]
+  ];
+  timeframePolicies.forEach(([interval, includeForming]) => {
+    const result = api.classifyTimeframe(interval);
+    assert.equal(result.provisional, includeForming, `${interval} provisional policy changed`);
+    assert.equal(result.source.includeForming, includeForming, `${interval} forming-candle request policy changed`);
+  });
+
   const isolatedRuntime = createCoreOnlyRuntime(runtime.periods);
   const isolatedCore = isolatedRuntime.core;
   const isolatedVolatility = isolatedRuntime.volatility;
@@ -189,6 +236,54 @@ function createCoreOnlyRuntime(periods) {
   assert.equal(isolatedCore.freshMaPairEventText(failedBearishOutcome),"EMAs 9 / 21 Failed Crossover | Bearish | current candle");
   assert.equal(failedBullishOutcome.type,"failed crossover","failed-crossover presentation changed the internal event type");
   assert.equal(isolatedCore.cleanMaPairTypeText({type:"crossover",dir:1}),"Bull Crossover","plain crossover wording changed");
+
+  const scoreRuntime = createCoreOnlyRuntime([9, 21, 55, 100, 200]);
+  const volatilityScales = [22, 25, 30, 80, 160, 240];
+  const normalizedScores = volatilityScales.map(targetAtr => {
+    const rows = scaledTrendRows(targetAtr);
+    const measuredAtr = scoreRuntime.volatility.snapshot(rows, 14, 5).atr;
+    const result = scoreRuntime.core.classify(rows, {
+      tfKey:"1m", tfInterval:"1m", includeForming:true, sourceType:"scaled-regression", sourcePath:"scaled-regression", sourceIndex:rows.length - 1
+    }, { slots:scoreRuntime.slots });
+    assert(Math.abs(measuredAtr - targetAtr) < 1e-9, `scaled fixture ATR ${targetAtr} was not preserved`);
+    assert.equal(result.alignment, 100, `scaled fixture ATR ${targetAtr} changed structural alignment`);
+    return result;
+  });
+  const strengths = normalizedScores.map(result => result.strength);
+  const qualities = normalizedScores.map(result => result.quality);
+  assert(Math.max(...strengths) - Math.min(...strengths) <= 10, `ATR-normalized Strength diverged across scales: ${strengths.join(", ")}`);
+  assert(Math.max(...qualities) - Math.min(...qualities) <= 10, `ATR-normalized Quality diverged across scales: ${qualities.join(", ")}`);
+  assert(normalizedScores.at(-1).strength >= 80, "extreme high-conviction trend remained suppressed by overextension");
+  assert(normalizedScores.at(-1).adx >= 90, "independent ADX no longer reports the extreme trend separately");
+
+  const compressionReleaseScores = volatilityScales.map(targetAtr => {
+    const rows = scaledTrendRows(targetAtr);
+    return scoreRuntime.core.classify(rows, {
+      tfKey:"1m", tfInterval:"1m", includeForming:true, sourceType:"compression-regression", sourcePath:"compression-regression", sourceIndex:rows.length - 1
+    }, scaledCompressionSnapshot(targetAtr,scoreRuntime.slots));
+  });
+  const compressionQualities = compressionReleaseScores.map(result => result.quality);
+  assert(Math.max(...compressionQualities) - Math.min(...compressionQualities) <= 10, `ATR-normalized pre-compression Quality diverged across scales: ${compressionQualities.join(", ")}`);
+  assert(compressionQualities[0] <= compressionQualities.at(-1), "quiet-market pre-compression Quality remained higher than equivalent high-volatility Quality");
+
+  const timeframeMs = {"1m":60_000,"3m":180_000,"5m":300_000,"15m":900_000,"30m":1_800_000,"1h":3_600_000,"4h":14_400_000,"1d":86_400_000};
+  timeframePolicies.forEach(([interval, includeForming]) => {
+    const rows = scaledTrendRows(80, timeframeMs[interval]);
+    const result = scoreRuntime.core.classify(rows, {
+      tfKey:interval, tfInterval:interval, includeForming, sourceType:"timeframe-regression", sourcePath:"timeframe-regression", sourceIndex:rows.length - 1
+    }, { slots:scoreRuntime.slots });
+    assert.equal(result.strength, normalizedScores[3].strength, `${interval} changed normalized Strength`);
+    assert.equal(result.quality, normalizedScores[3].quality, `${interval} changed normalized Quality`);
+    assert.equal(result.provisional, includeForming, `${interval} core result changed provisional policy`);
+  });
+
+  const priceRows = [[1,101,102,100.8,101],[2,101,102,100.8,101]];
+  const priceSeries = [[100,100]];
+  const priceSlots = [{slot:1,slotId:"MA1",period:9}];
+  const highAtrPriceEvent = isolatedCore.detectPriceMA(priceRows,priceSeries,priceSlots,{setup:1,atrSeries:[4,4]},2);
+  const lowAtrPriceEvent = isolatedCore.detectPriceMA(priceRows,priceSeries,priceSlots,{setup:1,atrSeries:[2,2]},2);
+  assert(highAtrPriceEvent && highAtrPriceEvent.type === "price bounce","ATR-relative price proximity did not admit a 0.20 ATR touch");
+  assert(lowAtrPriceEvent && lowAtrPriceEvent.type !== "price bounce","ATR-relative price proximity admitted a 0.40 ATR non-touch");
 
   const rankCases = [
     ["crossover",700],
