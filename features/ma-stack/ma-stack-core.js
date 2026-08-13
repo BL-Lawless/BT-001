@@ -177,23 +177,26 @@
       const fastAway = signs[0] > 0 ? fast[idx] > fast[minIdx] : fast[idx] < fast[minIdx];
       return fastAway;
     }
-    function isFailedCross(diff, idx){
+    function failedCrossDirection(diff, idx){
       const start = Math.max(1,idx-5);
       const curSign = signOf(diff[idx]);
-      if(!curSign) return false;
+      if(!curSign) return 0;
       let crossIdx = -1;
       for(let k=start;k<=idx;k++){
         const prevSign = signOf(diff[k-1]), thisSign = signOf(diff[k]);
-        if(prevSign && thisSign && prevSign !== thisSign) crossIdx = k;
+        if(prevSign && thisSign && prevSign !== thisSign){ crossIdx = k; break; }
       }
-      if(crossIdx < 0 || crossIdx === idx) return false;
+      if(crossIdx < 0 || crossIdx === idx) return 0;
       const beforeSign = signOf(diff[crossIdx-1]);
       const crossedSign = signOf(diff[crossIdx]);
-      if(!beforeSign || !crossedSign || beforeSign === crossedSign) return false;
-      const crossedBack = curSign === beforeSign;
-      const postCrossFailed = curSign === crossedSign && Math.abs(diff[idx]) < Math.abs(diff[crossIdx])*.65;
-      return crossedBack || postCrossFailed;
+      if(!beforeSign || !crossedSign || beforeSign === crossedSign) return 0;
+      let crossedBack = false;
+      for(let k=crossIdx+1;k<=idx;k++){
+        if(signOf(diff[k]) === beforeSign){ crossedBack = true; break; }
+      }
+      return crossedBack && curSign === beforeSign ? crossedSign : 0;
     }
+    function isFailedCross(diff, idx){ return failedCrossDirection(diff,idx) !== 0; }
     function detectMaPair(series, slots, ctx, lookback){
       const len = series[0] ? series[0].length : 0;
       const start = Math.max(2, len - (lookback || 18));
@@ -224,7 +227,8 @@
             const curSign = signOf(cur);
             if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bull crossover`,age,dir:1,time:eventTime,rank:95});
             if(prev >= 0 && cur < 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bear crossover`,age,dir:-1,time:eventTime,rank:95});
-            if(isFailedCross(diff,i)) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}failed crossover`,age,dir:curSign || -signOf(diff[Math.max(0,i-1)]),time:eventTime,rank:82});
+            const failedDir = failedCrossDirection(diff,i);
+            if(failedDir) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}failed crossover`,age,dir:failedDir,time:eventTime,rank:82});
             const sameSide = Math.sign(cur) === Math.sign(prev) && Math.sign(cur) !== 0;
             const movingTogether = sameSide && curPct < prevPct && prevPct <= olderPct;
             const deepBounceOk = pairClass === "adjacent" || (ctx.alignment >= 40 && ctx.setup && curSign === ctx.setup && ctx.spreadDelta >= -0.005);
@@ -269,18 +273,19 @@
       }
       return best;
     }
-    function unavailable(reason){
-      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
+    function unavailable(reason,provisional=false){
+      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows,debugCtx,snapshot){
+      const provisional = !!(debugCtx && debugCtx.includeForming);
       const slots = snapshot && snapshot.slots;
-      if(!Array.isArray(slots) || slots.length !== 5) return unavailable("MA slots unavailable");
+      if(!Array.isArray(slots) || slots.length !== 5) return unavailable("MA slots unavailable",provisional);
       const periods = slots.map(slot => slot.period);
       const maxPeriod = Math.max(...periods);
       const candles = (Array.isArray(rows)?rows:[]).filter(r=>r && Number.isFinite(Number(r[4])));
       const closes = candles.map(r=>Number(r[4]));
       const times = candles.map(r=>Number(r[0]) || 0);
-      if(closes.length < maxPeriod + 10) return unavailable("Insufficient data");
+      if(closes.length < maxPeriod + 10) return unavailable("Insufficient data",provisional);
       const latest = closes[closes.length-1];
       let series = periods.map(p=>emaSeries(closes,p));
       let vals = series.map(s=>s[s.length-1]);
@@ -299,13 +304,14 @@
       const prev2Idx = Math.max(0, closes.length-12);
       const prev = series.map(s=>s[prevIdx]);
       const prev2 = series.map(s=>s[prev2Idx]);
-      if(vals.some(v=>!Number.isFinite(v)) || prev.some(v=>!Number.isFinite(v)) || prev2.some(v=>!Number.isFinite(v))) return unavailable("Insufficient MA data");
-      const pairDirs = vals.slice(0,-1).map((v,i)=>Math.sign(v-vals[i+1]));
+      if(vals.some(v=>!Number.isFinite(v)) || prev.some(v=>!Number.isFinite(v)) || prev2.some(v=>!Number.isFinite(v))) return unavailable("Insufficient MA data",provisional);
+      const comparison = stackComparison(vals);
+      const pairDirs = vals.slice(0,-1).map((v,i)=>comparison.cmp(v,vals[i+1]));
       const upPairs = pairDirs.every(x=>x>0), downPairs = pairDirs.every(x=>x<0);
       let allBull=0, allBear=0, allTotal=0, slowBull=0, slowBear=0, slowTotal=0;
       for(let i=0;i<vals.length-1;i++){
         for(let j=i+1;j<vals.length;j++){
-          const d = Math.sign(vals[i]-vals[j]);
+          const d = comparison.cmp(vals[i],vals[j]);
           if(!d) continue;
           allTotal++;
           if(d>0) allBull++; else allBear++;
@@ -426,7 +432,12 @@
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
       rank.state = state;
       rank.summaryState = phase;
-      return {state,icon,strength,alignment,quality,title,phase,setup,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
+      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
+    }
+    function stackComparison(vals){
+      const base = Math.max(Math.abs(Number(vals && vals[3])),Math.abs(Number(vals && vals[4])),1);
+      const tol = base * 0.0001;
+      return {tol,cmp:(a,b) => (a > b + tol ? 1 : a < b - tol ? -1 : 0)};
     }
     function buildStackRank(vals,state,setup,slots,debugCtx){
       const safeSlots = Array.isArray(slots) && slots.length === 5
@@ -509,9 +520,7 @@
 
       const [ma1,ma2,ma3,ma4,ma5] = vals.map(Number);
       if(![ma1,ma2,ma3,ma4,ma5].every(Number.isFinite)) return empty;
-      const base = Math.max(Math.abs(ma4),Math.abs(ma5),1);
-      const tol = base * 0.0001;
-      const cmp = (a,b) => (a > b + tol ? 1 : a < b - tol ? -1 : 0);
+      const {tol,cmp} = stackComparison(vals);
       const c12 = cmp(ma1,ma2);
       const c23 = cmp(ma2,ma3);
       const c34 = cmp(ma3,ma4);
@@ -597,14 +606,12 @@
       }else if(fullBear){
         summary = "Bearish stack";
       }else if(selectedRegime === "bullish"){
-        if(fastPairState === "bullish" && hingeStatus === "supports_bullish") summary = "Bullish stack";
-        else if(hingeStatus === "supports_bullish" && fastPairState === "bearish") summary = "Bullish regime / pullback";
+        if(hingeStatus === "supports_bullish" && fastPairState === "bearish") summary = "Bullish regime / pullback";
         else if((hingeStatus === "lost" || hingeStatus === "contested") && fastPairState === "bearish") summary = "Bullish regime under bearish breakdown";
         else if(hingeStatus === "lost") summary = "Bullish regime under bearish breakdown";
         else summary = "Bullish regime / pullback";
       }else if(selectedRegime === "bearish"){
-        if(fastPairState === "bearish" && hingeStatus === "supports_bearish") summary = "Bearish stack";
-        else if(hingeStatus === "supports_bearish" && fastPairState === "bullish") summary = "Bearish regime / pullback";
+        if(hingeStatus === "supports_bearish" && fastPairState === "bullish") summary = "Bearish regime / pullback";
         else if((hingeStatus === "reclaimed" || hingeStatus === "contested") && fastPairState === "bullish") summary = "Bearish regime under bullish reclaim";
         else if(hingeStatus === "reclaimed") summary = "Bearish regime under bullish reclaim";
         else summary = "Bearish regime / pullback";

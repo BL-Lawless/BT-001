@@ -69,14 +69,14 @@
           await h.ensureMaStackBuffers(false).catch(() => {});
         }
         await Promise.all(TFs.map(async tf=>{
+          const includeForming = LIVE_TFS.has(tf.interval);
           try{
             const slots = stackSlots();
             if(!Array.isArray(slots) || slots.length !== 5){
-              out[tf.key] = unavailable("MA slots unavailable");
+              out[tf.key] = unavailable("MA slots unavailable",includeForming);
               return;
             }
             const periods = slots.map(slot => slot.period);
-            const includeForming = LIVE_TFS.has(tf.interval);
             let snapshot = null;
             if(h && typeof h.getAuthoritativeMaSnapshot === "function"){
               snapshot = h.getAuthoritativeMaSnapshot(tf.interval,{
@@ -91,22 +91,23 @@
                   .filter(row => row && row.every((v,idx) => idx > 5 || Number.isFinite(v)))
               : null;
             if(!snapshot){
-              out[tf.key] = unavailable("MA snapshot unavailable");
+              out[tf.key] = unavailable("MA snapshot unavailable",includeForming);
               return;
             }
             if(snapshot && !snapshot.reliable){
-              out[tf.key] = unavailable(`Warmup: ${snapshot.warmupCount}/${snapshot.requiredRows}`);
+              out[tf.key] = unavailable(`Warmup: ${snapshot.warmupCount}/${snapshot.requiredRows}`,includeForming);
               return;
             }
             out[tf.key] = rows && rows.length ? classify(rows,{
               tfKey:tf.key,
               tfInterval:tf.interval,
+              includeForming,
               sourceType:snapshot ? snapshot.sourceType : (includeForming ? "hub.getChartBuffer" : "hub.getClosedBuffer"),
               sourcePath:snapshot ? snapshot.sourcePath : `PUBLIC_MARKET_DATA_HUB.${includeForming ? "getChartBuffer" : "getClosedBuffer"}(${tf.interval}) -> hubRowToKline -> emaSeries`,
               sourceIndex:snapshot && Number.isFinite(Number(snapshot.sourceIndex)) ? Number(snapshot.sourceIndex) : null
-            },{...snapshot,slots}) : unavailable("Unavailable");
+            },{...snapshot,slots}) : unavailable("Unavailable",includeForming);
           }catch(e){
-            out[tf.key]=unavailable("Fetch failed: "+(e&&e.message?e.message:String(e)));
+            out[tf.key]=unavailable("Fetch failed: "+(e&&e.message?e.message:String(e)),includeForming);
           }
         }));
         applyHigherTfAgreement(out);
@@ -149,12 +150,13 @@
     function classifyTimeframe(interval,options={}){
       const h=hub(),slots=stackSlots();
       if(!h||typeof h.getAuthoritativeMaSnapshot!=="function"||!Array.isArray(slots)||slots.length!==5)return null;
-      const periods=slots.map(slot=>slot.period),includeForming=options.includeForming!==false;
+      const periods=slots.map(slot=>slot.period);
+      const includeForming=Object.prototype.hasOwnProperty.call(options,"includeForming") ? options.includeForming!==false : LIVE_TFS.has(interval);
       const snapshot=h.getAuthoritativeMaSnapshot(interval,{slots,includeForming,requiredRows:Math.max(...periods)+10});
       if(!snapshot||!snapshot.reliable||!Array.isArray(snapshot.rows))return null;
       const rows=snapshot.rows.map(row=>Array.isArray(row)?row:hubRowToKline(row)).filter(row=>row&&row.every((value,index)=>index>5||Number.isFinite(value)));
       if(!rows.length)return null;
-      return {...classify(rows,{tfKey:interval,tfInterval:interval,sourceType:snapshot.sourceType||"PUBLIC_MARKET_DATA_HUB",sourcePath:snapshot.sourcePath||`PUBLIC_MARKET_DATA_HUB.getAuthoritativeMaSnapshot(${interval})`,sourceIndex:Number.isFinite(Number(snapshot.sourceIndex))?Number(snapshot.sourceIndex):null},{...snapshot,slots}),slots,source:{type:snapshot.sourceType||"PUBLIC_MARKET_DATA_HUB",path:snapshot.sourcePath||"getAuthoritativeMaSnapshot",index:Number.isFinite(Number(snapshot.sourceIndex))?Number(snapshot.sourceIndex):null,includeForming}};
+      return {...classify(rows,{tfKey:interval,tfInterval:interval,includeForming,sourceType:snapshot.sourceType||"PUBLIC_MARKET_DATA_HUB",sourcePath:snapshot.sourcePath||`PUBLIC_MARKET_DATA_HUB.getAuthoritativeMaSnapshot(${interval})`,sourceIndex:Number.isFinite(Number(snapshot.sourceIndex))?Number(snapshot.sourceIndex):null},{...snapshot,slots}),slots,source:{type:snapshot.sourceType||"PUBLIC_MARKET_DATA_HUB",path:snapshot.sourcePath||"getAuthoritativeMaSnapshot",index:Number.isFinite(Number(snapshot.sourceIndex))?Number(snapshot.sourceIndex):null,includeForming}};
     }
   root.runtime = {hub,hubRowToKline,stackSlots,stackPeriods,refresh,refreshSoon,start,stop,classifyTimeframe,lastEventKeyByTf,lastBlinkEventByTf};
 })();

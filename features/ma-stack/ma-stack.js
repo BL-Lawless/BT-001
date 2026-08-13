@@ -210,7 +210,8 @@
         }).join("");
         summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
         rankTooltipHtmlByTf.set(tf.key,compactRankTooltipHtml(tf,r));
-        return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" aria-label="${tf.key} MA Stack"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}</span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
+        const liveBadge = r.provisional ? '<span class="v33-ma-live-badge" aria-label="Live forming candle">L</span>' : "";
+        return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" data-provisional="${r.provisional?'true':'false'}" aria-label="${tf.key} MA Stack${r.provisional?' (live, forming candle)':''}"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}${liveBadge}</span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
       }).join("");
       if(strip.__v33LastHtml !== html){
         strip.innerHTML = html;

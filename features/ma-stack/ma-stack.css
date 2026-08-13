@@ -101,6 +101,30 @@
   min-height:10px;
 }
 .v33-ma-stack-box .v33-tf-label{display:inline-block;line-height:1}
+.v33-ma-stack-box[data-provisional="true"] .v33-ma-head{
+  box-sizing:border-box;
+  padding-right:7px;
+}
+.v33-ma-stack-box .v33-ma-live-badge{
+  position:absolute;
+  top:1px;
+  right:1px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:6px;
+  height:7px;
+  padding:0;
+  border:0;
+  border-radius:1px;
+  background:rgba(224,242,254,.78);
+  color:#0369a1;
+  font-size:6px;
+  font-weight:700;
+  letter-spacing:0;
+  line-height:1;
+  pointer-events:none;
+}
 .v33-ma-stack-box .v33-stack-icon{
   display:inline-flex;
   align-items:center;

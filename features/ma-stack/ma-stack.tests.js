@@ -84,6 +84,7 @@ function createRuntime() {
   let visible = null;
   let ensureCalls = 0;
   let snapshotCalls = 0;
+  const snapshotRequests = [];
   let timerId = 0;
   const timers = new Map();
   const hub = {
@@ -91,6 +92,7 @@ function createRuntime() {
     ensureMaStackBuffers() { ensureCalls++; return Promise.resolve(); },
     getAuthoritativeMaSnapshot(intervalName, options) {
       snapshotCalls++;
+      snapshotRequests.push({ interval: intervalName, options });
       return { reliable: true, rows, sourceType: "fixture", sourcePath: "fixture", sourceIndex: rows.length - 1, requestedInterval: intervalName, requestedOptions: options };
     },
     getChartBuffer() { return rows; },
@@ -120,7 +122,7 @@ function createRuntime() {
   vm.runInContext(coreSource, context, { filename: "ma-stack-core.js" });
   vm.runInContext(runtimeSource, context, { filename: "ma-stack-runtime.js" });
   vm.runInContext(moduleSource, context, { filename: "ma-stack.js" });
-  return { context, api: context.MA_STACK_STRIP, document, rows, periods, timers, hub, get visible() { return visible; }, get ensureCalls() { return ensureCalls; }, get snapshotCalls() { return snapshotCalls; } };
+  return { context, api: context.MA_STACK_STRIP, document, rows, periods, timers, hub, snapshotRequests, get visible() { return visible; }, get ensureCalls() { return ensureCalls; }, get snapshotCalls() { return snapshotCalls; } };
 }
 
 function createCoreOnlyRuntime(periods) {
@@ -153,6 +155,16 @@ function createCoreOnlyRuntime(periods) {
   assert.equal(classified.source.type, "fixture");
   assert(runtime.snapshotCalls >= 1, "authoritative snapshot was not requested");
   assert(["up", "down", "mixed", "transition", "compression"].includes(classified.state));
+  assert.equal(classified.provisional, false, "explicit closed-only result was not labeled final");
+
+  const liveDefault = api.classifyTimeframe("15m");
+  const hourlyDefault = api.classifyTimeframe("1h");
+  assert.equal(liveDefault.provisional, true, "live timeframe default was not labeled provisional");
+  assert.equal(liveDefault.source.includeForming, true, "live timeframe did not include forming data by default");
+  assert.equal(hourlyDefault.provisional, false, "closed timeframe default was labeled provisional");
+  assert.equal(hourlyDefault.source.includeForming, false, "hourly timeframe included forming data by default");
+  assert.equal(runtime.snapshotRequests.at(-2).options.includeForming, true);
+  assert.equal(runtime.snapshotRequests.at(-1).options.includeForming, false);
 
   const isolatedRuntime = createCoreOnlyRuntime(runtime.periods);
   const isolatedCore = isolatedRuntime.core;
@@ -162,8 +174,61 @@ function createCoreOnlyRuntime(periods) {
   assert.equal(typeof isolatedCore.emaSeries, "function");
   assert.equal(isolatedCore.emaSeries([1, 2, 3, 4, 5], 3).length, 5);
 
+  const fullBull = isolatedCore.buildStackRank([105, 104, 103, 102, 101], "up", 1, isolatedRuntime.slots);
+  const brokenMiddleBull = isolatedCore.buildStackRank([105, 104, 106, 102, 101], "mixed", 1, isolatedRuntime.slots);
+  const brokenSlowAdjacentBull = isolatedCore.buildStackRank([105, 104, 103, 100, 101], "mixed", 1, isolatedRuntime.slots);
+  const fullBear = isolatedCore.buildStackRank([101, 102, 103, 104, 105], "down", -1, isolatedRuntime.slots);
+  const brokenMiddleBear = isolatedCore.buildStackRank([101, 102, 100, 104, 105], "mixed", -1, isolatedRuntime.slots);
+  assert.equal(fullBull.summary, "Bullish stack");
+  assert.notEqual(brokenMiddleBull.summary, "Bullish stack", "MA2/MA3 contradiction was promoted to a bullish stack");
+  assert.notEqual(brokenSlowAdjacentBull.summary, "Bullish stack", "adjacent MA4/MA5 contradiction was promoted to a bullish stack");
+  assert.equal(fullBear.summary, "Bearish stack");
+  assert.notEqual(brokenMiddleBear.summary, "Bearish stack", "MA2/MA3 contradiction was promoted to a bearish stack");
+  const withinTolerance = isolatedCore.buildStackRank([105, 104, 103, 102, 101.995], "mixed", 1, isolatedRuntime.slots);
+  assert.equal(withinTolerance.diagnostics.debug.bullishComparisons["MA4>MA5"], false, "adjacent MA4/MA5 tolerance was not applied");
+
+  const adjacentFailSeries = [
+    Array(8).fill(140), Array(8).fill(130), Array(8).fill(120),
+    [99, 99, 99, 99, 101, 102, 99, 98], Array(8).fill(100)
+  ];
+  const adjacentFailure = isolatedCore.detectMaPair(adjacentFailSeries, isolatedRuntime.slots, { times:[1,2,3,4,5,6,7,8], alignment:60, setup:1, spreadDelta:0 }, 8);
+  assert(adjacentFailure && adjacentFailure.ref === "MA4/MA5" && adjacentFailure.pairClass === "adjacent" && adjacentFailure.type === "failed crossover", "adjacent MA4/MA5 cross-back was not detected as failed");
+  assert.equal(adjacentFailure.dir, 1, "failed adjacent MA4/MA5 direction did not describe the original bullish cross");
+  const adjacentContractionSeries = [
+    Array(8).fill(140), Array(8).fill(130), Array(8).fill(120),
+    [99, 99, 99, 99, 101, 100.8, 100.5, 100.3], Array(8).fill(100)
+  ];
+  const adjacentContractionEvent = isolatedCore.detectMaPair(adjacentContractionSeries, isolatedRuntime.slots, { times:[1,2,3,4,5,6,7,8], alignment:60, setup:1, spreadDelta:0 }, 8);
+  assert(!adjacentContractionEvent || adjacentContractionEvent.type !== "failed crossover", "adjacent MA4/MA5 contraction without cross-back was mislabeled failed");
+
+  const pairVerificationCases = [
+    { ref:"MA1/MA3", targetIndex:2, pairClass:"deep", baselines:[null,130,100,80,70] },
+    { ref:"MA1/MA4", targetIndex:3, pairClass:"wide", baselines:[null,130,120,100,80] },
+    { ref:"MA1/MA5", targetIndex:4, pairClass:"wide", baselines:[null,140,130,120,100] }
+  ];
+  pairVerificationCases.forEach(({ ref,targetIndex,pairClass,baselines }) => {
+    const target = baselines[targetIndex];
+    const buildSeries = ma1 => baselines.map((value,index) => index === 0 ? ma1 : Array(8).fill(value));
+    const failedSeries = buildSeries([target-1,target-1,target-1,target-1,target+1,target+2,target-1,target-2]);
+    const failure = isolatedCore.detectMaPair(failedSeries, isolatedRuntime.slots, { times:[1,2,3,4,5,6,7,8], alignment:60, setup:1, spreadDelta:0 }, 8);
+    assert(failure && failure.ref === ref && failure.pairClass === pairClass && failure.type === "failed crossover", `${ref} genuine cross-back was not detected as a failed ${pairClass} crossover`);
+    assert.equal(failure.dir, 1, `${ref} failure direction did not describe the original bullish cross`);
+
+    const contractionSeries = buildSeries([target-1,target-1,target-1,target-1,target+1,target+0.8,target+0.5,target+0.3]);
+    const contraction = isolatedCore.detectMaPair(contractionSeries, isolatedRuntime.slots, { times:[1,2,3,4,5,6,7,8], alignment:60, setup:1, spreadDelta:0 }, 8);
+    assert(!contraction || contraction.type !== "failed crossover", `${ref} contraction without cross-back was mislabeled failed`);
+  });
+
   const events = api.markerEvents({ key: "15m", interval: "15m" }, runtime.rows);
   assert(Array.isArray(events), "markerEvents did not return an array");
+
+  const tfResults = Object.fromEntries(["1m","3m","5m","15m","30m","1H","4H","1D"].map(key => [key, { ...isolated, provisional:["1m","3m","5m","15m","30m"].includes(key) }]));
+  runtime.context.__BT001_MA_STACK_BUILD__.presentation.renderEnhanced(tfResults);
+  const stripHtml = runtime.document.getElementById("v33MAStackStrip").innerHTML;
+  assert.equal((stripHtml.match(/v33-ma-stack-group/g) || []).length, 8, "strip did not render all eight timeframes");
+  assert.equal((stripHtml.match(/v33-ma-live-badge/g) || []).length, 5, "LIVE badge did not render on exactly five timeframes");
+  ["1m","3m","5m","15m","30m"].forEach(tf => assert(stripHtml.includes(`data-tf="${tf}"`) && stripHtml.includes(`data-interval="${tf}"`), `${tf} DOM anchor missing`));
+  assert(cssSource.includes(".v33-ma-stack-box .v33-ma-live-badge"), "LIVE badge styling missing");
 
   api.start();
   assert.equal(runtime.visible, true);
@@ -199,7 +264,7 @@ function createCoreOnlyRuntime(periods) {
   assert(runtimeSource.includes("root.runtime ="), "runtime build slice missing");
   assert(moduleSource.includes("root.presentation ="), "presentation build slice missing");
 
-  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, canonicalPeriods: true, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
+  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
