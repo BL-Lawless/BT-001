@@ -180,21 +180,18 @@
     function failedCrossDirection(diff, idx){
       const start = Math.max(1,idx-5);
       const curSign = signOf(diff[idx]);
-      if(!curSign) return 0;
+      const prevSign = signOf(diff[idx-1]);
+      if(!curSign || !prevSign || curSign === prevSign) return 0;
       let crossIdx = -1;
-      for(let k=start;k<=idx;k++){
+      for(let k=start;k<idx;k++){
         const prevSign = signOf(diff[k-1]), thisSign = signOf(diff[k]);
         if(prevSign && thisSign && prevSign !== thisSign){ crossIdx = k; break; }
       }
-      if(crossIdx < 0 || crossIdx === idx) return 0;
+      if(crossIdx < 0) return 0;
       const beforeSign = signOf(diff[crossIdx-1]);
       const crossedSign = signOf(diff[crossIdx]);
       if(!beforeSign || !crossedSign || beforeSign === crossedSign) return 0;
-      let crossedBack = false;
-      for(let k=crossIdx+1;k<=idx;k++){
-        if(signOf(diff[k]) === beforeSign){ crossedBack = true; break; }
-      }
-      return crossedBack && curSign === beforeSign ? crossedSign : 0;
+      return curSign === beforeSign ? crossedSign : 0;
     }
     function isFailedCross(diff, idx){ return failedCrossDirection(diff,idx) !== 0; }
     function detectMaPair(series, slots, ctx, lookback){
@@ -228,11 +225,13 @@
             if(prev <= 0 && cur > 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bull crossover`,age,dir:1,time:eventTime,rank:95});
             if(prev >= 0 && cur < 0) add({eventClass:"MA-pair",type:"crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bear crossover`,age,dir:-1,time:eventTime,rank:95});
             const failedDir = failedCrossDirection(diff,i);
-            if(failedDir) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}failed crossover`,age,dir:failedDir,time:eventTime,rank:82});
+            if(failedDir) add({eventClass:"MA-pair",type:"failed crossover",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}failed crossover`,age,dir:failedDir,time:eventTime,rank:96});
             const sameSide = Math.sign(cur) === Math.sign(prev) && Math.sign(cur) !== 0;
             const movingTogether = sameSide && curPct < prevPct && prevPct <= olderPct;
             const deepBounceOk = pairClass === "adjacent" || (ctx.alignment >= 40 && ctx.setup && curSign === ctx.setup && ctx.spreadDelta >= -0.005);
-            if(sameSide && deepBounceOk && isConfirmedBounce(diff,fast,slow,i)) add({eventClass:"MA-pair",type:"bounce/no-cross",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
+            const confirmedBounce = isConfirmedBounce(diff,fast,slow,i);
+            const firstBounceConfirmation = confirmedBounce && !isConfirmedBounce(diff,fast,slow,i-1);
+            if(sameSide && deepBounceOk && firstBounceConfirmation) add({eventClass:"MA-pair",type:"bounce/no-cross",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}bounce / no-cross`,age,dir:curSign,time:eventTime,rank:78});
             if(sameSide && olderPct <= 0.0009 && curPct > Math.max(olderPct*1.55,0.0012)) add({eventClass:"MA-pair",type:"compression release",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression release`,age,dir:curSign,time:eventTime,rank:70});
             if(movingTogether && curPct <= 0.0018) add({eventClass:"MA-pair",type:"cross risk",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}cross risk`,age,dir:0,time:eventTime,rank:52});
             else if(curPct <= 0.0007) add({eventClass:"MA-pair",type:"compression",pairClass,ref:pairRef,label:`${pairText} ${pairPrefix}compression`,age,dir:0,time:eventTime,rank:45});
@@ -274,7 +273,7 @@
       return best;
     }
     function unavailable(reason,provisional=false){
-      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
+      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,pricePosition:1,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows,debugCtx,snapshot){
       const provisional = !!(debugCtx && debugCtx.includeForming);
@@ -432,12 +431,16 @@
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
       rank.state = state;
       rank.summaryState = phase;
-      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
+      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,pricePosition:pricePosition(latest,vals),maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
     }
     function stackComparison(vals){
       const base = Math.max(Math.abs(Number(vals && vals[3])),Math.abs(Number(vals && vals[4])),1);
       const tol = base * 0.0001;
       return {tol,cmp:(a,b) => (a > b + tol ? 1 : a < b - tol ? -1 : 0)};
+    }
+    function pricePosition(price,maValues){
+      if(!Number.isFinite(Number(price)) || !Array.isArray(maValues) || maValues.length !== 5 || maValues.some(value=>!Number.isFinite(Number(value)))) return 1;
+      return 1 + maValues.filter(value => Number(price) > Number(value)).length;
     }
     function buildStackRank(vals,state,setup,slots,debugCtx){
       const safeSlots = Array.isArray(slots) && slots.length === 5
@@ -816,5 +819,5 @@
       }
       return out;
     }
-  root.core = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
+  root.core = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,pricePosition,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
 })();

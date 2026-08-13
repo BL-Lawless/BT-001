@@ -208,10 +208,12 @@
           const cls = on && side !== "off" ? `v33-rank-led is-on ${side}` : "v33-rank-led";
           return `<span class="${cls}" data-ema="${item.label}" aria-hidden="true"></span>`;
         }).join("");
+        const pricePosition = Math.max(1,Math.min(6,Math.round(Number(r.pricePosition)||1)));
+        const priceDots = Array.from({length:6},(_item,index) => `<span class="v33-price-position-mark${index+1===pricePosition?' is-current':''}" aria-hidden="true"></span>`).join("");
         summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
         rankTooltipHtmlByTf.set(tf.key,compactRankTooltipHtml(tf,r));
         const liveBadge = r.provisional ? '<span class="v33-ma-live-badge" aria-label="Live forming candle">L</span>' : "";
-        return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" data-provisional="${r.provisional?'true':'false'}" aria-label="${tf.key} MA Stack${r.provisional?' (live, forming candle)':''}"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}${liveBadge}</span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
+        return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" data-provisional="${r.provisional?'true':'false'}" aria-label="${tf.key} MA Stack${r.provisional?' (live, forming candle)':''}; price position ${pricePosition} of 6"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}${liveBadge}</span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span><span class="v33-price-position" data-position="${pricePosition}" aria-hidden="true">${priceDots}</span></div>`;
       }).join("");
       if(strip.__v33LastHtml !== html){
         strip.innerHTML = html;

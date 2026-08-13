@@ -174,6 +174,40 @@ function createCoreOnlyRuntime(periods) {
   assert.equal(typeof isolatedCore.emaSeries, "function");
   assert.equal(isolatedCore.emaSeries([1, 2, 3, 4, 5], 3).length, 5);
 
+  const twoSlots = isolatedRuntime.slots.slice(0,2);
+  const eventCtx = length => ({ times:Array.from({length},(_value,index)=>index+1), alignment:80, setup:1, spreadDelta:0.02 });
+  const slowEventSeries = Array(11).fill(100);
+  const failedFastSeries = [99,99,99,99,101,102,99,98,97,96,95];
+  const failedAges = [7,8,9,10,11].map(length => isolatedCore.detectMaPair([failedFastSeries.slice(0,length),slowEventSeries.slice(0,length)],twoSlots,eventCtx(length),11));
+  assert.deepStrictEqual(failedAges.map(event=>event && event.age),[0,1,2,3,4],"failed crossover did not age from its original cross-back candle");
+  assert.deepStrictEqual(failedAges.map(event=>isolatedCore.freshMaPairEventText(event)),[
+    "EMAs 3 / 4 Failed Crossover | current candle",
+    "EMAs 3 / 4 Failed Crossover | 1 candle ago",
+    "EMAs 3 / 4 Failed Crossover | 2 candles ago",
+    "EMAs 3 / 4 Failed Crossover | 3 candles ago",
+    "No fresh event"
+  ]);
+  const newerCrossFast = failedFastSeries.slice(0,8).concat([101]);
+  const newerCross = isolatedCore.detectMaPair([newerCrossFast,slowEventSeries.slice(0,9)],twoSlots,eventCtx(9),11);
+  assert(newerCross && newerCross.type === "crossover" && newerCross.age === 0 && newerCross.dir === 1,"newer crossover did not replace the older failed crossover");
+
+  const bounceFastSeries = [100.2,100.15,100.1,100.05,100.08,100.12,100.16,100.2,100.24,100.28];
+  const bounceAges = [6,7,8,9,10].map(length => isolatedCore.detectMaPair([bounceFastSeries.slice(0,length),slowEventSeries.slice(0,length)],twoSlots,eventCtx(length),10));
+  assert.deepStrictEqual(bounceAges.map(event=>event && event.age),[0,1,2,3,4],"confirmed bounce did not remain anchored to its first confirmation candle");
+  assert.equal(isolatedCore.freshMaPairEventText(bounceAges[4]),"No fresh event","bounce remained fresh beyond its three-candle memory");
+
+  const positionCases = [
+    {price:90,mas:[100,110,120,130,140],expected:1},
+    {price:105,mas:[100,110,120,130,140],expected:2},
+    {price:115,mas:[100,110,120,130,140],expected:3},
+    {price:125,mas:[100,110,120,130,140],expected:4},
+    {price:135,mas:[100,110,120,130,140],expected:5},
+    {price:150,mas:[100,110,120,130,140],expected:6},
+    {price:125,mas:[140,100,130,110,120],expected:4},
+    {price:125,mas:[140,130,120,110,100],expected:4}
+  ];
+  positionCases.forEach(({price,mas,expected}) => assert.equal(isolatedCore.pricePosition(price,mas),expected,`price-position mismatch for ${price} vs ${mas.join("/")}`));
+
   const fullBull = isolatedCore.buildStackRank([105, 104, 103, 102, 101], "up", 1, isolatedRuntime.slots);
   const brokenMiddleBull = isolatedCore.buildStackRank([105, 104, 106, 102, 101], "mixed", 1, isolatedRuntime.slots);
   const brokenSlowAdjacentBull = isolatedCore.buildStackRank([105, 104, 103, 100, 101], "mixed", 1, isolatedRuntime.slots);
@@ -222,11 +256,14 @@ function createCoreOnlyRuntime(periods) {
   const events = api.markerEvents({ key: "15m", interval: "15m" }, runtime.rows);
   assert(Array.isArray(events), "markerEvents did not return an array");
 
-  const tfResults = Object.fromEntries(["1m","3m","5m","15m","30m","1H","4H","1D"].map(key => [key, { ...isolated, provisional:["1m","3m","5m","15m","30m"].includes(key) }]));
+  const tfResults = Object.fromEntries(["1m","3m","5m","15m","30m","1H","4H","1D"].map((key,index) => [key, { ...isolated, pricePosition:index%6+1, provisional:["1m","3m","5m","15m","30m"].includes(key) }]));
   runtime.context.__BT001_MA_STACK_BUILD__.presentation.renderEnhanced(tfResults);
   const stripHtml = runtime.document.getElementById("v33MAStackStrip").innerHTML;
   assert.equal((stripHtml.match(/v33-ma-stack-group/g) || []).length, 8, "strip did not render all eight timeframes");
   assert.equal((stripHtml.match(/v33-ma-live-badge/g) || []).length, 5, "LIVE badge did not render on exactly five timeframes");
+  assert.equal((stripHtml.match(/v33-price-position"/g) || []).length, 8, "price-position track did not render for all eight timeframes");
+  assert.equal((stripHtml.match(/v33-price-position-mark is-current/g) || []).length, 8, "each timeframe did not render exactly one current-price dot");
+  assert(stripHtml.includes('data-position="1"') && stripHtml.includes('data-position="6"'),"price-position endpoint rendering missing");
   ["1m","3m","5m","15m","30m"].forEach(tf => assert(stripHtml.includes(`data-tf="${tf}"`) && stripHtml.includes(`data-interval="${tf}"`), `${tf} DOM anchor missing`));
   assert(cssSource.includes(".v33-ma-stack-box .v33-ma-live-badge"), "LIVE badge styling missing");
 
@@ -264,7 +301,7 @@ function createCoreOnlyRuntime(periods) {
   assert(runtimeSource.includes("root.runtime ="), "runtime build slice missing");
   assert(moduleSource.includes("root.presentation ="), "presentation build slice missing");
 
-  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
+  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, eventAging: true, bounceAging: true, newerEventHandoff: true, pricePositions: 6, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
