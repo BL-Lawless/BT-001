@@ -764,6 +764,9 @@ let tradeLoading = false;
 
 let visibleCount = DEF_VISIBLE;
 let rightOffset = 0;
+let zoomPivotExactRightOffset = null;
+let zoomPivotRoundedRightOffset = null;
+let zoomPivotVisibleCount = null;
 
 let mouse = null;
 let dragChart = false;
@@ -2949,12 +2952,41 @@ function getExchangeNowMs(){
     : Date.now() + (Number.isFinite(exchangeTimeOffsetMs) ? exchangeTimeOffsetMs : 0);
 }
 
+function nextCandleOpenTimeMs(tf,openMs){
+  const value=Number(openMs);
+  if(!Number.isFinite(value))return NaN;
+  if(tf==="1M"){
+    const date=new Date(value);
+    return Date.UTC(date.getUTCFullYear(),date.getUTCMonth()+1,1);
+  }
+  return value+ivSec(tf)*1000;
+}
+
+function previousCandleOpenTimeMs(tf,openMs){
+  const value=Number(openMs);
+  if(!Number.isFinite(value))return NaN;
+  if(tf==="1M"){
+    const date=new Date(value);
+    return Date.UTC(date.getUTCFullYear(),date.getUTCMonth()-1,1);
+  }
+  return value-ivSec(tf)*1000;
+}
+
+function missingCandleCount(tf,previousOpenMs,nextOpenMs){
+  if(tf==="1M"){
+    const previous=new Date(Number(previousOpenMs)),next=new Date(Number(nextOpenMs));
+    if(!Number.isFinite(previous.getTime())||!Number.isFinite(next.getTime()))return 0;
+    return Math.max(0,(next.getUTCFullYear()-previous.getUTCFullYear())*12+next.getUTCMonth()-previous.getUTCMonth()-1);
+  }
+  return Math.max(0,Math.floor((Number(nextOpenMs)-Number(previousOpenMs))/(ivSec(tf)*1000))-1);
+}
+
 function candleCloseBoundaryMs(tf,row){
   if(row && Number.isFinite(Number(row.closeTime)) && Number(row.closeTime) > 0){
     return Number(row.closeTime) + 1;
   }
   if(!row || !Number.isFinite(Number(row.time))) return NaN;
-  return Number(row.time) * 1000 + ivSec(tf) * 1000;
+  return nextCandleOpenTimeMs(tf,Number(row.time)*1000);
 }
 
 function EMA(src,p){
@@ -3363,6 +3395,7 @@ window.BT001_CHART_VIEW_STATE = Object.freeze({
 });
 
 function resetView(options={}){
+  resetZoomPivotContinuity();
   visibleCount = Math.min(DEF_VISIBLE, Math.max(1, candles.length || DEF_VISIBLE));
   rightOffset = 0;
   manualY = false;
@@ -3699,6 +3732,7 @@ const marketDataHub = (() => {
   const state = {
     generation:0,
     reconnectTimer:null,
+    reconnectCancelableByTick:true,
     statusTimer:null,
     restInFlight:false,
     connectStartedAt:0,
@@ -3712,6 +3746,7 @@ const marketDataHub = (() => {
     formingKlineByTf:{},
     gapRepairInFlightByTf:{},
     lastGapRepairMsByTf:{},
+    gapRepairAttemptsByTf:{},
     closedRevisionByTf:{},
     formingRevisionByTf:{},
     maSnapshotCache:new Map(),
@@ -3729,6 +3764,7 @@ const marketDataHub = (() => {
   // Diagnostics must reference the live repair maps, not look-alike objects that never mutate.
   diag.gapRepairInFlightByTf = state.gapRepairInFlightByTf;
   diag.lastGapRepairMsByTf = state.lastGapRepairMsByTf;
+  diag.gapRepairAttemptsByTf = state.gapRepairAttemptsByTf;
   diag.closedRevisionByTf = state.closedRevisionByTf;
   diag.formingRevisionByTf = state.formingRevisionByTf;
   Object.defineProperty(diag,"visibilityRecovery",{enumerable:true,get:()=>publicMarketVisibilityRecoveryGate.diagnostics()});
@@ -3750,9 +3786,15 @@ const marketDataHub = (() => {
       state.formingKlineByTf = {};
       state.closedRevisionByTf = {};
       state.formingRevisionByTf = {};
+      state.gapRepairInFlightByTf = {};
+      state.lastGapRepairMsByTf = {};
+      state.gapRepairAttemptsByTf = {};
       state.maSnapshotCache.clear();
       diag.closedRevisionByTf = state.closedRevisionByTf;
       diag.formingRevisionByTf = state.formingRevisionByTf;
+      diag.gapRepairInFlightByTf = state.gapRepairInFlightByTf;
+      diag.lastGapRepairMsByTf = state.lastGapRepairMsByTf;
+      diag.gapRepairAttemptsByTf = state.gapRepairAttemptsByTf;
       diag.lastKlineTickByTf = {};
       diag.lastChartActivityByTf = {};
       diag.lastChartActivitySourceByTf = {};
@@ -3987,7 +4029,7 @@ const marketDataHub = (() => {
   }
   function currentStreams(){
     const base = cfg().symbol.toLowerCase();
-    const order=["1m","3m","5m","15m","30m","1h","4h","1d"];
+    const order=["1m","3m","5m","15m","30m","1h","4h","1d","1w","1M"];
     const streams = [...requiredKlineTimeframes()].sort((a,b)=>order.indexOf(a)-order.indexOf(b)).map(tf=>base+"@kline_"+tf);
     streams.push(base + "@aggTrade");
     streams.push(base + "@markPrice@1s");
@@ -4036,7 +4078,7 @@ const marketDataHub = (() => {
       ...row,
       time:Math.floor(alignedMs / 1000),
       openTime:alignedMs,
-      closeTime:Number.isFinite(Number(row.closeTime)) ? Number(row.closeTime) : alignedMs + step - 1,
+      closeTime:Number.isFinite(Number(row.closeTime)) ? Number(row.closeTime) : nextCandleOpenTimeMs(tf,alignedMs) - 1,
       open,
       high,
       low,
@@ -4157,7 +4199,7 @@ const marketDataHub = (() => {
       warnIntegrity(`forming-conflict:${tf}:${forming.time}`,"forming candle time conflicts with latest closed candle",{tf,forming,lastClosed});
       return closed;
     }
-    if(lastClosed && Number(forming.time) !== Number(lastClosed.time) + ivSec(tf)){
+    if(lastClosed && Number(forming.time)*1000 !== nextCandleOpenTimeMs(tf,Number(lastClosed.time)*1000)){
       warnIntegrity(`forming-gap:${tf}:${forming.time}`,"forming candle would create a chart gap and was ignored",{tf,forming,lastClosed});
       return closed;
     }
@@ -4208,14 +4250,15 @@ const marketDataHub = (() => {
     const raw = String(tf || "").trim();
     if(!raw) return "";
     const map = {
-      "1m":"1m","1M":"1m",
+      "1m":"1m","1M":"1M",
       "3m":"3m","3M":"3m",
       "5m":"5m","5M":"5m",
       "15m":"15m","15M":"15m",
       "30m":"30m","30M":"30m",
       "1h":"1h","1H":"1h",
       "4h":"4h","4H":"4h",
-      "1d":"1d","1D":"1d"
+      "1d":"1d","1D":"1d",
+      "1w":"1w","1W":"1w"
     };
     return map[raw] || map[raw.toLowerCase()] || "";
   }
@@ -4463,7 +4506,7 @@ const marketDataHub = (() => {
     }
   }
   function detectClosedBoundaryIssues(tf,rows,options={}){
-    const arr=Array.isArray(rows)?rows:[],intervalMsExpected=Math.max(1000,(Number(options.stepSec)||ivSec(tf))*1000);
+    const arr=Array.isArray(rows)?rows:[],stepOverride=Number(options.stepSec),intervalMsExpected=Math.max(1000,(stepOverride||ivSec(tf))*1000);
     const toleranceMs=Math.max(0,Number(options.toleranceMs)||1);
     const issues=[];
     for(let index=1;index<arr.length;index++){
@@ -4472,9 +4515,9 @@ const marketDataHub = (() => {
       const nextOpenRaw=Number(current&&(current.openTime??Number(current.time)*1000));
       const previousOpenMs=Number.isFinite(previousOpenRaw)?previousOpenRaw:NaN,nextOpenMs=Number.isFinite(nextOpenRaw)?nextOpenRaw:NaN;
       const suppliedCloseMs=Number(previous&&previous.closeTime);
-      const expectedPreviousCloseMs=previousOpenMs+intervalMsExpected-1;
+      const expectedNextOpenMs=stepOverride?previousOpenMs+intervalMsExpected:nextCandleOpenTimeMs(tf,previousOpenMs);
+      const expectedPreviousCloseMs=expectedNextOpenMs-1;
       const previousCloseMs=Number.isFinite(suppliedCloseMs)?suppliedCloseMs:expectedPreviousCloseMs;
-      const expectedNextOpenMs=expectedPreviousCloseMs+1;
       const actualDifferenceMs=nextOpenMs-expectedNextOpenMs;
       const closeDifferenceMs=previousCloseMs-expectedPreviousCloseMs;
       if(Number.isFinite(previousOpenMs)&&Number.isFinite(nextOpenMs)&&Math.abs(actualDifferenceMs)<=toleranceMs&&Math.abs(closeDifferenceMs)<=toleranceMs)continue;
@@ -4483,7 +4526,7 @@ const marketDataHub = (() => {
         previousOpenMs,previousCloseMs,expectedPreviousCloseMs,expectedNextOpenMs,nextOpenMs,
         actualDifferenceMs,closeDifferenceMs,
         fromTime:Number(previous&&previous.time),toTime:Number(current&&current.time),
-        missingCount:Number.isFinite(actualDifferenceMs)&&actualDifferenceMs>toleranceMs?Math.max(1,Math.round(actualDifferenceMs/intervalMsExpected)):0
+        missingCount:Number.isFinite(actualDifferenceMs)&&actualDifferenceMs>toleranceMs?missingCandleCount(tf,previousOpenMs,nextOpenMs):0
       });
     }
     return issues;
@@ -4491,7 +4534,6 @@ const marketDataHub = (() => {
   function validateClosedBuffer(tf,rows,{repair=false,reason="validate"}={}){
     const arr = Array.isArray(rows) ? rows : getClosedBuffer(tf);
     if(!Array.isArray(arr) || arr.length < 2) return [];
-    const stepSec = ivSec(tf);
     const gaps = [];
     let unsorted = false;
     const seen = new Set();
@@ -4507,13 +4549,13 @@ const marketDataHub = (() => {
         const prev = Number(arr[i-1] && arr[i-1].time);
         if(Number.isFinite(prev)){
           if(t < prev) unsorted = true;
-          const delta = t - prev;
-          if(delta > stepSec){
+          const expectedNextMs=nextCandleOpenTimeMs(tf,prev*1000);
+          if(t*1000 > expectedNextMs){
             const gap = {
               tf,
-              fromTime:prev + stepSec,
-              toTime:t - stepSec,
-              missingCount:Math.floor(delta / stepSec) - 1,
+              fromTime:expectedNextMs/1000,
+              toTime:previousCandleOpenTimeMs(tf,t*1000)/1000,
+              missingCount:missingCandleCount(tf,prev*1000,t*1000),
               reason
             };
             gaps.push(gap);
@@ -4563,12 +4605,13 @@ const marketDataHub = (() => {
       warnIntegrity(`forming-closed-conflict:${tf}:${normalized.time}`,"forming candle time conflicts with latest closed candle",{tf,forming:normalized,lastClosed});
       return null;
     }
-    if(lastClosed && Number(normalized.time) > Number(lastClosed.time) + ivSec(tf)){
+    if(lastClosed && Number(normalized.time)*1000 > nextCandleOpenTimeMs(tf,Number(lastClosed.time)*1000)){
+      const expectedNextMs=nextCandleOpenTimeMs(tf,Number(lastClosed.time)*1000);
       const gap = {
         tf,
-        fromTime:Number(lastClosed.time) + ivSec(tf),
-        toTime:Number(normalized.time) - ivSec(tf),
-        missingCount:Math.floor((Number(normalized.time) - Number(lastClosed.time)) / ivSec(tf)) - 1,
+        fromTime:expectedNextMs/1000,
+        toTime:previousCandleOpenTimeMs(tf,Number(normalized.time)*1000)/1000,
+        missingCount:missingCandleCount(tf,Number(lastClosed.time)*1000,Number(normalized.time)*1000),
         reason:"forming-after-gap"
       };
       warnIntegrity(`missing-before-forming:${tf}:${gap.fromTime}:${gap.toTime}`,"missing interval detected",gap,12000);
@@ -4708,6 +4751,9 @@ const marketDataHub = (() => {
   async function repairMissingClosedCandles(tf,gaps,reason="gap",options={}){
     ensureBufferSymbol();
     if(!tf || !Array.isArray(gaps) || !gaps.length) return {fetched:0,merged:0};
+    state.gapRepairInFlightByTf ||= {};
+    state.lastGapRepairMsByTf ||= {};
+    state.gapRepairAttemptsByTf ||= {};
     const guard = options && options.guard;
     const suppressRedraw = !!(options && options.suppressRedraw);
     if(state.gapRepairInFlightByTf[tf]) return state.gapRepairInFlightByTf[tf];
@@ -4732,7 +4778,7 @@ const marketDataHub = (() => {
         if(!isGuardCurrent(guard)){stale=true;break;}
         const boundaryRepair=gap&&gap.kind==="timestamp-boundary";
         const count = boundaryRepair?2:Math.max(1,Math.min(KLINE_LIMIT,Number(gap.missingCount) || 1));
-        const endMs = (Number(gap.toTime) + ivSec(tf)) * 1000 - 1;
+        const endMs = nextCandleOpenTimeMs(tf,Number(gap.toTime)*1000) - 1;
         if(!Number.isFinite(endMs) || endMs <= 0) continue;
         const rows = await klinesForInterval(tf,endMs,Math.min(KLINE_LIMIT,count + 2),cfg().symbol);
         if(!isGuardCurrent(guard)){stale=true;break;}
@@ -4782,7 +4828,8 @@ const marketDataHub = (() => {
     })().catch(error=>{
       const attempt=state.gapRepairAttemptsByTf[tf];
       if(attempt&&attempt.generation===recoveryGeneration&&attempt.inputSignature===inputSignature)attempt.nextRetryAt=now()+retryDelay;
-      throw error;
+      warnIntegrity(`gap-repair-error:${tf}:${recoveryGeneration}`,"REST gap repair failed",{tf,reason,generation:recoveryGeneration,error:error&&error.message?error.message:String(error)},retryDelay);
+      return {fetched:0,merged:0,corrected:0,changed:false,resolved:false,unresolvedGaps:gaps,reason,started,stale:false,generation:recoveryGeneration,retryCount,error:error&&error.message?error.message:String(error)};
     }).finally(() => {
       state.gapRepairInFlightByTf[tf] = null;
     });
@@ -4898,11 +4945,11 @@ const marketDataHub = (() => {
     }
 
     const lastClosed = getClosedBuffer(tf).slice(-1)[0] || null;
-    if(liveForming && lastClosed && Number(liveForming.time) === Number(lastClosed.time) + ivSec(tf)){
+    if(liveForming && lastClosed && Number(liveForming.time)*1000 === nextCandleOpenTimeMs(tf,Number(lastClosed.time)*1000)){
       setFormingCandle(tf,liveForming,{replace:true,source:liveForming.source || "ws"});
     }
     const forming = getFormingCandle(tf);
-    if(forming && lastClosed && Number(forming.time) !== Number(lastClosed.time) + ivSec(tf)){
+    if(forming && lastClosed && Number(forming.time)*1000 !== nextCandleOpenTimeMs(tf,Number(lastClosed.time)*1000)){
       delete state.formingKlineByTf[tf];
     }
     return {
@@ -4983,9 +5030,10 @@ const marketDataHub = (() => {
     return state.maStackSeedPromise;
   }
   function markWsTick(source){
-    if(state.reconnectTimer){
+    if(state.reconnectTimer && state.reconnectCancelableByTick){
       clearTimeout(state.reconnectTimer);
       state.reconnectTimer = null;
+      state.reconnectCancelableByTick = true;
     }
     lastWs = now();
     diag.lastWsTickTime = lastWs;
@@ -5041,14 +5089,19 @@ const marketDataHub = (() => {
     publishMarketUpdate({type:"kline",tf:d.k.i,closed:d.k.x===true,row:{...row},closedRevision:revisions.closedRevision,formingRevision:revisions.formingRevision,exchangeTime:Number((d&&d.E)||d.k.t||now())});
     refreshConnectionStatus();
   }
-  function scheduleReconnect(reason,delay=1500){
+  function scheduleReconnect(reason,delay=1500,{cancelOnTick=true}={}){
     if(!state.desiredLive || loading) return;
-    if(state.reconnectTimer) return;
+    if(state.reconnectTimer){
+      if(cancelOnTick===false) state.reconnectCancelableByTick = false;
+      return;
+    }
     diag.lastError = reason || null;
     diag.reconnectCount += 1;
     paintStatus("RECONNECTING",reason || "socket reconnect");
+    state.reconnectCancelableByTick = cancelOnTick!==false;
     state.reconnectTimer = setTimeout(() => {
       state.reconnectTimer = null;
+      state.reconnectCancelableByTick = true;
       connect({force:true,reason});
     },delay);
   }
@@ -5153,6 +5206,7 @@ const marketDataHub = (() => {
     if(state.reconnectTimer){
       clearTimeout(state.reconnectTimer);
       state.reconnectTimer = null;
+      state.reconnectCancelableByTick = true;
     }
     closeRealtimeSocket();
     state.connectStartedAt = now();
@@ -5227,6 +5281,7 @@ const marketDataHub = (() => {
     if(state.reconnectTimer){
       clearTimeout(state.reconnectTimer);
       state.reconnectTimer = null;
+      state.reconnectCancelableByTick = true;
     }
     closeRealtimeSocket();
     refreshConnectionStatus();
@@ -5237,7 +5292,7 @@ const marketDataHub = (() => {
     const nextStreams = currentStreams();
     const changed = diag.streams.join("|") !== nextStreams.join("|");
     if(forceReconnect || changed){
-      scheduleReconnect("stream requirements changed",100);
+      scheduleReconnect("stream requirements changed",100,{cancelOnTick:false});
     }
     if(state.ssscVisible){
       ensureSsscBuffers(false).catch(() => {});
@@ -5372,7 +5427,6 @@ const marketDataHub = (() => {
 
   window.BINANCE_REALTIME_DIAG = diag;
   window.binanceRealtimeDiagnostics = () => ({...diag});
-
   return {
     diag,
     state,
@@ -5563,7 +5617,9 @@ async function loadChart(opt={}){
     noMoreOlder=false;loadingOlder=false;olderFetchArmed=false;olderFetchTargetVisible=0;
     if(!opt.focus){manualY=false;yMin=null;yMax=null;}
     indicators();
-    if(opt.focus)applyFocus(opt.focus);else if(!opt.preserveView)resetView({reason:"timeframe-retained-reset"});else clampView();
+    if(opt.focus)applyFocus(opt.focus);
+    else if(!opt.preserveView)resetView({reason:"timeframe-retained-reset"});
+    else clampView();
     if(candles.length)metrics(candles[candles.length-1]);
     draw();
     BT001_PERFORMANCE_DIAGNOSTICS.timeframeFirstPaintMs=refocusDiagNow()-clickedAt;
@@ -5591,7 +5647,7 @@ async function loadChart(opt={}){
     ? Math.max(Array.isArray(candles) ? candles.length : 0, keepVisible || 0)
     : 0;
   const tradesOff = !window.BT001_DISPLAY_CONTROLS.snapshot().visibility.trades;
-  const targetRight = preserveView && tradesOff ? Math.min(0, Number(keepRight) || 0) : keepRight;
+  const targetRight = keepRight;
 
   loading = true;
 
@@ -7731,8 +7787,9 @@ function draw(){
   const maxVol = Math.max(...vis.map(c => c.volume),1);
   const slot = chartW / total;
   const candleW = Math.max(2,Math.min(13,slot*.68));
+  const zoomPhase = zoomPivotRenderPhase();
 
-  const mapX = i => left + i*slot + slot/2;
+  const mapX = i => left + (i+zoomPhase)*slot + slot/2;
   const mapY = p => top + ((maxP-p)/(maxP-minP))*priceH;
   const mapV = v => volTop + volH - (v/maxVol)*volH;
 
@@ -7907,7 +7964,7 @@ function draw(){
       drawHoverPriceOnRightAxis(cursorPrice,mouse.y,{chartRight:w-right,axisRight:w,top,priceH});
     }
 
-    const idx = Math.floor((mouse.x-left)/slot);
+    const idx = Math.floor((mouse.x-left)/slot-zoomPhase);
     if(idx >= 0 && idx < vis.length) candleTip(vis[idx]);
 
     drawHoverTooltip();
@@ -7920,6 +7977,7 @@ function draw(){
 ========================================================= */
 
 function pan(delta){
+  resetZoomPivotContinuity();
   olderFetchArmed = true;
   olderFetchTargetVisible = 0;
   rightOffset += delta;
@@ -7928,25 +7986,48 @@ function pan(delta){
   draw();
 }
 
+function resetZoomPivotContinuity(){
+  zoomPivotExactRightOffset = null;
+  zoomPivotRoundedRightOffset = null;
+  zoomPivotVisibleCount = null;
+}
+
+function zoomPivotRenderPhase(){
+  const right=Number(rightOffset),visible=Number(visibleCount);
+  return Number.isFinite(zoomPivotExactRightOffset)
+    && zoomPivotRoundedRightOffset===right
+    && zoomPivotVisibleCount===visible
+      ? zoomPivotExactRightOffset-right
+      : 0;
+}
+
+function solveZoomPivotRightOffset(currentRight,currentVisible,nextVisible,cursorRatio){
+  const ratio=clamp(Number(cursorRatio)||0,0,1);
+  return Number(currentRight)+(1-ratio)*(Number(currentVisible)-Number(nextVisible));
+}
+
+function zoomPivotRightOffset(currentRight,currentVisible,nextVisible,cursorRatio,candleCount){
+  const right=Number(currentRight),visible=Number(currentVisible),next=Number(nextVisible),count=Number(candleCount);
+  const continuing=Number.isFinite(zoomPivotExactRightOffset)
+    && zoomPivotRoundedRightOffset===right
+    && zoomPivotVisibleCount===visible;
+  const exactCurrent=continuing?zoomPivotExactRightOffset:right;
+  const exactNext=solveZoomPivotRightOffset(exactCurrent,visible,next,cursorRatio);
+  const roundedNext=Math.round(exactNext);
+  const boundedNext=clamp(roundedNext,-Math.max(0,Math.floor(next*MAX_FUTURE_RATIO)),Math.max(0,count-next));
+  zoomPivotExactRightOffset=boundedNext===roundedNext?exactNext:boundedNext;
+  zoomPivotRoundedRightOffset=boundedNext;
+  zoomPivotVisibleCount=next;
+  return boundedNext;
+}
+
 function zoomAt(mx,dy){
   if(candles.length < 2) return;
   olderFetchArmed = true;
 
   const left = LEFT_PAD;
   const chartW = canvas.clientWidth - left - RIGHT_AXIS;
-  const r = range();
-
-  const oldStart = r.start;
-  const oldReal = r.end - r.start;
-  const oldTotal = Math.max(1, oldReal + r.futureBars);
-  const slot = chartW / oldTotal;
-
-  let idxView = Math.floor((mx-left)/slot);
-  idxView = clamp(idxView,0,oldTotal-1);
-
-  const anchor = Math.min(idxView,Math.max(0,oldReal-1));
-  const global = oldStart + anchor;
-  const ratio = idxView / oldTotal;
+  const ratio = clamp((mx-left)/chartW,0,1);
   const factor = dy < 0 ? .82 : 1.22;
   const rawVisible = Math.round(visibleCount * factor);
   let nc = rawVisible;
@@ -7955,18 +8036,15 @@ function zoomAt(mx,dy){
     ? candles.length
     : clamp(nc,MIN_VISIBLE,Math.max(MIN_VISIBLE,candles.length));
 
-  const newEnd = Math.round(global + (1-ratio)*nc);
-
   if(dy > 0 && rawVisible > candles.length){
     olderFetchTargetVisible = Math.max(olderFetchTargetVisible || 0, rawVisible);
   }else if(rawVisible <= candles.length){
     olderFetchTargetVisible = 0;
   }
 
+  rightOffset = zoomPivotRightOffset(rightOffset,visibleCount,nc,ratio,candles.length);
   visibleCount = nc;
-  rightOffset = candles.length - newEnd;
 
-  clampView();
   markChartViewAction("horizontal-zoom");
   draw();
 }
@@ -8011,6 +8089,7 @@ canvas.addEventListener("mousedown",e => {
 
     canvas.style.cursor = "ns-resize";
   }else{
+    resetZoomPivotContinuity();
     dragChart = true;
     dragAxis = false;
     canvas.style.cursor = "grabbing";
@@ -8145,6 +8224,8 @@ function handleMarketChange(){
 }
 
 function handleIntervalChange(){
+  resetZoomPivotContinuity();
+  marketDataHub.rebuildRequirements(false);
   loadChart({preserveView:true});
 }
 
@@ -12395,7 +12476,8 @@ startTradeAuto();
     const maxVolScaled = Math.max(1,maxVol / 0.88);
     const slot = chartW / total;
     const candleW = Math.max(2,Math.min(13,slot*.68));
-    const mapX = i => left + i*slot + slot/2;
+    const zoomPhase = zoomPivotRenderPhase();
+    const mapX = i => left + (i+zoomPhase)*slot + slot/2;
     const mapY = p => top + ((maxP-p)/(maxP-minP))*priceH;
     const mapV = v => volTop + volH - (v/maxVolScaled)*volH;
     const clip = {left,top,width:chartW,height:priceH};
@@ -12546,7 +12628,7 @@ startTradeAuto();
           ctx.restore();
         }
       }
-      const idx = Math.floor((mouse.x-left)/slot);
+      const idx = Math.floor((mouse.x-left)/slot-zoomPhase);
       if(idx >= 0 && idx < vis.length) candleTip(vis[idx]);
       drawHoverTooltip();
     }
@@ -18672,8 +18754,13 @@ startTradeAuto();
   }
   function timeAtX26(x,st){
     if(!st || !st.vis.length) return null;
-    const first = Number(st.vis[0].time);
-    return first + ((x - st.left - st.slot/2) / st.slot) * st.sec;
+    const position=(x-st.left-st.slot/2)/st.slot;
+    if(position<=0)return Number(st.vis[0].time)+position*st.sec;
+    const lastIndex=st.vis.length-1;
+    if(position>=lastIndex)return Number(st.vis[lastIndex].time)+(position-lastIndex)*st.sec;
+    const index=Math.floor(position),fraction=position-index;
+    const start=Number(st.vis[index].time),end=Number(st.vis[index+1].time);
+    return start+(end-start)*fraction;
   }
   function xForTime26(t,st){
     if(!st || !st.vis.length) return null;
@@ -18720,36 +18807,25 @@ startTradeAuto();
   if(typeof zoomAt === "function" && !window.__v13Patch26ZoomWrapped){
     window.__v13Patch26ZoomWrapped = true;
     zoomAt = function(mx,dy){
-      if(!Array.isArray(candles) || !candles.length || typeof range !== "function") return;
-      const r = range();
-      const vis = candles.slice(r.start,r.end);
-      const oldReal = vis.length;
-      const oldTotal = Math.max(2,oldReal + (Number(r.futureBars) || 0));
+      if(!Array.isArray(candles) || !candles.length) return;
       const left = typeof LEFT_PAD !== "undefined" ? LEFT_PAD : 58;
       const right = typeof RIGHT_AXIS !== "undefined" ? RIGHT_AXIS : 86;
       const chartW = canvas.clientWidth - left - right;
-      const slot = chartW / oldTotal;
-      let idxView = Math.floor((mx-left)/slot);
-      idxView = clamp26(idxView,0,oldTotal-1);
-      const anchor = Math.min(idxView,Math.max(0,oldReal-1));
-      const global = r.start + anchor;
-      const ratio = idxView / oldTotal;
+      const ratio = clamp26((mx-left)/chartW,0,1);
       const mag = clamp26(Math.abs(Number(dy) || 0) / 100, 0.12, 3.0);
       const factor = Math.exp((dy < 0 ? -1 : 1) * 0.20 * mag);
       const rawVisible = Math.round(visibleCount * factor);
       let nc = rawVisible;
       const minVis = typeof MIN_VISIBLE !== "undefined" ? MIN_VISIBLE : 40;
       nc = candles.length < minVis ? candles.length : clamp26(nc,minVis,Math.max(minVis,candles.length));
-      const newEnd = Math.round(global + (1-ratio)*nc);
       olderFetchArmed = true;
       if(dy > 0 && rawVisible > candles.length){
         olderFetchTargetVisible = Math.max(olderFetchTargetVisible || 0, rawVisible);
       }else if(rawVisible <= candles.length){
         olderFetchTargetVisible = 0;
       }
+      rightOffset = zoomPivotRightOffset(rightOffset,visibleCount,nc,ratio,candles.length);
       visibleCount = nc;
-      rightOffset = candles.length - newEnd;
-      if(typeof clampView === "function") clampView();
       if(typeof draw === "function") draw();
     };
   }
@@ -20141,7 +20217,8 @@ If there is NO open position, use this Section 2 instead:
       const chartW = w - left - right;
       const total = Math.max(2,vis.length + (r.futureBars || 0));
       const slot = chartW / total;
-      const mapX = i => left + i*slot + slot/2;
+      const zoomPhase = zoomPivotRenderPhase();
+      const mapX = i => left + (i+zoomPhase)*slot + slot/2;
       const mapY = p => top + ((lastYMax-p)/(lastYMax-lastYMin))*priceH;
       const evs = events();
       ctx.save();

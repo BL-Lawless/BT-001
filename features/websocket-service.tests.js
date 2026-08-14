@@ -46,7 +46,7 @@ for(const status of ["WS LIVE","WS WAITING","RECONNECTING","WS STALE"]){
 }
 assert.deepEqual(connVisual("REST FALLBACK"),{text:"R",bg:"#0ecb81",glow:"rgba(14,203,129,.45)"});
 assert.deepEqual(connVisual("OFFLINE / ERROR"),{text:"X",bg:"#f6465d",glow:"rgba(246,70,93,.42)"});
-assert(main.includes('scheduleReconnect("stream requirements changed",100)'),"public stream requirement changes must be debounced");
+assert(main.includes('scheduleReconnect("stream requirements changed",100,{cancelOnTick:false})'),"public stream requirement changes must be debounced and must survive traffic from the old subscription set");
 assert(main.includes("connect({force:true,reason})"),"public stale/error recovery must replace a half-dead socket instead of no-oping while it still reports OPEN");
 assert(main.includes('scheduleReconnect("stale WebSocket",1000)')&&main.includes("diag.hiddenMessageCount += 1"),"public ingestion must watchdog stale sockets without using visibility as its primary trigger and retain evidence of hidden-tab traffic");
 const statusLoop=main.slice(main.indexOf("function runStatusLoop()"),main.indexOf("function startStatusLoop()"));
