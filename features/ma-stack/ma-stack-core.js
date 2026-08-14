@@ -294,7 +294,7 @@
       return best;
     }
     function unavailable(reason,provisional=false){
-      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,pricePosition:1,adx:null,adxPrevious:null,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
+      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,adx:null,adxPrevious:null,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows,debugCtx,snapshot){
       const provisional = !!(debugCtx && debugCtx.includeForming);
@@ -464,16 +464,12 @@
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
       rank.state = state;
       rank.summaryState = phase;
-      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,pricePosition:pricePosition(latest,vals),adx:volatilitySnapshot.adx,adxPrevious:volatilitySnapshot.adxShadow,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
+      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,adx:volatilitySnapshot.adx,adxPrevious:volatilitySnapshot.adxShadow,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
     }
     function stackComparison(vals){
       const base = Math.max(Math.abs(Number(vals && vals[3])),Math.abs(Number(vals && vals[4])),1);
       const tol = base * 0.0001;
       return {tol,cmp:(a,b) => (a > b + tol ? 1 : a < b - tol ? -1 : 0)};
-    }
-    function pricePosition(price,maValues){
-      if(!Number.isFinite(Number(price)) || !Array.isArray(maValues) || maValues.length !== 5 || maValues.some(value=>!Number.isFinite(Number(value)))) return 1;
-      return 1 + maValues.filter(value => Number(price) > Number(value)).length;
     }
     function buildStackRank(vals,state,setup,slots,debugCtx){
       const safeSlots = Array.isArray(slots) && slots.length === 5
@@ -610,27 +606,27 @@
         ledStates.MA4 = true;
         ledStates.MA5 = true;
         slowMatch = 2;
-        if(fastPairState === "bullish"){
-          ledStates.MA1 = true;
-          ledStates.MA2 = true;
-          fastMatch = 2;
-        }
+        if(fastPairState === "bullish") fastMatch = 2;
         if(hingeStatus === "supports_bullish"){
           ledStates.MA3 = true;
           hingeMatch = 1;
+          if(c23 > 0){
+            ledStates.MA2 = true;
+            if(c12 > 0) ledStates.MA1 = true;
+          }
         }
       }else if(selectedRegime === "bearish"){
         ledStates.MA4 = true;
         ledStates.MA5 = true;
         slowMatch = 2;
-        if(fastPairState === "bearish"){
-          ledStates.MA1 = true;
-          ledStates.MA2 = true;
-          fastMatch = 2;
-        }
+        if(fastPairState === "bearish") fastMatch = 2;
         if(hingeStatus === "supports_bearish"){
           ledStates.MA3 = true;
           hingeMatch = 1;
+          if(c23 < 0){
+            ledStates.MA2 = true;
+            if(c12 < 0) ledStates.MA1 = true;
+          }
         }
       }
 
@@ -852,5 +848,5 @@
       }
       return out;
     }
-  root.core = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,pairEventScore,selectHigherPriorityPairEvent,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,pricePosition,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
+  root.core = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,pairEventScore,selectHigherPriorityPairEvent,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
 })();

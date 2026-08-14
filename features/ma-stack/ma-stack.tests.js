@@ -410,28 +410,33 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   const release = isolatedCore.detectMaPair([releaseDiff.map(gap=>1000+gap),Array(8).fill(1000)],fastSlots,{...eventCtx(8),atrSeries:Array(8).fill(120)},8);
   assert(release && release.type==="compression release","ATR-relative compression release origin/destination was not detected");
 
-  const positionCases = [
-    {price:90,mas:[100,110,120,130,140],expected:1},
-    {price:105,mas:[100,110,120,130,140],expected:2},
-    {price:115,mas:[100,110,120,130,140],expected:3},
-    {price:125,mas:[100,110,120,130,140],expected:4},
-    {price:135,mas:[100,110,120,130,140],expected:5},
-    {price:150,mas:[100,110,120,130,140],expected:6},
-    {price:125,mas:[140,100,130,110,120],expected:4},
-    {price:125,mas:[140,130,120,110,100],expected:4}
-  ];
-  positionCases.forEach(({price,mas,expected}) => assert.equal(isolatedCore.pricePosition(price,mas),expected,`price-position mismatch for ${price} vs ${mas.join("/")}`));
-
   const fullBull = isolatedCore.buildStackRank([105, 104, 103, 102, 101], "up", 1, isolatedRuntime.slots);
   const brokenMiddleBull = isolatedCore.buildStackRank([105, 104, 106, 102, 101], "mixed", 1, isolatedRuntime.slots);
   const brokenSlowAdjacentBull = isolatedCore.buildStackRank([105, 104, 103, 100, 101], "mixed", 1, isolatedRuntime.slots);
   const fullBear = isolatedCore.buildStackRank([101, 102, 103, 104, 105], "down", -1, isolatedRuntime.slots);
   const brokenMiddleBear = isolatedCore.buildStackRank([101, 102, 100, 104, 105], "mixed", -1, isolatedRuntime.slots);
+  const regimeOnlyBull = isolatedCore.buildStackRank([105, 104, 100, 102, 101], "mixed", 1, isolatedRuntime.slots);
+  const brokenFastBull = isolatedCore.buildStackRank([103.5, 104, 103, 102, 101], "mixed", 1, isolatedRuntime.slots);
+  const regimeOnlyBear = isolatedCore.buildStackRank([101, 102, 106, 104, 105], "mixed", -1, isolatedRuntime.slots);
+  const brokenFastBear = isolatedCore.buildStackRank([102.5, 102, 103, 104, 105], "mixed", -1, isolatedRuntime.slots);
+  const ledArray = rank => ["MA1","MA2","MA3","MA4","MA5"].map(slotId => rank.diagnostics.ledStates[slotId]);
   assert.equal(fullBull.summary, "Bullish stack");
+  assert.deepEqual(ledArray(fullBull), [true,true,true,true,true], "clean bullish stack did not light the complete cascade");
   assert.notEqual(brokenMiddleBull.summary, "Bullish stack", "MA2/MA3 contradiction was promoted to a bullish stack");
+  assert.deepEqual(ledArray(brokenMiddleBull), [false,false,true,true,true], "bullish MA2/MA3 break did not stop the cascade after MA3");
+  assert.equal(brokenMiddleBull.fastPairState, "bullish", "broken-middle fixture no longer preserves the raw bullish fast-pair diagnostic");
+  assert.equal(brokenMiddleBull.fastMatch, 2, "raw bullish fast-pair match score was incorrectly repurposed as cascade participation");
   assert.notEqual(brokenSlowAdjacentBull.summary, "Bullish stack", "adjacent MA4/MA5 contradiction was promoted to a bullish stack");
+  assert.deepEqual(ledArray(regimeOnlyBull), [false,false,false,true,true], "bullish MA3 break did not stop every downstream LED");
+  assert.deepEqual(ledArray(brokenFastBull), [false,true,true,true,true], "bullish MA1 break stopped the cascade at the wrong link");
   assert.equal(fullBear.summary, "Bearish stack");
+  assert.deepEqual(ledArray(fullBear), [true,true,true,true,true], "clean bearish stack did not light the complete cascade");
   assert.notEqual(brokenMiddleBear.summary, "Bearish stack", "MA2/MA3 contradiction was promoted to a bearish stack");
+  assert.deepEqual(ledArray(brokenMiddleBear), [false,false,true,true,true], "bearish MA2/MA3 break did not stop the cascade after MA3");
+  assert.equal(brokenMiddleBear.fastPairState, "bearish", "broken-middle fixture no longer preserves the raw bearish fast-pair diagnostic");
+  assert.equal(brokenMiddleBear.fastMatch, 2, "raw bearish fast-pair match score was incorrectly repurposed as cascade participation");
+  assert.deepEqual(ledArray(regimeOnlyBear), [false,false,false,true,true], "bearish MA3 break did not stop every downstream LED");
+  assert.deepEqual(ledArray(brokenFastBear), [false,true,true,true,true], "bearish MA1 break stopped the cascade at the wrong link");
   const withinTolerance = isolatedCore.buildStackRank([105, 104, 103, 102, 101.995], "mixed", 1, isolatedRuntime.slots);
   assert.equal(withinTolerance.diagnostics.debug.bullishComparisons["MA4>MA5"], false, "adjacent MA4/MA5 tolerance was not applied");
 
@@ -470,14 +475,11 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   const events = api.markerEvents({ key: "15m", interval: "15m" }, runtime.rows);
   assert(Array.isArray(events), "markerEvents did not return an array");
 
-  const tfResults = Object.fromEntries(["1m","3m","5m","15m","30m","1H","4H","1D"].map((key,index) => [key, { ...isolated, pricePosition:index%6+1, provisional:["1m","3m","5m","15m","30m"].includes(key) }]));
+  const tfResults = Object.fromEntries(["1m","3m","5m","15m","30m","1H","4H","1D"].map(key => [key, { ...isolated, provisional:["1m","3m","5m","15m","30m"].includes(key) }]));
   runtime.context.__BT001_MA_STACK_BUILD__.presentation.renderEnhanced(tfResults);
   const stripHtml = runtime.document.getElementById("v33MAStackStrip").innerHTML;
   assert.equal((stripHtml.match(/v33-ma-stack-group/g) || []).length, 8, "strip did not render all eight timeframes");
   assert.equal((stripHtml.match(/v33-ma-live-badge/g) || []).length, 5, "LIVE badge did not render on exactly five timeframes");
-  assert.equal((stripHtml.match(/v33-price-position"/g) || []).length, 8, "price-position track did not render for all eight timeframes");
-  assert.equal((stripHtml.match(/v33-price-position-mark is-current/g) || []).length, 8, "each timeframe did not render exactly one current-price dot");
-  assert(stripHtml.includes('data-position="1"') && stripHtml.includes('data-position="6"'),"price-position endpoint rendering missing");
   ["1m","3m","5m","15m","30m"].forEach(tf => assert(stripHtml.includes(`data-tf="${tf}"`) && stripHtml.includes(`data-interval="${tf}"`), `${tf} DOM anchor missing`));
   assert(cssSource.includes(".v33-ma-stack-box .v33-ma-live-badge"), "LIVE badge styling missing");
   const tooltipBelow = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"1m"},{...isolated,adx:24.9,adxPrevious:20});
@@ -521,7 +523,7 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   assert(runtimeSource.includes("root.runtime ="), "runtime build slice missing");
   assert(moduleSource.includes("root.presentation ="), "presentation build slice missing");
 
-  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, volatilityIndependent: true, atrWilder: true, adxWilder: true, adxShadow: 5, atrNormalizedEvents: true, microscopicBounceRejected: true, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, eventAging: true, bounceAging: true, newerEventHandoff: true, pricePositions: 6, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
+  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, volatilityIndependent: true, atrWilder: true, adxWilder: true, adxShadow: 5, atrNormalizedEvents: true, microscopicBounceRejected: true, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, eventAging: true, bounceAging: true, newerEventHandoff: true, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
