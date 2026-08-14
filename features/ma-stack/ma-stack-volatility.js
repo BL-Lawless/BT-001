@@ -1,6 +1,8 @@
 (() => {
   "use strict";
-  const root = window.__BT001_MA_STACK_BUILD__ ||= {};
+  const root = typeof window !== "undefined"
+    ? (window.__BT001_MA_STACK_BUILD__ ||= {})
+    : (globalThis.__BT001_MA_STACK_BUILD__ ||= {});
   const DEFAULT_PERIOD = 14;
   const finite = value => Number.isFinite(Number(value));
   const field = (row,index,name) => Number(Array.isArray(row) ? row[index] : row && row[name]);
@@ -84,5 +86,7 @@
       shadowBars:Math.max(0,Math.round(Number(shadowBars)||0))
     };
   }
-  root.volatility = {DEFAULT_PERIOD,trueRange,trueRangeSeries,wilderAverageSeries,atrSeries,adxSeries,snapshot};
+  const api = {DEFAULT_PERIOD,trueRange,trueRangeSeries,wilderAverageSeries,atrSeries,adxSeries,snapshot};
+  root.volatility = api;
+  if(typeof module!=="undefined"&&module.exports) module.exports=api;
 })();

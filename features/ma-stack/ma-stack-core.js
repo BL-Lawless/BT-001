@@ -1,14 +1,16 @@
 (() => {
   "use strict";
-  const root = window.__BT001_MA_STACK_BUILD__ ||= {};
+  const root = typeof window !== "undefined"
+    ? (window.__BT001_MA_STACK_BUILD__ ||= {})
+    : (globalThis.__BT001_MA_STACK_BUILD__ ||= {});
   root.TFs ||= [
     {key:"1m", interval:"1m"}, {key:"3m", interval:"3m"}, {key:"5m", interval:"5m"}, {key:"15m", interval:"15m"},
     {key:"30m", interval:"30m"}, {key:"1H", interval:"1h"}, {key:"4H", interval:"4h"}, {key:"1D", interval:"1d"}
   ];
   root.LIVE_TFS ||= new Set(["1m","3m","5m","15m","30m"]);
   const TFs = root.TFs;
-  if(!root.volatility) throw new Error("MA Stack volatility foundation is unavailable");
-  const volatility = root.volatility;
+  const volatility = root.volatility || (typeof module!=="undefined"&&module.exports ? require("./ma-stack-volatility.js") : null);
+  if(!volatility) throw new Error("MA Stack volatility foundation is unavailable");
   const GAP_ATR = Object.freeze({nearCross:0.15,compression:0.20,releaseOrigin:0.25,bounce:0.35,releaseDestination:0.40,crossRisk:0.50,bounceExpansion:0.12});
   const SCORE_ATR = Object.freeze({stackSpread:4.0,expansionOffset:0.20,expansionRange:0.60,slopeMove:0.30,acceleration:0.20,tightStack:1.0,releaseOrigin:1.20,releaseDelta:0.15,flattenDelta:-0.10,flatSlope:0.08,preCompression:1.50,priceProximity:0.25});
     function emaSeries(values,p){
@@ -294,7 +296,8 @@
       return best;
     }
     function unavailable(reason,provisional=false){
-      return {state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,adx:null,adxPrevious:null,maPair:"No fresh event",priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${reason || "Unavailable"}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
+      const unavailableReason=reason || "Unavailable";
+      return {available:false,unavailableReason,state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,adx:null,adxPrevious:null,spreadPct:null,spreadAtr:null,spreadScore:null,spreadLabel:"Unavailable",spreadCondition:"unavailable",maPair:"No fresh event",maEvent:null,priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${unavailableReason}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows,debugCtx,snapshot){
       const provisional = !!(debugCtx && debugCtx.includeForming);
@@ -461,10 +464,12 @@
       const maPair = eventText(maEvent,true);
       const priceMa = eventText(priceEvent,false);
       const spreadCondition = tight ? "compression" : spreadDelta > 0.01 ? "expanding" : spreadDelta < -0.01 ? "contracting" : "balanced";
+      const structuredSpreadScore = clamp100(spreadPct/0.65*100);
+      const spreadLabel = spreadScoreLabel(structuredSpreadScore);
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
       rank.state = state;
       rank.summaryState = phase;
-      return {state,icon,strength,alignment,quality,title,phase,setup,provisional,adx:volatilitySnapshot.adx,adxPrevious:volatilitySnapshot.adxShadow,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
+      return {available:true,unavailableReason:null,state,icon,strength,alignment,quality,title,phase,setup,provisional,adx:volatilitySnapshot.adx,adxPrevious:volatilitySnapshot.adxShadow,spreadPct,spreadAtr,spreadScore:structuredSpreadScore,spreadLabel,spreadCondition,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
     }
     function stackComparison(vals){
       const base = Math.max(Math.abs(Number(vals && vals[3])),Math.abs(Number(vals && vals[4])),1);
@@ -848,5 +853,7 @@
       }
       return out;
     }
-  root.core = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,pairEventScore,selectHigherPriorityPairEvent,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
+  const api = {emaSeries,maLabelP,pairLabel,spreadScoreLabel,spreadDisplay,clamp100,eventText,maPairAgeText,cleanMaPairPeriodText,cleanMaPairTypeText,freshMaPairEventText,bounceSetupClassification,maPairTooltipLine,setupDir,eventIdentity,pairEventRank,pairEventScore,selectHigherPriorityPairEvent,actionableMaPair,maPairIntent,normalizeMaPairEvent,signOf,isConfirmedBounce,isFailedCross,detectMaPair,detectPriceMA,unavailable,classify,buildStackRank,applyHigherTfAgreement,labEventBucket,labEventSettingKey,labPairIndexes,labPairStillValid,labStackStillValid,markerEvents};
+  root.core = api;
+  if(typeof module!=="undefined"&&module.exports) module.exports=api;
 })();

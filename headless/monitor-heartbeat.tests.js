@@ -2,7 +2,7 @@
 
 const assert=require("assert");
 const {
-  readMonitorConfig,evaluateHeartbeat,evaluateSignalBHeartbeat,createSupabaseSnapshotReader,
+  readMonitorConfig,evaluateHeartbeat,evaluateSignalBHeartbeat,evaluateMaStackHeartbeat,MA_STACK_TIMEFRAMES,createSupabaseSnapshotReader,
   checkSystemdServices,runMonitorOnce,report
 }=require("./monitor-heartbeat.js");
 
@@ -17,6 +17,10 @@ function snapshot(at,value=1){
 
 function sigBSnapshot(at,value=1){return {created_at:new Date(at).toISOString(),event_at:new Date(at-100).toISOString(),machine_id:"vm-btc-sig-logger",symbol:"BTCUSDT",direction:"LONG",entry_state:"WATCHING",confidence:60+value,setup_score:value,hard_gates:{passed:[String(value)]},flow_effectiveness:{effective:value%2===0},signal_output:{readinessScore:value}};}
 
+function maStackSnapshot(timeframe,at,value=1){return {created_at:new Date(at).toISOString(),event_at:new Date(at-100).toISOString(),candle_open_at:new Date(at-value*60000).toISOString(),machine_id:"vm-btc-sig-logger",symbol:"BTCUSDT",timeframe,available:true,state:"up",phase:`phase-${value}`,selected_regime:"bullish",setup_direction:1,strength:60+value,quality:70+value,alignment_pct:100,adx:25+value,adx_shadow_5:20+value,led_ma1:true,led_ma2:true,led_ma3:true,led_ma4:true,led_ma5:true,spread_pct:value,spread_atr:value,spread_score:50+value,spread_label:"Balanced Spread",spread_condition:"expanding",ma_event_type:null,ma_event_pair:null,ma_event_outcome_direction:null,ma_event_age_candles:null};}
+
+function healthyMaStackRows(at){return MA_STACK_TIMEFRAMES.flatMap(tf=>Array.from({length:8},(_,index)=>maStackSnapshot(tf,at-index*30000,index+1)));}
+
 function fakeClient(rows,error=null){
   const calls=[];
   const query={
@@ -28,7 +32,7 @@ function fakeClient(rows,error=null){
   return {calls,from(table){calls.push(["from",table]);return query;}};
 }
 
-function fakeMonitorClient(snapshotRows,sigBRows=Array.from({length:8},(_,index)=>sigBSnapshot(Date.now()-index*30000,index+1))){
+function fakeMonitorClient(snapshotRows,sigBRows=Array.from({length:8},(_,index)=>sigBSnapshot(Date.now()-index*30000,index+1)),maStackRows=healthyMaStackRows(Date.now())){
   const inserts=[],unresolved=[],calls=[];
   return {
     inserts,calls,
@@ -38,12 +42,14 @@ function fakeMonitorClient(snapshotRows,sigBRows=Array.from({length:8},(_,index)
       return {
         select(value){calls.push(["select",table,value]);return this;},
         eq(column,value){filters[column]=value;return this;},
+        in(column,value){filters[column]=value;return this;},
         is(column,value){filters[column]=value;return this;},
         gte(column,value){filters[column]=value;return this;},
         order(){return this;},
         limit(){
           if(table==="sssc_snapshots")return Promise.resolve({data:snapshotRows,error:null});
           if(table==="sig_b_snapshots")return Promise.resolve({data:sigBRows,error:null});
+          if(table==="ma_stack_snapshots")return Promise.resolve({data:maStackRows.filter(row=>!filters.timeframe||row.timeframe===filters.timeframe),error:null});
           const match=unresolved.find(row=>row.machine_id===filters.machine_id&&row.check_name===filters.check_name);
           return Promise.resolve({data:match?[match]:[],error:null});
         },
@@ -62,6 +68,7 @@ async function run(){
   const config=readMonitorConfig({SUPABASE_URL:"https://example.supabase.co/",SUPABASE_ANON_KEY:"anon"});
   assert.equal(config.machineId,"vm-btc-sig-logger");assert.equal(config.staleMs,180000);assert.equal(config.frozenRows,8);
   assert.equal(config.sigBStaleMs,180000);assert.equal(config.sigBFrozenRows,8);
+  assert.equal(config.maStackFastStaleMs,90000);assert.equal(config.maStackSlowGraceMs,180000);assert.equal(config.maStackFrozenRows,8);
   assert.equal(config.incidentDedupeMs,21600000);
   cases.monitorDefaultsMatchVmCadence=true;
 
@@ -93,6 +100,17 @@ async function run(){
   assert(evaluateSignalBHeartbeat({rows:frozenSigB,machineId:config.machineId,staleMs:180000,frozenRows:8,now}).incidents.some(item=>item.code==="SIGB_FROZEN_DUPLICATES"));
   cases.sigBStalenessAndFrozenPayloadChecksMatchSsscPattern=true;
 
+  const maHealthy=evaluateMaStackHeartbeat({rows:healthyMaStackRows(now),machineId:config.maStackMachineId,fastStaleMs:90000,slowGraceMs:180000,frozenRows:8,now});
+  assert.equal(maHealthy.healthy,true);
+  const maStaleRows=healthyMaStackRows(now).filter(row=>row.timeframe!=="1h");maStaleRows.push(maStackSnapshot("1h",now-3600000-180001,1));
+  assert(evaluateMaStackHeartbeat({rows:maStaleRows,machineId:config.maStackMachineId,fastStaleMs:90000,slowGraceMs:180000,frozenRows:8,now}).incidents.some(item=>item.code==="MA_STACK_STALE"&&item.timeframe==="1h"));
+  const withoutDaily=healthyMaStackRows(now).filter(row=>row.timeframe!=="1d");
+  assert(!evaluateMaStackHeartbeat({rows:withoutDaily,startedAt:new Date(now).toISOString(),machineId:config.maStackMachineId,fastStaleMs:90000,slowGraceMs:180000,frozenRows:8,now}).incidents.some(item=>item.code==="MA_STACK_NO_ROWS"&&item.timeframe==="1d"));
+  assert(evaluateMaStackHeartbeat({rows:withoutDaily,startedAt:new Date(now).toISOString(),machineId:config.maStackMachineId,fastStaleMs:90000,slowGraceMs:180000,frozenRows:8,now:now+86400000+180001}).incidents.some(item=>item.code==="MA_STACK_NO_ROWS"&&item.timeframe==="1d"));
+  const frozenMa=healthyMaStackRows(now).map(row=>row.timeframe==="1m"?{...maStackSnapshot("1m",Date.parse(row.created_at),42),candle_open_at:row.candle_open_at}:row);
+  assert(evaluateMaStackHeartbeat({rows:frozenMa,machineId:config.maStackMachineId,fastStaleMs:90000,slowGraceMs:180000,frozenRows:8,now}).incidents.some(item=>item.code==="MA_STACK_FROZEN_DUPLICATES"&&item.timeframe==="1m"));
+  cases.maStackDualCadenceAndFrozenPayloadChecks=true;
+
   const down=evaluateHeartbeat({
     rows:healthyRows,services:[{name:"sssc-logger",active:true,status:"active"},{name:"scalp-signal-logger",active:false,status:"failed"}],
     machineId:config.machineId,staleMs:180000,frozenRows:8,now
@@ -112,7 +130,7 @@ async function run(){
   assert.deepEqual(serviceStates.map(item=>item.active),[true,false]);
   cases.systemdStatusIsMockable=true;
 
-  const incidentClient=fakeMonitorClient([snapshot(now-180001,7)],sigBHealthy);
+  const incidentClient=fakeMonitorClient([snapshot(now-180001,7)],sigBHealthy,healthyMaStackRows(now));
   const incidentConfig={...config,checkSystemd:false};
   const firstIncident=await runMonitorOnce({config:incidentConfig,client:incidentClient,now:()=>now});
   assert(firstIncident.incidentWrites.some(item=>item.inserted));

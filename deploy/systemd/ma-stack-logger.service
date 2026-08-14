@@ -1,0 +1,19 @@
+[Unit]
+Description=BT-001 independent MA Stack snapshot logger
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nader_moustafa
+Group=nader_moustafa
+WorkingDirectory=/home/nader_moustafa/BT-001
+EnvironmentFile=/home/nader_moustafa/BT-001/.env.ma-stack
+ExecStart=/usr/bin/node /home/nader_moustafa/BT-001/headless/run-ma-stack-logger.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

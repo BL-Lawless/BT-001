@@ -7,7 +7,12 @@ const DEFAULT_MACHINE_ID="vm-btc-sig-logger";
 const DEFAULT_STALE_MS=180000;
 const DEFAULT_FROZEN_ROWS=8;
 const DEFAULT_INCIDENT_DEDUPE_MS=21600000;
-const LOGGER_SERVICES=Object.freeze(["sssc-logger","scalp-signal-logger","sig-b-logger"]);
+const DEFAULT_MA_STACK_FAST_STALE_MS=90000;
+const DEFAULT_MA_STACK_SLOW_GRACE_MS=180000;
+const MA_STACK_TIMEFRAMES=Object.freeze(["1m","3m","5m","15m","30m","1h","4h","1d"]);
+const MA_STACK_FAST_TIMEFRAMES=Object.freeze(["1m","3m","5m","15m","30m"]);
+const MA_STACK_TF_MS=Object.freeze({"1m":60000,"3m":180000,"5m":300000,"15m":900000,"30m":1800000,"1h":3600000,"4h":14400000,"1d":86400000});
+const LOGGER_SERVICES=Object.freeze(["sssc-logger","scalp-signal-logger","sig-b-logger","ma-stack-logger"]);
 
 function positiveInteger(value,fallback,name){
   const parsed=Number(value==null||value===""?fallback:value);
@@ -16,14 +21,19 @@ function positiveInteger(value,fallback,name){
 }
 
 function readMonitorConfig(env=process.env){
+  const machineId=String(env.BT001_MACHINE_ID||DEFAULT_MACHINE_ID).trim();
   return Object.freeze({
     supabaseUrl:required(env,"SUPABASE_URL").replace(/\/+$/,""),
     supabaseAnonKey:required(env,"SUPABASE_ANON_KEY"),
-    machineId:String(env.BT001_MACHINE_ID||DEFAULT_MACHINE_ID).trim(),
+    machineId,
     staleMs:positiveInteger(env.MONITOR_SSSC_STALE_MS,DEFAULT_STALE_MS,"MONITOR_SSSC_STALE_MS"),
     frozenRows:positiveInteger(env.MONITOR_SSSC_FROZEN_ROWS,DEFAULT_FROZEN_ROWS,"MONITOR_SSSC_FROZEN_ROWS"),
     sigBStaleMs:positiveInteger(env.MONITOR_SIG_B_STALE_MS,DEFAULT_STALE_MS,"MONITOR_SIG_B_STALE_MS"),
     sigBFrozenRows:positiveInteger(env.MONITOR_SIG_B_FROZEN_ROWS,DEFAULT_FROZEN_ROWS,"MONITOR_SIG_B_FROZEN_ROWS"),
+    maStackMachineId:String(env.MA_STACK_MACHINE_ID||machineId).trim(),
+    maStackFastStaleMs:positiveInteger(env.MONITOR_MA_STACK_FAST_STALE_MS,DEFAULT_MA_STACK_FAST_STALE_MS,"MONITOR_MA_STACK_FAST_STALE_MS"),
+    maStackSlowGraceMs:positiveInteger(env.MONITOR_MA_STACK_SLOW_GRACE_MS,DEFAULT_MA_STACK_SLOW_GRACE_MS,"MONITOR_MA_STACK_SLOW_GRACE_MS"),
+    maStackFrozenRows:positiveInteger(env.MONITOR_MA_STACK_FROZEN_ROWS,DEFAULT_FROZEN_ROWS,"MONITOR_MA_STACK_FROZEN_ROWS"),
     incidentDedupeMs:positiveInteger(env.MONITOR_INCIDENT_DEDUPE_MS,DEFAULT_INCIDENT_DEDUPE_MS,"MONITOR_INCIDENT_DEDUPE_MS"),
     checkSystemd:String(env.MONITOR_CHECK_SYSTEMD||"true").toLowerCase()!=="false"
   });
@@ -60,6 +70,17 @@ function signalBSnapshotFingerprint(row){
     current_entry_score:(row&&row.current_entry_score)??null,readiness_score:(row&&row.readiness_score)??null,
     hard_gates:row&&row.hard_gates||null,flow_effectiveness:row&&row.flow_effectiveness||null,
     signal_output:removeVolatileSignalFields(row&&row.signal_output||null)
+  }));
+}
+
+function maStackSnapshotFingerprint(row){
+  return JSON.stringify(canonicalize({
+    available:row&&row.available,state:row&&row.state,phase:row&&row.phase,selected_regime:row&&row.selected_regime,
+    setup_direction:row&&row.setup_direction,strength:row&&row.strength,quality:row&&row.quality,alignment_pct:row&&row.alignment_pct,
+    adx:row&&row.adx,adx_shadow_5:row&&row.adx_shadow_5,
+    led_ma1:row&&row.led_ma1,led_ma2:row&&row.led_ma2,led_ma3:row&&row.led_ma3,led_ma4:row&&row.led_ma4,led_ma5:row&&row.led_ma5,
+    spread_pct:row&&row.spread_pct,spread_atr:row&&row.spread_atr,spread_score:row&&row.spread_score,spread_label:row&&row.spread_label,spread_condition:row&&row.spread_condition,
+    ma_event_type:row&&row.ma_event_type,ma_event_pair:row&&row.ma_event_pair,ma_event_outcome_direction:row&&row.ma_event_outcome_direction,ma_event_age_candles:row&&row.ma_event_age_candles
   }));
 }
 
@@ -127,6 +148,35 @@ function evaluateSignalBHeartbeat(options={}){
   return {healthy:incidents.length===0,checkedAt:new Date(now).toISOString(),incidents};
 }
 
+function evaluateMaStackHeartbeat(options={}){
+  const now=typeof options.now==="function"?options.now():Number(options.now)||Date.now();
+  const fastStaleMs=positiveInteger(options.fastStaleMs,DEFAULT_MA_STACK_FAST_STALE_MS,"fastStaleMs");
+  const slowGraceMs=positiveInteger(options.slowGraceMs,DEFAULT_MA_STACK_SLOW_GRACE_MS,"slowGraceMs");
+  const frozenRows=positiveInteger(options.frozenRows,DEFAULT_FROZEN_ROWS,"frozenRows");
+  const grouped=Object.groupBy?Object.groupBy(options.rows||[],row=>row.timeframe):Array.from(options.rows||[]).reduce((all,row)=>{(all[row.timeframe]||(all[row.timeframe]=[])).push(row);return all;},{});
+  const startedAt=Date.parse(options.startedAt||"");
+  const incidents=[];
+  for(const timeframe of MA_STACK_TIMEFRAMES){
+    const rows=(grouped[timeframe]||[]).slice().sort((a,b)=>(rowTime(b)||0)-(rowTime(a)||0));
+    if(!rows.length){
+      const startupGrace=MA_STACK_FAST_TIMEFRAMES.includes(timeframe)?0:MA_STACK_TF_MS[timeframe]+slowGraceMs;
+      if(startupGrace===0||Number.isFinite(startedAt)&&now-startedAt>startupGrace)incidents.push({code:"MA_STACK_NO_ROWS",machineId:options.machineId,timeframe,message:`No ma_stack_snapshots rows found for machine_id=${options.machineId}, timeframe=${timeframe}`});
+      continue;
+    }
+    const latestAt=rowTime(rows[0]),ageMs=latestAt==null?Infinity:Math.max(0,now-latestAt);
+    const limitMs=MA_STACK_FAST_TIMEFRAMES.includes(timeframe)?fastStaleMs:MA_STACK_TF_MS[timeframe]+slowGraceMs;
+    if(latestAt==null||ageMs>limitMs)incidents.push({code:"MA_STACK_STALE",machineId:options.machineId,timeframe,ageMs:Number.isFinite(ageMs)?ageMs:null,lastRowAt:latestAt==null?null:new Date(latestAt).toISOString(),limitMs,
+      message:`Latest MA Stack ${timeframe} snapshot is stale (${Number.isFinite(ageMs)?Math.round(ageMs/1000):"unknown"}s old; limit ${Math.round(limitMs/1000)}s)`});
+    if(rows.length>=frozenRows){
+      const sample=rows.slice(0,frozenRows),boundaries=new Set(sample.map(row=>row.candle_open_at).filter(Boolean));
+      if(boundaries.size>=2&&new Set(sample.map(maStackSnapshotFingerprint)).size===1)incidents.push({code:"MA_STACK_FROZEN_DUPLICATES",machineId:options.machineId,timeframe,rowCount:frozenRows,
+        newestAt:rowTime(sample[0])==null?null:new Date(rowTime(sample[0])).toISOString(),oldestAt:rowTime(sample.at(-1))==null?null:new Date(rowTime(sample.at(-1))).toISOString(),
+        message:`Last ${frozenRows} MA Stack ${timeframe} rows across candle boundaries have identical calculated payloads`});
+    }
+  }
+  return {healthy:incidents.length===0,checkedAt:new Date(now).toISOString(),incidents};
+}
+
 function createSupabaseMonitorStore(options={}){
   const createClient=options.createClient||require("@supabase/supabase-js").createClient;
   const client=options.client||createClient(options.url,options.key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});
@@ -146,6 +196,22 @@ function createSupabaseMonitorStore(options={}){
       if(error)throw error;
       if(!Array.isArray(data))throw new Error("Invalid Supabase Sig B monitoring response");
       return data;
+    },
+    async latestMaStack(machineId,perTimeframeLimit){
+      const fields="created_at,event_at,machine_id,symbol,timeframe,candle_open_at,available,state,phase,selected_regime,setup_direction,strength,quality,alignment_pct,adx,adx_shadow_5,led_ma1,led_ma2,led_ma3,led_ma4,led_ma5,spread_pct,spread_atr,spread_score,spread_label,spread_condition,ma_event_type,ma_event_pair,ma_event_outcome_direction,ma_event_age_candles";
+      const batches=await Promise.all(MA_STACK_TIMEFRAMES.map(async timeframe=>{
+        const {data,error}=await client.from("ma_stack_snapshots").select(fields)
+          .eq("machine_id",machineId).eq("timeframe",timeframe).order("created_at",{ascending:false}).limit(perTimeframeLimit);
+        if(error)throw error;
+        if(!Array.isArray(data))throw new Error(`Invalid Supabase MA Stack ${timeframe} monitoring response`);
+        return data;
+      }));
+      return batches.flat();
+    },
+    async maStackFirstRow(machineId){
+      const {data,error}=await client.from("ma_stack_snapshots").select("created_at").eq("machine_id",machineId).order("created_at",{ascending:true}).limit(1);
+      if(error)throw error;
+      return Array.isArray(data)&&data.length?data[0]:null;
     },
     async findRecentUnresolved(machineId,checkName,since){
       const {data,error}=await client.from("monitoring_incidents").select("id,created_at")
@@ -173,14 +239,17 @@ function incidentRow(incident,options={}){
     SIGB_NO_ROWS:"sig_b_no_rows",
     SIGB_STALE:"sig_b_stale",
     SIGB_FROZEN_DUPLICATES:"sig_b_frozen_duplicate",
+    MA_STACK_NO_ROWS:"ma_stack_no_rows",
+    MA_STACK_STALE:"ma_stack_stale",
+    MA_STACK_FROZEN_DUPLICATES:"ma_stack_frozen_duplicate",
     SUPABASE_QUERY_FAILED:"supabase_query_failed"
   };
   const checkName=incident&&incident.code==="SERVICE_DOWN"
-    ?(service==="scalp-signal-logger"?"scalp_service_down":service==="sig-b-logger"?"sig_b_service_down":"sssc_service_down")
+    ?(service==="scalp-signal-logger"?"scalp_service_down":service==="sig-b-logger"?"sig_b_service_down":service==="ma-stack-logger"?"ma_stack_service_down":"sssc_service_down")
     :names[incident&&incident.code]||String(incident&&incident.code||"monitor_unknown").toLowerCase();
-  const severity=["SSSC_FROZEN_DUPLICATES","SSSC_NO_ROWS","SIGB_FROZEN_DUPLICATES","SIGB_NO_ROWS"].includes(incident&&incident.code)?"critical":"error";
+  const severity=["SSSC_FROZEN_DUPLICATES","SSSC_NO_ROWS","SIGB_FROZEN_DUPLICATES","SIGB_NO_ROWS","MA_STACK_FROZEN_DUPLICATES","MA_STACK_NO_ROWS"].includes(incident&&incident.code)?"critical":"error";
   return {
-    machine_id:String(options.machineId||DEFAULT_MACHINE_ID),
+    machine_id:String(incident&&incident.machineId||options.machineId||DEFAULT_MACHINE_ID),
     check_name:checkName,severity,
     detail:canonicalize({...incident,checked_at:options.checkedAt})
   };
@@ -217,11 +286,18 @@ async function runMonitorOnce(options={}){
   const config=options.config;
   const store=options.store||(!options.reader?createSupabaseMonitorStore({url:config.supabaseUrl,key:config.supabaseAnonKey,client:options.client}):null);
   const reader=options.reader||store;
-  let rows=[],sigBRows=[],queryError=null,sigBQueryError=null;
+  let rows=[],sigBRows=[],maStackRows=[],maStackFirstRow=null,queryError=null,sigBQueryError=null,maStackQueryError=null;
   try{rows=await reader.latest(config.machineId,config.frozenRows);}
   catch(error){queryError=error;}
   try{sigBRows=await reader.latestSignalB(config.machineId,config.sigBFrozenRows);}
   catch(error){sigBQueryError=error;}
+  if(typeof reader.latestMaStack==="function"){
+    try{
+      maStackRows=await reader.latestMaStack(config.maStackMachineId,config.maStackFrozenRows);
+      if(typeof reader.maStackFirstRow==="function")maStackFirstRow=await reader.maStackFirstRow(config.maStackMachineId);
+    }
+    catch(error){maStackQueryError=error;}
+  }
   let services=[];
   if(config.checkSystemd){
     try{services=(options.checkServices||checkSystemdServices)();}
@@ -230,6 +306,10 @@ async function runMonitorOnce(options={}){
   const result=evaluateHeartbeat({rows,services,machineId:config.machineId,staleMs:config.staleMs,frozenRows:config.frozenRows,now:options.now});
   const sigBResult=evaluateSignalBHeartbeat({rows:sigBRows,machineId:config.machineId,staleMs:config.sigBStaleMs,frozenRows:config.sigBFrozenRows,now:options.now});
   result.incidents.push(...sigBResult.incidents);result.healthy=result.incidents.length===0;
+  if(typeof reader.latestMaStack==="function"){
+    const maStackResult=evaluateMaStackHeartbeat({rows:maStackRows,startedAt:maStackFirstRow&&maStackFirstRow.created_at,machineId:config.maStackMachineId,fastStaleMs:config.maStackFastStaleMs,slowGraceMs:config.maStackSlowGraceMs,frozenRows:config.maStackFrozenRows,now:options.now});
+    result.incidents.push(...maStackResult.incidents);result.healthy=result.incidents.length===0;
+  }
   if(queryError){
     result.incidents=result.incidents.filter(incident=>!["SSSC_NO_ROWS","SSSC_STALE","SSSC_FROZEN_DUPLICATES"].includes(incident.code));
     result.healthy=false;
@@ -239,6 +319,11 @@ async function runMonitorOnce(options={}){
     result.incidents=result.incidents.filter(incident=>!["SIGB_NO_ROWS","SIGB_STALE","SIGB_FROZEN_DUPLICATES"].includes(incident.code));
     result.healthy=false;result.incidents.push({code:"SUPABASE_SIGB_QUERY_FAILED",message:`Supabase Sig B health query failed: ${sigBQueryError.message||sigBQueryError}`});
   }
+  if(maStackQueryError){
+    result.incidents=result.incidents.filter(incident=>!["MA_STACK_NO_ROWS","MA_STACK_STALE","MA_STACK_FROZEN_DUPLICATES"].includes(incident.code));
+    result.healthy=false;result.incidents.push({code:"SUPABASE_MA_STACK_QUERY_FAILED",machineId:config.maStackMachineId,message:`Supabase MA Stack health query failed: ${maStackQueryError.message||maStackQueryError}`});
+  }
+  for(const incident of result.incidents){if(incident.code==="SERVICE_DOWN"&&incident.service==="ma-stack-logger")incident.machineId=config.maStackMachineId;}
   result.incidentWrites=store&&result.incidents.length?await persistIncidents(result,store,{
     machineId:config.machineId,dedupeMs:config.incidentDedupeMs,now:options.now
   }):[];
@@ -267,8 +352,8 @@ async function main(){
 }
 
 module.exports={
-  DEFAULT_MACHINE_ID,DEFAULT_STALE_MS,DEFAULT_FROZEN_ROWS,DEFAULT_INCIDENT_DEDUPE_MS,LOGGER_SERVICES,
-  readMonitorConfig,canonicalize,removeVolatileSignalFields,snapshotFingerprint,signalBSnapshotFingerprint,evaluateHeartbeat,evaluateSignalBHeartbeat,
+  DEFAULT_MACHINE_ID,DEFAULT_STALE_MS,DEFAULT_FROZEN_ROWS,DEFAULT_INCIDENT_DEDUPE_MS,DEFAULT_MA_STACK_FAST_STALE_MS,DEFAULT_MA_STACK_SLOW_GRACE_MS,MA_STACK_TIMEFRAMES,MA_STACK_FAST_TIMEFRAMES,MA_STACK_TF_MS,LOGGER_SERVICES,
+  readMonitorConfig,canonicalize,removeVolatileSignalFields,snapshotFingerprint,signalBSnapshotFingerprint,maStackSnapshotFingerprint,evaluateHeartbeat,evaluateSignalBHeartbeat,evaluateMaStackHeartbeat,
   createSupabaseMonitorStore,createSupabaseSnapshotReader,incidentRow,persistIncidents,
   checkSystemdServices,runMonitorOnce,report,main
 };

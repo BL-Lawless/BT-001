@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+!.env.ma-stack.example
 node_modules/
 artifacts/sssc-latest.json
 artifacts/sssc-latest.json.*.tmp
+artifacts/ma-stack-supabase-spool.jsonl

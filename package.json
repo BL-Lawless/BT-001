@@ -9,6 +9,7 @@
     "headless:sssc": "node headless/run-sssc.js",
     "headless:sig-b": "node headless/run-sig-b.js",
     "headless:scalper": "node headless/run-scalper-signals.js",
+    "headless:ma-stack": "node headless/run-ma-stack-logger.js",
     "headless:heatmap": "node headless/pull-liquidation-heatmap.js",
     "headless:monitor": "node headless/monitor-heartbeat.js"
   },
