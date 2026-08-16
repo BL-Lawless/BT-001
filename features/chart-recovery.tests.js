@@ -16,5 +16,6 @@ assert(main.includes("state.gapRepairInFlightByTf[tf]")&&main.includes("state.ti
 assert(main.includes("candleRestInFlight.has(requestKey)")&&main.includes("restCandleRequestReuseCount"),"identical REST candle windows must reuse one in-flight request");
 assert(visibility.indexOf("rehydrateActiveChartFromHub")<visibility.indexOf("setTimeout(()=>{"),"visibility return must paint retained candles before public repair");
 assert(!visibility.includes("BT001VisibilityRecovery.recover")&&visibility.includes("setTimeout(()=>{"),"public lifecycle repair must not invoke authenticated recovery");
+assert(visibility.includes("invokePublicMarketVisibilityRecovery(reason)"),"BT001-FIX-01 visibility recovery must use the retrying public-market entry point");
 assert(main.includes("visibilityFirstChartPaintMs")&&main.includes("timeframeFirstPaintMs")&&main.includes("restCandleRequests")&&main.includes("publicWsRestartCount")&&main.includes("obsoleteChartLoadsDiscarded"),"browser-verification diagnostics must be exposed");
 console.log("chart recovery tests passed");

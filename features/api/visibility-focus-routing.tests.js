@@ -37,4 +37,6 @@ assert(main.includes('window.addEventListener("pageshow",scheduleVisibilityRecov
 assert(!main.slice(main.indexOf("function handleVisibilityReturn()"),main.indexOf("async function runPublicMarketVisibilityRecovery")).includes("BT001VisibilityRecovery.recover"),"public recovery must not cascade into private recovery");
 const publicWork=main.slice(main.indexOf("async function runPublicMarketVisibilityRecovery"),main.indexOf("function scheduleVisibilityRecovery"));
 assert(!publicWork.includes("ensureSsscBuffers")&&!publicWork.includes("recoverVisibleAccounts21"),"public lifecycle recovery must not invoke SSSC or private-account work");
+assert(publicWork.includes('syncOutcome.reason==="stale-request"')&&publicWork.includes(":active-market-retry"),"BT001-FIX-01 stale REST work must retry against the active market");
+assert(publicWork.includes('syncOutcome.reason==="error"'),"only a genuine REST failure should fail public visibility recovery");
 console.log("visibility focus routing tests: PASS");

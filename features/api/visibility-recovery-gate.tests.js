@@ -89,6 +89,7 @@ const {create}=require("./visibility-recovery-gate.module.js");
   assert(!mainWorkSource.includes("scalpVisibilityRecoveryGate21.run"),"SCALP's gate must not be nested inside the main-account gate");
   assert(mainEntrySource.includes("await mainVisibilityRecoveryGate21.run")&&mainEntrySource.includes("await scalpVisibilityRecoveryGate21.run"),"every visibility attempt must reach the independent main and SCALP gates in sequence");
   assert(main.includes('publicMarketVisibilityRecoveryGate.run(reason,runPublicMarketVisibilityRecovery)'),"public market visibility work must use its post-completion gate");
+  assert(main.includes('visibilityRecoveryRetryTimer=setTimeout(()=>')&&main.includes('invokePublicMarketVisibilityRecovery(`${reason}:retry`)'),"BT001-FIX-01 failures must schedule a delayed public-market recovery retry");
   assert(main.includes('ssscVisibilityRecoveryGate.run(reason,async()=>'),"SSSC visibility work must use its post-completion gate");
   assert(main.includes('windowMs:MAIN_VISIBILITY_RECOVERY_DEBOUNCE_MS21')&&main.includes('windowMs:PUBLIC_MARKET_VISIBILITY_DEBOUNCE_MS')&&main.includes('windowMs:SSSC_VISIBILITY_RECOVERY_DEBOUNCE_MS'));
   assert(main.includes('const main=mainVisibilityRecoveryGate21.diagnostics()')&&main.includes('return {active:main.inFlight,runs:main.completedRuns,main,'));
