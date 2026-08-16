@@ -3688,6 +3688,7 @@ const marketDataHub = (() => {
   const REST_FALLBACK_MS = 10000;
   const REST_STATUS_HOLD_MS = 12000;
   const REST_LATEST_LIMIT = 5;
+  const PUBLIC_MARKET_VISIBILITY_RETRY_MS = 3000;
   const HISTORICAL_CONTINUITY_CHECK_MS = 60000;
   const GAP_REPAIR_RETRY_BASE_MS = 15000;
   const GAP_REPAIR_RETRY_MAX_MS = 5*60*1000;
@@ -3741,6 +3742,7 @@ const marketDataHub = (() => {
     maStackVisible:false,
     lastMessageSource:"",
     visibilityRecoveryTimer:null,
+    visibilityRecoveryRetryTimer:null,
     pendingLifecycleEvidence:null,
     closedKlinesByTf:{},
     formingKlineByTf:{},
@@ -5105,18 +5107,18 @@ const marketDataHub = (() => {
       connect({force:true,reason});
     },delay);
   }
-  async function restSyncLatest(reason="fallback",options={}){
+  async function restSyncLatest(reason="fallback"){
     const refocusStarted=refocusDiagNow();
     refocusDiag("restSyncLatest start",{reason,documentHidden:document.hidden});
     if(state.restInFlight){
       refocusDiag("restSyncLatest end",{reason,outcome:"skipped-in-flight",elapsedMs:refocusDiagNow()-refocusStarted});
-      return false;
+      return {ok:false,reason:"in-flight"};
     }
     const gate=window.BINANCE_REST_GATE;
     const gateState=gate&&typeof gate.state==="function"?gate.state():{paused:false};
     if(gateState.paused){
       refocusDiag("restSyncLatest end",{reason,outcome:"skipped-gate-paused",remainingMs:gateState.remainingMs,elapsedMs:refocusDiagNow()-refocusStarted});
-      return false;
+      return {ok:false,reason:"gate-paused"};
     }
     const requestStarted = now();
     const requestSymbol = cfg().symbol;
@@ -5127,7 +5129,10 @@ const marketDataHub = (() => {
     if(!waitingForFirstTick()) paintStatus("REST FALLBACK",reason);
     try{
       const rows = await klines(Date.now(),REST_LATEST_LIMIT);
-      if(cfg().symbol !== requestSymbol || iv() !== requestInterval) return false;
+      if(cfg().symbol !== requestSymbol || iv() !== requestInterval){
+        refocusOutcome="stale-request";
+        return {ok:false,reason:"stale-request"};
+      }
       const currentChart = getChartBuffer(requestInterval);
       const currentLastTime = currentChart.length ? currentChart[currentChart.length-1].time : 0;
       const activeKlineTick = Number(diag.lastKlineTickByTf[requestInterval]) || 0;
@@ -5141,14 +5146,13 @@ const marketDataHub = (() => {
       lastRest = now();
       diag.lastRestSyncTime = lastRest;
       refreshConnectionStatus();
-      return true;
+      return {ok:true,reason:"success"};
     }catch(e){
       refocusOutcome="error";
       diag.lastError = e && e.message ? e.message : String(e);
       if(!socketOpen()) paintStatus("OFFLINE / ERROR",diag.lastError);
       console.warn(MODULE + " REST fallback failed",e);
-      if(options.throwOnError===true)throw e;
-      return false;
+      return {ok:false,reason:"error",error:e};
     }finally{
       state.restInFlight = false;
       refocusDiag("restSyncLatest end",{reason,outcome:refocusOutcome,elapsedMs:refocusDiagNow()-refocusStarted});
@@ -5378,9 +5382,7 @@ const marketDataHub = (() => {
       setTimeout(()=>{
         const evidence=state.pendingLifecycleEvidence;
         const reason=`lifecycle:${evidence&&evidence.trigger||"unknown"}:generation-${evidence&&evidence.generation||0}`;
-        publicMarketVisibilityRecoveryGate.run(reason,runPublicMarketVisibilityRecovery).catch(error=>{
-          console.warn(MODULE+" visibility recovery failed",error);
-        });
+        invokePublicMarketVisibilityRecovery(reason);
       },0);
     }finally{
       refocusDiag("handleVisibilityReturn end",{documentHidden:document.hidden,elapsedMs:refocusDiagNow()-refocusStarted});
@@ -5390,14 +5392,31 @@ const marketDataHub = (() => {
   async function runPublicMarketVisibilityRecovery(reason){
     const repairOutcome=await repairKnownClosedGaps(reason,{throwOnError:true});
     if(!repairOutcome||repairOutcome.resolved!==true||repairOutcome.stale===true)throw new Error("Public market visibility candle-integrity repair remained unresolved");
-    const synced=await restSyncLatest(reason,{throwOnError:true});
-    if(!synced)throw new Error("Public market visibility REST sync did not complete");
+    let syncOutcome=await restSyncLatest(reason);
+    if(syncOutcome&&syncOutcome.reason==="stale-request"){
+      syncOutcome=await restSyncLatest(`${reason}:active-market-retry`);
+    }
+    if(syncOutcome&&syncOutcome.reason==="error"){
+      throw syncOutcome.error||new Error("Public market visibility REST sync failed");
+    }
     if(state.maStackVisible)await ensureMaStackBuffers(false);
     const globalAge = diag.lastWsTickTime ? now() - diag.lastWsTickTime : Infinity;
     if(!socketOpen()) connect();
     else if(globalAge > WS_RECONNECT_MS) scheduleReconnect("stale WebSocket on visibility return",0);
     else refreshConnectionStatus();
     return true;
+  }
+
+  function invokePublicMarketVisibilityRecovery(reason){
+    publicMarketVisibilityRecoveryGate.run(reason,runPublicMarketVisibilityRecovery).catch(error=>{
+      console.warn(MODULE+" visibility recovery failed",error);
+      if(state.visibilityRecoveryRetryTimer)return;
+      // BT001-FIX-01: a genuine recovery failure must not dead-end until another visibility event.
+      state.visibilityRecoveryRetryTimer=setTimeout(()=>{
+        state.visibilityRecoveryRetryTimer=null;
+        invokePublicMarketVisibilityRecovery(`${reason}:retry`);
+      },PUBLIC_MARKET_VISIBILITY_RETRY_MS);
+    });
   }
 
   function scheduleVisibilityRecovery(event){

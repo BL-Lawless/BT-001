@@ -73,6 +73,72 @@ const {createExchangeClock}=require("./exchange-clock.module.js");
 
   local=20000;let epoch=1,hidden=false,resolveSuspended;const suspended=createExchangeClock({localNow:()=>local,maxRoundTripMs:100,visibilityState:()=>({hidden,epoch}),fetchServerTime:()=>new Promise(resolve=>{resolveSuspended=resolve;})});const contaminated=suspended.sync(true);hidden=true;local+=21537;epoch++;hidden=false;epoch++;resolveSuspended(19900);await contaminated;assert.equal(suspended.status().discardedContaminatedSamples,1);assert.equal(suspended.status().lastError,null);assert(!/round-trip/.test(String(suspended.status().lastError||"")));
   for(const suspensionMs of [20000,60000]){local=30000;epoch=10;hidden=false;let release;const clock=createExchangeClock({localNow:()=>local,maxRoundTripMs:100,visibilityState:()=>({hidden,epoch}),fetchServerTime:()=>new Promise(resolve=>{release=resolve;})});const pending=clock.sync(true);hidden=true;local+=suspensionMs;epoch++;hidden=false;epoch++;release(29900);await pending;assert.equal(clock.status().discardedContaminatedSamples,1,`${suspensionMs}ms suspension must be discarded`);assert.equal(clock.status().lastError,null);}
+
+  // BT001-FIX-02: visibility-contaminated samples are retry-neutral and can outnumber the
+  // genuine-failure budget without blocking the first clean clock sample.
+  local=40000;epoch=20;hidden=false;
+  let flapFetches=0;
+  const flapping=createExchangeClock({
+    localNow:()=>local,
+    delay:async ms=>{local+=ms;},
+    visibilityState:()=>({hidden,epoch}),
+    fetchServerTime:async()=>{
+      flapFetches+=1;
+      local+=10;
+      if(flapFetches<=4){hidden=true;epoch+=1;hidden=false;epoch+=1;}
+      return local-75;
+    }
+  });
+  assert.equal(await flapping.ensureSynchronized({attempts:2,baseDelayMs:1}),-75);
+  assert.equal(flapFetches,5,"four contaminated samples must not exhaust a two-failure budget");
+  assert.equal(flapping.status().discardedContaminatedSamples,4);
+  assert.equal(flapping.status().consecutiveFailures,0);
+
+  local=50000;epoch=40;hidden=false;
+  let mixedFetches=0;
+  const genuinelyFailing=createExchangeClock({
+    localNow:()=>local,
+    delay:async ms=>{local+=ms;},
+    visibilityState:()=>({hidden,epoch}),
+    fetchServerTime:async()=>{
+      mixedFetches+=1;
+      local+=5;
+      if(mixedFetches<=2){hidden=true;epoch+=1;hidden=false;epoch+=1;return local-50;}
+      throw new Error("offline after visibility flap");
+    }
+  });
+  await assert.rejects(genuinelyFailing.ensureSynchronized({attempts:3,baseDelayMs:1}),/failed after 3 attempt\(s\).*offline/);
+  assert.equal(mixedFetches,5,"only the three genuine fetch errors must consume the bounded attempt budget");
+  assert.equal(genuinelyFailing.status().discardedContaminatedSamples,2);
+  assert.equal(genuinelyFailing.status().consecutiveFailures,3);
+
+  local=60000;epoch=60;hidden=true;
+  let hiddenFetches=0,visibilityWaits=0;
+  const hiddenThenVisible=createExchangeClock({
+    localNow:()=>local,
+    visibilityWaitMs:20,
+    visibilityPollMs:2,
+    delay:async ms=>{local+=ms;visibilityWaits+=1;if(visibilityWaits===2){hidden=false;epoch+=1;}},
+    visibilityState:()=>({hidden,epoch}),
+    fetchServerTime:async()=>{hiddenFetches+=1;return local-25;}
+  });
+  assert.equal(await hiddenThenVisible.ensureSynchronized({attempts:1,baseDelayMs:1}),-25);
+  assert.equal(hiddenFetches,1,"a hidden tab must defer rather than fire a doomed request");
+  assert(visibilityWaits>=3,"visibility must remain stable for a poll before the request starts");
+
+  local=70000;hidden=true;
+  let indefinitelyHiddenFetches=0;
+  const indefinitelyHidden=createExchangeClock({
+    localNow:()=>local,
+    visibilityWaitMs:3,
+    visibilityPollMs:1,
+    delay:async ms=>{local+=ms;},
+    visibilityState:()=>({hidden:true,epoch:70}),
+    fetchServerTime:async()=>{indefinitelyHiddenFetches+=1;return local;}
+  });
+  await assert.rejects(indefinitelyHidden.ensureSynchronized({attempts:2,baseDelayMs:1}),/tab remained hidden/);
+  assert.equal(indefinitelyHiddenFetches,0,"bounded hidden-tab waiting must never call Binance while still hidden");
+
   assert.equal(await slow.sync(true),-100,"a suspicious measurement must not replace the last usable offset");
   assert.equal(slow.isReliable(),false,"a background-delayed sync must invalidate reliability");
   assert.equal(slow.status().lastSyncOk,false);
