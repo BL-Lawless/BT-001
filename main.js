@@ -13236,8 +13236,58 @@ startTradeAuto();
     }));
   }
 
+  // WF-FLIP-DIAG2: diagnostic-only evidence for a flip reconstructed from a
+  // potentially incomplete starting lot set. This intentionally does not alter
+  // lots, matching, grouping, context expansion, or the returned reconstruction.
+  function flipRowKey12(row){
+    return [row&&row.id,row&&row.orderId,row&&row.time,row&&row.side,row&&row.qty,row&&row.price].map(value=>String(value??'')).join('|');
+  }
+
+  function flipTime12(seconds){
+    const value=n12(seconds);
+    if(!(value>0)) return {time:null,timeIso:null,timeDubai:null};
+    const date=new Date(value*1000);
+    let timeDubai=null;
+    try{
+      timeDubai=new Intl.DateTimeFormat('en-CA',{
+        timeZone:'Asia/Dubai',year:'numeric',month:'2-digit',day:'2-digit',
+        hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'
+      }).format(date);
+    }catch(_e){}
+    return {time:value,timeIso:date.toISOString(),timeDubai};
+  }
+
+  function flipDisplayContext12(){
+    try{
+      const controls=window.BT001_DISPLAY_CONTROLS;
+      const snapshot=controls&&typeof controls.snapshot==='function'?controls.snapshot():null;
+      const range=controls&&typeof controls.periodWindow==='function'?controls.periodWindow():null;
+      return {
+        period:snapshot&&snapshot.period?String(snapshot.period.value||''):'',
+        displayControlsRevision:snapshot?n12(snapshot.revision):null,
+        requestedStartMs:range&&Number.isFinite(Number(range.startMs))?Number(range.startMs):null,
+        requestedEndMs:range&&Number.isFinite(Number(range.endMs))?Number(range.endMs):null
+      };
+    }catch(_e){return {period:'',displayControlsRevision:null,requestedStartMs:null,requestedEndMs:null};}
+  }
+
+  function flipDiag12(detail){
+    try{
+      const state=window.__WF_FLIP_DIAG2 ||= {version:'WF-FLIP-DIAG2',seq:0,calls:0,events:[]};
+      const event={seq:++state.seq,at:Date.now(),iso:new Date().toISOString(),type:'flip',...(detail||{})};
+      state.events.push(event);
+      if(state.events.length>1000)state.events.splice(0,state.events.length-1000);
+      console.info('[WF-FLIP-DIAG2]',event);
+      return event;
+    }catch(_e){return null;}
+  }
+
   reconstruct = function(rows,symbol){
     const groups = groupExecutionRows12(rows || []);
+    const flipState12=window.__WF_FLIP_DIAG2 ||= {version:'WF-FLIP-DIAG2',seq:0,calls:0,events:[]};
+    const flipCallId12='reconstruct-'+(++flipState12.calls);
+    const firstProcessedGroup12=groups[0]||null;
+    const firstProcessedRow12=firstProcessedGroup12&&firstProcessedGroup12.rows&&firstProcessedGroup12.rows[0]||null;
     const markers = [];
     const links = [];
     const lots = [];
@@ -13371,6 +13421,72 @@ startTradeAuto();
       const openBefore = totalQty();
       const closeTotal = Math.min(rem,openBefore);
       let cm = null;
+
+      const earliestLot12=lots.reduce((earliest,lot)=>!earliest||n12(lot.time)<n12(earliest.time)?lot:earliest,null);
+      const earliestMarker12=earliestLot12?markers.find(marker=>marker&&marker.id===earliestLot12.markerId)||null:null;
+      const earliestWasFirstRow12=!!(
+        earliestMarker12&&firstProcessedRow12&&
+        (earliestMarker12.sourceRows||[]).some(row=>row===firstProcessedRow12||flipRowKey12(row)===flipRowKey12(firstProcessedRow12))
+      );
+      let diagnosticRemaining12=closeTotal;
+      const contributingLots12=[];
+      for(const lot of lots){
+        if(!(diagnosticRemaining12>EPS12)) break;
+        const contribution=Math.min(diagnosticRemaining12,n12(lot.remainingQty));
+        if(!(contribution>EPS12)) continue;
+        const marker=markers.find(item=>item&&item.id===lot.markerId)||null;
+        contributingLots12.push({
+          markerId:lot.markerId,
+          parentId:lot.parentTradeId||lot.chainId||null,
+          ...flipTime12(lot.time),
+          remainingQty:n12(lot.remainingQty),
+          originalQty:n12(lot.originalQty),
+          closeContributionQty:contribution,
+          entryTradeId:marker&&marker.tradeId!=null?String(marker.tradeId):null,
+          entryOrderId:marker&&marker.orderId!=null?String(marker.orderId):null,
+          entrySourceTradeIds:[...new Set((marker&&marker.sourceRows||[]).map(row=>row&&row.id).filter(value=>value!=null).map(String))]
+        });
+        diagnosticRemaining12-=contribution;
+      }
+      flipDiag12({
+        callId:flipCallId12,
+        symbol:String(symbol||''),
+        ...flipDisplayContext12(),
+        inputRowCount:Array.isArray(rows)?rows.length:0,
+        executionGroupCount:groups.length,
+        firstProcessedRow:firstProcessedRow12?{
+          tradeId:firstProcessedRow12.id!=null?String(firstProcessedRow12.id):null,
+          orderId:firstProcessedRow12.orderId!=null?String(firstProcessedRow12.orderId):null,
+          side:String(firstProcessedRow12.side||''),
+          qty:n12(firstProcessedRow12.qty),
+          price:n12(firstProcessedRow12.price),
+          ...flipTime12(Math.floor(n12(firstProcessedRow12.time)/1000))
+        }:null,
+        flipFill:{
+          tradeId:g.tradeId!=null?String(g.tradeId):null,
+          orderId:g.orderId!=null?String(g.orderId):null,
+          rawSide:String(g.side||''),
+          priorPositionSide:sideText12(ps),
+          incomingSide:sideText12(s),
+          qty:q,price:p,realizedPnl:pnl,
+          ...flipTime12(t)
+        },
+        openBefore,
+        closeTotal,
+        reverseRemainder:Math.max(0,q-closeTotal),
+        earliestContributingLot:earliestLot12?{
+          markerId:earliestLot12.markerId,
+          parentId:earliestLot12.parentTradeId||earliestLot12.chainId||null,
+          remainingQty:n12(earliestLot12.remainingQty),
+          originalQty:n12(earliestLot12.originalQty),
+          entryTradeId:earliestMarker12&&earliestMarker12.tradeId!=null?String(earliestMarker12.tradeId):null,
+          entryOrderId:earliestMarker12&&earliestMarker12.orderId!=null?String(earliestMarker12.orderId):null,
+          ...flipTime12(earliestLot12.time)
+        }:null,
+        earliestLotEntryWasFirstProcessedRow:earliestWasFirstRow12,
+        startingPositionUnverifiedAtFetchBoundary:earliestWasFirstRow12,
+        contributingLots:contributingLots12
+      });
 
       const closePnlTotal = pnl;
       if(closeTotal > EPS12){
