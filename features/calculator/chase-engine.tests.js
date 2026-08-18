@@ -118,5 +118,18 @@ function harness(overrides={}){
     await h.engine.cancel("cancel requested");
     assert(!h.engine.isActive(),"the row chase lock may release after snapshot confirmation");
   }
+  {
+    let confirms=false;
+    const h=harness({verifyCanceled:async identity=>{h.calls.verify.push(identity);return confirms;}});
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    await h.engine.cancel("cancel requested");
+    await h.engine.tick();
+    assert(h.engine.isActive(),"a scheduled tick must keep retrying cancel verification instead of finishing from order status alone");
+    assert.equal(h.finishes.length,0,"an unconfirmed cancel must not reach onFinish");
+    assert.equal(h.calls.verify.length,2,"the pending cancel intent must be reverified on the next tick");
+    confirms=true;
+    await h.engine.tick();
+    assert(!h.engine.isActive(),"a pending cancel may finish after a later authoritative confirmation");
+  }
   console.log("Shared chase engine tests: PASS");
 })().catch(error=>{console.error(error);process.exitCode=1;});

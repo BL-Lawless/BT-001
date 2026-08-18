@@ -16,17 +16,49 @@ assert(main.includes("ensureTopOfBook,"),"the public market hub must expose proa
 assert(main.includes("const TOP_OF_BOOK_STALE_MS = 2500"),"top-of-book freshness must use the documented 2.5-second gate");
 assert(main.includes('type:"bookTicker"'),"book updates must publish through the shared hub");
 assert.equal((calculator.match(/getTopOfBook/g)||[]).length>=2,true,"both OTF and row engines must consume the shared API");
-assert.equal((calculator.match(/timeInForce:"GTX"/g)||[]).length,2,"OTF and row placement paths must both use GTX");
+assert.equal((calculator.match(/timeInForce:"GTX"/g)||[]).length>=2,true,"OTF and row placement paths must both use GTX");
 assert(calculator.includes('signedOrderWrite("PUT",send)'),"chases must amend through PUT /fapi/v1/order");
 assert(calculator.includes("send.quantity = fmtLot(quantity)")&&calculator.includes("send.price = String(price)"),"amends must send price and quantity together");
 assert(!/timeInForce:"GTC"/.test(calculator.slice(0,calculator.indexOf("function moneyColor"))),"the OTF chase path must not retain GTC");
-assert(calculator.includes("maxDurationMs:3000"),"row chases must have a three-second cap");
+assert(calculator.includes("maxDurationMs:15000"),"entry and exit row chases must share the fifteen-second cap");
+assert(calculator.includes("Chase this row for up to 15 seconds"),"the row chase tooltip must describe the fifteen-second cap");
+assert(calculator.includes("applyRowChaseWriteSuccess(activeRowChase,confirmed"),"a placed chase order must reconcile onto its originating calculator row");
+assert(calculator.includes("applyRowChaseWriteSuccess(activeRowChase,response"),"a repriced chase order must keep its originating row identity current");
+assert(calculator.includes("suppressNormalOrderIdentity:terminalIdentity"),"terminal chase reconciliation must suppress its own transient live-order identity");
 assert(calculator.includes("Another row chase is active"),"row C controls must enforce one shared row lock");
 assert(calculator.includes("snapshot.normalFetchError"),"row unlock must depend on a successful open-orders cancel verification");
 assert(calculator.includes('else if(activeRowChase.type === "exit") send.reduceOnly = "true"'),"only row exits may add reduceOnly in one-way mode");
 assert(css.includes(".calc-module-row-chase")&&css.includes(".otf-close-live.is-error"),"row controls and the single red OTF status must be styled");
 assert.equal((calculator.match(/id="otfCloseChaseLiveStatus"/g)||[]).length,1,"OTF must render exactly one chase status line");
 assert(!calculator.includes('id="otfCloseChaseStatus"'),"the duplicate OTF status element must be removed");
+
+const identityStart=calculator.indexOf("function normalOrderMatchesIdentity");
+const identityEnd=calculator.indexOf("function freshRowChaseClientId",identityStart);
+const identityContext={toUpper:value=>String(value||"").toUpperCase(),currentSymbol:()=>"BTCUSDT",String,Array};
+vm.createContext(identityContext);
+vm.runInContext(calculator.slice(identityStart,identityEnd),identityContext);
+const transientSnapshot={normalOrders:[
+  {symbol:"BTCUSDT",orderId:41,clientOrderId:"row-chase",status:"NEW"},
+  {symbol:"BTCUSDT",orderId:42,clientOrderId:"other",status:"NEW"}
+]};
+identityContext.suppressNormalOrderByIdentity(transientSnapshot,{symbol:"BTCUSDT",orderId:41,clientOrderId:"row-chase"});
+assert.deepEqual(transientSnapshot.normalOrders.map(order=>order.orderId),[42],"terminal reconciliation must omit only the chase's own transient order");
+
+const writeStart=calculator.indexOf("function applyRowChaseWriteSuccess");
+const writeEnd=calculator.indexOf("function refreshRowChaseButtons",writeStart);
+let reconciledWrite=null;
+const writeContext={applyWriteSuccessToRow:(row,response,fallback)=>{reconciledWrite={row,response,fallback};}};
+vm.createContext(writeContext);
+vm.runInContext(calculator.slice(writeStart,writeEnd),writeContext);
+const originRow={isConnected:true};
+writeContext.applyRowChaseWriteSuccess(
+  {row:originRow,type:"entry",symbol:"BTCUSDT",side:"BUY",positionSide:""},
+  {orderId:77,clientOrderId:"row-chase"},
+  {quantity:"0.010",price:"60000",clientOrderId:"row-chase"}
+);
+assert.equal(reconciledWrite.row,originRow,"the chase write must reconcile the originating row instead of creating a second row");
+assert.equal(reconciledWrite.fallback.orderRoleType,"CHASE_ENTRY");
+assert.equal(reconciledWrite.fallback.timeInForce,"GTX");
 
 let clock=10000;
 const bookStart=main.indexOf("function topOfBookSnapshot");

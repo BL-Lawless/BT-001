@@ -2144,18 +2144,45 @@
       lot.classList.toggle("calc-module-input-locked",isLocked);
     }
   }
-  function findNormalOrderByIdentity(snapshot,identity){
-    if(!snapshot || !Array.isArray(snapshot.normalOrders)) return null;
+  function normalOrderMatchesIdentity(order,identity){
+    if(!order) return false;
     const symbol = toUpper(identity && identity.symbol || currentSymbol());
     const orderId = identity && identity.orderId != null ? String(identity.orderId) : "";
     const clientOrderId = String(identity && identity.clientOrderId || "");
-    return snapshot.normalOrders.find(order => order && toUpper(order.symbol) === symbol && (
+    return toUpper(order.symbol) === symbol && (
       (orderId && order.orderId != null && String(order.orderId) === orderId) ||
       (clientOrderId && String(order.clientOrderId || "") === clientOrderId)
-    )) || null;
+    );
+  }
+  function findNormalOrderByIdentity(snapshot,identity){
+    if(!snapshot || !Array.isArray(snapshot.normalOrders)) return null;
+    return snapshot.normalOrders.find(order => normalOrderMatchesIdentity(order,identity)) || null;
+  }
+  function suppressNormalOrderByIdentity(snapshot,identity){
+    if(!snapshot || !Array.isArray(snapshot.normalOrders) || !identity) return snapshot;
+    snapshot.normalOrders = snapshot.normalOrders.filter(order => !normalOrderMatchesIdentity(order,identity));
+    return snapshot;
   }
   function freshRowChaseClientId(){
     return ("CALC_ROW_C_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7)).slice(0,36);
+  }
+  function applyRowChaseWriteSuccess(context,response,details){
+    if(!context || !context.row || !context.row.isConnected) return;
+    const write = details || {};
+    applyWriteSuccessToRow(context.row,response,{
+      symbol:context.symbol,
+      side:context.side,
+      positionSide:context.positionSide || "BOTH",
+      type:"LIMIT",
+      price:write.price,
+      origQty:write.quantity,
+      timeInForce:"GTX",
+      clientOrderId:write.clientOrderId || "",
+      reduceOnly:context.type === "exit" && !context.positionSide ? "true" : undefined,
+      orderRoleCode:"C",
+      orderRoleType:context.type === "entry" ? "CHASE_ENTRY" : "CHASE_EXIT",
+      orderOwner:"CALC"
+    });
   }
   function refreshRowChaseButtons(){
     document.querySelectorAll(".calc-module-row-chase").forEach(button => {
@@ -2164,7 +2191,7 @@
       button.disabled = !!activeRowChase && !active;
       button.classList.toggle("is-active",active);
       button.textContent = active ? "×" : "C";
-      button.title = active ? "Cancel this row chase" : "Chase this row for up to 3 seconds";
+      button.title = active ? "Cancel this row chase" : "Chase this row for up to 15 seconds";
     });
   }
   function setRowChaseStatus(state){
@@ -2216,17 +2243,14 @@
         else if(activeRowChase.type === "exit") send.reduceOnly = "true";
         const response = await signedOrderWrite("POST",send);
         if(!binanceWriteConfirmed(response)) throw new Error("Unexpected Binance response.");
-        registerTrackedOrderMeta({
-          symbol:send.symbol,
-          side:send.side,
-          positionSide:send.positionSide || "",
-          roleCode:"C",
-          roleType:activeRowChase.type === "entry" ? "CHASE_ENTRY" : "CHASE_EXIT",
-          owner:"CALC",
-          orderId:response && response.orderId != null ? response.orderId : null,
-          clientOrderId:response && response.clientOrderId ? response.clientOrderId : clientId
+        const confirmed = Object.assign({clientOrderId:clientId,price:send.price},response || {});
+        if(!confirmed.clientOrderId) confirmed.clientOrderId = clientId;
+        applyRowChaseWriteSuccess(activeRowChase,confirmed,{
+          quantity:send.quantity,
+          price:send.price,
+          clientOrderId:confirmed.clientOrderId
         });
-        return Object.assign({clientOrderId:clientId,price:send.price},response || {});
+        return confirmed;
       },
       amend:async ({identity,quantity,price}) => {
         if(!activeRowChase) throw new Error("Row chase context is unavailable.");
@@ -2234,7 +2258,13 @@
         send.side = activeRowChase.side;
         send.quantity = fmtLot(quantity);
         send.price = String(price);
-        return signedOrderWrite("PUT",send);
+        const response = await signedOrderWrite("PUT",send);
+        applyRowChaseWriteSuccess(activeRowChase,response,{
+          quantity:send.quantity,
+          price:send.price,
+          clientOrderId:identity && identity.clientOrderId
+        });
+        return response;
       },
       query:async identity => {
         try{ return await signedOrderWrite("GET",rowChaseIdentityParams(identity)); }
@@ -2258,7 +2288,16 @@
         }
         refreshRowChaseButtons();
         setRowChaseStatus(state);
-        try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_ignored){}
+        const terminalIdentity = state && ["filled","cancelled","expired"].includes(String(state.result || ""))
+          ? {symbol:context && context.symbol,orderId:state.orderId,clientOrderId:state.clientOrderId}
+          : null;
+        try{
+          await readBinance({
+            preserveSendPlan:true,
+            source:"postSendRefresh",
+            suppressNormalOrderIdentity:terminalIdentity
+          });
+        }catch(_ignored){}
       }
     });
     return rowChaseEngine;
@@ -2318,7 +2357,7 @@
         label:(type === "entry" ? "Entry" : "Exit") + " row CHS",
         symbol:activeRowChase.symbol,
         quantity,
-        maxDurationMs:3000,
+        maxDurationMs:15000,
         meta:{type,direction:rowDirection}
       });
     }catch(error){
@@ -6783,6 +6822,7 @@
       }
 
       if(snapshot){
+        if(opts.suppressNormalOrderIdentity) suppressNormalOrderByIdentity(snapshot,opts.suppressNormalOrderIdentity);
         if(opts.preserveSendPlan) detectCalculatorOrderExecutions(snapshot);
         mapped = mapLimitOrdersForCalculator(snapshot,pos ? pos.side : direction);
         diag.normalLimitOrdersFound = mapped.diagnostic.normalLimitOrdersFound;

@@ -154,6 +154,12 @@
       busy = true;
       clearTimer();
       try{
+        if(run.cancelIntent){
+          const intent = run.cancelIntent;
+          busy = false;
+          await cancel(intent.reason,intent.extra);
+          return;
+        }
         if(run.expiresAt && Date.now() >= run.expiresAt){
           busy = false;
           await cancel(run.label + " expired — remaining qty cancelled",{result:"expired"});
@@ -288,6 +294,7 @@
         recovering:false,
         firstBookWaitCompleted:false,
         canceling:false,
+        cancelIntent:null,
         meta:input.meta || null
       };
       update(run.label + " starting");
@@ -297,11 +304,13 @@
     async function cancel(reason,extra){
       if(!run) return Object.freeze({active:false});
       if(run.canceling) return snapshot();
+      const cancelReason = reason || run.label + " cancelled";
+      run.cancelIntent = {reason:cancelReason,extra:extra || null};
       clearTimer();
       run.canceling = true;
       update(reason || run.label + " canceling");
       const id = {symbol:run.symbol,orderId:run.orderId,clientOrderId:run.clientOrderId};
-      if(id.orderId == null && !id.clientOrderId) return finish(reason || run.label + " cancelled","normal",extra);
+      if(id.orderId == null && !id.clientOrderId) return finish(cancelReason,"normal",extra);
       try{
         let finalOrder = null;
         try{
@@ -313,7 +322,7 @@
         const confirmed = await opts.verifyCanceled(id,snapshot());
         if(!confirmed) throw new Error("cancel was not confirmed by the live open-orders snapshot");
         if(upper(finalOrder && finalOrder.status) === "FILLED") return finish(run.label + " filled","normal",{result:"filled"});
-        return finish(reason || run.label + " cancelled","normal",extra);
+        return finish(cancelReason,"normal",extra);
       }catch(error){
         if(!run) return Object.freeze({active:false});
         run.canceling = false;
