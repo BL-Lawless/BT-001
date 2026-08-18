@@ -20,6 +20,7 @@
   const AUTO_SYNC_DISPLAY_REFRESH_MS = 500;
   const SEND_POSITION_MAX_AGE_MS = 5000;
   const FLAT_CLEANUP_CONFIRM_MS = 700;
+  const ROW_CHASE_TERMINAL_SUPPRESSION_MS = 5000;
   const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1000;
   const OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS = [0,1,2,5];
   const OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS = [
@@ -108,6 +109,8 @@
     startedAt:0,
     expiresAt:0
   };
+  let rowChaseTerminalOrderSuppression = null;
+  let rowChaseTerminalSuppressionTimer = null;
   let binanceStateReconcileTimer = null;
   let pendingBinanceStateChange = null;
   let lastBinanceStateEventSignature = "";
@@ -2163,6 +2166,55 @@
     snapshot.normalOrders = snapshot.normalOrders.filter(order => !normalOrderMatchesIdentity(order,identity));
     return snapshot;
   }
+  function clearRowChaseOrderSuppression(){
+    if(rowChaseTerminalSuppressionTimer != null) clearTimeout(rowChaseTerminalSuppressionTimer);
+    rowChaseTerminalSuppressionTimer = null;
+    rowChaseTerminalOrderSuppression = null;
+  }
+  function beginRowChaseOrderSuppression(identity){
+    const normalized = {
+      symbol:String(identity&&identity.symbol||currentSymbol()),
+      orderId:identity&&identity.orderId!=null?String(identity.orderId):null,
+      clientOrderId:String(identity&&identity.clientOrderId||"")
+    };
+    if(normalized.orderId == null && !normalized.clientOrderId) return null;
+    clearRowChaseOrderSuppression();
+    const startedAt = Date.now();
+    const state = {identity:normalized,startedAt,expiresAt:startedAt+ROW_CHASE_TERMINAL_SUPPRESSION_MS};
+    rowChaseTerminalOrderSuppression = state;
+    rowChaseTerminalSuppressionTimer = setTimeout(() => {
+      if(rowChaseTerminalOrderSuppression === state) clearRowChaseOrderSuppression();
+    },ROW_CHASE_TERMINAL_SUPPRESSION_MS);
+    return state;
+  }
+  function activeRowChaseOrderSuppression(){
+    const state = rowChaseTerminalOrderSuppression;
+    if(!state) return null;
+    if(Date.now() >= state.expiresAt){
+      clearRowChaseOrderSuppression();
+      return null;
+    }
+    return state;
+  }
+  function cacheConfirmsRowChaseOrderAbsent(state){
+    try{
+      const cache = window.BINANCE_OPEN_ORDERS_CACHE;
+      const cached = cache&&typeof cache.getSnapshot==="function"?cache.getSnapshot(state.identity.symbol):null;
+      if(!cached||cached.status!=="ok"||cached.requestInFlight||!(Number(cached.verifiedAt)>=state.startedAt)) return false;
+      return !(Array.isArray(cached.orders)&&cached.orders.some(order=>normalOrderMatchesIdentity(order,state.identity)));
+    }catch(_e){return false;}
+  }
+  function applyRowChaseOrderSuppression(snapshot,scopedIdentity){
+    const shared = activeRowChaseOrderSuppression();
+    const identity = shared?shared.identity:scopedIdentity;
+    if(!snapshot||!identity) return null;
+    const orderPresent = !!findNormalOrderByIdentity(snapshot,identity);
+    suppressNormalOrderByIdentity(snapshot,identity);
+    const directAbsenceConfirmed = !snapshot.normalFetchError&&!orderPresent;
+    const cacheAbsenceConfirmed = !!(shared&&directAbsenceConfirmed&&cacheConfirmsRowChaseOrderAbsent(shared));
+    if(cacheAbsenceConfirmed) clearRowChaseOrderSuppression();
+    return {identity,shared:!!shared,orderPresent,directAbsenceConfirmed,cacheAbsenceConfirmed};
+  }
   function freshRowChaseClientId(){
     return ("CALC_ROW_C_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7)).slice(0,36);
   }
@@ -2250,6 +2302,9 @@
           price:send.price,
           clientOrderId:confirmed.clientOrderId
         });
+        const confirmedMeta = activeRowChase.row&&activeRowChase.row.__binanceLimitOrderMeta;
+        const confirmedBlinkKey = orderKeyFromMeta(confirmedMeta)||orderKeyFromMeta(confirmed);
+        if(confirmedBlinkKey) triggerConfirmedOrderBlink(confirmedBlinkKey);
         return confirmed;
       },
       amend:async ({identity,quantity,price}) => {
@@ -2264,6 +2319,9 @@
           price:send.price,
           clientOrderId:identity && identity.clientOrderId
         });
+        const amendedMeta = activeRowChase.row&&activeRowChase.row.__binanceLimitOrderMeta;
+        const amendedBlinkKey = orderKeyFromMeta(amendedMeta)||orderKeyFromMeta(response)||orderKeyFromMeta(identity);
+        if(amendedBlinkKey) triggerConfirmedOrderBlink(amendedBlinkKey);
         return response;
       },
       query:async identity => {
@@ -2291,11 +2349,11 @@
         const terminalIdentity = state && ["filled","cancelled","expired"].includes(String(state.result || ""))
           ? {symbol:context && context.symbol,orderId:state.orderId,clientOrderId:state.clientOrderId}
           : null;
+        if(terminalIdentity) beginRowChaseOrderSuppression(terminalIdentity);
         try{
           await readBinance({
             preserveSendPlan:true,
-            source:"postSendRefresh",
-            suppressNormalOrderIdentity:terminalIdentity
+            source:"postSendRefresh"
           });
         }catch(_ignored){}
       }
@@ -6822,7 +6880,7 @@
       }
 
       if(snapshot){
-        if(opts.suppressNormalOrderIdentity) suppressNormalOrderByIdentity(snapshot,opts.suppressNormalOrderIdentity);
+        applyRowChaseOrderSuppression(snapshot,opts.suppressNormalOrderIdentity);
         if(opts.preserveSendPlan) detectCalculatorOrderExecutions(snapshot);
         mapped = mapLimitOrdersForCalculator(snapshot,pos ? pos.side : direction);
         diag.normalLimitOrdersFound = mapped.diagnostic.normalLimitOrdersFound;

@@ -24,7 +24,17 @@ assert(calculator.includes("maxDurationMs:15000"),"entry and exit row chases mus
 assert(calculator.includes("Chase this row for up to 15 seconds"),"the row chase tooltip must describe the fifteen-second cap");
 assert(calculator.includes("applyRowChaseWriteSuccess(activeRowChase,confirmed"),"a placed chase order must reconcile onto its originating calculator row");
 assert(calculator.includes("applyRowChaseWriteSuccess(activeRowChase,response"),"a repriced chase order must keep its originating row identity current");
-assert(calculator.includes("suppressNormalOrderIdentity:terminalIdentity"),"terminal chase reconciliation must suppress its own transient live-order identity");
+assert(calculator.includes("beginRowChaseOrderSuppression(terminalIdentity)"),"terminal chase reconciliation must publish its identity to the shared bounded suppression lifecycle");
+assert(calculator.includes("applyRowChaseOrderSuppression(snapshot,opts.suppressNormalOrderIdentity)"),"every calculator read path must consult the shared chase suppression lifecycle");
+assert(calculator.includes("ROW_CHASE_TERMINAL_SUPPRESSION_MS = 5000"),"shared chase suppression must have a short bounded lifetime");
+assert(calculator.includes("cacheAbsenceConfirmed")&&calculator.includes("clearRowChaseOrderSuppression()"),"shared suppression must clear after direct and cache snapshots both confirm absence");
+const rowChaseEngineStart=calculator.indexOf("function ensureRowChaseEngine");
+const rowSubmitStart=calculator.indexOf("submit:async ({quantity,price})",rowChaseEngineStart);
+const rowAmendStart=calculator.indexOf("amend:async ({identity,quantity,price})",rowChaseEngineStart);
+const rowSubmitBlock=calculator.slice(rowSubmitStart,rowAmendStart);
+const rowAmendBlock=calculator.slice(rowAmendStart,calculator.indexOf("query:async identity",rowAmendStart));
+assert(rowSubmitBlock.includes("triggerConfirmedOrderBlink(confirmedBlinkKey)"),"a confirmed row-chase submit must trigger the normal chart confirmation blink");
+assert(rowAmendBlock.includes("triggerConfirmedOrderBlink(amendedBlinkKey)"),"a confirmed row-chase reprice must trigger the normal chart confirmation blink");
 assert(calculator.includes("Another row chase is active"),"row C controls must enforce one shared row lock");
 assert(calculator.includes("snapshot.normalFetchError"),"row unlock must depend on a successful open-orders cancel verification");
 assert(calculator.includes('else if(activeRowChase.type === "exit") send.reduceOnly = "true"'),"only row exits may add reduceOnly in one-way mode");
@@ -34,7 +44,22 @@ assert(!calculator.includes('id="otfCloseChaseStatus"'),"the duplicate OTF statu
 
 const identityStart=calculator.indexOf("function normalOrderMatchesIdentity");
 const identityEnd=calculator.indexOf("function freshRowChaseClientId",identityStart);
-const identityContext={toUpper:value=>String(value||"").toUpperCase(),currentSymbol:()=>"BTCUSDT",String,Array};
+let suppressionClock=20000;
+let cacheSnapshot={status:"ok",requestInFlight:false,verifiedAt:suppressionClock,orders:[
+  {symbol:"BTCUSDT",orderId:41,clientOrderId:"row-chase",status:"NEW"}
+]};
+const identityContext={
+  toUpper:value=>String(value||"").toUpperCase(),
+  currentSymbol:()=>"BTCUSDT",
+  rowChaseTerminalOrderSuppression:null,
+  rowChaseTerminalSuppressionTimer:null,
+  ROW_CHASE_TERMINAL_SUPPRESSION_MS:5000,
+  Date:{now:()=>suppressionClock},
+  setTimeout:()=>1,
+  clearTimeout:()=>{},
+  window:{BINANCE_OPEN_ORDERS_CACHE:{getSnapshot:()=>cacheSnapshot}},
+  String,Array,Number
+};
 vm.createContext(identityContext);
 vm.runInContext(calculator.slice(identityStart,identityEnd),identityContext);
 const transientSnapshot={normalOrders:[
@@ -43,6 +68,22 @@ const transientSnapshot={normalOrders:[
 ]};
 identityContext.suppressNormalOrderByIdentity(transientSnapshot,{symbol:"BTCUSDT",orderId:41,clientOrderId:"row-chase"});
 assert.deepEqual(transientSnapshot.normalOrders.map(order=>order.orderId),[42],"terminal reconciliation must omit only the chase's own transient order");
+
+identityContext.beginRowChaseOrderSuppression({symbol:"BTCUSDT",orderId:41,clientOrderId:"row-chase"});
+const delayedAutoSyncSnapshot={normalFetchError:false,normalOrders:[
+  {symbol:"BTCUSDT",orderId:41,clientOrderId:"row-chase",status:"NEW"},
+  {symbol:"BTCUSDT",orderId:42,clientOrderId:"other",status:"NEW"}
+]};
+identityContext.applyRowChaseOrderSuppression(delayedAutoSyncSnapshot,null);
+assert.deepEqual(delayedAutoSyncSnapshot.normalOrders.map(order=>order.orderId),[42],"the delayed auto-sync read must consult shared suppression and omit the transient chase order");
+assert(identityContext.activeRowChaseOrderSuppression(),"suppression must remain active while the authoritative cache still contains the chase order");
+suppressionClock+=1;
+cacheSnapshot={status:"ok",requestInFlight:false,verifiedAt:suppressionClock,orders:[]};
+identityContext.applyRowChaseOrderSuppression({normalFetchError:false,normalOrders:[]},null);
+assert.equal(identityContext.activeRowChaseOrderSuppression(),null,"suppression must clear once direct and authoritative cache reads both confirm absence");
+identityContext.beginRowChaseOrderSuppression({symbol:"BTCUSDT",orderId:43,clientOrderId:"row-chase-timeout"});
+suppressionClock+=5001;
+assert.equal(identityContext.activeRowChaseOrderSuppression(),null,"suppression must expire after the bounded fallback window even without confirmed absence");
 
 const writeStart=calculator.indexOf("function applyRowChaseWriteSuccess");
 const writeEnd=calculator.indexOf("function refreshRowChaseButtons",writeStart);
