@@ -106,7 +106,7 @@ const MARKETS = {
     income:"https://fapi.binance.com/fapi/v1/income",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
-    ws:"wss://fstream.binance.com/market/stream"
+    ws:"wss://fstream.binance.com/stream"
   },
   btcusdc:{
     symbol:"BTCUSDC",
@@ -116,7 +116,7 @@ const MARKETS = {
     income:"https://fapi.binance.com/fapi/v1/income",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
-    ws:"wss://fstream.binance.com/market/stream"
+    ws:"wss://fstream.binance.com/stream"
   }
 };
 
@@ -3683,6 +3683,7 @@ const marketDataHub = (() => {
     skippedReason:"recent-public-market-visibility-recovery"
   });
   const ACTIVE_FEED_STALE_MS = 8000;
+  const TOP_OF_BOOK_STALE_MS = 2500;
   const WS_STALE_MS = 12000;
   const WS_RECONNECT_MS = 25000;
   const REST_FALLBACK_MS = 10000;
@@ -3709,6 +3710,9 @@ const marketDataHub = (() => {
     lastError:null,
     latestPrice:null,
     latestMarkPrice:null,
+    latestBid:null,
+    latestAsk:null,
+    latestBookTickerTime:0,
     latestAggTradeTickTime:0,
     restFallbackTimestamp:0,
     lastKlineTickByTf:{},
@@ -3758,7 +3762,10 @@ const marketDataHub = (() => {
     consumerTimeframes:{},
     consumerDepths:{},
     timeframeEnsureInFlight:{},
-    subscribers:new Set()
+    subscribers:new Set(),
+    topOfBook:null,
+    topOfBookEnsurePromise:null,
+    lastTopOfBookEnsureReconnectAt:0
   };
 
   diag.maCacheHits = 0;
@@ -3802,20 +3809,24 @@ const marketDataHub = (() => {
       diag.lastChartActivitySourceByTf = {};
       diag.lastActiveChartCandles = [];
       state.timeframeEnsureInFlight = {};
+      state.topOfBook = null;
+      diag.latestBid = null;
+      diag.latestAsk = null;
+      diag.latestBookTickerTime = 0;
     }
     state.bufferSymbol = symbol;
     return symbol;
   }
   function wsBase(){
-    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream").replace(/\/+$/,"");
-    if(/\/market\/stream$/i.test(raw)) return raw;
-    if(/\/market\/ws$/i.test(raw)) return raw.replace(/\/market\/ws$/i,"/market/stream");
-    if(/\/(?:public|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|private)\/stream$/i,"/market/stream");
-    if(/\/(?:public|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|private)\/ws$/i,"/market/stream");
-    if(/\/stream$/i.test(raw)) return raw.replace(/\/stream$/i,"/market/stream");
-    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/market/stream");
-    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/market/stream");
-    return raw + "/market/stream";
+    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/stream").replace(/\/+$/,"");
+    if(/\/market\/stream$/i.test(raw)) return raw.replace(/\/market\/stream$/i,"/stream");
+    if(/\/market\/ws$/i.test(raw)) return raw.replace(/\/market\/ws$/i,"/stream");
+    if(/\/(?:public|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|private)\/stream$/i,"/stream");
+    if(/\/(?:public|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|private)\/ws$/i,"/stream");
+    if(/\/stream$/i.test(raw)) return raw;
+    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/stream");
+    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/stream");
+    return raw + "/stream";
   }
   function socketState(){
     if(!ws) return "closed";
@@ -3957,6 +3968,10 @@ const marketDataHub = (() => {
     diag.lastRestSyncTime = 0;
     diag.lastMarkPriceTickTime = 0;
     diag.latestAggTradeTickTime = 0;
+    diag.latestBid = null;
+    diag.latestAsk = null;
+    diag.latestBookTickerTime = 0;
+    state.topOfBook = null;
     diag.restFallbackTimestamp = 0;
     diag.lastKlineTickByTf = {};
     diag.lastChartActivityByTf = {};
@@ -4035,6 +4050,7 @@ const marketDataHub = (() => {
     const streams = [...requiredKlineTimeframes()].sort((a,b)=>order.indexOf(a)-order.indexOf(b)).map(tf=>base+"@kline_"+tf);
     streams.push(base + "@aggTrade");
     streams.push(base + "@markPrice@1s");
+    streams.push(base + "@bookTicker");
     return streams;
   }
   function intervalMs(tf){
@@ -5072,6 +5088,24 @@ const marketDataHub = (() => {
     updateTabTitle();
     publishMarketUpdate({type:"price",source:"markPrice",price,exchangeTime:ms});
   }
+  function queueBookTicker(d){
+    const bid = Number(d && d.b);
+    const ask = Number(d && d.a);
+    if(!Number.isFinite(bid) || bid <= 0 || !Number.isFinite(ask) || ask <= 0 || ask < bid) return;
+    const receivedAt = now();
+    const symbol = String((d && d.s) || ensureBufferSymbol()).toUpperCase();
+    state.topOfBook = Object.freeze({
+      symbol,
+      bid,
+      ask,
+      at:receivedAt,
+      updateId:Number.isFinite(Number(d && d.u)) ? Number(d.u) : null
+    });
+    diag.latestBid = bid;
+    diag.latestAsk = ask;
+    diag.latestBookTickerTime = receivedAt;
+    publishMarketUpdate({type:"bookTicker",source:"bookTicker",bid,ask,exchangeTime:receivedAt});
+  }
   function handleKline(d){
     ensureBufferSymbol();
     const row = parseWsKline(d.k);
@@ -5261,6 +5295,9 @@ const marketDataHub = (() => {
           }else if(d && d.e === "markPriceUpdate"){
             markWsTick("markPrice");
             queueMarkPriceTick(d);
+          }else if(d && d.s && d.b != null && d.a != null){
+            markWsTick("bookTicker");
+            queueBookTicker(d);
           }
         },
         onError:() => {
@@ -5444,6 +5481,56 @@ const marketDataHub = (() => {
   window.addEventListener("pagehide",scheduleVisibilityRecovery,false);
   window.addEventListener("pageshow",scheduleVisibilityRecovery,false);
 
+  function topOfBookSnapshot(){
+    const book = state.topOfBook;
+    const expectedSymbol = String((cfg() && cfg().symbol) || "").toUpperCase();
+    const matches = !!book && book.symbol === expectedSymbol;
+    const ageMs = matches ? Math.max(0,now() - Number(book.at || 0)) : null;
+    const fresh = matches && ageMs <= TOP_OF_BOOK_STALE_MS;
+    return Object.freeze({
+      symbol:expectedSymbol,
+      bid:matches ? book.bid : null,
+      ask:matches ? book.ask : null,
+      at:matches ? book.at : null,
+      ageMs,
+      hasData:matches,
+      state:matches ? (fresh ? "fresh" : "stale") : "waiting",
+      fresh,
+      staleAfterMs:TOP_OF_BOOK_STALE_MS
+    });
+  }
+  function ensureTopOfBook(options={}){
+    const current = topOfBookSnapshot();
+    if(current.fresh) return Promise.resolve(current);
+    if(state.topOfBookEnsurePromise) return state.topOfBookEnsurePromise;
+    const timeoutMs = Math.max(250,Number(options.timeoutMs) || 3000);
+    const desiredUrl = wsBase() + "?streams=" + currentStreams().join("/");
+    const needsCorrectSocket = !socketOpen() || diag.activeUrl !== desiredUrl;
+    const stalledFirstTick = !current.hasData && socketOpen() && now() - Number(state.connectStartedAt || 0) >= 1000;
+    if(needsCorrectSocket || (stalledFirstTick && now() - state.lastTopOfBookEnsureReconnectAt >= timeoutMs)){
+      state.lastTopOfBookEnsureReconnectAt = now();
+      connect({force:true,reason:"top-of-book readiness"});
+    }
+    state.topOfBookEnsurePromise = new Promise(resolve => {
+      let settled = false;
+      let unsubscribe = () => {};
+      const finish = () => {
+        if(settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        state.topOfBookEnsurePromise = null;
+        resolve(topOfBookSnapshot());
+      };
+      const timer = setTimeout(finish,timeoutMs);
+      unsubscribe = subscribe(event => {
+        if(event && event.type === "bookTicker" && event.symbol === current.symbol) finish();
+      });
+      if(topOfBookSnapshot().fresh) finish();
+    });
+    return state.topOfBookEnsurePromise;
+  }
+
   window.BINANCE_REALTIME_DIAG = diag;
   window.binanceRealtimeDiagnostics = () => ({...diag});
   return {
@@ -5488,6 +5575,8 @@ const marketDataHub = (() => {
     canonicalTfKey,
     getAuthoritativeMaSnapshot,
     subscribe,
+    getTopOfBook:topOfBookSnapshot,
+    ensureTopOfBook,
     getLatestPrice:() => Number(diag.latestAggTradeTickTime||0)>=Number(diag.lastMarkPriceTickTime||0)
       ? {price:Number(diag.latestPrice)||null,at:Number(diag.latestAggTradeTickTime)||null,source:diag.latestPrice?"aggTrade":"unavailable"}
       : {price:Number(diag.latestMarkPrice)||null,at:Number(diag.lastMarkPriceTickTime)||null,source:diag.latestMarkPrice?"markPrice":"unavailable"},

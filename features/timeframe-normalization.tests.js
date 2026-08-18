@@ -21,7 +21,7 @@ const assert=require("assert"),fs=require("fs"),path=require("path"),vm=require(
   });
   assert.deepEqual(Array.from(currentStreams()),[
     "btcusdt@kline_1m","btcusdt@kline_1w","btcusdt@kline_1M",
-    "btcusdt@aggTrade","btcusdt@markPrice@1s"
+    "btcusdt@aggTrade","btcusdt@markPrice@1s","btcusdt@bookTicker"
   ],"one-minute, weekly, and monthly requirements must remain distinct streams");
 
   const fetched=[];

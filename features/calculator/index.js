@@ -34,6 +34,7 @@
       try{
         await loadScript("features/calculator/domain/calculatorDomain.js");
         await loadScript("features/calculator/application/calculatorService.js");
+        await loadScript("features/calculator/application/chaseEngine.js");
         await loadScript("features/calculator/infrastructure/storageAdapter.js");
         await loadScript("features/calculator/presentation/calculatorModule.js");
       }catch(error){

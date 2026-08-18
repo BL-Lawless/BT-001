@@ -122,7 +122,7 @@ async function run(){
   assert(calculator.includes("const AUTO_SYNC_DISPLAY_REFRESH_MS = 500;"));
   assert(calculator.includes("setInterval(refreshAutoSyncDisplayFromHeldState,AUTO_SYNC_DISPLAY_REFRESH_MS)"));
   assert(calculator.includes('window.addEventListener("v14:binance-state-change"'),"Calculator resync must be driven by reconciled private-stream state changes");
-  assert(calculator.includes("const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1200;"));
+  assert(calculator.includes("const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1000;"));
   assert(main.includes("state.statusTimer = setInterval(runStatusLoop,1000);"));
   assert(!main.includes("restFailureCount")&&!main.includes("nextRestAttemptAt"));
   assert(scalp.includes("attempt<=C.order.protectionRetry")&&scalp.includes("attempt<=C.order.tpRetry"));
