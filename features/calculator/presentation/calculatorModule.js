@@ -98,6 +98,7 @@
   let rowChaseOriginalWatchGeneration = 0;
   let openPositionCloseChs = {
     active:false,
+    mode:"CHS",
     canceling:false,
     symbol:"",
     side:"",
@@ -179,6 +180,7 @@
   }
   function resetOpenPositionCloseChs(){
     openPositionCloseChs.active = false;
+    openPositionCloseChs.mode = "CHS";
     openPositionCloseChs.canceling = false;
     openPositionCloseChs.symbol = "";
     openPositionCloseChs.side = "";
@@ -211,7 +213,9 @@
     return !!(hit && hit.controlType === "open-position-close-toggle");
   }
   function openPositionCloseMode(){
-    return openPositionCloseChs.active ? "CHS" : (String(openPositionCloseUi.mode || "CHS").toUpperCase() === "MKT" ? "MKT" : "CHS");
+    if(openPositionCloseChs.active) return openPositionCloseChs.mode === "REV" ? "REV" : "CHS";
+    const mode=String(openPositionCloseUi.mode || "CHS").toUpperCase();
+    return mode === "MKT" ? "MKT" : mode === "REV" ? "REV" : "CHS";
   }
   function openPositionCloseChsValidOption(key){
     const target = String(key || "30s").toLowerCase();
@@ -297,6 +301,7 @@
           <div class="otf-close-segments" role="group" aria-label="Close mode">
             <button id="otfCloseChaseModeMkt" type="button">MKT</button>
             <button id="otfCloseChaseModeChs" type="button">CHS</button>
+            <button id="otfCloseChaseModeRev" type="button">REV</button>
           </div>
         </div>
         <label class="otf-close-field otf-close-slider-field" for="otfCloseChasePercent">
@@ -334,7 +339,7 @@
 
     const chsGuard = () => {
       if(!openPositionCloseChs.active) return false;
-      setStatus("Open Position CHS is active. Cancel CHS first.");
+      setStatus("Open Position " + openPositionCloseMode() + " is active. Cancel it first.");
       return true;
     };
     q("otfCloseChaseClose").addEventListener("click",hideOpenPositionClosePanel,false);
@@ -346,6 +351,13 @@
     q("otfCloseChaseModeChs").addEventListener("click",() => {
       if(chsGuard()) return;
       openPositionCloseUi.mode = "CHS";
+      renderOpenPositionClosePanel();
+    },false);
+    q("otfCloseChaseModeRev").addEventListener("click",() => {
+      if(chsGuard()) return;
+      openPositionCloseUi.mode = "REV";
+      openPositionCloseUi.percent = 100;
+      openPositionCloseUi.quantity = null;
       renderOpenPositionClosePanel();
     },false);
     q("otfCloseChaseDist").addEventListener("click",() => {
@@ -397,7 +409,7 @@
     },false);
     q("otfCloseChaseConfirm").addEventListener("click",() => { void confirmOpenPositionCloseOrder(); },false);
     q("otfCloseChaseCancel").addEventListener("click",() => {
-      if(openPositionCloseChs.active) void cancelOpenPositionCloseChs("Open Position CHS cancelled.",{closeUi:false});
+      if(openPositionCloseChs.active) void cancelOpenPositionCloseChs("Open Position " + openPositionCloseMode() + " cancelled.",{closeUi:false});
     },false);
     warmTopOfBook();
     return win;
@@ -468,16 +480,20 @@
     const preview = refreshOpenPositionClosePreviewSummary() || openPositionClosePreview({});
     const chsActive = !!openPositionCloseChs.active;
     const selectedMode = openPositionCloseMode();
+    const reverseMode = selectedMode === "REV";
     const validOption = openPositionCloseChsValidOption(currentOpenPositionCloseChsValidKey());
     const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : validOption.ms;
     const slider = q("otfCloseChasePercent");
     if(document.activeElement !== slider || chsActive) slider.value = String(preview.percent);
-    slider.setAttribute("aria-disabled",chsActive ? "true" : "false");
+    const sliderField=slider.closest(".otf-close-slider-field");
+    if(sliderField) sliderField.classList.toggle("hidden",reverseMode);
+    slider.disabled=reverseMode;
+    slider.setAttribute("aria-disabled",chsActive || reverseMode ? "true" : "false");
     const qtyInput=q("otfCloseChaseQtyInput");
-    qtyInput.readOnly=chsActive;
-    qtyInput.setAttribute("aria-disabled",chsActive ? "true" : "false");
-    [q("otfCloseChaseModeMkt"),q("otfCloseChaseModeChs")].forEach(button => {
-      const active = button.id.endsWith(selectedMode === "MKT" ? "Mkt" : "Chs");
+    qtyInput.readOnly=chsActive || reverseMode;
+    qtyInput.setAttribute("aria-disabled",chsActive || reverseMode ? "true" : "false");
+    [q("otfCloseChaseModeMkt"),q("otfCloseChaseModeChs"),q("otfCloseChaseModeRev")].forEach(button => {
+      const active = button.id.endsWith(selectedMode === "MKT" ? "Mkt" : selectedMode === "REV" ? "Rev" : "Chs");
       button.classList.toggle("is-active",active);
       button.setAttribute("aria-pressed",active ? "true" : "false");
       button.setAttribute("aria-disabled",chsActive ? "true" : "false");
@@ -495,12 +511,14 @@
         filledQty:Math.max(0,num(openPositionCloseChs.filledQty) || 0),
         remainingQty:Math.max(0,num(openPositionCloseChs.remainingQty) || 0),
         activePrice:String(openPositionCloseChs.price || "")
-      },{validText:openPositionCloseChsTimerText(remainingValidMs)}) : "";
+      },{prefix:"Open Position " + selectedMode,validText:openPositionCloseChsTimerText(remainingValidMs)}) : "";
     const statusText = openPositionClosePanelStatus || fallbackStatus;
     q("otfCloseChaseLiveStatus").textContent = statusText;
     live.classList.toggle("hidden",!statusText);
     live.classList.toggle("is-error",openPositionClosePanelTone === "error");
-    q("otfCloseChaseCancel").classList.toggle("hidden",!chsActive);
+    const cancelButton=q("otfCloseChaseCancel");
+    cancelButton.classList.toggle("hidden",!chsActive);
+    cancelButton.textContent="Cancel " + selectedMode;
     q("otfCloseChaseConfirm").setAttribute("aria-disabled",openPositionCloseUi.sending || chsActive ? "true" : "false");
   }
   function symbolTickSizeValue(){
@@ -553,13 +571,34 @@
     const normalizedQty=normalizeOpenPositionCloseQuantity(rawQty,liveQty,directQty==null
       ? {allowZero:true,roundDown:true,clampMinimum:false}
       : {allowZero:true});
-    const roundedQty=normalizedQty.quantity;
+    const reverseMode=String(openPositionCloseUi.mode||"").toUpperCase()==="REV";
+    const reverseQty=reverseMode?openPositionReverseOrderQuantity(liveQty):null;
+    const roundedQty=reverseMode?reverseQty.quantity:normalizedQty.quantity;
     const belowMinimum = rawQty > 0 && roundedQty < normalizedQty.minQty;
-    const executable = roundedQty >= normalizedQty.minQty && roundedQty <= liveQty + 1e-9;
+    const executable = reverseMode
+      ? reverseQty.exact && roundedQty >= reverseQty.minQty && roundedQty > liveQty
+      : roundedQty >= normalizedQty.minQty && roundedQty <= liveQty + 1e-9;
     const current = currentPriceReference();
     const side = String(positionLike && positionLike.side || direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-    const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * roundedQty);
-    return {liveQty,entry,percent,rawQty,roundedQty,belowMinimum,executable,estPl,side,current,stepSize:normalizedQty.stepSize,minQty:normalizedQty.minQty,maxQty:normalizedQty.maxQty};
+    const plQty=reverseMode?liveQty:roundedQty;
+    const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * plQty);
+    return {liveQty,entry,percent:reverseMode?100:percent,rawQty:reverseMode?liveQty*2:rawQty,roundedQty,belowMinimum,executable,estPl,side,current,stepSize:reverseMode?reverseQty.stepSize:normalizedQty.stepSize,minQty:reverseMode?reverseQty.minQty:normalizedQty.minQty,maxQty:reverseMode?reverseQty.maxQty:normalizedQty.maxQty,reverseMode};
+  }
+  function openPositionReverseOrderQuantity(liveQtyValue){
+    const helper=window.BT001SymbolTradingSettings;
+    const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+    const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
+    const lotFilter=filters.find(filter=>toUpper(filter&&filter.filterType)==="LOT_SIZE")||null;
+    const stepSize=Math.max(0,num(settings&&settings.stepSize)||num(lotFilter&&lotFilter.stepSize)||0.001);
+    const minQty=Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize);
+    const maxQty=Math.max(minQty,num(lotFilter&&lotFilter.maxQty)||Number.MAX_SAFE_INTEGER);
+    const requested=Math.max(0,num(liveQtyValue)||0)*2;
+    const normalizedText=helper&&typeof helper.normalizeQty==="function"
+      ? helper.normalizeQty(requested,settings)
+      : Number(Math.round(requested/stepSize)*stepSize).toFixed(3);
+    const quantity=Math.min(maxQty,Math.max(0,num(normalizedText)||0));
+    const exact=Math.abs(quantity-requested)<=Math.max(1e-12,stepSize*1e-6);
+    return {quantity,requested,stepSize,minQty,maxQty,exact};
   }
   function normalizedChasePrice(orderSide,topOfBook,distTicksOverride){
     const side = toUpper(orderSide) === "BUY" ? "BUY" : "SELL";
@@ -615,9 +654,14 @@
       price:String(price),
       newClientOrderId:clientId
     };
-    const ps = toUpper((livePos && livePos.positionSide) || openPositionCloseChs.positionSide || "");
-    if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
-    else send.reduceOnly = "true";
+    if(openPositionCloseChs.mode === "REV"){
+      send.positionSide = "BOTH";
+      send.reduceOnly = "false";
+    }else{
+      const ps = toUpper((livePos && livePos.positionSide) || openPositionCloseChs.positionSide || "");
+      if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
+      else send.reduceOnly = "true";
+    }
     const resp = await signedOrderWrite("POST",send);
     if(!binanceWriteConfirmed(resp)) throw new Error("Unexpected Binance response.");
     openPositionCloseChs.orderId = resp && resp.orderId != null ? resp.orderId : null;
@@ -629,7 +673,7 @@
       positionSide:send.positionSide || "",
       positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientOrderId:openPositionCloseChs.clientOrderId}) : null,
       roleCode:"C",
-      roleType:"CHASE_CLOSE",
+      roleType:openPositionCloseChs.mode === "REV" ? "CHASE_REVERSE" : "CHASE_CLOSE",
       owner:"CALC",
       orderId:resp && resp.orderId != null ? resp.orderId : null,
       clientOrderId:openPositionCloseChs.clientOrderId
@@ -770,7 +814,7 @@
       return;
     }
     if(openPositionCloseChs.active){
-      setStatus("Open Position CHS is already active. Use Cancel CHS.");
+      setStatus("Open Position " + openPositionCloseMode() + " is already active. Use Cancel.");
       return;
     }
     if(typeof hasKeys !== "function" || !hasKeys()){
@@ -794,13 +838,15 @@
           : "Open Position close blocked: selected lot is not executable.");
         return;
       }
-      if(openPositionCloseMode() === "CHS"){
+      const selectedMode=openPositionCloseMode();
+      if(selectedMode === "CHS" || selectedMode === "REV"){
         const validOption = openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
         openPositionCloseChs.active = true;
+        openPositionCloseChs.mode = selectedMode;
         openPositionCloseChs.canceling = false;
         openPositionCloseChs.symbol = String(currentSymbol());
         openPositionCloseChs.side = preview.side === "SHORT" ? "BUY" : "SELL";
-        openPositionCloseChs.positionSide = toUpper(livePos.positionSide || "");
+        openPositionCloseChs.positionSide = selectedMode === "REV" ? "BOTH" : toUpper(livePos.positionSide || "");
         openPositionCloseChs.requestedQty = preview.roundedQty;
         openPositionCloseChs.filledQty = 0;
         openPositionCloseChs.remainingQty = preview.roundedQty;
@@ -811,14 +857,14 @@
         openPositionCloseChs.startedAt = Date.now();
         openPositionCloseChs.expiresAt = validOption.ms == null ? 0 : (openPositionCloseChs.startedAt + validOption.ms);
         openPositionCloseUi.open = true;
-        openPositionCloseUi.mode = "CHS";
+        openPositionCloseUi.mode = selectedMode;
         const engine = ensureOpenPositionCloseChaseEngine();
         await engine.start({
-          label:"Open Position CHS",
+          label:selectedMode === "REV" ? "Open Position REV" : "Open Position CHS",
           symbol:openPositionCloseChs.symbol,
           quantity:preview.roundedQty,
           expiresAt:openPositionCloseChs.expiresAt,
-          meta:{distTicks:openPositionCloseChs.distTicks,type:"otf-close"}
+          meta:{distTicks:openPositionCloseChs.distTicks,type:selectedMode === "REV" ? "otf-reverse" : "otf-close",mode:selectedMode}
         });
         return;
       }
@@ -1539,7 +1585,7 @@
             <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddEntry" type="button">Add Entry</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedEntryAvg">-</span><span id="calcModuleCollapsedEntryFloating">-</span></span><span class="calc-module-caret" id="calcModuleEntriesCaret">▾</span></span>
           </div>
           <div id="calcModuleEntriesBody">
-            <div class="calc-module-row-head"><div>#</div><div>Level</div><div>Lot</div><div>C</div><div>Margin</div><div>x</div></div>
+            <div class="calc-module-row-head"><div>#</div><div>Level</div><div>Lot</div><div>Chase</div><div>Margin</div><div>x</div></div>
             <div id="calcModuleEntryRows"></div>
           </div>
         </div>
@@ -1565,7 +1611,7 @@
             <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddExit" type="button">Add Exit</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedExitPl">-</span></span><span class="calc-module-caret" id="calcModuleExitsCaret">▾</span></span>
           </div>
           <div id="calcModuleExitsBody">
-            <div class="calc-module-exit-head"><div>#</div><div>Level</div><div>Lot</div><div>C</div><div>PL</div><div>x</div></div>
+            <div class="calc-module-exit-head"><div>#</div><div>Level</div><div>Lot</div><div>Chase</div><div>PL</div><div>x</div></div>
             <div id="calcModuleExitRows"></div>
           </div>
         </div>
@@ -2058,6 +2104,9 @@
     const on = !!isOpenPosition;
     row.dataset.openPosition = on ? "1" : "0";
     row.classList.toggle("calc-module-row-open-position",on);
+    const chaseButton=row.querySelector(".calc-module-row-chase");
+    if(!on) resetOpenPositionRowChaseArm(chaseButton);
+    if(chaseButton&&!chaseButton.classList.contains("is-active")&&!isRowChaseOriginalCancelled(row)) chaseButton.textContent=on?"D":"C";
     row.title = on ? "Open Position" : (row.title || "");
     const lvl = levelInput(row);
     const lot = lotInput(row);
@@ -2419,11 +2468,39 @@
       const row = button.closest(".calc-module-row");
       const originalCancelled=isRowChaseOriginalCancelled(row);
       const active = !!(activeRowChase && activeRowChase.row === row);
+      if(active) resetOpenPositionRowChaseArm(button);
       button.disabled = originalCancelled||!!activeRowChase&&!active;
       button.classList.toggle("is-active",active);
-      button.textContent = active ? "×" : originalCancelled?"—":"C";
-      button.title = active ? "Cancel this row chase" : originalCancelled?"Original order cancelled after chase fill":"Chase this row for up to 15 seconds";
+      button.textContent = active ? "×" : originalCancelled?"—":isOpenPositionRow(row)?"D":"C";
+      const armed=button.dataset.openPositionChaseArmed==="1";
+      button.title = active ? "Cancel this row chase" : originalCancelled?"Original order cancelled after chase fill":armed?"Click again within 3 seconds to confirm":"Chase this row for up to 15 seconds";
     });
+  }
+  function resetOpenPositionRowChaseArm(button){
+    if(!button) return;
+    if(button.__openPositionChaseArmTimer!=null) clearTimeout(button.__openPositionChaseArmTimer);
+    button.__openPositionChaseArmTimer=null;
+    delete button.dataset.openPositionChaseArmed;
+    button.classList.remove("is-confirm-armed");
+    if(!button.classList.contains("is-active")) button.title="Chase this row for up to 15 seconds";
+  }
+  function handleRowChaseButtonClick(row,rowType){
+    const button=row&&row.querySelector(".calc-module-row-chase");
+    if(!isOpenPositionRow(row)||activeRowChase){
+      resetOpenPositionRowChaseArm(button);
+      void toggleRowChase(row,rowType);
+      return;
+    }
+    if(button&&button.dataset.openPositionChaseArmed==="1"){
+      resetOpenPositionRowChaseArm(button);
+      void toggleRowChase(row,rowType);
+      return;
+    }
+    if(!button)return;
+    button.dataset.openPositionChaseArmed="1";
+    button.classList.add("is-confirm-armed");
+    button.title="Click again within 3 seconds to confirm";
+    button.__openPositionChaseArmTimer=setTimeout(()=>resetOpenPositionRowChaseArm(button),3000);
   }
   function setRowChaseStatus(state){
     if(!state) return;
@@ -2854,7 +2931,7 @@
     setOpenPositionRow(row,!!opts.openPosition);
     setRowLocked(row,!!opts.locked,{keepRemoveEnabled:!!opts.keepRemoveEnabled});
     const chaseButton = row.querySelector(".calc-module-row-chase");
-    if(chaseButton) chaseButton.addEventListener("click",() => { void toggleRowChase(row,isEntry ? "entry" : "exit"); },false);
+    if(chaseButton) chaseButton.addEventListener("click",() => handleRowChaseButtonClick(row,isEntry ? "entry" : "exit"),false);
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",() => {
       if(input.classList.contains("calc-module-lot")) normalizeLotInput(input);
       if(input.classList.contains("calc-module-level")) normalizeLevelInput(input);

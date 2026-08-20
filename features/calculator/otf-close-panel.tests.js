@@ -13,7 +13,7 @@ const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
 
 assert(html.includes('src="features/shared/floatingWindow.js"'),"the shared floating-window utility must load before Calculator starts");
 assert(calculator.includes('id = "otfCloseChaseWindow"'),"the OTF close panel must be a DOM window");
-for(const id of ["otfCloseChaseModeMkt","otfCloseChaseModeChs","otfCloseChasePercent","otfCloseChaseQtyInput","otfCloseChaseDist","otfCloseChaseValid","otfCloseChaseConfirm","otfCloseChaseCancel"]){
+for(const id of ["otfCloseChaseModeMkt","otfCloseChaseModeChs","otfCloseChaseModeRev","otfCloseChasePercent","otfCloseChaseQtyInput","otfCloseChaseDist","otfCloseChaseValid","otfCloseChaseConfirm","otfCloseChaseCancel"]){
   assert(calculator.includes(id),`the DOM panel must include ${id}`);
 }
 assert(calculator.includes("storageKey:OTF_CLOSE_WINDOW_KEY"),"panel geometry must use global browser storage");
@@ -31,6 +31,10 @@ for(const label of ["%","SIZE","P/L"]){
 }
 assert.equal((calculator.match(/class="otf-close-summary-cell"/g)||[]).length,3,"the summary must render three individual metric cells");
 assert(calculator.includes('id="otfCloseChaseConfirm" type="button">Confirm</button>'),"the close action must use the concise Confirm label");
+assert(calculator.includes('openPositionCloseUi.mode = "REV"'),"REV must be a selectable OTF mode");
+assert(calculator.includes('sliderField.classList.toggle("hidden",reverseMode)'),"REV must hide the close-quantity slider");
+assert(calculator.includes('send.positionSide = "BOTH"')&&calculator.includes('send.reduceOnly = "false"'),"REV must explicitly use one-way BOTH with reduce-only off");
+assert(calculator.includes('quantity:preview.roundedQty')&&calculator.includes('const requested=Math.max(0,num(liveQtyValue)||0)*2'),"REV must feed double the full live position size into the shared chase engine");
 assert(calculator.indexOf('<div class="otf-close-actions">')<calculator.indexOf('<div class="otf-close-live hidden"'),"feedback status must render below the Confirm/Cancel row");
 assert(calculator.includes("plText.style.color=moneyColor(infoPl);"),"preview P/L must use the same positive/negative color logic as header P/L");
 assert(calculator.includes('id="otfCloseChaseQtyInput" type="number" inputmode="decimal"'),"the SIZE cell must be a directly editable numeric lot input");
@@ -88,6 +92,29 @@ quantityContext.openPositionCloseUi.quantity=null;
 quantityContext.openPositionCloseUi.percent=55;
 quantityPreview=quantityContext.openPositionClosePreview({qty:0.01,entry:100,side:"LONG"});
 assert.equal(quantityPreview.roundedQty,0.005,"slider quantities must retain the existing downward lot-step rounding");
+quantityContext.openPositionCloseUi.mode="REV";
+quantityPreview=quantityContext.openPositionClosePreview({qty:0.01,entry:100,side:"LONG"});
+assert.equal(quantityPreview.roundedQty,0.02,"REV must use exactly double the full live position size");
+assert.equal(quantityPreview.percent,100,"REV must ignore prior partial-close selection");
+
+const submitStart=calculator.indexOf("async function submitOpenPositionCloseChsLimit");
+const submitEnd=calculator.indexOf("function setOpenPositionChaseStatus",submitStart);
+let submittedOrder=null;
+const submitContext={
+  freshOpenPositionCloseClientId:()=>"rev-test",currentSymbol:()=>"BTCUSDT",
+  openPositionCloseChs:{mode:"REV",side:"SELL",positionSide:"BOTH",orderId:null,clientOrderId:"",price:""},
+  fmtLot:value=>Number(value).toFixed(3),toUpper:value=>String(value||"").toUpperCase(),
+  signedOrderWrite:async (_method,send)=>{submittedOrder={...send};return {orderId:7,clientOrderId:send.newClientOrderId};},
+  binanceWriteConfirmed:()=>true,registerTrackedOrderMeta:()=>{},positionGroupTracker:null,
+  String,Object,Error
+};
+vm.createContext(submitContext);
+vm.runInContext(calculator.slice(submitStart,submitEnd),submitContext);
+submitContext.submitOpenPositionCloseChsLimit({positionSide:"BOTH"},0.02,"101.0").then(()=>{});
+assert.equal(submittedOrder.timeInForce,"GTX","REV must retain GTX");
+assert.equal(submittedOrder.side,"SELL","reversing a LONG must use the existing SELL/Ask-side convention");
+assert.equal(submittedOrder.positionSide,"BOTH","REV must remain in one-way position mode");
+assert.equal(submittedOrder.reduceOnly,"false","REV must explicitly turn reduce-only off");
 
 assert(floating.includes('["n","ne","e","se","s","sw","w","nw"].forEach(edge => {'),"all eight resize edges must be installed");
 assert(floating.includes("localStorage.setItem(key,JSON.stringify(value))"),"window geometry must persist through localStorage");
