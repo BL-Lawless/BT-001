@@ -106,7 +106,7 @@ const MARKETS = {
     income:"https://fapi.binance.com/fapi/v1/income",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
-    ws:"wss://fstream.binance.com/stream"
+    ws:"wss://fstream.binance.com/market/stream"
   },
   btcusdc:{
     symbol:"BTCUSDC",
@@ -116,7 +116,7 @@ const MARKETS = {
     income:"https://fapi.binance.com/fapi/v1/income",
     positionRisk:"https://fapi.binance.com/fapi/v2/positionRisk",
     balance:"https://fapi.binance.com/fapi/v2/balance",
-    ws:"wss://fstream.binance.com/stream"
+    ws:"wss://fstream.binance.com/market/stream"
   }
 };
 
@@ -3762,10 +3762,30 @@ const marketDataHub = (() => {
     consumerTimeframes:{},
     consumerDepths:{},
     timeframeEnsureInFlight:{},
-    subscribers:new Set(),
+    subscribers:new Set()
+  };
+  const bookTickerState = {
+    socket:null,
+    generation:0,
+    reconnectTimer:null,
+    connectStartedAt:0,
+    consumers:new Set(),
     topOfBook:null,
     topOfBookEnsurePromise:null,
-    lastTopOfBookEnsureReconnectAt:0
+    lastTopOfBookEnsureReconnectAt:0,
+    waiters:new Set()
+  };
+  const bookTickerDiag = {
+    status:"inactive",
+    symbol:null,
+    streams:[],
+    socketStatus:"closed",
+    activeUrl:"",
+    connectCount:0,
+    disconnectCount:0,
+    reconnectCount:0,
+    lastMessageTime:0,
+    lastError:null
   };
 
   diag.maCacheHits = 0;
@@ -3809,7 +3829,7 @@ const marketDataHub = (() => {
       diag.lastChartActivitySourceByTf = {};
       diag.lastActiveChartCandles = [];
       state.timeframeEnsureInFlight = {};
-      state.topOfBook = null;
+      bookTickerState.topOfBook = null;
       diag.latestBid = null;
       diag.latestAsk = null;
       diag.latestBookTickerTime = 0;
@@ -3818,15 +3838,25 @@ const marketDataHub = (() => {
     return symbol;
   }
   function wsBase(){
-    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/stream").replace(/\/+$/,"");
-    if(/\/market\/stream$/i.test(raw)) return raw.replace(/\/market\/stream$/i,"/stream");
-    if(/\/market\/ws$/i.test(raw)) return raw.replace(/\/market\/ws$/i,"/stream");
-    if(/\/(?:public|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|private)\/stream$/i,"/stream");
-    if(/\/(?:public|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|private)\/ws$/i,"/stream");
-    if(/\/stream$/i.test(raw)) return raw;
-    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/stream");
-    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/stream");
-    return raw + "/stream";
+    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/market/stream").replace(/\/+$/,"");
+    if(/\/market\/stream$/i.test(raw)) return raw;
+    if(/\/market\/ws$/i.test(raw)) return raw.replace(/\/market\/ws$/i,"/market/stream");
+    if(/\/(?:public|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|private)\/stream$/i,"/market/stream");
+    if(/\/(?:public|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|private)\/ws$/i,"/market/stream");
+    if(/\/stream$/i.test(raw)) return raw.replace(/\/stream$/i,"/market/stream");
+    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/market/stream");
+    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/market/stream");
+    return raw + "/market/stream";
+  }
+  function bookTickerWsBase(){
+    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/public/stream").replace(/\/+$/,"");
+    if(/\/public\/stream$/i.test(raw)) return raw;
+    if(/\/(?:market|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:market|private)\/stream$/i,"/public/stream");
+    if(/\/(?:public|market|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|market|private)\/ws$/i,"/public/stream");
+    if(/\/stream$/i.test(raw)) return raw.replace(/\/stream$/i,"/public/stream");
+    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/public/stream");
+    if(/\/(?:public|market|private)$/i.test(raw)) return raw.replace(/\/(?:public|market|private)$/i,"/public/stream");
+    return raw + "/public/stream";
   }
   function socketState(){
     if(!ws) return "closed";
@@ -3968,10 +3998,6 @@ const marketDataHub = (() => {
     diag.lastRestSyncTime = 0;
     diag.lastMarkPriceTickTime = 0;
     diag.latestAggTradeTickTime = 0;
-    diag.latestBid = null;
-    diag.latestAsk = null;
-    diag.latestBookTickerTime = 0;
-    state.topOfBook = null;
     diag.restFallbackTimestamp = 0;
     diag.lastKlineTickByTf = {};
     diag.lastChartActivityByTf = {};
@@ -4050,7 +4076,6 @@ const marketDataHub = (() => {
     const streams = [...requiredKlineTimeframes()].sort((a,b)=>order.indexOf(a)-order.indexOf(b)).map(tf=>base+"@kline_"+tf);
     streams.push(base + "@aggTrade");
     streams.push(base + "@markPrice@1s");
-    streams.push(base + "@bookTicker");
     return streams;
   }
   function intervalMs(tf){
@@ -5094,7 +5119,7 @@ const marketDataHub = (() => {
     if(!Number.isFinite(bid) || bid <= 0 || !Number.isFinite(ask) || ask <= 0 || ask < bid) return;
     const receivedAt = now();
     const symbol = String((d && d.s) || ensureBufferSymbol()).toUpperCase();
-    state.topOfBook = Object.freeze({
+    bookTickerState.topOfBook = Object.freeze({
       symbol,
       bid,
       ask,
@@ -5104,7 +5129,9 @@ const marketDataHub = (() => {
     diag.latestBid = bid;
     diag.latestAsk = ask;
     diag.latestBookTickerTime = receivedAt;
-    publishMarketUpdate({type:"bookTicker",source:"bookTicker",bid,ask,exchangeTime:receivedAt});
+    bookTickerDiag.lastMessageTime = receivedAt;
+    bookTickerDiag.lastError = null;
+    bookTickerState.waiters.forEach(listener=>{try{listener();}catch(_error){}});
   }
   function handleKline(d){
     ensureBufferSymbol();
@@ -5295,9 +5322,6 @@ const marketDataHub = (() => {
           }else if(d && d.e === "markPriceUpdate"){
             markWsTick("markPrice");
             queueMarkPriceTick(d);
-          }else if(d && d.s && d.b != null && d.a != null){
-            markWsTick("bookTicker");
-            queueBookTicker(d);
           }
         },
         onError:() => {
@@ -5327,6 +5351,130 @@ const marketDataHub = (() => {
     closeRealtimeSocket();
     refreshConnectionStatus();
   }
+  function bookTickerSocketState(){
+    const connection=bookTickerState.socket;
+    if(!connection) return "closed";
+    return ["connecting","open","closing","closed"][connection.readyState] || String(connection.readyState);
+  }
+  function bookTickerSocketOpen(){
+    return !!(bookTickerState.socket && bookTickerState.socket.readyState === WebSocket.OPEN);
+  }
+  function bookTickerDesired(){
+    return bookTickerState.consumers.size > 0;
+  }
+  function closeBookTickerSocket({clearData=false}={}){
+    const connection=bookTickerState.socket;
+    if(bookTickerState.reconnectTimer){
+      clearTimeout(bookTickerState.reconnectTimer);
+      bookTickerState.reconnectTimer=null;
+    }
+    bookTickerState.generation += 1;
+    closeSocket(connection);
+    bookTickerState.socket=null;
+    bookTickerDiag.socketStatus="closed";
+    bookTickerDiag.status=bookTickerDesired()?"disconnected":"inactive";
+    bookTickerDiag.activeUrl="";
+    bookTickerDiag.streams=[];
+    if(connection) bookTickerDiag.disconnectCount += 1;
+    if(clearData){
+      bookTickerState.topOfBook=null;
+      diag.latestBid=null;
+      diag.latestAsk=null;
+      diag.latestBookTickerTime=0;
+      bookTickerDiag.lastMessageTime=0;
+    }
+  }
+  function scheduleBookTickerReconnect(reason,delay=1000){
+    if(!bookTickerDesired() || bookTickerState.reconnectTimer) return;
+    bookTickerDiag.status="reconnecting";
+    bookTickerDiag.lastError=reason || null;
+    bookTickerDiag.reconnectCount += 1;
+    bookTickerState.reconnectTimer=setTimeout(()=>{
+      bookTickerState.reconnectTimer=null;
+      connectBookTicker({force:true,reason});
+    },Math.max(0,delay));
+  }
+  function connectBookTicker({force=false,reason=""}={}){
+    if(!bookTickerDesired()) return;
+    const symbol=ensureBufferSymbol();
+    const stream=symbol.toLowerCase()+"@bookTicker";
+    const url=bookTickerWsBase()+"?streams="+stream;
+    const existing=bookTickerState.socket;
+    if(!force && existing && bookTickerDiag.activeUrl===url && (existing.readyState===WebSocket.CONNECTING || existing.readyState===WebSocket.OPEN)) return;
+    closeBookTickerSocket();
+    const token=++bookTickerState.generation;
+    bookTickerState.connectStartedAt=now();
+    bookTickerDiag.status="connecting";
+    bookTickerDiag.symbol=symbol;
+    bookTickerDiag.streams=[stream];
+    bookTickerDiag.activeUrl=url;
+    bookTickerDiag.socketStatus="connecting";
+    bookTickerDiag.lastError=reason || null;
+    bookTickerDiag.connectCount += 1;
+    try{
+      bookTickerState.socket=API.connectWebSocket(url,{
+        connectionKey:"public-book-ticker",
+        reconnect:false,
+        onOpen:()=>{
+          if(token!==bookTickerState.generation || !bookTickerState.socket) return;
+          bookTickerDiag.socketStatus="open";
+          bookTickerDiag.status="waiting";
+        },
+        onMessage:event=>{
+          if(token!==bookTickerState.generation || !bookTickerState.socket) return;
+          let d;
+          try{
+            const msg=JSON.parse(event.data);
+            d=msg&&msg.data?msg.data:msg;
+          }catch(error){
+            bookTickerDiag.lastError="bookTicker parse error";
+            return;
+          }
+          if(!d || String(d.s||"").toUpperCase()!==symbol || d.b==null || d.a==null) return;
+          queueBookTicker(d);
+          bookTickerDiag.status="live";
+          bookTickerDiag.socketStatus=bookTickerSocketState();
+        },
+        onError:()=>{
+          if(token!==bookTickerState.generation || !bookTickerState.socket) return;
+          scheduleBookTickerReconnect("bookTicker WebSocket error",1500);
+        },
+        onClose:event=>{
+          if(token!==bookTickerState.generation) return;
+          bookTickerState.socket=null;
+          bookTickerDiag.socketStatus="closed";
+          scheduleBookTickerReconnect("bookTicker closed "+(event&&event.code?event.code:""),1000);
+        }
+      });
+    }catch(error){
+      bookTickerState.socket=null;
+      bookTickerDiag.socketStatus="closed";
+      scheduleBookTickerReconnect(error&&error.message?error.message:String(error),1500);
+    }
+  }
+  function setBookTickerConsumerActive(consumerId,active){
+    const id=String(consumerId||"").trim();
+    if(!id) return bookTickerDiagnostics();
+    if(active) bookTickerState.consumers.add(id);
+    else bookTickerState.consumers.delete(id);
+    if(bookTickerDesired()) connectBookTicker();
+    else closeBookTickerSocket({clearData:true});
+    return bookTickerDiagnostics();
+  }
+  function subscribeBookTickerTick(listener){
+    if(typeof listener!=="function") return()=>{};
+    bookTickerState.waiters.add(listener);
+    return()=>bookTickerState.waiters.delete(listener);
+  }
+  function bookTickerDiagnostics(){
+    return {
+      ...bookTickerDiag,
+      socketStatus:bookTickerSocketState(),
+      consumers:[...bookTickerState.consumers],
+      desired:bookTickerDesired(),
+      topOfBook:topOfBookSnapshot()
+    };
+  }
   function rebuildRequirements(forceReconnect=false){
     state.desiredLive = true;
     ensureBufferSymbol();
@@ -5341,6 +5489,7 @@ const marketDataHub = (() => {
     if(state.maStackVisible){
       ensureMaStackBuffers(false).catch(() => {});
     }
+    if(bookTickerDesired()) connectBookTicker();
     repairKnownClosedGaps("timeframe/requirements switch");
   }
   function runStatusLoop(){
@@ -5482,7 +5631,7 @@ const marketDataHub = (() => {
   window.addEventListener("pageshow",scheduleVisibilityRecovery,false);
 
   function topOfBookSnapshot(){
-    const book = state.topOfBook;
+    const book = bookTickerState.topOfBook;
     const expectedSymbol = String((cfg() && cfg().symbol) || "").toUpperCase();
     const matches = !!book && book.symbol === expectedSymbol;
     const ageMs = matches ? Math.max(0,now() - Number(book.at || 0)) : null;
@@ -5502,10 +5651,16 @@ const marketDataHub = (() => {
   function ensureTopOfBook(options={}){
     const current = topOfBookSnapshot();
     if(current.fresh) return Promise.resolve(current);
+    if(!bookTickerDesired()) return Promise.resolve(current);
+    const state = bookTickerState;
+    const diag = bookTickerDiag;
+    const socketState = bookTickerSocketState;
+    const socketOpen = bookTickerSocketOpen;
+    const connect = connectBookTicker;
     if(state.topOfBookEnsurePromise) return state.topOfBookEnsurePromise;
     const timeoutMs = Math.max(250,Number(options.timeoutMs) || 3000);
-    const desiredUrl = wsBase() + "?streams=" + currentStreams().join("/");
-    const needsCorrectSocket = !socketOpen() || diag.activeUrl !== desiredUrl;
+    const expectedBookTicker = String(current.symbol || "").toLowerCase() + "@bookTicker";
+    const needsCorrectSocket = socketState() === "closed" || !Array.isArray(diag.streams) || !diag.streams.includes(expectedBookTicker);
     const stalledFirstTick = !current.hasData && socketOpen() && now() - Number(state.connectStartedAt || 0) >= 1000;
     if(needsCorrectSocket || (stalledFirstTick && now() - state.lastTopOfBookEnsureReconnectAt >= timeoutMs)){
       state.lastTopOfBookEnsureReconnectAt = now();
@@ -5523,16 +5678,15 @@ const marketDataHub = (() => {
         resolve(topOfBookSnapshot());
       };
       const timer = setTimeout(finish,timeoutMs);
-      unsubscribe = subscribe(event => {
-        if(event && event.type === "bookTicker" && event.symbol === current.symbol) finish();
-      });
+      unsubscribe = subscribeBookTickerTick(finish);
       if(topOfBookSnapshot().fresh) finish();
     });
     return state.topOfBookEnsurePromise;
   }
 
   window.BINANCE_REALTIME_DIAG = diag;
-  window.binanceRealtimeDiagnostics = () => ({...diag});
+  window.BINANCE_BOOK_TICKER_DIAG = bookTickerDiag;
+  window.binanceRealtimeDiagnostics = () => ({...diag,bookTicker:bookTickerDiagnostics()});
   return {
     diag,
     state,
@@ -5577,6 +5731,8 @@ const marketDataHub = (() => {
     subscribe,
     getTopOfBook:topOfBookSnapshot,
     ensureTopOfBook,
+    setBookTickerConsumerActive,
+    bookTickerDiagnostics,
     getLatestPrice:() => Number(diag.latestAggTradeTickTime||0)>=Number(diag.lastMarkPriceTickTime||0)
       ? {price:Number(diag.latestPrice)||null,at:Number(diag.latestAggTradeTickTime)||null,source:diag.latestPrice?"aggTrade":"unavailable"}
       : {price:Number(diag.latestMarkPrice)||null,at:Number(diag.lastMarkPriceTickTime)||null,source:diag.latestMarkPrice?"markPrice":"unavailable"},

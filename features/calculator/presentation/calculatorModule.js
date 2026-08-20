@@ -12,15 +12,16 @@
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
   const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
   const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
-  const OTF_CLOSE_WINDOW_KEY = STORE + "otf_close_window_v1";
+  const OTF_CLOSE_WINDOW_KEY = STORE + "otf_close_window_v2";
   const OTF_CLOSE_WINDOW_MIN_WIDTH = 360;
-  const OTF_CLOSE_WINDOW_MIN_HEIGHT = 300;
+  const OTF_CLOSE_WINDOW_MIN_HEIGHT = 240;
   const OTF_CLOSE_WINDOW_DEFAULT_WIDTH = 440;
-  const OTF_CLOSE_WINDOW_DEFAULT_HEIGHT = 340;
+  const OTF_CLOSE_WINDOW_DEFAULT_HEIGHT = 272;
   const AUTO_SYNC_DISPLAY_REFRESH_MS = 500;
   const SEND_POSITION_MAX_AGE_MS = 5000;
   const FLAT_CLEANUP_CONFIRM_MS = 700;
   const ROW_CHASE_TERMINAL_SUPPRESSION_MS = 5000;
+  const ROW_CHASE_ORIGINAL_POLL_MS = 500;
   const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1000;
   const OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS = [0,1,2,5];
   const OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS = [
@@ -83,13 +84,18 @@
   let openPositionReconcileTimer = null;
   let pendingOpenPositionChange = null;
   let lastOpenPositionReconcileSignature = "";
-  let openPositionCloseUi = {open:false,percent:0,sending:false,mode:"CHS",chsDistTicks:2,chsValidKey:"manual"};
+  let openPositionCloseUi = {open:false,percent:0,quantity:null,sending:false,mode:"CHS",chsDistTicks:2,chsValidKey:"manual"};
   let openPositionCloseWindowApi = null;
   let openPositionClosePanelStatus = "";
   let openPositionClosePanelTone = "normal";
+  let openPositionCloseLivePriceUnsubscribe = null;
+  let openPositionCloseLivePriceFrame = null;
   let openPositionCloseChaseEngine = null;
   let rowChaseEngine = null;
   let activeRowChase = null;
+  let rowChaseOriginalWatchTimer = null;
+  let rowChaseOriginalWatchBusy = false;
+  let rowChaseOriginalWatchGeneration = 0;
   let openPositionCloseChs = {
     active:false,
     canceling:false,
@@ -194,6 +200,7 @@
   function resetOpenPositionCloseUi(){
     openPositionCloseUi.open = false;
     openPositionCloseUi.percent = 0;
+    openPositionCloseUi.quantity = null;
     openPositionCloseUi.sending = false;
     openPositionCloseUi.mode = "CHS";
     openPositionCloseUi.chsDistTicks = 2;
@@ -226,10 +233,12 @@
   }
   function primeOpenPositionClosePanelDefaults(){
     openPositionCloseUi.open = true;
+    setBookTickerVisibilityConsumer("otf-close",true);
     warmTopOfBook();
     if(openPositionCloseChs.active) return;
     openPositionClosePanelStatus = "";
     openPositionCloseUi.percent = 0;
+    openPositionCloseUi.quantity = null;
     openPositionCloseUi.mode = "CHS";
     openPositionCloseUi.chsDistTicks = 2;
     openPositionCloseUi.chsValidKey = "manual";
@@ -250,6 +259,12 @@
     const hub = window.PUBLIC_MARKET_DATA_HUB;
     if(hub && typeof hub.ensureTopOfBook === "function") hub.ensureTopOfBook({timeoutMs:3000}).catch(() => {});
   }
+  function setBookTickerVisibilityConsumer(consumerId,active){
+    const hub=window.PUBLIC_MARKET_DATA_HUB;
+    if(hub && typeof hub.setBookTickerConsumerActive === "function"){
+      hub.setBookTickerConsumerActive(consumerId,active===true);
+    }
+  }
   function ensureOpenPositionCloseWindow(){
     let win = q("otfCloseChaseWindow");
     if(win) return win;
@@ -264,9 +279,18 @@
       </header>
       <div class="otf-close-body">
         <div class="otf-close-summary" aria-live="polite">
-          <span id="otfCloseChasePercentText">0%</span>
-          <span id="otfCloseChaseQtyText">0.000</span>
-          <span id="otfCloseChasePlText">$0.00</span>
+          <div class="otf-close-summary-cell">
+            <div class="otf-close-summary-label">%</div>
+            <div class="otf-close-summary-value" id="otfCloseChasePercentText">0%</div>
+          </div>
+          <div class="otf-close-summary-cell">
+            <div class="otf-close-summary-label">SIZE</div>
+            <input class="otf-close-summary-value otf-close-summary-input" id="otfCloseChaseQtyInput" type="number" inputmode="decimal" min="0.001" step="0.001" value="0.000" aria-label="Close quantity">
+          </div>
+          <div class="otf-close-summary-cell">
+            <div class="otf-close-summary-label">P/L</div>
+            <div class="otf-close-summary-value" id="otfCloseChasePlText">$0.00</div>
+          </div>
         </div>
         <div class="otf-close-field">
           <div class="otf-close-label">Mode</div>
@@ -277,21 +301,21 @@
         </div>
         <label class="otf-close-field otf-close-slider-field" for="otfCloseChasePercent">
           <span class="otf-close-label">Close quantity</span>
-          <input id="otfCloseChasePercent" type="range" min="0" max="100" step="1" value="0">
+          <input id="otfCloseChasePercent" type="range" min="0" max="100" step="0.01" value="0">
         </label>
         <div class="otf-close-field">
           <div class="otf-close-label">Chase settings</div>
           <div class="otf-close-chips">
             <button id="otfCloseChaseDist" type="button">Dist 2 ticks</button>
-            <button id="otfCloseChaseValid" type="button">Valid Manual</button>
+            <button id="otfCloseChaseValid" type="button">Validity: Manual</button>
           </div>
+        </div>
+        <div class="otf-close-actions">
+          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Confirm</button>
+          <button class="otf-close-cancel hidden" id="otfCloseChaseCancel" type="button">Cancel CHS</button>
         </div>
         <div class="otf-close-live hidden" id="otfCloseChaseLive" aria-live="polite">
           <div id="otfCloseChaseLiveStatus"></div>
-        </div>
-        <div class="otf-close-actions">
-          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Confirm close</button>
-          <button class="otf-close-cancel hidden" id="otfCloseChaseCancel" type="button">Cancel CHS</button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -345,7 +369,30 @@
         event.target.value = String(openPositionCloseUi.percent);
         return;
       }
-      openPositionCloseUi.percent = clamp(Math.round(num(event.target.value) || 0),0,100);
+      openPositionCloseUi.quantity = null;
+      openPositionCloseUi.percent = clamp(num(event.target.value) || 0,0,100);
+      renderOpenPositionClosePanel();
+    },false);
+    const qtyInput = q("otfCloseChaseQtyInput");
+    qtyInput.addEventListener("pointerdown",event => {
+      if(!openPositionCloseChs.active) return;
+      event.preventDefault();
+      chsGuard();
+    },false);
+    qtyInput.addEventListener("input",event => {
+      if(chsGuard()){
+        event.target.value = fmtLot(openPositionClosePreview(openPositionClosePreviewPosition()||{}).roundedQty);
+        return;
+      }
+      const typedValue=event.target.value;
+      setOpenPositionCloseQuantity(event.target.value,{allowZero:true});
+      renderOpenPositionClosePanel();
+      event.target.value=typedValue;
+    },false);
+    qtyInput.addEventListener("change",event => {
+      if(chsGuard()) return;
+      const preview=setOpenPositionCloseQuantity(event.target.value,{allowZero:false});
+      event.target.value=fmtLot(preview.roundedQty);
       renderOpenPositionClosePanel();
     },false);
     q("otfCloseChaseConfirm").addEventListener("click",() => { void confirmOpenPositionCloseOrder(); },false);
@@ -355,7 +402,58 @@
     warmTopOfBook();
     return win;
   }
+  function openPositionClosePreviewPosition(){
+    return currentOpenPositionRowSnapshot() || (lastReadStateSnapshot && lastReadStateSnapshot.openPosition) || null;
+  }
+  function refreshOpenPositionClosePreviewSummary(){
+    if(!openPositionCloseUi.open) return null;
+    const percentText=q("otfCloseChasePercentText");
+    const qtyInput=q("otfCloseChaseQtyInput");
+    const plText=q("otfCloseChasePlText");
+    if(!percentText||!qtyInput||!plText) return null;
+    const preview=openPositionClosePreview(openPositionClosePreviewPosition()||{});
+    const infoPl=preview.estPl==null?0:preview.estPl;
+    percentText.textContent=Number(preview.percent.toFixed(2))+"%";
+    if(document.activeElement!==qtyInput||openPositionCloseChs.active) qtyInput.value=fmtLot(preview.roundedQty);
+    qtyInput.min=String(preview.minQty);
+    qtyInput.step=String(preview.stepSize);
+    qtyInput.max=String(preview.maxQty);
+    plText.textContent=fmtChartMoney(infoPl);
+    plText.style.color=moneyColor(infoPl);
+    return preview;
+  }
+  function stopOpenPositionCloseLivePriceSubscription(){
+    if(openPositionCloseLivePriceUnsubscribe){
+      openPositionCloseLivePriceUnsubscribe();
+      openPositionCloseLivePriceUnsubscribe=null;
+    }
+    if(openPositionCloseLivePriceFrame!=null){
+      if(typeof cancelAnimationFrame==="function") cancelAnimationFrame(openPositionCloseLivePriceFrame);
+      else clearTimeout(openPositionCloseLivePriceFrame);
+      openPositionCloseLivePriceFrame=null;
+    }
+  }
+  function syncOpenPositionCloseLivePriceSubscription(active){
+    if(!active){
+      stopOpenPositionCloseLivePriceSubscription();
+      return;
+    }
+    if(openPositionCloseLivePriceUnsubscribe) return;
+    const hub=window.PUBLIC_MARKET_DATA_HUB;
+    if(!hub||typeof hub.subscribe!=="function") return;
+    openPositionCloseLivePriceUnsubscribe=hub.subscribe(event=>{
+      if(!openPositionCloseUi.open||!event||event.type!=="price"||toUpper(event.symbol)!==toUpper(currentSymbol())) return;
+      if(openPositionCloseLivePriceFrame!=null) return;
+      const refresh=()=>{
+        openPositionCloseLivePriceFrame=null;
+        refreshOpenPositionClosePreviewSummary();
+      };
+      openPositionCloseLivePriceFrame=typeof requestAnimationFrame==="function"?requestAnimationFrame(refresh):setTimeout(refresh,0);
+    });
+  }
   function renderOpenPositionClosePanel(){
+    setBookTickerVisibilityConsumer("otf-close",!!openPositionCloseUi.open);
+    syncOpenPositionCloseLivePriceSubscription(!!openPositionCloseUi.open);
     const win = q("otfCloseChaseWindow");
     if(!win) return;
     if(!openPositionCloseUi.open){
@@ -367,20 +465,17 @@
       if(openPositionCloseWindowApi) openPositionCloseWindowApi.show();
       else win.classList.remove("hidden");
     }
-    const position = currentOpenPositionRowSnapshot() || (lastReadStateSnapshot && lastReadStateSnapshot.openPosition) || null;
-    const preview = openPositionClosePreview(position || {});
+    const preview = refreshOpenPositionClosePreviewSummary() || openPositionClosePreview({});
     const chsActive = !!openPositionCloseChs.active;
     const selectedMode = openPositionCloseMode();
     const validOption = openPositionCloseChsValidOption(currentOpenPositionCloseChsValidKey());
     const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : validOption.ms;
-    const infoPl = preview.estPl == null ? 0 : preview.estPl;
-    q("otfCloseChasePercentText").textContent = preview.percent + "%";
-    q("otfCloseChaseQtyText").textContent = fmtLot(preview.roundedQty);
-    q("otfCloseChasePlText").textContent = fmtChartMoney(infoPl);
-    q("otfCloseChasePlText").style.color = infoPl > 0 ? "#166534" : infoPl < 0 ? "#991b1b" : "#53351f";
     const slider = q("otfCloseChasePercent");
     if(document.activeElement !== slider || chsActive) slider.value = String(preview.percent);
     slider.setAttribute("aria-disabled",chsActive ? "true" : "false");
+    const qtyInput=q("otfCloseChaseQtyInput");
+    qtyInput.readOnly=chsActive;
+    qtyInput.setAttribute("aria-disabled",chsActive ? "true" : "false");
     [q("otfCloseChaseModeMkt"),q("otfCloseChaseModeChs")].forEach(button => {
       const active = button.id.endsWith(selectedMode === "MKT" ? "Mkt" : "Chs");
       button.classList.toggle("is-active",active);
@@ -390,7 +485,7 @@
     const dist = q("otfCloseChaseDist");
     const valid = q("otfCloseChaseValid");
     dist.textContent = "Dist " + currentOpenPositionCloseChsDistTicks() + " ticks";
-    valid.textContent = "Valid " + (chsActive ? openPositionCloseChsTimerText(remainingValidMs) : validOption.label);
+    valid.textContent = "Validity: " + (chsActive ? openPositionCloseChsTimerText(remainingValidMs) : validOption.label);
     dist.setAttribute("aria-disabled",chsActive ? "true" : "false");
     valid.setAttribute("aria-disabled",chsActive ? "true" : "false");
     win.classList.toggle("is-chs-active",chsActive);
@@ -414,18 +509,57 @@
     const tick = num(settings && settings.tickSize);
     return tick && tick > 0 ? tick : null;
   }
+  function symbolLotSizeRules(liveQtyValue){
+    const helper=window.BT001SymbolTradingSettings;
+    const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+    const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
+    const lotFilter=filters.find(filter=>toUpper(filter&&filter.filterType)==="LOT_SIZE")||null;
+    const stepSize=Math.max(0,num(settings&&settings.stepSize)||num(lotFilter&&lotFilter.stepSize)||0.001);
+    const minQty=Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize);
+    const liveQty=Math.max(0,num(liveQtyValue)||0);
+    const maxQty=Math.max(0,Math.floor((liveQty+stepSize*1e-9)/stepSize)*stepSize);
+    return {helper,settings,stepSize,minQty,maxQty:Math.min(liveQty,maxQty)};
+  }
+  function normalizeOpenPositionCloseQuantity(value,liveQtyValue,options){
+    const opts=options||{};
+    const rules=symbolLotSizeRules(liveQtyValue);
+    const raw=Math.max(0,num(value)||0);
+    if(!(rules.maxQty>=rules.minQty)) return {...rules,quantity:0};
+    if(!(raw>0)) return {...rules,quantity:opts.allowZero?0:rules.minQty};
+    const normalizedText=opts.roundDown
+      ? String(Math.floor((raw+rules.stepSize*1e-9)/rules.stepSize)*rules.stepSize)
+      : rules.helper&&typeof rules.helper.normalizeQty==="function"
+        ? rules.helper.normalizeQty(raw,rules.settings)
+        : Number(Math.round(raw/rules.stepSize)*rules.stepSize).toFixed(3);
+    const parsedNormalized=Math.max(0,num(normalizedText)||0);
+    if(parsedNormalized<rules.minQty&&opts.clampMinimum===false) return {...rules,quantity:0};
+    const normalized=Math.max(rules.minQty,parsedNormalized);
+    return {...rules,quantity:Math.min(rules.maxQty,normalized)};
+  }
+  function setOpenPositionCloseQuantity(value,options){
+    const position=openPositionClosePreviewPosition()||{};
+    const liveQty=Math.max(0,num(position.qty!=null?position.qty:position.lot)||0);
+    const normalized=normalizeOpenPositionCloseQuantity(value,liveQty,options);
+    openPositionCloseUi.quantity=normalized.quantity;
+    openPositionCloseUi.percent=liveQty>0?clamp(normalized.quantity/liveQty*100,0,100):0;
+    return openPositionClosePreview(position);
+  }
   function openPositionClosePreview(positionLike){
     const liveQty = Math.max(0,num(positionLike && (positionLike.qty != null ? positionLike.qty : positionLike.lot)) || 0);
     const entry = num(positionLike && (positionLike.entry != null ? positionLike.entry : positionLike.level));
     const percent = clamp(num(openPositionCloseUi.percent) == null ? 0 : num(openPositionCloseUi.percent),0,100);
-    const rawQty = liveQty * percent / 100;
-    const roundedQty = Math.min(liveQty,floorToLotStep(rawQty));
-    const belowMinimum = rawQty > 0 && roundedQty < 0.001;
-    const executable = roundedQty >= 0.001 && roundedQty <= liveQty + 1e-9;
+    const directQty=openPositionCloseUi.quantity==null?null:num(openPositionCloseUi.quantity);
+    const rawQty = directQty == null ? liveQty * percent / 100 : directQty;
+    const normalizedQty=normalizeOpenPositionCloseQuantity(rawQty,liveQty,directQty==null
+      ? {allowZero:true,roundDown:true,clampMinimum:false}
+      : {allowZero:true});
+    const roundedQty=normalizedQty.quantity;
+    const belowMinimum = rawQty > 0 && roundedQty < normalizedQty.minQty;
+    const executable = roundedQty >= normalizedQty.minQty && roundedQty <= liveQty + 1e-9;
     const current = currentPriceReference();
     const side = String(positionLike && positionLike.side || direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * roundedQty);
-    return {liveQty,entry,percent,rawQty,roundedQty,belowMinimum,executable,estPl,side,current};
+    return {liveQty,entry,percent,rawQty,roundedQty,belowMinimum,executable,estPl,side,current,stepSize:normalizedQty.stepSize,minQty:normalizedQty.minQty,maxQty:normalizedQty.maxQty};
   }
   function normalizedChasePrice(orderSide,topOfBook,distTicksOverride){
     const side = toUpper(orderSide) === "BUY" ? "BUY" : "SELL";
@@ -656,7 +790,7 @@
       const preview = openPositionClosePreview(livePos);
       if(!preview.executable){
         setStatus(preview.belowMinimum
-          ? "Open Position close blocked: selected lot rounds below 0.001."
+          ? "Open Position close blocked: selected lot rounds below " + fmtLot(preview.minQty) + "."
           : "Open Position close blocked: selected lot is not executable.");
         return;
       }
@@ -1240,6 +1374,12 @@
     const lotVal = String(lotInput(row)?.value || "").trim();
     return !levelVal && !lotVal;
   }
+  function isRowChaseOriginalCancelled(row){
+    return !!(row&&row.dataset&&row.dataset.rowChaseOriginalCancelled==="1");
+  }
+  function isProtectedRowChaseOriginal(row){
+    return isRowChaseOriginalCancelled(row)||!!(activeRowChase&&activeRowChase.row===row&&activeRowChase.originalOrderIdentity);
+  }
   function defaultLotForRow(){ return "0.000"; }
   function normalizeNonNegativeDecimalInput(input,maxDecimals){
     if(!input) return;
@@ -1467,7 +1607,7 @@
       row,
       level:num(row.querySelector(".calc-module-level")?.value),
       lot:num(row.querySelector(".calc-module-lot")?.value)
-    })).filter(r => r.level != null && r.lot != null && r.lot >= 0.001);
+    })).filter(r => !isRowChaseOriginalCancelled(r.row) && r.level != null && r.lot != null && r.lot >= 0.001);
   }
   function getArchitectureServices(){
     const domain = window.CalculatorDomain || null;
@@ -1500,6 +1640,7 @@
   }
   function totalExitLots(){
     return rows("calcModuleExitRows").reduce((total,row) => {
+      if(isRowChaseOriginalCancelled(row)) return total;
       const lot = num(lotInput(row)?.value);
       return total + (lot != null && lot > 0 ? lot : 0);
     },0);
@@ -1844,6 +1985,8 @@
     row.classList.remove("calc-module-row-binance-entry");
     row.classList.remove("calc-module-row-manual-entry");
     row.classList.remove("calc-module-row-open-position");
+    row.classList.remove("calc-module-row-chase-original-cancelled");
+    delete row.dataset.rowChaseOriginalCancelled;
     row.removeAttribute("title");
     row.dataset.openPosition = "0";
     row.__binanceLimitOrderMeta = null;
@@ -1883,7 +2026,7 @@
     calculate();
   }
   function isStagedDeletionEligible(row){
-    if(!row || isOpenPositionRow(row)) return false;
+    if(!row || isRowChaseOriginalCancelled(row) || isOpenPositionRow(row)) return false;
     const source = String(row.dataset && row.dataset.source || "");
     const containerId = row.parentElement && row.parentElement.id;
     return (containerId === "calcModuleEntryRows" && source === "binance-limit")
@@ -1894,7 +2037,7 @@
   }
   function snapshotManualRows(containerId){
     return rows(containerId)
-      .filter(row => row && !String(row.dataset.source || "").startsWith("binance-") && !isOpenPositionRow(row) && !isRowEmpty(row))
+      .filter(row => row && !isRowChaseOriginalCancelled(row) && !String(row.dataset.source || "").startsWith("binance-") && !isOpenPositionRow(row) && !isRowEmpty(row))
       .map(row => ({
         level:String(levelInput(row)?.value || ""),
         lot:String(lotInput(row)?.value || "")
@@ -1927,7 +2070,7 @@
     const inEntryRows = !!(row.parentElement && row.parentElement.id === "calcModuleEntryRows");
     const open = isOpenPositionRow(row);
     const binanceExisting = !open && inEntryRows && String(row.dataset.source || "") === "binance-limit";
-    const manualEntry = !open && inEntryRows && !binanceExisting && !isRowEmpty(row);
+    const manualEntry = !open && inEntryRows && !binanceExisting && !isRowChaseOriginalCancelled(row) && !isRowEmpty(row);
     const lvl = levelInput(row);
     const lot = lotInput(row);
     row.classList.toggle("calc-module-row-binance-entry",binanceExisting);
@@ -1948,7 +2091,7 @@
     }
   }
   function rowPendingSend(row){
-    if(!row || isOpenPositionRow(row) || isRowEmpty(row)) return false;
+    if(!row || isRowChaseOriginalCancelled(row) || isOpenPositionRow(row) || isRowEmpty(row)) return false;
     const source = String(row.dataset && row.dataset.source || "");
     const level = num(levelInput(row)?.value);
     const lot = num(lotInput(row)?.value);
@@ -2206,8 +2349,10 @@
   }
   function applyRowChaseOrderSuppression(snapshot,scopedIdentity){
     const shared = activeRowChaseOrderSuppression();
+    const liveIdentity=activeRowChase&&activeRowChase.chaseIdentity;
+    if(snapshot&&liveIdentity) suppressNormalOrderByIdentity(snapshot,liveIdentity);
     const identity = shared?shared.identity:scopedIdentity;
-    if(!snapshot||!identity) return null;
+    if(!snapshot||!identity) return liveIdentity?{identity:liveIdentity,shared:false,orderPresent:false,directAbsenceConfirmed:false,cacheAbsenceConfirmed:false}:null;
     const orderPresent = !!findNormalOrderByIdentity(snapshot,identity);
     suppressNormalOrderByIdentity(snapshot,identity);
     const directAbsenceConfirmed = !snapshot.normalFetchError&&!orderPresent;
@@ -2218,32 +2363,66 @@
   function freshRowChaseClientId(){
     return ("CALC_ROW_C_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7)).slice(0,36);
   }
+  function rowLimitOrderMeta(row){
+    if(!row) return null;
+    return row.__binanceLimitOrderMeta||(row.dataset&&row.dataset.calcRowId?binanceLimitRowMetaByRowId.get(row.dataset.calcRowId):null)||null;
+  }
+  function rowChaseOriginalIdentity(row){
+    if(!row||String(row.dataset&&row.dataset.source||"")!=="binance-limit") return null;
+    const meta=rowLimitOrderMeta(row);
+    if(!meta||(meta.orderId==null&&!String(meta.clientOrderId||"").trim())) return null;
+    return {
+      symbol:String(meta.symbol||currentSymbol()),
+      orderId:meta.orderId!=null?meta.orderId:null,
+      clientOrderId:String(meta.clientOrderId||"")
+    };
+  }
   function applyRowChaseWriteSuccess(context,response,details){
-    if(!context || !context.row || !context.row.isConnected) return;
+    if(!context) return;
     const write = details || {};
-    applyWriteSuccessToRow(context.row,response,{
+    const merged=Object.assign({
       symbol:context.symbol,
       side:context.side,
-      positionSide:context.positionSide || "BOTH",
+      positionSide:context.positionSide||"BOTH",
       type:"LIMIT",
       price:write.price,
       origQty:write.quantity,
       timeInForce:"GTX",
-      clientOrderId:write.clientOrderId || "",
-      reduceOnly:context.type === "exit" && !context.positionSide ? "true" : undefined,
+      clientOrderId:write.clientOrderId||"",
+      reduceOnly:context.type==="exit"&&!context.positionSide?"true":undefined,
       orderRoleCode:"C",
-      orderRoleType:context.type === "entry" ? "CHASE_ENTRY" : "CHASE_EXIT",
+      orderRoleType:context.type==="entry"?"CHASE_ENTRY":"CHASE_EXIT",
       orderOwner:"CALC"
+    },response||{});
+    context.chaseIdentity={
+      symbol:String(merged.symbol||context.symbol),
+      orderId:merged.orderId!=null?merged.orderId:null,
+      clientOrderId:String(merged.clientOrderId||write.clientOrderId||"")
+    };
+    registerTrackedOrderMeta({
+      symbol:merged.symbol,
+      side:merged.side,
+      positionSide:merged.positionSide,
+      roleCode:"C",
+      roleType:merged.orderRoleType,
+      owner:"CALC",
+      orderId:context.chaseIdentity.orderId,
+      clientOrderId:context.chaseIdentity.clientOrderId
+    });
+    if(context.originalOrderIdentity||!context.row||!context.row.isConnected) return;
+    applyWriteSuccessToRow(context.row,response,{
+      ...merged
     });
   }
   function refreshRowChaseButtons(){
     document.querySelectorAll(".calc-module-row-chase").forEach(button => {
       const row = button.closest(".calc-module-row");
+      const originalCancelled=isRowChaseOriginalCancelled(row);
       const active = !!(activeRowChase && activeRowChase.row === row);
-      button.disabled = !!activeRowChase && !active;
+      button.disabled = originalCancelled||!!activeRowChase&&!active;
       button.classList.toggle("is-active",active);
-      button.textContent = active ? "×" : "C";
-      button.title = active ? "Cancel this row chase" : "Chase this row for up to 15 seconds";
+      button.textContent = active ? "×" : originalCancelled?"—":"C";
+      button.title = active ? "Cancel this row chase" : originalCancelled?"Original order cancelled after chase fill":"Chase this row for up to 15 seconds";
     });
   }
   function setRowChaseStatus(state){
@@ -2260,6 +2439,93 @@
     if(identity && identity.orderId != null) send.orderId = String(identity.orderId);
     else if(identity && identity.clientOrderId) send.origClientOrderId = String(identity.clientOrderId);
     return send;
+  }
+  function stopRowChaseOriginalWatch(){
+    rowChaseOriginalWatchGeneration+=1;
+    if(rowChaseOriginalWatchTimer!=null) clearTimeout(rowChaseOriginalWatchTimer);
+    rowChaseOriginalWatchTimer=null;
+    rowChaseOriginalWatchBusy=false;
+  }
+  function scheduleRowChaseOriginalWatch(context,generation,delay=ROW_CHASE_ORIGINAL_POLL_MS){
+    if(context!==activeRowChase||generation!==rowChaseOriginalWatchGeneration||!context.originalOrderIdentity) return;
+    if(rowChaseOriginalWatchTimer!=null) clearTimeout(rowChaseOriginalWatchTimer);
+    rowChaseOriginalWatchTimer=setTimeout(()=>{
+      rowChaseOriginalWatchTimer=null;
+      void pollRowChaseOriginalOrder(context,generation);
+    },Math.max(0,delay));
+  }
+  async function pollRowChaseOriginalOrder(context,generation){
+    if(context!==activeRowChase||generation!==rowChaseOriginalWatchGeneration||rowChaseOriginalWatchBusy||!context.originalOrderIdentity) return;
+    rowChaseOriginalWatchBusy=true;
+    try{
+      let original=null;
+      try{ original=await signedOrderWrite("GET",rowChaseIdentityParams(context.originalOrderIdentity)); }
+      catch(error){
+        if(Number(error&&error.code)!==-2013) context.originalWatchLastError=error&&error.message?error.message:String(error);
+      }
+      if(context!==activeRowChase||generation!==rowChaseOriginalWatchGeneration) return;
+      const status=toUpper(original&&original.status);
+      context.originalOrderLastStatus=status||context.originalOrderLastStatus||"";
+      if(status==="FILLED"){
+        context.originalFilledFirst=true;
+        stopRowChaseOriginalWatch();
+        const engine=ensureRowChaseEngine();
+        await engine.cancel("Original order filled — chase canceling immediately",{result:"original-filled"});
+        if(engine.isActive()&&context===activeRowChase){
+          scheduleRowChaseOriginalWatch(context,rowChaseOriginalWatchGeneration,ROW_CHASE_ORIGINAL_POLL_MS);
+        }
+        return;
+      }
+    }finally{
+      rowChaseOriginalWatchBusy=false;
+      if(context===activeRowChase&&generation===rowChaseOriginalWatchGeneration&&!context.originalFilledFirst){
+        scheduleRowChaseOriginalWatch(context,generation);
+      }
+    }
+  }
+  function startRowChaseOriginalWatch(context){
+    stopRowChaseOriginalWatch();
+    if(!context||!context.originalOrderIdentity) return;
+    const generation=rowChaseOriginalWatchGeneration;
+    scheduleRowChaseOriginalWatch(context,generation,0);
+  }
+  async function cancelRowChaseOriginalAfterFill(context){
+    if(!context||!context.originalOrderIdentity) return {required:false,cancelled:false};
+    const identity=context.originalOrderIdentity;
+    let response=null;
+    let cancelError=null;
+    let status="";
+    for(let attempt=0;attempt<3;attempt+=1){
+      try{ response=await signedOrderWrite("DELETE",rowChaseIdentityParams(identity)); }
+      catch(error){ cancelError=error; }
+      status=toUpper(response&&response.status);
+      if(status==="CANCELED"||status==="CANCELLED") return {required:true,cancelled:true,status,response};
+      try{
+        const checked=await signedOrderWrite("GET",rowChaseIdentityParams(identity));
+        status=toUpper(checked&&checked.status);
+        if(!response) response=checked;
+      }catch(error){
+        if(!cancelError) cancelError=error;
+      }
+      if(status==="CANCELED"||status==="CANCELLED") return {required:true,cancelled:true,status,response};
+      if(status==="FILLED") return {required:true,cancelled:false,filled:true,status,response};
+      if(attempt<2) await new Promise(resolve=>setTimeout(resolve,150));
+    }
+    return {required:true,cancelled:false,status:status||"UNKNOWN",error:cancelError};
+  }
+  function markRowChaseOriginalCancelled(context,outcome){
+    const row=context&&context.row;
+    if(!row||!row.isConnected) return;
+    const meta=rowLimitOrderMeta(row);
+    if(meta){
+      meta.status="CANCELED";
+      meta.rawOrder=Object.assign({},meta.rawOrder||{},outcome&&outcome.response||{},{status:"CANCELED"});
+    }
+    row.dataset.rowChaseOriginalCancelled="1";
+    row.classList.add("calc-module-row-chase-original-cancelled");
+    row.title="Original Binance LIMIT cancelled after chase fill";
+    setRowLocked(row,true,{keepRemoveEnabled:true});
+    refreshEntryRowVisualState(row);
   }
   function ensureRowChaseEngine(){
     if(rowChaseEngine) return rowChaseEngine;
@@ -2302,8 +2568,7 @@
           price:send.price,
           clientOrderId:confirmed.clientOrderId
         });
-        const confirmedMeta = activeRowChase.row&&activeRowChase.row.__binanceLimitOrderMeta;
-        const confirmedBlinkKey = orderKeyFromMeta(confirmedMeta)||orderKeyFromMeta(confirmed);
+        const confirmedBlinkKey = orderKeyFromMeta(activeRowChase.chaseIdentity)||orderKeyFromMeta(confirmed);
         if(confirmedBlinkKey) triggerConfirmedOrderBlink(confirmedBlinkKey);
         return confirmed;
       },
@@ -2319,8 +2584,7 @@
           price:send.price,
           clientOrderId:identity && identity.clientOrderId
         });
-        const amendedMeta = activeRowChase.row&&activeRowChase.row.__binanceLimitOrderMeta;
-        const amendedBlinkKey = orderKeyFromMeta(amendedMeta)||orderKeyFromMeta(response)||orderKeyFromMeta(identity);
+        const amendedBlinkKey = orderKeyFromMeta(activeRowChase.chaseIdentity)||orderKeyFromMeta(response)||orderKeyFromMeta(identity);
         if(amendedBlinkKey) triggerConfirmedOrderBlink(amendedBlinkKey);
         return response;
       },
@@ -2340,13 +2604,29 @@
       },
       onFinish:async state => {
         const context = activeRowChase;
+        stopRowChaseOriginalWatch();
+        let originalOutcome={required:false,cancelled:false};
+        if(context&&context.originalOrderIdentity&&String(state&&state.result||"")==="filled"&&!context.originalFilledFirst){
+          originalOutcome=await cancelRowChaseOriginalAfterFill(context);
+        }
         activeRowChase = null;
-        if(context && context.row && context.row.isConnected){
+        if(originalOutcome.cancelled){
+          markRowChaseOriginalCancelled(context,originalOutcome);
+        }else if(context && context.row && context.row.isConnected){
           setRowLocked(context.row,context.wasLocked,{keepRemoveEnabled:context.wasLocked && isOpenPositionRow(context.row)});
         }
         refreshRowChaseButtons();
-        setRowChaseStatus(state);
-        const terminalIdentity = state && ["filled","cancelled","expired"].includes(String(state.result || ""))
+        const finalState=originalOutcome.required&&!originalOutcome.cancelled
+          ? {...state,message:originalOutcome.filled?"Row CHS filled; original order also filled before cancellation":"Row CHS filled; original order cancellation was not confirmed",tone:"error"}
+          : context&&context.originalFilledFirst
+            ? String(state&&state.result||"")==="filled"
+              ? {...state,message:"Original order filled; chase also reported filled",tone:"error"}
+              : {...state,message:"Original order filled; chase cancellation completed"}
+            : originalOutcome.cancelled
+              ? {...state,message:"Row CHS filled; original order cancelled"}
+              : state;
+        setRowChaseStatus(finalState);
+        const terminalIdentity = state && ["filled","cancelled","expired","inactive","original-filled"].includes(String(state.result || ""))
           ? {symbol:context && context.symbol,orderId:state.orderId,clientOrderId:state.clientOrderId}
           : null;
         if(terminalIdentity) beginRowChaseOrderSuppression(terminalIdentity);
@@ -2367,6 +2647,10 @@
       return;
     }
     if(!row || !row.isConnected) return;
+    if(isRowChaseOriginalCancelled(row)){
+      setStatus("Row CHS blocked: this original order is already cancelled.");
+      return;
+    }
     if(typeof hasKeys !== "function" || !hasKeys()){
       setStatus("Row CHS blocked. API keys required.");
       return;
@@ -2399,6 +2683,7 @@
     const positionSide = hedgeMode || (type === "entry" && (livePositionSide === "LONG" || livePositionSide === "SHORT"))
       ? rowDirection
       : (livePositionSide === "LONG" || livePositionSide === "SHORT" ? livePositionSide : "");
+    const originalOrderIdentity=rowChaseOriginalIdentity(row);
     activeRowChase = {
       row,
       type,
@@ -2406,20 +2691,29 @@
       direction:rowDirection,
       side:sideForNewRow(type,rowDirection),
       positionSide:positionSide === "LONG" || positionSide === "SHORT" ? positionSide : "",
-      wasLocked:row.dataset.locked === "1"
+      wasLocked:row.dataset.locked === "1",
+      originalOrderIdentity,
+      originalOrderMeta:originalOrderIdentity?safeCloneOrder(rowLimitOrderMeta(row)):null,
+      originalFilledFirst:false,
+      originalOrderLastStatus:"",
+      chaseIdentity:null
     };
     setRowLocked(row,true);
     refreshRowChaseButtons();
     try{
-      await ensureRowChaseEngine().start({
+      const context=activeRowChase;
+      const started=ensureRowChaseEngine().start({
         label:(type === "entry" ? "Entry" : "Exit") + " row CHS",
-        symbol:activeRowChase.symbol,
+        symbol:context.symbol,
         quantity,
         maxDurationMs:15000,
         meta:{type,direction:rowDirection}
       });
+      startRowChaseOriginalWatch(context);
+      await started;
     }catch(error){
       const context = activeRowChase;
+      stopRowChaseOriginalWatch();
       activeRowChase = null;
       if(context && context.row && context.row.isConnected) setRowLocked(context.row,context.wasLocked,{keepRemoveEnabled:context.wasLocked && isOpenPositionRow(context.row)});
       refreshRowChaseButtons();
@@ -2427,7 +2721,10 @@
     }
   }
   function unlockEntryRows(){
-    rows("calcModuleEntryRows").forEach(row => setRowLocked(row,!!(activeRowChase && activeRowChase.row === row)));
+    rows("calcModuleEntryRows").forEach(row => {
+      if(isRowChaseOriginalCancelled(row)) setRowLocked(row,true,{keepRemoveEnabled:true});
+      else setRowLocked(row,!!(activeRowChase && activeRowChase.row === row));
+    });
   }
   function applyMappedRow(containerId,item){
     const container = q(containerId);
@@ -2627,6 +2924,8 @@
     const container = q(containerId);
     if(!container) return;
     const opts = options || {};
+    const retainedOriginalRows=rows(containerId).filter(isProtectedRowChaseOriginal);
+    retainedOriginalRows.forEach(row=>row.remove());
     container.innerHTML = "";
     const list = data && data.length ? data : [{}];
     list.forEach((item,index) => {
@@ -2642,6 +2941,7 @@
         }
       );
     });
+    retainedOriginalRows.forEach(row=>container.appendChild(row));
   }
   function clearCalculatorLocal(){
     markSendPlanStale("Calculator cleared after preflight.");
@@ -2926,6 +3226,7 @@
     if(!(activeKeys instanceof Set)) return;
     rows(containerId).forEach(row => {
       if(row.dataset.source !== "binance-limit") return;
+      if(isProtectedRowChaseOriginal(row)) return;
       const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
       const key = orderKeyFromMeta(meta);
       if(key && activeKeys.has(key)) return;
@@ -2936,6 +3237,23 @@
       clearBinanceMetaOnRow(row);
       row.remove();
     });
+  }
+  function clearRowChaseCancelledRowsAfterRead(snapshot){
+    if(!snapshot||snapshot.normalFetchError) return 0;
+    let removed=0;
+    ["calcModuleEntryRows","calcModuleExitRows"].forEach(containerId=>{
+      rows(containerId).forEach(row=>{
+        if(!isRowChaseOriginalCancelled(row)) return;
+        clearBinanceMetaOnRow(row);
+        row.remove();
+        removed+=1;
+      });
+    });
+    if(removed){
+      refreshEntryRowNumbers();
+      refreshExitRowNumbers(readEntry().avg);
+    }
+    return removed;
   }
   function pruneMappedPartialStopRows(activeKeys){
     if(!(activeKeys instanceof Set)) return;
@@ -3538,7 +3856,7 @@
       row,
       level:num(levelInput(row)?.value),
       lot:num(lotInput(row)?.value)
-    })).filter(item => item.level != null && item.lot != null && item.lot > 0);
+    })).filter(item => !isRowChaseOriginalCancelled(item.row) && item.level != null && item.lot != null && item.lot > 0);
   }
   function currentOverlayRows(){
     const rawEntries = usableOverlayRows("calcModuleEntryRows");
@@ -4954,6 +5272,11 @@
     const limitRowRecords = [];
 
     entryRows.forEach(row => {
+      if(isRowChaseOriginalCancelled(row)){
+        const key=orderKeyFromMeta(rowLimitOrderMeta(row));
+        if(key) presentBinanceKeys.add(key);
+        return;
+      }
       if(isRowEmpty(row)) return;
       if(isOpenPositionRow(row)){
         addPlanRow(plan,{
@@ -4978,6 +5301,11 @@
       limitRowRecords.push({row,rowType:"entry",meta});
     });
     exitRows.forEach(row => {
+      if(isRowChaseOriginalCancelled(row)){
+        const key=orderKeyFromMeta(rowLimitOrderMeta(row));
+        if(key) presentBinanceKeys.add(key);
+        return;
+      }
       if(isRowEmpty(row)) return;
       const meta = row.__binanceLimitOrderMeta || (row.dataset && row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(row.dataset.calcRowId) : null);
       limitRowRecords.push({row,rowType:"exit",meta});
@@ -6894,6 +7222,7 @@
         mapped.exitRows.forEach(item => applyMappedRow("calcModuleExitRows",item));
         pruneMappedLimitRows("calcModuleEntryRows",activeLimitKeys);
         pruneMappedLimitRows("calcModuleExitRows",activeLimitKeys);
+        clearRowChaseCancelledRowsAfterRead(snapshot);
       }
 
       let stop = null;
@@ -7146,6 +7475,7 @@
 
     function showCalculator(){
       win.classList.remove("hidden");
+      setBookTickerVisibilityConsumer("calculator",true);
       win.style.zIndex = String(++zTop);
       openBtn.classList.add("is-on");
       clearCalculatorExecutionNotice();
@@ -7157,6 +7487,7 @@
     function hideCalculator(){
       stopAutoSyncDisplayRefresh();
       win.classList.add("hidden");
+      setBookTickerVisibilityConsumer("calculator",false);
       openBtn.classList.remove("is-on");
       openBtn.setAttribute("aria-pressed","false");
     }
