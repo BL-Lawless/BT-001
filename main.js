@@ -1595,6 +1595,9 @@ const SHARED_POSITION_OWNER = window.createSharedPositionFactOwner({
   onPublish:detail=>{
     BINANCE_PRIVATE_STATE.position.positionChangePublishedAt=detail.publishedAt;
     publishOpenPositionChange(detail);
+    if(detail.closed && window.BT001_WATERFALL_WINDOW && typeof window.BT001_WATERFALL_WINDOW.positionClosed === "function"){
+      window.BT001_WATERFALL_WINDOW.positionClosed(detail);
+    }
   },
   onDraw:detail=>scheduleAccountChartDraw(detail.closed?"position-closed":"position-changed")
 });

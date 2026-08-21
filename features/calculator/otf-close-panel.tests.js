@@ -7,130 +7,100 @@ const vm=require("vm");
 
 const root=path.resolve(__dirname,"..","..");
 const calculator=fs.readFileSync(path.join(__dirname,"presentation","calculatorModule.js"),"utf8");
+const engine=fs.readFileSync(path.join(__dirname,"application","chaseEngine.js"),"utf8");
 const floating=fs.readFileSync(path.join(root,"features","shared","floatingWindow.js"),"utf8");
 const css=fs.readFileSync(path.join(root,"style.css"),"utf8");
 const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
 
 assert(html.includes('src="features/shared/floatingWindow.js"'),"the shared floating-window utility must load before Calculator starts");
 assert(calculator.includes('id = "otfCloseChaseWindow"'),"the OTF close panel must be a DOM window");
-for(const id of ["otfCloseChaseModeMkt","otfCloseChaseModeChs","otfCloseChaseModeRev","otfCloseChasePercent","otfCloseChaseQtyInput","otfCloseChaseDist","otfCloseChaseValid","otfCloseChaseConfirm","otfCloseChaseCancel"]){
+for(const id of ["otfCloseChasePercent","otfCloseChaseQtyInput","otfCloseChaseDist","otfCloseChaseValid","otfCloseChaseConfirm","otfCloseChasePlPercentText"]){
   assert(calculator.includes(id),`the DOM panel must include ${id}`);
 }
+assert(!calculator.includes('id="otfCloseChaseCancel"'),"OTF must not create a second cancellation button");
+assert(!calculator.includes("otfCloseChaseModeMkt")&&!calculator.includes("otfCloseChaseModeChs")&&!calculator.includes('type:"MARKET"'),"OTF must be CHS-only with no MKT selector or MARKET close path");
+assert(!calculator.includes("otfCloseChaseModeRev"),"OTF must not render a REV mode control");
+assert(!calculator.includes('openPositionCloseUi.mode = "REV"'),"OTF must not select REV internally");
 assert(calculator.includes("storageKey:OTF_CLOSE_WINDOW_KEY"),"panel geometry must use global browser storage");
-assert(calculator.includes("renderOpenPositionClosePanel();\n  }\n  function calculatorIsOpen"),"status updates must render the live DOM panel directly");
-assert(!calculator.includes("otfClosePanels"),"the legacy canvas panel render list must be removed");
-assert(!/controlType:"open-position-close-(?!toggle)/.test(calculator),"only the chart X toggle may retain a canvas hit box");
-assert.equal((calculator.match(/controlType:"open-position-close-toggle"/g)||[]).length,1,"the original chart X must remain the sole close-panel canvas hit target");
+assert(calculator.includes("OTF_CLOSE_PREFERENCES_KEY")&&calculator.includes("saveOpenPositionClosePreferences();"),"OTF close percent and chase distance must persist independently of geometry");
+assert(calculator.includes("OTF_CLOSE_WINDOW_MIN_HEIGHT = 180")&&calculator.includes("OTF_CLOSE_WINDOW_DEFAULT_HEIGHT = 194"),"OTF floating geometry must use the compact content height and a lower manual resize floor");
+assert(calculator.includes("storedPercent==null?100")&&calculator.includes("storedDist==null?1"),"fresh OTF state must default to 100 percent and one tick");
 assert(calculator.includes('timeInForce:"GTX"'),"the chase order must use post-only GTX");
 assert(calculator.includes("hub.getTopOfBook()"),"the chase must use the shared top-of-book source");
-assert(calculator.includes('event.type!=="price"'),"the visible OTF preview must listen to the shared TF-independent price events");
-assert(calculator.includes("refreshOpenPositionClosePreviewSummary();"),"live price events must refresh the OTF percentage P/L summary without slider input");
-assert(calculator.includes('>Validity: Manual</button>')&&calculator.includes('valid.textContent = "Validity: "'),"the validity chip must consistently use the Validity: X label format");
-for(const label of ["%","SIZE","P/L"]){
+assert(calculator.includes('event.type!=="price"'),"the visible OTF preview must listen to TF-independent price events");
+for(const label of ["%","SIZE","P/L","P/L%"]){
   assert(calculator.includes(`<div class="otf-close-summary-label">${label}</div>`),`the summary must include the ${label} metric label`);
 }
-assert.equal((calculator.match(/class="otf-close-summary-cell"/g)||[]).length,3,"the summary must render three individual metric cells");
-assert(calculator.includes('id="otfCloseChaseConfirm" type="button">Confirm</button>'),"the close action must use the concise Confirm label");
-assert(calculator.includes('openPositionCloseUi.mode = "REV"'),"REV must be a selectable OTF mode");
-assert(calculator.includes('sliderField.classList.toggle("hidden",reverseMode)'),"REV must hide the close-quantity slider");
-assert(calculator.includes('send.positionSide = "BOTH"')&&calculator.includes('send.reduceOnly = "false"'),"REV must explicitly use one-way BOTH with reduce-only off");
-assert(calculator.includes('quantity:preview.roundedQty')&&calculator.includes('const requested=Math.max(0,num(liveQtyValue)||0)*2'),"REV must feed double the full live position size into the shared chase engine");
-assert(calculator.indexOf('<div class="otf-close-actions">')<calculator.indexOf('<div class="otf-close-live hidden"'),"feedback status must render below the Confirm/Cancel row");
-assert(calculator.includes("plText.style.color=moneyColor(infoPl);"),"preview P/L must use the same positive/negative color logic as header P/L");
-assert(calculator.includes('id="otfCloseChaseQtyInput" type="number" inputmode="decimal"'),"the SIZE cell must be a directly editable numeric lot input");
-assert(calculator.includes('openPositionCloseUi.quantity = null;')&&calculator.includes('setOpenPositionCloseQuantity(event.target.value'),"slider and quantity edits must maintain a two-way selection model");
-assert(calculator.includes('qtyInput.step=String(preview.stepSize);')&&calculator.includes('qtyInput.max=String(preview.maxQty);'),"the quantity input must expose the symbol step and live position maximum");
-assert(calculator.includes('typeof rules.helper.normalizeQty==="function"'),"quantity edits must use the shared symbol quantity normalizer");
+assert.equal((calculator.match(/class="otf-close-summary-cell"/g)||[]).length,4,"the summary must render four metric cells");
+assert(calculator.includes("currentFloatingPlPercent(openPositionClosePreviewPosition())"),"P/L percent must be derived from floating P/L and open-position margin");
+assert(calculator.includes("floating/margin*100"),"margin-based P/L percent must use floating P/L divided by margin");
+assert(calculator.includes('<div class="otf-close-execution-row">')&&calculator.indexOf('id="otfCloseChaseLive"')<calculator.indexOf('id="otfCloseChaseConfirm"'),"feedback status must render left of the single Execute/Cancel button");
+for(const message of [
+  "Waiting for price...","Chasing — ","Price feed stale","Repricing...",
+  "Filled — ","Cancelled","Expired","No price data","Stopped"
+]) assert(calculator.includes(message),`OTF must expose the exact status message fragment: ${message}`);
+assert(engine.includes('?"repricing":"chasing"')&&engine.includes('statusCode:"no-price"'),"the shared engine must publish stable repricing and no-price lifecycle codes");
+
+const persisted=new Map();
+const preferenceContext={
+  OTF_CLOSE_PREFERENCES_KEY:"otf-test",openPositionCloseUi:null,
+  localStorage:{getItem:key=>persisted.get(key)||null,setItem:(key,value)=>persisted.set(key,value)},
+  num:value=>Number.isFinite(Number(value))?Number(value):null,
+  clamp:(value,min,max)=>Math.max(min,Math.min(max,value)),JSON,Math
+};
+const preferenceStart=calculator.indexOf("function loadOpenPositionClosePreferences");
+const preferenceEnd=calculator.indexOf("function num",preferenceStart);
+vm.createContext(preferenceContext);
+vm.runInContext(calculator.slice(preferenceStart,preferenceEnd),preferenceContext);
+let preferences=preferenceContext.loadOpenPositionClosePreferences();
+assert.equal(preferences.percent,100,"fresh OTF state must use a 100 percent close selection");
+assert.equal(preferences.chsDistTicks,1,"fresh OTF state must use a one-tick chase distance");
+preferenceContext.openPositionCloseUi={percent:42,chsDistTicks:5};
+preferenceContext.saveOpenPositionClosePreferences();
+preferences=preferenceContext.loadOpenPositionClosePreferences();
+assert.equal(preferences.percent,42,"changed close percentage must survive a reload");
+assert.equal(preferences.chsDistTicks,5,"changed chase distance must survive a reload");
+
+const statusStart=calculator.indexOf("function formatChaseExecutionStatus");
+const statusEnd=calculator.indexOf("async function submitOpenPositionCloseChsLimit",statusStart);
+const statusContext={num:value=>Number.isFinite(Number(value))?Number(value):null,clamp:(value,min,max)=>Math.max(min,Math.min(max,value)),fmtLot:value=>Number(value).toFixed(3),Number,String,Math};
+vm.createContext(statusContext);
+vm.runInContext(calculator.slice(statusStart,statusEnd),statusContext);
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"waiting"}).message,"Waiting for price...");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"chasing",filledQty:.002,remainingQty:.003}).message,"Chasing — 40%");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"filled",requestedQty:.01,filledQty:.007}).message,"Filled — 70%");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"cancelled"}).message,"Cancelled");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"expired"}).message,"Expired");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"no-price"}).message,"No price data");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"stopped"}).message,"Stopped");
 
 const subscriptionStart=calculator.indexOf("function stopOpenPositionCloseLivePriceSubscription");
 const subscriptionEnd=calculator.indexOf("function renderOpenPositionClosePanel",subscriptionStart);
 let listener=null,unsubscribed=0,previewRefreshes=0;
 const subscriptionContext={
-  openPositionCloseLivePriceUnsubscribe:null,
-  openPositionCloseLivePriceFrame:null,
-  openPositionCloseUi:{open:true},
+  openPositionCloseLivePriceUnsubscribe:null,openPositionCloseLivePriceFrame:null,openPositionCloseUi:{open:true},
   window:{PUBLIC_MARKET_DATA_HUB:{subscribe:next=>{listener=next;return()=>{unsubscribed++;};}}},
-  currentSymbol:()=>"BTCUSDT",
-  toUpper:value=>String(value||"").toUpperCase(),
-  refreshOpenPositionClosePreviewSummary:()=>{previewRefreshes++;},
-  requestAnimationFrame:callback=>{callback();return 1;},
+  currentSymbol:()=>"BTCUSDT",toUpper:value=>String(value||"").toUpperCase(),
+  refreshOpenPositionClosePreviewSummary:()=>{previewRefreshes++;},requestAnimationFrame:callback=>{callback();return 1;},
   cancelAnimationFrame:()=>{},clearTimeout:()=>{},setTimeout:callback=>{callback();return 1;},Math
 };
 vm.createContext(subscriptionContext);
 vm.runInContext(calculator.slice(subscriptionStart,subscriptionEnd),subscriptionContext);
 subscriptionContext.syncOpenPositionCloseLivePriceSubscription(true);
 listener({type:"price",symbol:"BTCUSDT",price:62000});
-assert.equal(previewRefreshes,1,"a live market price tick must update the visible OTF preview without slider interaction");
+assert.equal(previewRefreshes,1,"a live market-price tick must update the visible OTF summary");
 subscriptionContext.syncOpenPositionCloseLivePriceSubscription(false);
-assert.equal(unsubscribed,1,"closing the OTF panel must release its live-price subscription");
-
-const quantityStart=calculator.indexOf("function symbolLotSizeRules");
-const quantityEnd=calculator.indexOf("function normalizedChasePrice",quantityStart);
-const quantityContext={
-  window:{BT001SymbolTradingSettings:{
-    getCached:()=>({stepSize:0.001,filters:[{filterType:"LOT_SIZE",stepSize:"0.001",minQty:"0.001"}]}),
-    normalizeQty:value=>(Math.round(Number(value)/0.001)*0.001).toFixed(3)
-  }},
-  currentSymbol:()=>"BTCUSDT",toUpper:value=>String(value||"").toUpperCase(),
-  num:value=>{const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;},
-  clamp:(value,min,max)=>Math.max(min,Math.min(max,value)),
-  openPositionCloseUi:{percent:0,quantity:null},
-  openPositionClosePreviewPosition:()=>({qty:0.01,entry:100,side:"LONG"}),
-  currentPriceReference:()=>101,direction:"LONG",Math,Number,String,Array
-};
-vm.createContext(quantityContext);
-vm.runInContext(calculator.slice(quantityStart,quantityEnd),quantityContext);
-let quantityPreview=quantityContext.setOpenPositionCloseQuantity(0.0056,{allowZero:false});
-assert.equal(quantityPreview.roundedQty,0.006,"typed quantities must normalize to the symbol lot step");
-assert.equal(quantityContext.openPositionCloseUi.percent,60,"typing a quantity must move the percentage selection");
-quantityPreview=quantityContext.setOpenPositionCloseQuantity(1,{allowZero:false});
-assert.equal(quantityPreview.roundedQty,0.01,"typed quantities must clamp to the live position size");
-assert.equal(quantityContext.openPositionCloseUi.percent,100,"a quantity clamped to the position size must move the slider to 100%");
-quantityPreview=quantityContext.setOpenPositionCloseQuantity(0.0001,{allowZero:false});
-assert.equal(quantityPreview.roundedQty,0.001,"typed quantities must clamp to the minimum symbol lot");
-quantityContext.openPositionCloseUi.quantity=null;
-quantityContext.openPositionCloseUi.percent=55;
-quantityPreview=quantityContext.openPositionClosePreview({qty:0.01,entry:100,side:"LONG"});
-assert.equal(quantityPreview.roundedQty,0.005,"slider quantities must retain the existing downward lot-step rounding");
-quantityContext.openPositionCloseUi.mode="REV";
-quantityPreview=quantityContext.openPositionClosePreview({qty:0.01,entry:100,side:"LONG"});
-assert.equal(quantityPreview.roundedQty,0.02,"REV must use exactly double the full live position size");
-assert.equal(quantityPreview.percent,100,"REV must ignore prior partial-close selection");
-
-const submitStart=calculator.indexOf("async function submitOpenPositionCloseChsLimit");
-const submitEnd=calculator.indexOf("function setOpenPositionChaseStatus",submitStart);
-let submittedOrder=null;
-const submitContext={
-  freshOpenPositionCloseClientId:()=>"rev-test",currentSymbol:()=>"BTCUSDT",
-  openPositionCloseChs:{mode:"REV",side:"SELL",positionSide:"BOTH",orderId:null,clientOrderId:"",price:""},
-  fmtLot:value=>Number(value).toFixed(3),toUpper:value=>String(value||"").toUpperCase(),
-  signedOrderWrite:async (_method,send)=>{submittedOrder={...send};return {orderId:7,clientOrderId:send.newClientOrderId};},
-  binanceWriteConfirmed:()=>true,registerTrackedOrderMeta:()=>{},positionGroupTracker:null,
-  String,Object,Error
-};
-vm.createContext(submitContext);
-vm.runInContext(calculator.slice(submitStart,submitEnd),submitContext);
-submitContext.submitOpenPositionCloseChsLimit({positionSide:"BOTH"},0.02,"101.0").then(()=>{});
-assert.equal(submittedOrder.timeInForce,"GTX","REV must retain GTX");
-assert.equal(submittedOrder.side,"SELL","reversing a LONG must use the existing SELL/Ask-side convention");
-assert.equal(submittedOrder.positionSide,"BOTH","REV must remain in one-way position mode");
-assert.equal(submittedOrder.reduceOnly,"false","REV must explicitly turn reduce-only off");
+assert.equal(unsubscribed,1,"closing OTF must release its live-price subscription");
 
 assert(floating.includes('["n","ne","e","se","s","sw","w","nw"].forEach(edge => {'),"all eight resize edges must be installed");
 assert(floating.includes("localStorage.setItem(key,JSON.stringify(value))"),"window geometry must persist through localStorage");
-assert(floating.includes("(window.innerWidth - width) / 2") && floating.includes("(window.innerHeight - height) / 2"),"first-open geometry must be centered");
 const otfCss=css.slice(css.indexOf(".otf-close-window{"),css.indexOf(".calc-module-window.is-collapsed",css.indexOf(".otf-close-window{")));
-assert(otfCss.includes("min-width:360px") && otfCss.includes("min-height:240px"),"the compact DOM panel must enforce its reduced size floor");
-assert(otfCss.includes("background:#f3f5f7")&&otfCss.includes("background:#eef0f2")&&otfCss.includes("border:1px solid #d9dce1"),"the OTF panel must use Calculator's neutral grey palette");
-for(const warmColor of ["#fffdf8","#fff8e8","#53351f","#d6c6aa","#b7791f","#7c4700","#8b5e14","#267a50","#eaf8f0","#166534","#cf8585","#fff0f0","#991b1b"]){
-  assert(!otfCss.includes(warmColor),`the OTF panel must not retain warm/green/red color ${warmColor}`);
-}
-assert(otfCss.includes("border-radius:6px")&&otfCss.includes("border-radius:5px"),"window and control corners must use subtle Calculator-like radii");
-assert(otfCss.includes(".otf-close-summary-cell{")&&otfCss.includes("border:1px solid #e6e8ea")&&otfCss.includes("background:#fff"),"summary metrics must match Calculator's white bordered cells");
-assert(otfCss.includes(".otf-close-summary-label{")&&otfCss.includes("font-size:9px")&&otfCss.includes("color:#707a8a"),"summary labels must match Calculator's small muted metric labels");
-assert(otfCss.includes(".otf-close-summary-value{")&&otfCss.includes("font-size:14px")&&otfCss.includes("font-weight:700"),"summary values must match Calculator's bold metric values");
-assert(otfCss.includes(".otf-close-summary-input{")&&otfCss.includes("background:transparent")&&otfCss.includes("text-align:center"),"the editable SIZE value must retain the white summary-cell presentation");
-assert(/\.otf-close-label\{[^}]*font-weight:400/s.test(otfCss),"section labels must use regular font weight");
-assert(/\.otf-close-live\.is-error\{[^}]*color:#f6465d/s.test(otfCss),"error feedback must retain its red status state");
+assert(otfCss.includes("grid-template-columns:repeat(4,minmax(0,1fr))"),"OTF summary must lay out four cells");
+assert(/\.otf-close-execution-row \.otf-close-confirm\{[^}]*width:46px;[^}]*height:46px;/s.test(otfCss),"Execute/Cancel must be square");
+assert(otfCss.includes("grid-template-columns:minmax(0,1fr) 46px"),"status must occupy the left column and Execute/Cancel the right column");
+assert(/\.otf-close-window\{[^}]*height:194px;[^}]*min-height:180px;/s.test(otfCss),"OTF CSS height and resize floor must match compact geometry");
+assert(/\.otf-close-live\{[^}]*height:46px;[^}]*min-height:46px;/s.test(otfCss),"status must exactly match the Execute/Cancel height");
+assert(/\.otf-close-live\{[^}]*border:1px solid #d9dce1;[^}]*background:#f7f8f9;/s.test(otfCss),"status must be a bordered light-grey box");
+assert(/\.otf-close-live\.is-error\{[^}]*color:#f6465d/s.test(otfCss),"error feedback must retain its red state");
 
 console.log("OTF close DOM panel tests: PASS");

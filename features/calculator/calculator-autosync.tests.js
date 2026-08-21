@@ -16,7 +16,8 @@ assert(source.includes("if(calculatorRowsHydrated && hasReliableCalculatorPrivat
 assert(source.includes('readBinance({preserveSendPlan:true,source:"ordersToggleLoad"})'),"an unseeded Orders open must perform exactly one authoritative read");
 assert.equal((source.match(/source:"ordersToggleLoad"/g)||[]).length,1,"Orders open must have one one-shot seed call site");
 assert(source.includes("try{ await ensureCalculatorRowsHydratedForOrders(); }catch(_e){}"),"explicit Orders opening must use the shared one-shot seed helper");
-assert(source.includes("if(ordersVisible) ensureCalculatorRowsHydratedForOrders().catch(() => {});"),"default/persisted Orders opening must use the same seed helper");
+assert(source.includes("if(effectiveOrdersVisible()) ensureCalculatorRowsHydratedForOrders().catch(() => {});"),"default, persisted, or temporarily forced Orders opening must use the same seed helper");
+assert(source.includes('setOrdersVisibilityConsumer("rapid-fire",active===true)'),"Rapid Fire must use the shared Orders visibility consumer without changing persisted manual state");
 const mappingIndex=source.indexOf('mapped.exitRows.forEach(item => applyMappedRow("calcModuleExitRows",item));');
 const hydratedIndex=source.indexOf("calculatorRowsHydrated = true;");
 assert(mappingIndex>=0&&hydratedIndex>mappingIndex,"local hydration may be marked complete only after Binance rows are mapped");

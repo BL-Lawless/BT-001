@@ -84,6 +84,7 @@
     closeTimer:null,
     closeRetry:0,
     closeSyncBusy:false,
+    closeSyncPending:false,
     closeSyncBaseline:"",
     liveRefreshKey:"",
     liveRefreshTimer:null,
@@ -362,10 +363,12 @@
     }
     wfSyncState.closeRetry = 0;
     wfSyncState.closeSyncBusy = false;
+    wfSyncState.closeSyncPending = false;
     wfSyncState.closeSyncBaseline = "";
   }
   function scheduleAutoCloseSync(delayMs=1250){
     if((!wfSyncState.loaded && !visible) || (wfSyncState.loaded && wfSyncState.symbol !== currentSymbol())) return;
+    wfSyncState.closeSyncPending = true;
     if(wfSyncState.closeTimer || wfSyncState.closeSyncBusy) return;
     wfSyncState.closeSyncBaseline = activeWfSignature();
     const period = wfSyncState.period || currentPeriodValue();
@@ -373,8 +376,9 @@
     wfSyncState.closeTimer = setTimeout(async () => {
       wfSyncState.closeTimer = null;
       wfSyncState.closeSyncBusy = true;
+      wfSyncState.closeSyncPending = false;
       try{
-        while(wfSyncState.closeRetry < 2){
+        while(wfSyncState.closeRetry < 4){
           let staleContext = false;
           const acceptResult = () => {
             const currentPeriod = currentPeriodValue();
@@ -389,24 +393,36 @@
           const nextSignature = wfDataMode() === "fast"
             ? closedTradeFastSignature(result)
             : closedTradeSignature(result && result.report);
+          if(visible) render();
           if(result && (!wfSyncState.closeSyncBaseline || (nextSignature && nextSignature !== wfSyncState.closeSyncBaseline))){
             wfSyncState.closeRetry = 0;
             wfSyncState.closeSyncBaseline = "";
             return;
           }
           wfSyncState.closeRetry += 1;
-          if(wfSyncState.closeRetry < 2) await new Promise(resolve => setTimeout(resolve,3000));
+          if(wfSyncState.closeRetry < 4){
+            const retryDelay=[1500,3000,5000][wfSyncState.closeRetry-1]||5000;
+            await new Promise(resolve => setTimeout(resolve,retryDelay));
+          }
         }
         showWfTradesStatus("Closed trade not ready yet");
       }catch(error){
         console.warn(MODULE + " live sync failed",error);
         showWfTradesStatus("Closed trade sync failed");
       }finally{
+        const rerun=wfSyncState.closeSyncPending;
         wfSyncState.closeSyncBusy = false;
         wfSyncState.closeRetry = 0;
         wfSyncState.closeSyncBaseline = "";
+        wfSyncState.closeSyncPending = false;
+        if(rerun) scheduleAutoCloseSync(250);
       }
     },Math.max(250,delayMs));
+  }
+  function notifyPositionClosed(){
+    if(visible) render();
+    maybeRefreshLivePreview();
+    scheduleAutoCloseSync(250);
   }
   function maybeRefreshLivePreview(){
     if(!visible) return;
@@ -1767,7 +1783,7 @@
     },false);
     window.addEventListener("v13:open-position-change",event => {
       const detail = event && event.detail || {};
-      if(detail && detail.closed && !(detail && detail.sideChanged && detail.current)) scheduleAutoCloseSync(1250);
+      if(detail && detail.closed && !(detail && detail.sideChanged && detail.current)) notifyPositionClosed();
       else if(detail && detail.opened) clearAutoCloseSync();
       maybeRefreshLivePreview();
     },false);
@@ -1777,7 +1793,7 @@
   else install();
 
 window.BT001_WATERFALL_WINDOW = {
-  version:MODULE,show,hide,render,
+  version:MODULE,show,hide,render,positionClosed:notifyPositionClosed,
   _selfTest:runWfCrosshairSelfTests,
   _diagnostics:() => {
     const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),closedPartials=wfCurrentCampaignClosedPartialPL();

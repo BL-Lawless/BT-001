@@ -12,7 +12,6 @@ Cleanup-only build from V13_UI_V2_PATCH_20.
 Exact duplicate inline script/style blocks removed; final behavior patches preserved in last-load order.
 Rollback baseline: V13_UI_V2_PATCH_20.
 -->
-
 <style>
 /* bundled: style.css */
 :root{
@@ -1870,9 +1869,9 @@ button:hover{filter:brightness(1.04)}
 .calc-module-window.hidden{display:none}
 .otf-close-window{
   width:420px;
-  height:272px;
+  height:194px;
   min-width:360px;
-  min-height:240px;
+  min-height:180px;
   border-radius:6px;
   background:#fff;
 }
@@ -1905,7 +1904,7 @@ button:hover{filter:brightness(1.04)}
 }
 .otf-close-summary{
   display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-template-columns:repeat(4,minmax(0,1fr));
   gap:4px;
   padding:0;
   font-variant-numeric:tabular-nums;
@@ -1969,9 +1968,10 @@ button:hover{filter:brightness(1.04)}
   grid-template-columns:repeat(2,minmax(0,1fr));
   gap:5px;
 }
+.otf-close-chips{grid-template-columns:repeat(2,minmax(0,1fr))}
 .otf-close-segments button,
 .otf-close-chips button,
-.otf-close-actions button{
+.otf-close-execution-row button{
   min-height:27px;
   margin:0;
   padding:4px 8px;
@@ -2004,34 +2004,55 @@ button:hover{filter:brightness(1.04)}
   cursor:not-allowed;
 }
 .otf-close-live{
+  min-width:0;
+  height:46px;
+  min-height:46px;
+  box-sizing:border-box;
+  display:flex;
+  align-items:center;
   padding:5px 7px;
   border:1px solid #d9dce1;
   border-radius:5px;
   background:#f7f8f9;
   color:#4b5563;
   line-height:1.3;
-  overflow-wrap:anywhere;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
 }
 .otf-close-live.is-error{
   border-color:#f6465d;
   color:#f6465d;
   font-weight:800;
 }
-.otf-close-actions{
-  display:flex;
-  justify-content:flex-end;
+#otfCloseChaseLiveStatus{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.otf-close-execution-row{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 46px;
+  align-items:stretch;
   gap:5px;
   margin-top:2px;
 }
-.otf-close-actions .otf-close-confirm{
+.otf-close-execution-row .otf-close-confirm{
+  width:46px;
+  min-width:46px;
+  height:46px;
+  min-height:46px;
+  padding:1px;
   border-color:#d9dce1;
   background:#eef0f2;
   color:#1e2329;
+  font-size:10px;
 }
-.otf-close-actions .otf-close-cancel{
-  border-color:#d9dce1;
-  background:#eef0f2;
-  color:#1e2329;
+.otf-close-execution-row .otf-close-confirm.is-cancel{
+  border-color:#f3b3bb;
+  background:#fde8eb;
+  color:#b42334;
 }
 .calc-module-window.is-collapsed{
   height:auto;
@@ -2121,19 +2142,28 @@ button:hover{filter:brightness(1.04)}
   opacity:.9;
 }
 .calc-module-dir{
-  border:0;
-  background:transparent;
-  padding:0;
+  border:1px solid rgba(31,41,55,.42);
+  border-radius:0;
+  background:#fff;
+  padding:3px 8px;
   margin:0;
   color:#111;
-  font-size:13px;
-  font-weight:400;
+  font-size:12px;
+  font-weight:700;
+  line-height:1;
   cursor:pointer;
   text-transform:uppercase;
-  letter-spacing:.02em;
+  letter-spacing:.01em;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.82),inset 0 -1px 0 rgba(15,23,42,.1);
 }
-.calc-module-dir.is-long{color:#047857}
-.calc-module-dir.is-short{color:#f6465d}
+.calc-module-dir.is-long{
+  background:linear-gradient(180deg,rgba(240,253,244,.98),rgba(187,247,208,.72));
+  color:#166534;
+}
+.calc-module-dir.is-short{
+  background:linear-gradient(180deg,rgba(254,242,242,.98),rgba(254,202,202,.72));
+  color:#991b1b;
+}
 .calc-module-title-sum{
   font-size:13px;
   color:#111;
@@ -2162,22 +2192,32 @@ button:hover{filter:brightness(1.04)}
 .calc-module-exit-head,
 .calc-module-row.calc-module-exit-row {
   display:grid;
-  grid-template-columns:20px minmax(62px,1fr) 66px 28px 82px 22px;
+  grid-template-columns:20px minmax(62px,1fr) 66px 22px 82px 22px;
   gap:6px;
   align-items:center;
 }
 .calc-module-row-chase{
-  width:28px;
+  width:22px;
   height:26px;
   min-width:0;
   margin:0;
   padding:0;
-  border:1px solid #9ca3af;
+  border:1px solid #d9dce1;
   border-radius:5px;
-  background:transparent;
-  color:#374151;
-  font-size:11px;
-  font-weight:800;
+  background:#fff;
+  color:#707a8a;
+  font-size:9px;
+  font-weight:700;
+}
+.calc-module-row-open-position .calc-module-row-chase{
+  border-color:rgba(185,28,28,.32);
+  background:rgba(220,38,38,.12);
+  color:#991b1b;
+}
+.calc-module-row-open-position .calc-module-row-chase.is-confirm-armed{
+  border-color:#b91c1c;
+  background:#b91c1c;
+  color:#fff;
 }
 .calc-module-row-chase.is-active{
   border-color:#b91c1c;
@@ -2762,6 +2802,8 @@ button:hover{filter:brightness(1.04)}
   white-space:nowrap;
 }
 
+</style>
+<style>
 /* bundled: features/pressure-signal/pressure-signal.css */
 .pressure-signal-toolbar{
   display:inline-flex;
@@ -3288,6 +3330,8 @@ button:hover{filter:brightness(1.04)}
 .signal-engine-choice-copy{display:flex;flex-direction:column;gap:3px}
 .signal-engine-choice-copy small,.signal-engine-storage-note{color:var(--muted,#6b7280);font-size:11px}
 
+</style>
+<style>
 /* bundled: features/grad-calculator/grad-calculator.css */
 .grad-calc-metric{flex:0 0 30px;min-width:30px;display:flex;align-items:center;justify-content:center}.grad-calc-icon{width:28px;height:28px;padding:0;margin:0;border:1px solid #cfd5dc;border-radius:5px;background:#fff;color:#1e2329;font-size:12px;font-weight:800}.grad-calc-icon.is-on{background:#f7f8fa;border-color:#9ca3af}.grad-levels-icon{display:block;width:18px;height:18px;margin:auto}
 .grad-calc-window{position:fixed;z-index:83;left:74px;top:112px;width:395px;height:min(650px,calc(100vh - 130px));min-width:395px;min-height:360px;max-width:calc(100vw - 8px);max-height:calc(100vh - 8px);display:flex;flex-direction:column;background:#fff;border:1px solid #d9dce1;border-radius:10px;box-shadow:0 10px 24px rgba(15,23,42,.14);font-family:Arial,Helvetica,sans-serif;color:#1e2329}.grad-calc-window.hidden{display:none}.grad-calc-window.is-collapsed{height:auto;min-height:0}.grad-calc-window.is-collapsed .grad-calc-body,.grad-calc-window.is-collapsed .grad-resize-handle{display:none}
@@ -3307,6 +3351,8 @@ button:hover{filter:brightness(1.04)}
 #gradPreflightConfirm{height:28px;margin:0;padding:0 10px;background:#eef0f2;border:1px solid #d9dce1;color:#111;font-size:12px;font-weight:700;border-radius:6px}#gradPreflightConfirm:disabled{opacity:.55;cursor:not-allowed}
 .grad-resize-handle{position:absolute;z-index:4}.grad-resize-n,.grad-resize-s{left:8px;right:8px;height:7px;cursor:ns-resize}.grad-resize-n{top:-4px}.grad-resize-s{bottom:-4px}.grad-resize-e,.grad-resize-w{top:8px;bottom:8px;width:7px;cursor:ew-resize}.grad-resize-e{right:-4px}.grad-resize-w{left:-4px}.grad-resize-ne,.grad-resize-se,.grad-resize-sw,.grad-resize-nw{width:11px;height:11px}.grad-resize-ne{top:-4px;right:-4px;cursor:nesw-resize}.grad-resize-se{right:-4px;bottom:-4px;cursor:nwse-resize}.grad-resize-sw{bottom:-4px;left:-4px;cursor:nesw-resize}.grad-resize-nw{top:-4px;left:-4px;cursor:nwse-resize}
 
+</style>
+<style>
 /* bundled: features/waterfall/waterfall.css */
 /* =========================================================
    BT001_WATERFALL_WINDOW - Closed-position "Waterfall" report window styles
@@ -3856,6 +3902,8 @@ button:hover{filter:brightness(1.04)}
 .wf-resize-se{right:0;bottom:0;width:12px;height:12px;cursor:se-resize}
 .wf-resize-sw{left:0;bottom:0;width:10px;height:10px;cursor:sw-resize}
 
+</style>
+<style>
 /* bundled: features/ma-stack/ma-stack.css */
 /* MA_STACK_STRIP presentation extracted from style.css. */
 #v33MAStackMetric{
@@ -4085,6 +4133,203 @@ button:hover{filter:brightness(1.04)}
 }
 
 </style>
+<style>
+/* bundled: features/rapid-fire/rapid-fire.css */
+.rapid-fire-trigger{
+  width:30px;
+  height:26px;
+  padding:0;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:#eef0f2;
+  color:#111;
+  font-size:15px;
+  line-height:24px;
+}
+.rapid-fire-window{
+  width:430px;
+  height:258px;
+  min-width:370px;
+  min-height:258px;
+  border-radius:6px;
+  background:#fff;
+}
+.rapid-fire-window.is-window-active{box-shadow:0 14px 34px rgba(15,23,42,.2)}
+.rapid-fire-window.is-dragging,
+.rapid-fire-window.is-resizing,
+.rapid-fire-window.is-dragging *,
+.rapid-fire-window.is-resizing *{user-select:none!important}
+.rapid-fire-head{min-height:28px;padding:3px 10px;background:#f3f5f7}
+.rapid-fire-body{
+  flex:1;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  padding:8px;
+  overflow:hidden;
+  background:#fff;
+  color:#1e2329;
+  font:12px Arial,Helvetica,sans-serif;
+}
+.rapid-fire-summary{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:5px;
+  font-variant-numeric:tabular-nums;
+  text-align:center;
+}
+.rapid-fire-summary-cell,
+.rapid-fire-dir{
+  min-width:0;
+  padding:5px 7px;
+  border:1px solid #e6e8ea;
+  border-radius:5px;
+  background:#fff;
+}
+.rapid-fire-summary-label{
+  display:block;
+  margin-bottom:3px;
+  color:#707a8a;
+  font-size:9px;
+  line-height:1;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+.rapid-fire-summary-value{
+  display:block;
+  overflow:hidden;
+  color:#1e2329;
+  font-size:14px;
+  font-weight:700;
+  line-height:1.2;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.rapid-fire-add-row{
+  display:grid;
+  grid-template-columns:74px 86px 50px 62px 44px;
+  gap:6px;
+  align-items:stretch;
+  justify-content:start;
+}
+.rapid-fire-dir{
+  width:100%;
+  margin:0;
+  border:1px solid rgba(31,41,55,.42);
+  border-radius:0;
+  font-family:inherit;
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:.01em;
+  text-align:center;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.82),inset 0 -1px 0 rgba(15,23,42,.1);
+}
+.rapid-fire-dir.is-long{
+  background:linear-gradient(180deg,rgba(240,253,244,.98),rgba(187,247,208,.72));
+  color:#166534;
+}
+.rapid-fire-dir.is-short{
+  background:linear-gradient(180deg,rgba(254,242,242,.98),rgba(254,202,202,.72));
+  color:#991b1b;
+}
+.rapid-fire-dir.is-locked{
+  cursor:default;
+  font-weight:700;
+}
+.rapid-fire-dir.is-locked.is-long{color:#166534}
+.rapid-fire-dir.is-locked.is-short{color:#991b1b}
+.rapid-fire-lot{
+  width:100%;
+  min-width:0;
+  margin:0;
+  padding:5px 7px;
+  border:1px solid #d9dce1;
+  border-radius:5px;
+  background:#fff;
+  color:#1e2329;
+  font:700 13px Arial,Helvetica,sans-serif;
+  text-align:center;
+}
+.rapid-fire-button,
+.rapid-fire-action-title{
+  margin:0;
+  padding:5px 8px;
+  border:1px solid #d9dce1;
+  border-radius:5px;
+  background:#eef0f2;
+  color:#1e2329;
+  font:700 12px Arial,Helvetica,sans-serif;
+}
+.rapid-fire-button.is-confirm-armed{
+  border-color:#d97706;
+  background:#fff7df;
+  color:#92400e;
+}
+.rapid-fire-action-group{
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+}
+.rapid-fire-action-row{
+  display:grid;
+  grid-template-columns:82px minmax(0,1fr) 48px;
+  gap:7px;
+  align-items:center;
+  min-height:34px;
+}
+.rapid-fire-slider-shell{
+  position:relative;
+  display:block;
+  min-width:0;
+  height:34px;
+  padding-top:8px;
+}
+.rapid-fire-slider-ticks{
+  position:absolute;
+  top:2px;
+  left:8px;
+  right:8px;
+  height:5px;
+  pointer-events:none;
+}
+.rapid-fire-slider-ticks i{
+  position:absolute;
+  top:0;
+  width:1px;
+  height:5px;
+  background:rgba(107,114,128,.28);
+  transform:translateX(-.5px);
+}
+.rapid-fire-slider-shell input[type="range"]{width:100%;min-width:0;margin:0;accent-color:#6b7280}
+.rapid-fire-slider-value{font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
+.rapid-fire-action-title{width:82px;min-width:82px;padding:5px 4px;overflow:hidden}
+.rapid-fire-action-title.is-cancel{
+  border-color:#f3b3bb;
+  background:#fde8eb;
+  color:#b42334;
+}
+.rapid-fire-status{
+  width:100%;
+  height:34px;
+  min-height:34px;
+  box-sizing:border-box;
+  display:flex;
+  align-items:center;
+  padding:5px 7px;
+  border:1px solid #d9dce1;
+  border-radius:5px;
+  background:#f7f8f9;
+  color:#4b5563;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.rapid-fire-status.is-error{border-color:#f6465d;color:#f6465d;font-weight:800}
+.rapid-fire-window [aria-disabled="true"]{cursor:not-allowed;opacity:.62}
+.rapid-fire-window button:disabled{cursor:not-allowed;opacity:.55}
+
+</style>
 </head>
 <body>
 
@@ -4092,6 +4337,7 @@ button:hover{filter:brightness(1.04)}
 <div class="topbar">
 <span id="exchangeClockStatus" hidden role="status"></span>
 <button class="settings-button" id="apiKeysBtn" title="Settings">⚙</button>
+<button id="rapidFireBtn" class="rapid-fire-trigger" title="Open Rapid Fire" type="button" aria-label="Open Rapid Fire">&#9889;</button>
 <button id="ssscDashBtn" title="Open SSSC MA Diagnostic Dashboard" type="button">SSSC</button>
 <select id="market">
 <option value="btcusdt">BTCUSDT</option>
@@ -4193,13 +4439,11 @@ button:hover{filter:brightness(1.04)}
 <div class="api-account-row">
 <input class="api-account-nickname" id="apiNicknameMain" placeholder="Nickname" type="text" value="Main"/>
 <div class="api-account-controls">
-
 <button class="secondary api-account-read" id="readBinanceAccountMain" type="button">Read</button>
 </div>
 </div>
 <button class="secondary" id="openBinanceSettings" type="button">Open Binance API</button>
 </div>
-
 </div>
 <div class="settings-card" id="gptSettingsCard">
 <div class="settings-card-title">GPT API</div>
@@ -4395,8 +4639,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
 
 <!-- R13_SSSC_PROTO_V1_LIVE_COSMETIC_REBUILD_R3_END -->
 
-
-<!-- All executable scripts are intentionally after all application markup. -->
+<!-- Standalone execution block: all formerly deferred scripts are after the complete document markup. -->
 <script type="application/x-bt001-source" data-bundle-path="features/calculator/domain/calculatorDomain.js">
 (() => {
   "use strict";
@@ -4603,15 +4846,16 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }
     async function submitFresh(top,recovery){
       if(!run) return;
+      run.everReceivedBook = !!usableBook(top) || run.everReceivedBook;
       const qty = remaining();
-      if(!(qty > 0)) return finish(run.label + " filled","normal",{result:"filled"});
+      if(!(qty > 0)) return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
       const price = desiredPrice(top);
       if(!price){
-        update(run.label + " waiting for a valid book price","error");
+        update(run.label + " waiting for a valid book price","error",{statusCode:"stale"});
         schedule();
         return;
       }
-      update(recovery ? "Order cancelled by exchange (price crossed) — resubmitting GTX" : run.label + " submitting GTX",recovery ? "error" : "normal");
+      update(recovery ? "Order cancelled by exchange (price crossed) — resubmitting GTX" : run.label + " submitting GTX",recovery ? "error" : "normal",{statusCode:recovery?"repricing":"chasing"});
       try{
         const response = await opts.submit({quantity:qty,price,state:snapshot(),recovery:!!recovery});
         if(!run) return;
@@ -4620,10 +4864,10 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         run.price = String((response && response.price) || price);
         run.pendingAmend = false;
         run.needsSubmit = false;
-        update(run.label + " chasing");
+        update(run.label + " chasing","normal",{statusCode:"chasing"});
       }catch(error){
         if(!run) return;
-        update(run.label + " GTX rejected — retrying safely: " + (error && error.message ? error.message : String(error)),"error");
+        update(run.label + " GTX rejected — retrying safely: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
       }
       schedule();
     }
@@ -4632,11 +4876,11 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       if(order) applyOrder(order);
       carryCurrentFill();
       run.pendingAmend = false;
-      if(!(remaining() > 0)) return finish(run.label + " filled","normal",{result:"filled"});
+      if(!(remaining() > 0)) return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
       const currentBook = book();
       if(!currentBook){
         run.needsSubmit = true;
-        update("Book data stale — chase paused","error",{reason:"stale-book"});
+        update("Book data stale — chase paused","error",{reason:"stale-book",statusCode:"stale"});
         schedule();
         return;
       }
@@ -4660,7 +4904,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         }
         if(run.expiresAt && Date.now() >= run.expiresAt){
           busy = false;
-          await cancel(run.label + " expired — remaining qty cancelled",{result:"expired"});
+          const noPrice=!run.everReceivedBook;
+          await cancel(noPrice?run.label + " expired — no book data received":run.label + " expired — remaining qty cancelled",noPrice?{result:"no-price",statusCode:"no-price"}:{result:"expired",statusCode:"expired"});
           return;
         }
         let rawBook = bookState();
@@ -4670,25 +4915,26 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
             const hasData = !!(rawBook && (rawBook.hasData === true || rawBook.state === "stale"));
             if(!hasData && !run.firstBookWaitCompleted && typeof opts.waitForTopOfBook === "function"){
               run.firstBookWaitCompleted = true;
-              update("Waiting for book data...","normal",{reason:"waiting-book"});
+              update("Waiting for book data...","normal",{reason:"waiting-book",statusCode:"waiting"});
               try{ rawBook = await opts.waitForTopOfBook({timeoutMs:Number(opts.firstBookTimeoutMs) || 3000}); }
               catch(_ignored){ rawBook = null; }
               if(!run) return;
               if(run.expiresAt && Date.now() >= run.expiresAt){
                 busy = false;
-                await cancel(run.label + " expired — no book data received",{result:"expired"});
+                await cancel(run.label + " expired — no book data received",{result:"no-price",statusCode:"no-price"});
                 return;
               }
               top = usableBook(rawBook);
               if(top){
+                run.everReceivedBook = true;
                 await submitFresh(top,run.recovering);
                 run.recovering = false;
                 return;
               }
-              update("Book data unavailable — chase paused","error",{reason:"missing-book"});
+              update("Book data unavailable — chase paused","normal",{reason:"missing-book",statusCode:"waiting"});
               return;
             }
-            update(hasData ? "Book data stale — chase paused" : "Book data unavailable — chase paused","error",{reason:hasData ? "stale-book" : "missing-book"});
+            update(hasData ? "Book data stale — chase paused" : "Book data unavailable — chase paused",hasData?"error":"normal",{reason:hasData ? "stale-book" : "missing-book",statusCode:hasData?"stale":"waiting"});
             return;
           }
           await submitFresh(top,run.recovering);
@@ -4699,14 +4945,14 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         try{
           order = await queryCurrent();
         }catch(error){
-          update(run.label + " status check failed — chase paused: " + (error && error.message ? error.message : String(error)),"error");
+          update(run.label + " status check failed — chase paused: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
           return;
         }
         if(!run) return;
         if(order) applyOrder(order);
         const status = upper(order && order.status);
         if(status === "FILLED" || !(remaining() > 0)){
-          await finish(run.label + " filled","normal",{result:"filled"});
+          await finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
           return;
         }
         if(!order || CANCELED.has(status)){
@@ -4714,25 +4960,26 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
             await recoverCrossing(top,order);
             return;
           }
-          await finish(run.label + " inactive — remaining qty not chased","error",{result:"inactive"});
+          await finish(run.label + " inactive — remaining qty not chased","error",{result:"inactive",statusCode:"stopped"});
           return;
         }
         if(run.pendingAmend) run.pendingAmend = false;
         if(status && !ACTIVE.has(status)){
-          await finish(run.label + " stopped: " + status,"error",{result:"inactive"});
+          await finish(run.label + " stopped: " + status,"error",{result:"inactive",statusCode:"stopped"});
           return;
         }
         if(!top){
-          update("Book data stale — chase paused","error",{reason:"stale-book"});
+          update("Book data stale — chase paused","error",{reason:"stale-book",statusCode:"stale"});
           return;
         }
+        run.everReceivedBook = true;
         const price = desiredPrice(top);
         if(!price){
-          update(run.label + " waiting for a valid book price","error");
+          update(run.label + " waiting for a valid book price","error",{statusCode:"stale"});
           return;
         }
         if(samePrice(run.price,price)){
-          update(run.label + " chasing");
+          update(run.label + " chasing","normal",{statusCode:"chasing"});
           return;
         }
         run.pendingAmend = true;
@@ -4752,7 +4999,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
             return;
           }
           run.price = String((response && response.price) || price);
-          update(run.label + " chasing");
+          update(run.label + " chasing","normal",{statusCode:"chasing"});
         }catch(error){
           if(!run) return;
           let checked = null;
@@ -4763,7 +5010,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
           }
           applyOrder(checked);
           run.pendingAmend = false;
-          update(run.label + " amend rejected — chase paused: " + (error && error.message ? error.message : String(error)),"error");
+          update(run.label + " amend rejected — chase paused: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
         }
       }finally{
         busy = false;
@@ -4791,11 +5038,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         needsSubmit:true,
         recovering:false,
         firstBookWaitCompleted:false,
+        everReceivedBook:false,
         canceling:false,
         cancelIntent:null,
         meta:input.meta || null
       };
-      update(run.label + " starting");
+      update(run.label + " starting","normal",{statusCode:"chasing"});
       await tick();
       return snapshot();
     }
@@ -4806,7 +5054,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       run.cancelIntent = {reason:cancelReason,extra:extra || null};
       clearTimer();
       run.canceling = true;
-      update(reason || run.label + " canceling");
+      update(reason || run.label + " canceling","normal",{statusCode:"canceling"});
       const id = {symbol:run.symbol,orderId:run.orderId,clientOrderId:run.clientOrderId};
       if(id.orderId == null && !id.clientOrderId) return finish(cancelReason,"normal",extra);
       try{
@@ -4819,12 +5067,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         if(finalOrder) applyOrder(finalOrder);
         const confirmed = await opts.verifyCanceled(id,snapshot());
         if(!confirmed) throw new Error("cancel was not confirmed by the live open-orders snapshot");
-        if(upper(finalOrder && finalOrder.status) === "FILLED") return finish(run.label + " filled","normal",{result:"filled"});
-        return finish(cancelReason,"normal",extra);
+        if(upper(finalOrder && finalOrder.status) === "FILLED") return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
+        return finish(cancelReason,"normal",Object.assign({statusCode:"cancelled"},extra||{}));
       }catch(error){
         if(!run) return Object.freeze({active:false});
         run.canceling = false;
-        update(run.label + " cancel not confirmed — chase remains locked: " + (error && error.message ? error.message : String(error)),"error");
+        update(run.label + " cancel not confirmed — chase remains locked: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
         schedule();
         return snapshot();
       }
@@ -4876,11 +5124,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
   const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
   const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
-  const OTF_CLOSE_WINDOW_KEY = STORE + "otf_close_window_v2";
+  const OTF_CLOSE_WINDOW_KEY = STORE + "otf_close_window_v3";
+  const OTF_CLOSE_PREFERENCES_KEY = STORE + "otf_close_preferences_v1";
   const OTF_CLOSE_WINDOW_MIN_WIDTH = 360;
-  const OTF_CLOSE_WINDOW_MIN_HEIGHT = 240;
+  const OTF_CLOSE_WINDOW_MIN_HEIGHT = 180;
   const OTF_CLOSE_WINDOW_DEFAULT_WIDTH = 440;
-  const OTF_CLOSE_WINDOW_DEFAULT_HEIGHT = 272;
+  const OTF_CLOSE_WINDOW_DEFAULT_HEIGHT = 194;
   const AUTO_SYNC_DISPLAY_REFRESH_MS = 500;
   const SEND_POSITION_MAX_AGE_MS = 5000;
   const FLAT_CLEANUP_CONFIRM_MS = 700;
@@ -4909,6 +5158,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   let cbsEnabled = false;
   let expressModeEnabled = false;
   let ordersVisible = true;
+  const ordersVisibilityConsumers = new Set();
   let calculatorRowsHydrated = false;
   let calculatorRowsHydrationPromise = null;
   let otfEnabled = false;
@@ -4948,13 +5198,18 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   let openPositionReconcileTimer = null;
   let pendingOpenPositionChange = null;
   let lastOpenPositionReconcileSignature = "";
-  let openPositionCloseUi = {open:false,percent:0,quantity:null,sending:false,mode:"CHS",chsDistTicks:2,chsValidKey:"manual"};
+  let openPositionCloseUi = loadOpenPositionClosePreferences();
   let openPositionCloseWindowApi = null;
   let openPositionClosePanelStatus = "";
   let openPositionClosePanelTone = "normal";
   let openPositionCloseLivePriceUnsubscribe = null;
   let openPositionCloseLivePriceFrame = null;
   let openPositionCloseChaseEngine = null;
+  let rapidFireChaseEngine = null;
+  let rapidFireChaseContext = null;
+  let rapidFireBreakevenBusy = false;
+  let lastRapidFireBreakeven = null;
+  const rapidFireStatusListeners = new Set();
   let rowChaseEngine = null;
   let activeRowChase = null;
   let rowChaseOriginalWatchTimer = null;
@@ -4995,6 +5250,28 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   const SYMBOL_SETTINGS_CACHE_WINDOW_MS = 30000;
 
   function q(id){ return document.getElementById(id); }
+  function loadOpenPositionClosePreferences(){
+    let stored=null;
+    try{ stored=JSON.parse(localStorage.getItem(OTF_CLOSE_PREFERENCES_KEY)||"null"); }catch(_e){ stored=null; }
+    const storedPercent=stored&&num(stored.percent);
+    const storedDist=stored&&num(stored.chsDistTicks);
+    return {
+      open:false,
+      percent:storedPercent==null?100:clamp(storedPercent,0,100),
+      quantity:null,
+      sending:false,
+      chsDistTicks:storedDist==null?1:Math.max(0,Math.round(storedDist)),
+      chsValidKey:"manual"
+    };
+  }
+  function saveOpenPositionClosePreferences(){
+    try{
+      localStorage.setItem(OTF_CLOSE_PREFERENCES_KEY,JSON.stringify({
+        percent:clamp(num(openPositionCloseUi.percent)||0,0,100),
+        chsDistTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0))
+      }));
+    }catch(_e){}
+  }
   function num(v){
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
@@ -5017,6 +5294,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const n = num(v);
     if(n == null) return "$-";
     return (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
+  }
+  function fmtPercent(v){
+    const n=num(v);
+    if(n==null) return "-";
+    const rounded=Number(n.toFixed(2));
+    return (rounded>0?"+":"")+rounded+"%";
   }
   function wait(ms){
     return new Promise(resolve => setTimeout(resolve,Math.max(0,Number(ms) || 0)));
@@ -5054,7 +5337,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     openPositionCloseChs.orderId = null;
     openPositionCloseChs.clientOrderId = "";
     openPositionCloseChs.startedPositionQty = 0;
-    openPositionCloseChs.distTicks = Math.max(0,num(openPositionCloseUi.chsDistTicks) || 2);
+    openPositionCloseChs.distTicks = Math.max(0,num(openPositionCloseUi.chsDistTicks) == null ? 1 : num(openPositionCloseUi.chsDistTicks));
     openPositionCloseChs.validKey = String(openPositionCloseUi.chsValidKey || "manual");
     const validOption = openPositionCloseChsValidOption(openPositionCloseChs.validKey);
     openPositionCloseChs.validMs = validOption ? validOption.ms : null;
@@ -5063,19 +5346,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   }
   function resetOpenPositionCloseUi(){
     openPositionCloseUi.open = false;
-    openPositionCloseUi.percent = 0;
     openPositionCloseUi.quantity = null;
     openPositionCloseUi.sending = false;
-    openPositionCloseUi.mode = "CHS";
-    openPositionCloseUi.chsDistTicks = 2;
-    openPositionCloseUi.chsValidKey = "manual";
     renderOpenPositionClosePanel();
   }
   function isOpenPositionCloseControl(hit){
     return !!(hit && hit.controlType === "open-position-close-toggle");
-  }
-  function openPositionCloseMode(){
-    return openPositionCloseChs.active ? "CHS" : (String(openPositionCloseUi.mode || "CHS").toUpperCase() === "MKT" ? "MKT" : "CHS");
   }
   function openPositionCloseChsValidOption(key){
     const target = String(key || "30s").toLowerCase();
@@ -5101,17 +5377,14 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     warmTopOfBook();
     if(openPositionCloseChs.active) return;
     openPositionClosePanelStatus = "";
-    openPositionCloseUi.percent = 0;
     openPositionCloseUi.quantity = null;
-    openPositionCloseUi.mode = "CHS";
-    openPositionCloseUi.chsDistTicks = 2;
-    openPositionCloseUi.chsValidKey = "manual";
   }
   function cycleOpenPositionCloseChsDist(){
     const current = currentOpenPositionCloseChsDistTicks();
     const index = OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.indexOf(current);
     const next = OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS[(index + 1 + OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.length) % OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.length];
     openPositionCloseUi.chsDistTicks = next;
+    saveOpenPositionClosePreferences();
   }
   function cycleOpenPositionCloseChsValid(){
     const current = currentOpenPositionCloseChsValidKey();
@@ -5155,31 +5428,27 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
             <div class="otf-close-summary-label">P/L</div>
             <div class="otf-close-summary-value" id="otfCloseChasePlText">$0.00</div>
           </div>
-        </div>
-        <div class="otf-close-field">
-          <div class="otf-close-label">Mode</div>
-          <div class="otf-close-segments" role="group" aria-label="Close mode">
-            <button id="otfCloseChaseModeMkt" type="button">MKT</button>
-            <button id="otfCloseChaseModeChs" type="button">CHS</button>
+          <div class="otf-close-summary-cell">
+            <div class="otf-close-summary-label">P/L%</div>
+            <div class="otf-close-summary-value" id="otfCloseChasePlPercentText">0%</div>
           </div>
         </div>
         <label class="otf-close-field otf-close-slider-field" for="otfCloseChasePercent">
           <span class="otf-close-label">Close quantity</span>
-          <input id="otfCloseChasePercent" type="range" min="0" max="100" step="0.01" value="0">
+          <input id="otfCloseChasePercent" type="range" min="0" max="100" step="0.01" value="100">
         </label>
         <div class="otf-close-field">
           <div class="otf-close-label">Chase settings</div>
           <div class="otf-close-chips">
-            <button id="otfCloseChaseDist" type="button">Dist 2 ticks</button>
+            <button id="otfCloseChaseDist" type="button">Dist 1 tick</button>
             <button id="otfCloseChaseValid" type="button">Validity: Manual</button>
           </div>
         </div>
-        <div class="otf-close-actions">
-          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Confirm</button>
-          <button class="otf-close-cancel hidden" id="otfCloseChaseCancel" type="button">Cancel CHS</button>
-        </div>
-        <div class="otf-close-live hidden" id="otfCloseChaseLive" aria-live="polite">
-          <div id="otfCloseChaseLiveStatus"></div>
+        <div class="otf-close-execution-row">
+          <div class="otf-close-live" id="otfCloseChaseLive" aria-live="polite">
+            <div id="otfCloseChaseLiveStatus"></div>
+          </div>
+          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Execute</button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -5198,20 +5467,10 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
 
     const chsGuard = () => {
       if(!openPositionCloseChs.active) return false;
-      setStatus("Open Position CHS is active. Cancel CHS first.");
+      setStatus("Open Position CHS is active. Cancel it first.");
       return true;
     };
     q("otfCloseChaseClose").addEventListener("click",hideOpenPositionClosePanel,false);
-    q("otfCloseChaseModeMkt").addEventListener("click",() => {
-      if(chsGuard()) return;
-      openPositionCloseUi.mode = "MKT";
-      renderOpenPositionClosePanel();
-    },false);
-    q("otfCloseChaseModeChs").addEventListener("click",() => {
-      if(chsGuard()) return;
-      openPositionCloseUi.mode = "CHS";
-      renderOpenPositionClosePanel();
-    },false);
     q("otfCloseChaseDist").addEventListener("click",() => {
       if(chsGuard()) return;
       cycleOpenPositionCloseChsDist();
@@ -5235,6 +5494,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       }
       openPositionCloseUi.quantity = null;
       openPositionCloseUi.percent = clamp(num(event.target.value) || 0,0,100);
+      saveOpenPositionClosePreferences();
       renderOpenPositionClosePanel();
     },false);
     const qtyInput = q("otfCloseChaseQtyInput");
@@ -5259,9 +5519,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       event.target.value=fmtLot(preview.roundedQty);
       renderOpenPositionClosePanel();
     },false);
-    q("otfCloseChaseConfirm").addEventListener("click",() => { void confirmOpenPositionCloseOrder(); },false);
-    q("otfCloseChaseCancel").addEventListener("click",() => {
-      if(openPositionCloseChs.active) void cancelOpenPositionCloseChs("Open Position CHS cancelled.",{closeUi:false});
+    q("otfCloseChaseConfirm").addEventListener("click",() => {
+      if(openPositionCloseChs.active){
+        void cancelOpenPositionCloseChs("Open Position CHS cancelled.",{closeUi:false});
+        return;
+      }
+      void confirmOpenPositionCloseOrder();
     },false);
     warmTopOfBook();
     return win;
@@ -5274,7 +5537,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const percentText=q("otfCloseChasePercentText");
     const qtyInput=q("otfCloseChaseQtyInput");
     const plText=q("otfCloseChasePlText");
-    if(!percentText||!qtyInput||!plText) return null;
+    const plPercentText=q("otfCloseChasePlPercentText");
+    if(!percentText||!qtyInput||!plText||!plPercentText) return null;
     const preview=openPositionClosePreview(openPositionClosePreviewPosition()||{});
     const infoPl=preview.estPl==null?0:preview.estPl;
     percentText.textContent=Number(preview.percent.toFixed(2))+"%";
@@ -5284,6 +5548,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     qtyInput.max=String(preview.maxQty);
     plText.textContent=fmtChartMoney(infoPl);
     plText.style.color=moneyColor(infoPl);
+    const floatingPercent=currentFloatingPlPercent(openPositionClosePreviewPosition());
+    plPercentText.textContent=fmtPercent(floatingPercent);
+    plPercentText.style.color=moneyColor(floatingPercent);
     return preview;
   }
   function stopOpenPositionCloseLivePriceSubscription(){
@@ -5331,7 +5598,6 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }
     const preview = refreshOpenPositionClosePreviewSummary() || openPositionClosePreview({});
     const chsActive = !!openPositionCloseChs.active;
-    const selectedMode = openPositionCloseMode();
     const validOption = openPositionCloseChsValidOption(currentOpenPositionCloseChsValidKey());
     const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : validOption.ms;
     const slider = q("otfCloseChasePercent");
@@ -5340,15 +5606,10 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const qtyInput=q("otfCloseChaseQtyInput");
     qtyInput.readOnly=chsActive;
     qtyInput.setAttribute("aria-disabled",chsActive ? "true" : "false");
-    [q("otfCloseChaseModeMkt"),q("otfCloseChaseModeChs")].forEach(button => {
-      const active = button.id.endsWith(selectedMode === "MKT" ? "Mkt" : "Chs");
-      button.classList.toggle("is-active",active);
-      button.setAttribute("aria-pressed",active ? "true" : "false");
-      button.setAttribute("aria-disabled",chsActive ? "true" : "false");
-    });
     const dist = q("otfCloseChaseDist");
     const valid = q("otfCloseChaseValid");
-    dist.textContent = "Dist " + currentOpenPositionCloseChsDistTicks() + " ticks";
+    const distTicks=currentOpenPositionCloseChsDistTicks();
+    dist.textContent = "Dist " + distTicks + (distTicks===1 ? " tick" : " ticks");
     valid.textContent = "Validity: " + (chsActive ? openPositionCloseChsTimerText(remainingValidMs) : validOption.label);
     dist.setAttribute("aria-disabled",chsActive ? "true" : "false");
     valid.setAttribute("aria-disabled",chsActive ? "true" : "false");
@@ -5359,13 +5620,14 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         filledQty:Math.max(0,num(openPositionCloseChs.filledQty) || 0),
         remainingQty:Math.max(0,num(openPositionCloseChs.remainingQty) || 0),
         activePrice:String(openPositionCloseChs.price || "")
-      },{validText:openPositionCloseChsTimerText(remainingValidMs)}) : "";
+      },{prefix:"Open Position CHS",validText:openPositionCloseChsTimerText(remainingValidMs)}) : "";
     const statusText = openPositionClosePanelStatus || fallbackStatus;
     q("otfCloseChaseLiveStatus").textContent = statusText;
-    live.classList.toggle("hidden",!statusText);
     live.classList.toggle("is-error",openPositionClosePanelTone === "error");
-    q("otfCloseChaseCancel").classList.toggle("hidden",!chsActive);
-    q("otfCloseChaseConfirm").setAttribute("aria-disabled",openPositionCloseUi.sending || chsActive ? "true" : "false");
+    const executeButton=q("otfCloseChaseConfirm");
+    executeButton.textContent=chsActive?"Cancel":"Execute";
+    executeButton.classList.toggle("is-cancel",chsActive);
+    executeButton.setAttribute("aria-disabled",openPositionCloseUi.sending&&!chsActive ? "true" : "false");
   }
   function symbolTickSizeValue(){
     const helper = window.BT001SymbolTradingSettings;
@@ -5406,6 +5668,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const normalized=normalizeOpenPositionCloseQuantity(value,liveQty,options);
     openPositionCloseUi.quantity=normalized.quantity;
     openPositionCloseUi.percent=liveQty>0?clamp(normalized.quantity/liveQty*100,0,100):0;
+    saveOpenPositionClosePreferences();
     return openPositionClosePreview(position);
   }
   function openPositionClosePreview(positionLike){
@@ -5424,6 +5687,22 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const side = String(positionLike && positionLike.side || direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * roundedQty);
     return {liveQty,entry,percent,rawQty,roundedQty,belowMinimum,executable,estPl,side,current,stepSize:normalizedQty.stepSize,minQty:normalizedQty.minQty,maxQty:normalizedQty.maxQty};
+  }
+  function openPositionReverseOrderQuantity(liveQtyValue,reversePercent){
+    const helper=window.BT001SymbolTradingSettings;
+    const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+    const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
+    const lotFilter=filters.find(filter=>toUpper(filter&&filter.filterType)==="LOT_SIZE")||null;
+    const stepSize=Math.max(0,num(settings&&settings.stepSize)||num(lotFilter&&lotFilter.stepSize)||0.001);
+    const minQty=Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize);
+    const maxQty=Math.max(minQty,num(lotFilter&&lotFilter.maxQty)||Number.MAX_SAFE_INTEGER);
+    const requested=Math.max(0,num(liveQtyValue)||0)*(1+clamp(num(reversePercent)||0,25,300)/100);
+    const normalizedText=helper&&typeof helper.normalizeQty==="function"
+      ? helper.normalizeQty(requested,settings)
+      : Number(Math.round(requested/stepSize)*stepSize).toFixed(3);
+    const quantity=Math.min(maxQty,Math.max(0,num(normalizedText)||0));
+    const exact=Math.abs(quantity-requested)<=Math.max(1e-12,stepSize*1e-6);
+    return {quantity,requested,stepSize,minQty,maxQty,exact};
   }
   function normalizedChasePrice(orderSide,topOfBook,distTicksOverride){
     const side = toUpper(orderSide) === "BUY" ? "BUY" : "SELL";
@@ -5458,15 +5737,29 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }) || null;
   }
   function openPositionCloseChsStatusText(progress,options){
-    const opts = options || {};
-    const prefix = opts.prefix || "Open Position CHS";
-    const validText = opts.validText ? " | valid " + opts.validText : "";
-    return prefix
-      + " | chasing " + fmtLot(progress.requestedQty)
-      + " | filled " + fmtLot(progress.filledQty)
-      + " | remaining " + fmtLot(progress.remainingQty)
-      + " | price " + (progress.activePrice ? fmtPrice(progress.activePrice) : "-")
-      + validText;
+    return formatChaseExecutionStatus(Object.assign({},progress||{},options||{},{active:true,statusCode:"chasing"})).message;
+  }
+  function formatChaseExecutionStatus(state){
+    const value=state||{};
+    const code=String(value.statusCode||value.result||"").toLowerCase();
+    const requested=Math.max(0,num(value.requestedQty)||0);
+    const filled=Math.max(0,num(value.filledQty)||0);
+    const remaining=Math.max(0,num(value.remainingQty)||0);
+    const fillBase=requested>0?requested:filled+remaining;
+    const fillPercent=fillBase>0?clamp(filled/fillBase*100,0,100):0;
+    const fillText=Number(fillPercent.toFixed(2));
+    if(code==="waiting") return {message:"Waiting for price...",tone:"normal"};
+    if(code==="stale") return {message:"Price feed stale",tone:"error"};
+    if(code==="repricing") return {message:"Repricing...",tone:"error"};
+    if(code==="filled"){
+      return {message:"Filled — "+(fillBase>0?fillText:100)+"%",tone:"normal"};
+    }
+    if(code==="cancelled") return {message:"Cancelled",tone:"normal"};
+    if(code==="expired") return {message:"Expired",tone:"error"};
+    if(code==="no-price") return {message:"No price data",tone:"error"};
+    if(code==="stopped"||code==="inactive") return {message:"Stopped",tone:"error"};
+    if(code==="breakeven") return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
+    return {message:"Chasing — "+fillText+"%",tone:value.tone==="error"?"error":"normal"};
   }
   async function submitOpenPositionCloseChsLimit(livePos,quantity,price){
     const clientId = freshOpenPositionCloseClientId();
@@ -5505,20 +5798,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     });
   }
   function setOpenPositionChaseStatus(message,tone,state){
-    openPositionClosePanelTone = tone === "error" ? "error" : "normal";
-    if(state && state.active){
-      openPositionClosePanelStatus = openPositionCloseChsStatusText({
-        requestedQty:state.requestedQty,
-        filledQty:state.filledQty,
-        remainingQty:state.remainingQty,
-        activePrice:state.price
-      },{
-        prefix:String(message || "Open Position CHS"),
-        validText:openPositionCloseChsTimerText(state.expiresAt ? Math.max(0,state.expiresAt - Date.now()) : null)
-      });
-    }else{
-      openPositionClosePanelStatus = String(message || "");
-    }
+    const formatted=state?formatChaseExecutionStatus(state):{message:String(message||""),tone:tone==="error"?"error":"normal"};
+    openPositionClosePanelTone = formatted.tone;
+    openPositionClosePanelStatus = formatted.message;
     const el = q("calcModuleStatus");
     if(el) el.textContent = openPositionClosePanelStatus;
     renderOpenPositionClosePanel();
@@ -5584,15 +5866,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         calculate();
       },
       onFinish:async state => {
-        const progress = {
-          requestedQty:state.requestedQty,
-          filledQty:state.filledQty,
-          remainingQty:state.remainingQty,
-          activePrice:state.price
-        };
         resetOpenPositionCloseChs();
         calculate();
-        setOpenPositionChaseStatus(openPositionCloseChsStatusText(progress,{prefix:state.message}),state.tone,null);
+        setOpenPositionChaseStatus(state.message,state.tone,state);
         try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_ignored){}
       }
     });
@@ -5610,7 +5886,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       calculate();
       return;
     }
-    await engine.cancel(reason || "Open Position CHS cancelled",{result:"cancelled"});
+    await engine.cancel(reason || "Open Position CHS cancelled",{result:"cancelled",statusCode:"cancelled"});
   }
   function hideOpenPositionClosePanel(){
     if(!openPositionCloseUi.open) return false;
@@ -5634,7 +5910,11 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       return;
     }
     if(openPositionCloseChs.active){
-      setStatus("Open Position CHS is already active. Use Cancel CHS.");
+      setStatus("Open Position CHS is already active. Use Cancel.");
+      return;
+    }
+    if(rapidFireChaseContext){
+      setStatus("Open Position close blocked while Rapid Fire is active.");
       return;
     }
     if(typeof hasKeys !== "function" || !hasKeys()){
@@ -5658,50 +5938,32 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
           : "Open Position close blocked: selected lot is not executable.");
         return;
       }
-      if(openPositionCloseMode() === "CHS"){
-        const validOption = openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
-        openPositionCloseChs.active = true;
-        openPositionCloseChs.canceling = false;
-        openPositionCloseChs.symbol = String(currentSymbol());
-        openPositionCloseChs.side = preview.side === "SHORT" ? "BUY" : "SELL";
-        openPositionCloseChs.positionSide = toUpper(livePos.positionSide || "");
-        openPositionCloseChs.requestedQty = preview.roundedQty;
-        openPositionCloseChs.filledQty = 0;
-        openPositionCloseChs.remainingQty = preview.roundedQty;
-        openPositionCloseChs.startedPositionQty = Math.max(0,num(livePos.qty) || 0);
-        openPositionCloseChs.distTicks = Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks) || 1));
-        openPositionCloseChs.validKey = validOption.key;
-        openPositionCloseChs.validMs = validOption.ms;
-        openPositionCloseChs.startedAt = Date.now();
-        openPositionCloseChs.expiresAt = validOption.ms == null ? 0 : (openPositionCloseChs.startedAt + validOption.ms);
-        openPositionCloseUi.open = true;
-        openPositionCloseUi.mode = "CHS";
-        const engine = ensureOpenPositionCloseChaseEngine();
-        await engine.start({
-          label:"Open Position CHS",
-          symbol:openPositionCloseChs.symbol,
-          quantity:preview.roundedQty,
-          expiresAt:openPositionCloseChs.expiresAt,
-          meta:{distTicks:openPositionCloseChs.distTicks,type:"otf-close"}
-        });
-        return;
-      }
-      const send = {
-        symbol:String(currentSymbol()),
-        side:preview.side === "SHORT" ? "BUY" : "SELL",
-        type:"MARKET",
-        quantity:fmtLot(preview.roundedQty)
-      };
-      const ps = toUpper(livePos.positionSide || "");
-      if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
-      else send.reduceOnly = "true";
-      setStatus("Open Position close: sending " + send.side + " MARKET " + send.quantity + "...");
-      const resp = await signedOrderWrite("POST",send);
-      if(!binanceWriteConfirmed(resp)) throw new Error("Unexpected Binance response.");
-      resetOpenPositionCloseUi();
-      calculate();
-      setStatus("Open Position close sent: " + send.side + " MARKET " + send.quantity + ".");
-      try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_e){}
+      const validOption = openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
+      openPositionCloseChs.active = true;
+      openPositionCloseChs.canceling = false;
+      openPositionCloseChs.symbol = String(currentSymbol());
+      openPositionCloseChs.side = preview.side === "SHORT" ? "BUY" : "SELL";
+      openPositionCloseChs.positionSide = toUpper(livePos.positionSide || "");
+      openPositionCloseChs.requestedQty = preview.roundedQty;
+      openPositionCloseChs.filledQty = 0;
+      openPositionCloseChs.remainingQty = preview.roundedQty;
+      openPositionCloseChs.startedPositionQty = Math.max(0,num(livePos.qty) || 0);
+      const configuredDist=num(openPositionCloseUi.chsDistTicks);
+      openPositionCloseChs.distTicks = Math.max(0,Math.round(configuredDist==null?1:configuredDist));
+      openPositionCloseChs.validKey = validOption.key;
+      openPositionCloseChs.validMs = validOption.ms;
+      openPositionCloseChs.startedAt = Date.now();
+      openPositionCloseChs.expiresAt = validOption.ms == null ? 0 : (openPositionCloseChs.startedAt + validOption.ms);
+      openPositionCloseUi.open = true;
+      const engine = ensureOpenPositionCloseChaseEngine();
+      await engine.start({
+        label:"Open Position CHS",
+        symbol:openPositionCloseChs.symbol,
+        quantity:preview.roundedQty,
+        expiresAt:openPositionCloseChs.expiresAt,
+        meta:{distTicks:openPositionCloseChs.distTicks,type:"otf-close"}
+      });
+      return;
     }catch(e){
       if(openPositionCloseChs.active && (!openPositionCloseChaseEngine || !openPositionCloseChaseEngine.isActive())) resetOpenPositionCloseChs();
       setStatus("Open Position close failed: " + (e && e.message ? e.message : String(e)));
@@ -5709,6 +5971,392 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       openPositionCloseUi.sending = false;
       renderOpenPositionClosePanel();
     }
+  }
+  function rapidFirePositionSnapshot(){
+    const position=openPositionClosePreviewPosition();
+    if(!position||!(num(position.qty!=null?position.qty:position.lot)>0)) return null;
+    return {
+      symbol:String(currentSymbol()),
+      side:String(position.side||direction).toUpperCase()==="SHORT"?"SHORT":"LONG",
+      qty:Math.abs(num(position.qty!=null?position.qty:position.lot)||0),
+      entry:num(position.entry!=null?position.entry:position.level),
+      positionSide:toUpper(position.positionSide||"")
+    };
+  }
+  function rapidFireCloseMetrics(fullFloating,fullMargin,closePercentValue){
+    const closePercent=clamp(num(closePercentValue)==null?100:num(closePercentValue),0,100);
+    const closeRatio=closePercent/100;
+    const floating=fullFloating==null?null:num(fullFloating)*closeRatio;
+    const margin=fullMargin==null?null:num(fullMargin);
+    return {
+      closePercent,
+      closeRatio,
+      floatingPl:floating,
+      floatingPlPercent:floating!=null&&margin>0?floating/margin*100:null,
+      margin
+    };
+  }
+  function rapidFireSnapshot(options){
+    const opts=options||{};
+    const position=rapidFirePositionSnapshot();
+    const fullFloating=position?currentFloatingPl():null;
+    const fullMargin=position?currentOpenPositionMargin(position):null;
+    const metrics=rapidFireCloseMetrics(fullFloating,fullMargin,opts.closePercent);
+    return {
+      symbol:String(currentSymbol()),
+      position,
+      direction:position?position.side:direction,
+      size:position?position.qty:0,
+      floatingPl:metrics.floatingPl,
+      floatingPlPercent:metrics.floatingPlPercent,
+      margin:metrics.margin,
+      closePercent:metrics.closePercent,
+      closeQty:position?position.qty*metrics.closeRatio:0,
+      active:!!rapidFireChaseContext,
+      busy:!!rapidFireChaseContext||rapidFireBreakevenBusy,
+      activeAction:rapidFireChaseContext&&rapidFireChaseContext.action||(rapidFireBreakevenBusy?"breakeven":null),
+      lastBreakeven:lastRapidFireBreakeven,
+      sharedSettings:{
+        distTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0)),
+        validKey:String(openPositionCloseUi.chsValidKey||"manual"),
+        validMs:openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey).ms
+      }
+    };
+  }
+  function rapidFireLotRules(){
+    const helper=window.BT001SymbolTradingSettings;
+    const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+    const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
+    const lotFilter=filters.find(filter=>toUpper(filter&&filter.filterType)==="LOT_SIZE")||null;
+    const stepSize=Math.max(0,num(settings&&settings.stepSize)||num(lotFilter&&lotFilter.stepSize)||0.001);
+    const minQty=Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize);
+    const maxQty=Math.max(minQty,num(lotFilter&&lotFilter.maxQty)||Number.MAX_SAFE_INTEGER);
+    const stepText=String((settings&&settings.stepSize)||(lotFilter&&lotFilter.stepSize)||stepSize);
+    const precision=(stepText.split(".")[1]||"").replace(/0+$/g,"").length;
+    return {helper,settings,stepSize,minQty,maxQty,precision};
+  }
+  function normalizeRapidFireQuantity(value,options){
+    const opts=options||{};
+    const rules=rapidFireLotRules();
+    const raw=Math.max(0,num(value)||0);
+    const scaled=opts.roundDown?Math.floor((raw+rules.stepSize*1e-9)/rules.stepSize)*rules.stepSize:raw;
+    const normalizedText=rules.helper&&typeof rules.helper.normalizeQty==="function"
+      ? rules.helper.normalizeQty(scaled,rules.settings)
+      : Number(Math.round(scaled/rules.stepSize)*rules.stepSize).toFixed(rules.precision);
+    const quantity=Math.min(rules.maxQty,Math.max(0,num(normalizedText)||0));
+    return {...rules,quantity,text:quantity.toFixed(rules.precision),executable:quantity>=rules.minQty};
+  }
+  function rapidFireOpenEntryCommission(livePos,takerRate){
+    const qty=Math.max(0,num(livePos&&livePos.qty)||0);
+    const entry=num(livePos&&livePos.entry);
+    const fallback={amount:entry>0&&qty>0?entry*qty*takerRate:null,source:"live-account-taker-rate"};
+    if(typeof openLotLinks==="undefined"||typeof fillMarkers==="undefined"||!Array.isArray(openLotLinks)||!Array.isArray(fillMarkers)) return fallback;
+    const symbol=toUpper(currentSymbol());
+    const side=toUpper(livePos&&livePos.side)==="SHORT"?"SHORT":"LONG";
+    const links=openLotLinks.filter(link=>link&&toUpper(link.symbol)===symbol&&toUpper(link.side)===side&&num(link.qty)>0);
+    let coveredQty=0;
+    let amount=0;
+    links.forEach(link=>{
+      const marker=fillMarkers.find(item=>item&&String(item.id)===String(link.entryMarkerId));
+      const linkQty=Math.max(0,num(link.qty)||0);
+      const markerQty=Math.max(0,num(marker&&marker.qty)||0);
+      const markerFee=marker&&marker.fee!=null?num(marker.fee):null;
+      if(!(linkQty>0&&markerQty>0&&markerFee!=null&&markerFee>=0)) return;
+      const allocatedQty=Math.min(linkQty,markerQty);
+      coveredQty+=allocatedQty;
+      amount+=markerFee*(allocatedQty/markerQty);
+    });
+    const tolerance=Math.max(1e-9,qty*1e-6);
+    return coveredQty+ tolerance>=qty&&amount>=0
+      ? {amount,source:"actual-open-fill-commission",coveredQty}
+      : fallback;
+  }
+  function feeAwareBreakevenStop(entryPrice,quantity,entryCommission,side,exitRate,tickSize){
+    const entry=num(entryPrice);
+    const qty=num(quantity);
+    const commission=Math.max(0,num(entryCommission)||0);
+    const rate=exitRate==null?null:num(exitRate);
+    const tick=num(tickSize);
+    const directionText=toUpper(side)==="SHORT"?"SHORT":"LONG";
+    if(!(entry>0)) throw new Error("Open-position entry price is unavailable.");
+    if(!(qty>0)) throw new Error("Open-position quantity is unavailable.");
+    if(!(rate>=0&&rate<1)) throw new Error("Binance taker commission rate is unavailable.");
+    if(!(tick>0)) throw new Error("Symbol tick size is unavailable.");
+    const raw=directionText==="LONG"
+      ? (entry*qty+commission)/(qty*(1-rate))
+      : (entry*qty-commission)/(qty*(1+rate));
+    const tickCount=directionText==="LONG"
+      ? Math.ceil(raw/tick-1e-10)
+      : Math.floor(raw/tick+1e-10);
+    const rounded=tickCount*tick;
+    if(directionText==="LONG"&&!(rounded>entry)) throw new Error("Long breakeven must be above entry.");
+    if(directionText==="SHORT"&&!(rounded<entry)) throw new Error("Short breakeven must be below entry.");
+    return {raw,rounded};
+  }
+  async function replaceMasterStopAtBreakeven(livePos,triggerPrice,off){
+    const symbol=String(currentSymbol());
+    const orderSide=livePos.side==="SHORT"?"BUY":"SELL";
+    const positionSide=toUpper(livePos.positionSide||"");
+    let snapshot=await readOpenOrdersSnapshot({off});
+    if(snapshot.algoFetchError) throw snapshot.algoFetchError;
+    const existing=findStopOrderForPosition(livePos,snapshot,true);
+    if(existing&&normalizeLevelComparable(existing.price)===normalizeLevelComparable(triggerPrice)){
+      currentStopAlgoMeta=buildAlgoOrderMeta(existing.order);
+      masterStopDraftDirty=false;
+      return {replaced:false,unchanged:true,response:null};
+    }
+    const executionContext={slReplaceState:new Map(),off};
+    if(existing&&existing.order){
+      const meta=buildAlgoOrderMeta(existing.order);
+      await runPlanWriteRow({
+        writable:true,
+        mode:"sl-cancel",
+        payload:{symbol:meta.symbol||symbol,algoId:meta.algoId,clientAlgoId:meta.clientAlgoId,meta}
+      },livePos.side,executionContext);
+      snapshot=await readOpenOrdersSnapshot({off});
+      if(snapshot.algoFetchError) throw snapshot.algoFetchError;
+      if(findStopOrderForPosition(livePos,snapshot,true)) throw new Error("Existing Master SL cancellation was not confirmed.");
+    }
+    const result=await runPlanWriteRow({
+      writable:true,
+      mode:"sl-create",
+      payload:{
+        symbol,
+        side:orderSide,
+        positionSide,
+        triggerPrice:String(triggerPrice),
+        workingType:"CONTRACT_PRICE",
+        replaceAfterCancel:false
+      }
+    },livePos.side,executionContext);
+    return {replaced:!!existing,unchanged:false,response:result&&result.response||null};
+  }
+  async function executeRapidFireBreakevenLock(){
+    if(rapidFireBreakevenBusy) return lastRapidFireBreakeven;
+    if(rapidFireChaseContext) throw new Error("A Rapid Fire action is already active.");
+    if(openPositionCloseChs.active||openPositionCloseUi.sending) throw new Error("OTF execution is active. Cancel it first.");
+    if(typeof hasKeys!=="function"||!hasKeys()) throw new Error("API keys required.");
+    rapidFireBreakevenBusy=true;
+    publishRapidFireStatus({statusCode:"breakeven",message:"Calculating B.E....",tone:"normal"});
+    try{
+      const gateway=window.BT001_BINANCE_TRADING;
+      if(!gateway||typeof gateway.commissionRate!=="function") throw new Error("Binance commission-rate service is unavailable.");
+      const symbol=String(currentSymbol());
+      const off=typeof timeOffset==="function"?await timeOffset():0;
+      const settingsApi=window.BT001SymbolTradingSettings;
+      const [live,commission,settings]=await Promise.all([
+        signedPosition({off}),
+        gateway.commissionRate(symbol),
+        settingsApi&&typeof settingsApi.get==="function"?settingsApi.get(symbol):Promise.resolve(null)
+      ]);
+      if(!live||!(num(live.qty)>0)) throw new Error("No open position.");
+      const takerRate=commission&&commission.takerCommissionRate!=null?num(commission.takerCommissionRate):null;
+      if(!(takerRate>=0&&takerRate<1)) throw new Error("Binance taker commission rate is unavailable.");
+      const tickSize=num(settings&&settings.tickSize)||symbolTickSizeValue();
+      const entryFee=rapidFireOpenEntryCommission(live,takerRate);
+      const breakeven=feeAwareBreakevenStop(live.entry,live.qty,entryFee.amount,live.side,takerRate,tickSize);
+      const helper=window.BT001SymbolTradingSettings;
+      const normalized=helper&&typeof helper.normalizePrice==="function"
+        ? helper.normalizePrice(breakeven.rounded,settings)
+        : String(Number(breakeven.rounded.toFixed(8)));
+      const level=num(normalized);
+      if(!(level>0)) throw new Error("Breakeven price normalization failed.");
+      const stopInput=q("calcModuleStopLevel");
+      if(!stopInput) throw new Error("Calculator Master SL field is unavailable.");
+      stopInput.value=String(normalized);
+      masterStopMarkedForDeletion=false;
+      masterStopDraftDirty=true;
+      lastStopEdit="level";
+      syncStopFromLevel(live.entry);
+      markSendPlanStale("Master SL changed by Rapid Fire B.E.");
+      calculate();
+      const write=await replaceMasterStopAtBreakeven(live,level,off);
+      lastRapidFireBreakeven=Object.freeze({
+        at:new Date().toISOString(),symbol,side:live.side,entry:live.entry,quantity:live.qty,
+        makerCommissionRate:num(commission&&commission.makerCommissionRate),
+        takerCommissionRate:takerRate,
+        entryCommission:entryFee.amount,entryFeeSource:entryFee.source,
+        entryEffectiveRate:entryFee.amount/(live.entry*live.qty),exitFeeRate:takerRate,
+        rawPrice:breakeven.raw,stopPrice:level,orderType:"STOP_MARKET",
+        replaced:write.replaced,unchanged:write.unchanged
+      });
+      publishRapidFireStatus({statusCode:"breakeven",message:"B.E. locked — "+String(normalized),tone:"normal"});
+      try{await readBinance({preserveSendPlan:true,source:"postSendRefresh",off});}catch(_ignored){}
+      return lastRapidFireBreakeven;
+    }catch(error){
+      publishRapidFireStatus({statusCode:"breakeven",message:"B.E. failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+      throw error;
+    }finally{
+      rapidFireBreakevenBusy=false;
+    }
+  }
+  function publishRapidFireStatus(state){
+    const formatted=formatChaseExecutionStatus(state||{});
+    const detail=Object.freeze({...formatted,state:state||null,snapshot:rapidFireSnapshot()});
+    rapidFireStatusListeners.forEach(listener=>{try{listener(detail);}catch(_e){}});
+    try{window.dispatchEvent(new CustomEvent("bt001:rapid-fire-status",{detail}));}catch(_e){}
+    return detail;
+  }
+  function freshRapidFireClientId(){
+    return ("RAPID_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7)).slice(0,36);
+  }
+  function rapidFireIdentityParams(identity){
+    const send={symbol:String(identity&&identity.symbol||currentSymbol())};
+    if(identity&&identity.orderId!=null) send.orderId=String(identity.orderId);
+    else if(identity&&identity.clientOrderId) send.origClientOrderId=String(identity.clientOrderId);
+    return send;
+  }
+  function ensureRapidFireChaseEngine(){
+    if(rapidFireChaseEngine) return rapidFireChaseEngine;
+    const factory=window.CalculatorChaseEngine;
+    if(!factory||typeof factory.create!=="function") throw new Error("Shared chase engine is unavailable.");
+    rapidFireChaseEngine=factory.create({
+      label:"Rapid Fire",
+      pollMs:OPEN_POSITION_CLOSE_CHS_POLL_MS,
+      getTopOfBook:()=>{
+        const hub=window.PUBLIC_MARKET_DATA_HUB;
+        return hub&&typeof hub.getTopOfBook==="function"?hub.getTopOfBook():null;
+      },
+      waitForTopOfBook:options=>{
+        const hub=window.PUBLIC_MARKET_DATA_HUB;
+        return hub&&typeof hub.ensureTopOfBook==="function"?hub.ensureTopOfBook(options):Promise.resolve(null);
+      },
+      firstBookTimeoutMs:3000,
+      priceFor:(top,state)=>rapidFireChaseContext?normalizedChasePrice(rapidFireChaseContext.orderSide,top,state&&state.meta?state.meta.distTicks:rapidFireChaseContext.distTicks):"",
+      samePrice:(left,right)=>normalizeLevelComparable(left)===normalizeLevelComparable(right),
+      submit:async ({quantity,price})=>{
+        if(!rapidFireChaseContext) throw new Error("Rapid Fire context is unavailable.");
+        const clientId=freshRapidFireClientId();
+        const normalized=normalizeRapidFireQuantity(quantity);
+        const send={
+          symbol:rapidFireChaseContext.symbol,
+          side:rapidFireChaseContext.orderSide,
+          type:"LIMIT",
+          timeInForce:"GTX",
+          quantity:normalized.text,
+          price:String(price),
+          newClientOrderId:clientId
+        };
+        if(rapidFireChaseContext.positionSide) send.positionSide=rapidFireChaseContext.positionSide;
+        if(rapidFireChaseContext.reduceOnly!=null) send.reduceOnly=rapidFireChaseContext.reduceOnly?"true":"false";
+        const response=await signedOrderWrite("POST",send);
+        if(!binanceWriteConfirmed(response)) throw new Error("Unexpected Binance response.");
+        registerTrackedOrderMeta({
+          symbol:send.symbol,side:send.side,positionSide:send.positionSide||"",roleCode:"C",
+          roleType:rapidFireChaseContext.roleType,owner:"RAPID_FIRE",
+          orderId:response&&response.orderId!=null?response.orderId:null,
+          clientOrderId:String(response&&response.clientOrderId||clientId)
+        });
+        return Object.assign({clientOrderId:clientId,price:send.price},response||{});
+      },
+      amend:async ({identity,quantity,price})=>{
+        if(!rapidFireChaseContext) throw new Error("Rapid Fire context is unavailable.");
+        const send=rapidFireIdentityParams(identity);
+        send.side=rapidFireChaseContext.orderSide;
+        send.quantity=normalizeRapidFireQuantity(quantity).text;
+        send.price=String(price);
+        return signedOrderWrite("PUT",send);
+      },
+      query:async identity=>{
+        try{return await signedOrderWrite("GET",rapidFireIdentityParams(identity));}
+        catch(error){if(Number(error&&error.code)===-2013)return null;throw error;}
+      },
+      cancel:async identity=>signedOrderWrite("DELETE",rapidFireIdentityParams(identity)),
+      verifyCanceled:async identity=>{
+        const snapshot=await readOpenOrdersSnapshot();
+        if(snapshot.normalFetchError) throw snapshot.normalFetchError;
+        return !findOpenPositionCloseChsOrder(snapshot,identity);
+      },
+      onUpdate:state=>publishRapidFireStatus(state),
+      onFinish:async state=>{
+        rapidFireChaseContext=null;
+        setBookTickerVisibilityConsumer("rapid-fire-action",false);
+        publishRapidFireStatus(state);
+        calculate();
+        try{await readBinance({preserveSendPlan:true,source:"postSendRefresh"});}catch(_ignored){}
+      }
+    });
+    return rapidFireChaseEngine;
+  }
+  async function executeRapidFireChase(config){
+    const input=config||{};
+    const action=String(input.action||"add").toLowerCase();
+    if(rapidFireChaseContext) throw new Error("A Rapid Fire action is already active.");
+    if(openPositionCloseChs.active||openPositionCloseUi.sending) throw new Error("OTF execution is active. Cancel it first.");
+    if(typeof hasKeys!=="function"||!hasKeys()) throw new Error("API keys required.");
+    const startingContext={starting:true,action};
+    rapidFireChaseContext=startingContext;
+    try{
+      const live=await signedPosition();
+      if(rapidFireChaseContext!==startingContext) return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
+      const hasPosition=!!(live&&num(live.qty)>0);
+      const liveSide=hasPosition&&String(live.side).toUpperCase()==="SHORT"?"SHORT":"LONG";
+      const selectedDirection=hasPosition?liveSide:(String(input.direction).toUpperCase()==="SHORT"?"SHORT":"LONG");
+      if(action!=="add"&&!hasPosition) throw new Error("No open position.");
+      let requested=0;
+      let orderSide=selectedDirection==="SHORT"?"SELL":"BUY";
+      let positionSide="";
+      let reduceOnly=null;
+      let roleType="CHASE_ADD";
+      if(action==="double") requested=Math.abs(num(live.qty)||0);
+      else if(action==="close"){
+        requested=Math.abs(num(live.qty)||0)*clamp(num(input.percent)||0,0,100)/100;
+        orderSide=liveSide==="SHORT"?"BUY":"SELL";
+        roleType="CHASE_CLOSE";
+      }else if(action==="reverse"){
+        const reverse=openPositionReverseOrderQuantity(Math.abs(num(live.qty)||0),input.percent);
+        requested=reverse.requested;
+        orderSide=liveSide==="SHORT"?"BUY":"SELL";
+        positionSide="BOTH";
+        reduceOnly=false;
+        roleType="CHASE_REVERSE";
+      }else requested=num(input.quantity)||0;
+      const normalized=normalizeRapidFireQuantity(requested,{roundDown:action==="close"});
+      if(!normalized.executable) throw new Error("Lot size is below the symbol minimum of "+normalized.minQty+".");
+      if(action==="close"&&normalized.quantity>Math.abs(num(live.qty)||0)+1e-9) throw new Error("Close quantity exceeds the open position.");
+      if(action!=="reverse"){
+        const livePositionSide=toUpper(live&&live.positionSide||"");
+        const helper=window.BT001SymbolTradingSettings;
+        const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+        const hedgeMode=toUpper(settings&&settings.positionMode)==="HEDGE";
+        if(livePositionSide==="LONG"||livePositionSide==="SHORT") positionSide=livePositionSide;
+        else if(hedgeMode) positionSide=selectedDirection;
+        if(action==="close"&&!positionSide) reduceOnly=true;
+      }
+      const validOption=openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
+      const startedAt=Date.now();
+      rapidFireChaseContext={
+        action,symbol:String(currentSymbol()),direction:selectedDirection,orderSide,positionSide,reduceOnly,
+        roleType,distTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0)),
+        requestedQty:normalized.quantity,startedAt,expiresAt:validOption.ms==null?0:startedAt+validOption.ms
+      };
+      setBookTickerVisibilityConsumer("rapid-fire-action",true);
+      warmTopOfBook();
+      await ensureRapidFireChaseEngine().start({
+        label:"Rapid Fire "+action,
+        symbol:rapidFireChaseContext.symbol,
+        quantity:normalized.quantity,
+        expiresAt:rapidFireChaseContext.expiresAt,
+        meta:{action,distTicks:rapidFireChaseContext.distTicks,validKey:validOption.key}
+      });
+      return rapidFireChaseEngine.state();
+    }catch(error){
+      rapidFireChaseContext=null;
+      setBookTickerVisibilityConsumer("rapid-fire-action",false);
+      publishRapidFireStatus({active:false,statusCode:"stopped",tone:"error",message:error&&error.message?error.message:String(error)});
+      throw error;
+    }
+  }
+  async function cancelRapidFireChase(){
+    if(!rapidFireChaseEngine||!rapidFireChaseEngine.isActive()){
+      if(rapidFireChaseContext){
+        rapidFireChaseContext=null;
+        setBookTickerVisibilityConsumer("rapid-fire-action",false);
+        publishRapidFireStatus({active:false,result:"cancelled",statusCode:"cancelled"});
+      }
+      return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
+    }
+    return rapidFireChaseEngine.cancel("Rapid Fire cancelled",{result:"cancelled",statusCode:"cancelled"});
   }
   function moneyColor(v){
     const n = num(v);
@@ -6024,16 +6672,34 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       return true;
     }
   }
+  function effectiveOrdersVisible(){
+    return !!ordersVisible||ordersVisibilityConsumers.size>0;
+  }
+  function renderOrdersVisibleState(){
+    const effective=effectiveOrdersVisible();
+    const btn=q("calcModuleOrdersToggle");
+    if(btn){
+      btn.classList.toggle("is-on",effective);
+      btn.classList.toggle("is-off",!effective);
+      btn.classList.toggle("is-forced",!ordersVisible&&effective);
+      btn.setAttribute("aria-pressed",effective?"true":"false");
+      btn.title=!ordersVisible&&effective?"Orders (temporarily shown by Rapid Fire)":"Orders";
+    }
+    try{if(typeof draw==="function")draw();}catch(_e){}
+  }
   function saveOrdersVisible(next){
     ordersVisible = !!next;
     try{ localStorage.setItem(ORDERS_VISIBLE_KEY,ordersVisible ? "1" : "0"); }catch(_e){}
-    const btn = q("calcModuleOrdersToggle");
-    if(btn){
-      btn.classList.toggle("is-on",ordersVisible);
-      btn.classList.toggle("is-off",!ordersVisible);
-      btn.setAttribute("aria-pressed",ordersVisible ? "true" : "false");
-    }
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
+    renderOrdersVisibleState();
+  }
+  function setOrdersVisibilityConsumer(consumerId,active){
+    const key=String(consumerId||"").trim();
+    if(!key)return effectiveOrdersVisible();
+    if(active===true)ordersVisibilityConsumers.add(key);
+    else ordersVisibilityConsumers.delete(key);
+    renderOrdersVisibleState();
+    if(effectiveOrdersVisible())ensureCalculatorRowsHydratedForOrders().catch(()=>{});
+    return effectiveOrdersVisible();
   }
   function hasReliableCalculatorPrivateState(){
     const cache = window.BINANCE_OPEN_ORDERS_CACHE;
@@ -6135,7 +6801,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }
   }
   function toggleOtfEnabled(){
-    if(!otfEnabled && !ordersVisible){
+    if(!otfEnabled && !effectiveOrdersVisible()){
       saveOtfEnabled(false);
       setStatus("Turn Orders ON before enabling OTF.");
       return;
@@ -6347,7 +7013,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }
     btn.onclick = toggleOrdersVisible;
     saveOrdersVisible(ordersVisible);
-    if(ordersVisible) ensureCalculatorRowsHydratedForOrders().catch(() => {});
+    if(effectiveOrdersVisible()) ensureCalculatorRowsHydratedForOrders().catch(() => {});
     let otfBtn = q("calcModuleOtfToggle");
     if(!otfBtn){
       otfBtn = document.createElement("button");
@@ -6399,11 +7065,11 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       <div class="calc-module-body" id="calcModuleBody">
         <div class="calc-module-panel">
           <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleEntriesTitle">
-            <span class="calc-module-section-main">Entries <button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></span>
+            <span class="calc-module-section-main"><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></span>
             <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddEntry" type="button">Add Entry</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedEntryAvg">-</span><span id="calcModuleCollapsedEntryFloating">-</span></span><span class="calc-module-caret" id="calcModuleEntriesCaret">▾</span></span>
           </div>
           <div id="calcModuleEntriesBody">
-            <div class="calc-module-row-head"><div>#</div><div>Level</div><div>Lot</div><div>C</div><div>Margin</div><div>x</div></div>
+            <div class="calc-module-row-head"><div>#</div><div>Level</div><div>Lot</div><div>Chase</div><div>Margin</div><div>x</div></div>
             <div id="calcModuleEntryRows"></div>
           </div>
         </div>
@@ -6429,7 +7095,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
             <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddExit" type="button">Add Exit</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedExitPl">-</span></span><span class="calc-module-caret" id="calcModuleExitsCaret">▾</span></span>
           </div>
           <div id="calcModuleExitsBody">
-            <div class="calc-module-exit-head"><div>#</div><div>Level</div><div>Lot</div><div>C</div><div>PL</div><div>x</div></div>
+            <div class="calc-module-exit-head"><div>#</div><div>Level</div><div>Lot</div><div>Chase</div><div>PL</div><div>x</div></div>
             <div id="calcModuleExitRows"></div>
           </div>
         </div>
@@ -6579,6 +7245,22 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       found = true;
     });
     return found ? total : null;
+  }
+  function currentOpenPositionMargin(positionLike){
+    const margins=currentPositionBoxesForCalculator()
+      .map(box=>typeof openBoxMargin==="function"?num(openBoxMargin(box)):null)
+      .filter(value=>value!=null&&value>0);
+    if(margins.length) return margins.reduce((sum,value)=>sum+value,0);
+    const position=positionLike||openPositionClosePreviewPosition()||{};
+    const qty=Math.max(0,num(position.qty!=null?position.qty:position.lot)||0);
+    const entry=num(position.entry!=null?position.entry:position.level);
+    const leverage=currentCalculatorLeverage();
+    return qty>0&&entry>0&&leverage>0?entry*qty/leverage:null;
+  }
+  function currentFloatingPlPercent(positionLike){
+    const floating=currentFloatingPl();
+    const margin=currentOpenPositionMargin(positionLike);
+    return floating==null||!(margin>0)?null:floating/margin*100;
   }
   function currentCalculatorLeverage(){
     const box = currentPositionBoxesForCalculator().find(item => num(item && item.leverage) > 0);
@@ -6899,6 +7581,13 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   function isOpenPositionRow(row){
     return !!(row && row.dataset && row.dataset.openPosition === "1");
   }
+  function pinOpenPositionEntryRow(){
+    const container=q("calcModuleEntryRows");
+    if(!container) return null;
+    const openRow=rows("calcModuleEntryRows").find(isOpenPositionRow)||null;
+    if(openRow&&container.firstElementChild!==openRow) container.insertBefore(openRow,container.firstElementChild);
+    return openRow;
+  }
   function snapshotManualRows(containerId){
     return rows(containerId)
       .filter(row => row && !isRowChaseOriginalCancelled(row) && !String(row.dataset.source || "").startsWith("binance-") && !isOpenPositionRow(row) && !isRowEmpty(row))
@@ -6922,6 +7611,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const on = !!isOpenPosition;
     row.dataset.openPosition = on ? "1" : "0";
     row.classList.toggle("calc-module-row-open-position",on);
+    const chaseButton=row.querySelector(".calc-module-row-chase");
+    if(!on) resetOpenPositionRowChaseArm(chaseButton);
+    if(chaseButton&&!chaseButton.classList.contains("is-active")&&!isRowChaseOriginalCancelled(row)) chaseButton.textContent=on?"D":"C";
     row.title = on ? "Open Position" : (row.title || "");
     const lvl = levelInput(row);
     const lot = lotInput(row);
@@ -7283,11 +7975,39 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       const row = button.closest(".calc-module-row");
       const originalCancelled=isRowChaseOriginalCancelled(row);
       const active = !!(activeRowChase && activeRowChase.row === row);
+      if(active) resetOpenPositionRowChaseArm(button);
       button.disabled = originalCancelled||!!activeRowChase&&!active;
       button.classList.toggle("is-active",active);
-      button.textContent = active ? "×" : originalCancelled?"—":"C";
-      button.title = active ? "Cancel this row chase" : originalCancelled?"Original order cancelled after chase fill":"Chase this row for up to 15 seconds";
+      button.textContent = active ? "×" : originalCancelled?"—":isOpenPositionRow(row)?"D":"C";
+      const armed=button.dataset.openPositionChaseArmed==="1";
+      button.title = active ? "Cancel this row chase" : originalCancelled?"Original order cancelled after chase fill":armed?"Click again within 3 seconds to confirm":"Chase this row for up to 15 seconds";
     });
+  }
+  function resetOpenPositionRowChaseArm(button){
+    if(!button) return;
+    if(button.__openPositionChaseArmTimer!=null) clearTimeout(button.__openPositionChaseArmTimer);
+    button.__openPositionChaseArmTimer=null;
+    delete button.dataset.openPositionChaseArmed;
+    button.classList.remove("is-confirm-armed");
+    if(!button.classList.contains("is-active")) button.title="Chase this row for up to 15 seconds";
+  }
+  function handleRowChaseButtonClick(row,rowType){
+    const button=row&&row.querySelector(".calc-module-row-chase");
+    if(!isOpenPositionRow(row)||activeRowChase){
+      resetOpenPositionRowChaseArm(button);
+      void toggleRowChase(row,rowType);
+      return;
+    }
+    if(button&&button.dataset.openPositionChaseArmed==="1"){
+      resetOpenPositionRowChaseArm(button);
+      void toggleRowChase(row,rowType);
+      return;
+    }
+    if(!button)return;
+    button.dataset.openPositionChaseArmed="1";
+    button.classList.add("is-confirm-armed");
+    button.title="Click again within 3 seconds to confirm";
+    button.__openPositionChaseArmTimer=setTimeout(()=>resetOpenPositionRowChaseArm(button),3000);
   }
   function setRowChaseStatus(state){
     if(!state) return;
@@ -7661,6 +8381,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     });
   }
   function refreshEntryRowNumbers(){
+    pinOpenPositionEntryRow();
     let index = 0;
     rows("calcModuleEntryRows").forEach(row => {
       const idx = row.querySelector(".calc-module-entry-index");
@@ -7718,7 +8439,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     setOpenPositionRow(row,!!opts.openPosition);
     setRowLocked(row,!!opts.locked,{keepRemoveEnabled:!!opts.keepRemoveEnabled});
     const chaseButton = row.querySelector(".calc-module-row-chase");
-    if(chaseButton) chaseButton.addEventListener("click",() => { void toggleRowChase(row,isEntry ? "entry" : "exit"); },false);
+    if(chaseButton) chaseButton.addEventListener("click",() => handleRowChaseButtonClick(row,isEntry ? "entry" : "exit"),false);
     row.querySelectorAll("input").forEach(input => input.addEventListener("input",() => {
       if(input.classList.contains("calc-module-lot")) normalizeLotInput(input);
       if(input.classList.contains("calc-module-level")) normalizeLevelInput(input);
@@ -7772,6 +8493,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       calculate();
     },false);
     container.appendChild(row);
+    if(isEntry) pinOpenPositionEntryRow();
     refreshEntryRowVisualState(row);
     refreshEntryRowNumbers();
     refreshPartialStopRowNumbers();
@@ -7806,6 +8528,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       );
     });
     retainedOriginalRows.forEach(row=>container.appendChild(row));
+    if(containerId==="calcModuleEntryRows") pinOpenPositionEntryRow();
   }
   function clearCalculatorLocal(){
     markSendPlanStale("Calculator cleared after preflight.");
@@ -9036,7 +9759,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     overlayLevelBoxes = [];
     const calculatorOpen = calculatorWindowVisible();
     if(calculatorOpen && !levelsVisible) return;
-    if(!calculatorOpen && !ordersVisible) return;
+    const showOrders=effectiveOrdersVisible();
+    if(!calculatorOpen && !showOrders) return;
     if(!canvas || !ctx) return;
     const state = currentPriceLineState || {};
     const top = num(state.top);
@@ -9054,7 +9778,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       overlayRows.partialStops || [],
       overlayRows.newAverage ? [overlayRows.newAverage] : []
     )
-      .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && ordersVisible)))
+      .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && showOrders)))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
         const text = item.openPosition
@@ -9124,7 +9848,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       const y = cy - labelH / 2;
       const collides = placed.some(prev => normalX < prev.x + prev.w && normalX + w > prev.x && y < prev.y + prev.h && y + labelH > prev.y);
       const hiddenByStandardRule = y < top || y + labelH > chartBottom || collides;
-      const ordersOpenPositionException = !calculatorOpen && ordersVisible && !!item.openPosition && hiddenByStandardRule;
+      const ordersOpenPositionException = !calculatorOpen && showOrders && !!item.openPosition && hiddenByStandardRule;
       if(hiddenByStandardRule && !ordersOpenPositionException) return;
       const x = ordersOpenPositionException
         ? clamp(normalX - w * 1.2,left + 2,chartRight - w - 2)
@@ -12515,7 +13239,29 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       getStopMath(){
         return calculateStopMath(readEntry(),num(q("calcModuleStopLevel")?.value),readPartialStops());
       },
-      reconcileOpenPositionChange:reconcileOpenPositionRow
+      reconcileOpenPositionChange:reconcileOpenPositionRow,
+      getOtfPreferences(){
+        return {percent:openPositionCloseUi.percent,chsDistTicks:openPositionCloseUi.chsDistTicks,chsValidKey:openPositionCloseUi.chsValidKey};
+      },
+      rapidFire:Object.freeze({
+        snapshot:rapidFireSnapshot,
+        lotRules:rapidFireLotRules,
+        normalizeQuantity:normalizeRapidFireQuantity,
+        execute:executeRapidFireChase,
+        breakevenLock:executeRapidFireBreakevenLock,
+        cancel:cancelRapidFireChase,
+        isActive:()=>!!rapidFireChaseContext,
+        setVisible(active){
+          setBookTickerVisibilityConsumer("rapid-fire",active===true);
+          setOrdersVisibilityConsumer("rapid-fire",active===true);
+          if(active) warmTopOfBook();
+        },
+        subscribe(listener){
+          if(typeof listener!=="function") return ()=>{};
+          rapidFireStatusListeners.add(listener);
+          return ()=>rapidFireStatusListeners.delete(listener);
+        }
+      })
     };
     if(!window.__calculatorOpenPositionReconcileBound){
       window.__calculatorOpenPositionReconcileBound = true;
@@ -12540,6 +13286,283 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded",bindCalculator,{once:true});
   else bindCalculator();
+})();
+
+</script>
+<script type="application/x-bt001-source" data-bundle-path="features/rapid-fire/rapidFireModule.js">
+(() => {
+  "use strict";
+
+  const WINDOW_KEY="btc_futures_chart_v13_rapid_fire_window_v2";
+  const CLOSE_PERCENT_STEPS=Object.freeze(Array.from({length:11},(_value,index)=>index*10));
+  const REVERSE_PERCENT_STEPS=Object.freeze([25,...Array.from({length:28},(_value,index)=>(index+3)*10)]);
+  let windowApi=null;
+  let statusUnsubscribe=null;
+  let refreshTimer=null;
+  let selectedDirection="LONG";
+  let doubleArmTimer=null;
+
+  function q(id){return document.getElementById(id);}
+  function api(){return window.CALCULATOR_MODULE&&window.CALCULATOR_MODULE.rapidFire;}
+  function number(value){const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;}
+  function money(value){
+    const parsed=number(value);
+    if(parsed==null)return "-";
+    return (parsed>0?"+":parsed<0?"-":"")+"$"+Math.abs(parsed).toFixed(2);
+  }
+  function percent(value){
+    const parsed=number(value);
+    if(parsed==null)return "-";
+    const rounded=Number(parsed.toFixed(2));
+    return (rounded>0?"+":"")+rounded+"%";
+  }
+  function moneyColor(value){const parsed=number(value);return parsed==null||parsed===0?"#111":parsed>0?"#047857":"#f6465d";}
+  function lot(value,precision=3){const parsed=number(value);return parsed==null?"0.000":parsed.toFixed(Math.max(0,precision));}
+  function isOpen(){const win=q("rapidFireWindow");return !!(win&&!win.classList.contains("hidden"));}
+
+  function resetDoubleArm(){
+    if(doubleArmTimer!=null)clearTimeout(doubleArmTimer);
+    doubleArmTimer=null;
+    const button=q("rapidFireDouble");
+    if(!button)return;
+    button.classList.remove("is-confirm-armed");
+    delete button.dataset.armed;
+    button.textContent="Double";
+    button.title="Click once to arm, then again within 3 seconds";
+  }
+  function setStatus(message,tone){
+    const node=q("rapidFireStatus");
+    if(!node)return;
+    node.textContent=String(message||"");
+    node.classList.toggle("is-error",tone==="error");
+  }
+  function snapPercent(value,steps){
+    const target=number(value);
+    if(target==null||!Array.isArray(steps)||!steps.length)return 0;
+    return steps.reduce((best,current)=>Math.abs(current-target)<Math.abs(best-target)?current:best,steps[0]);
+  }
+  function sliderTicks(steps,min,max){
+    const span=Math.max(1,max-min);
+    return `<span class="rapid-fire-slider-ticks" aria-hidden="true">${steps.map(value=>`<i style="left:${((value-min)/span*100).toFixed(4)}%"></i>`).join("")}</span>`;
+  }
+  function bindDiscreteSlider(slider,textNode,steps){
+    const apply=value=>{
+      const snapped=snapPercent(value,steps);
+      slider.value=String(snapped);
+      textNode.textContent=snapped+"%";
+    };
+    slider.addEventListener("input",()=>apply(slider.value),false);
+    slider.addEventListener("keydown",event=>{
+      if(!["ArrowLeft","ArrowDown","ArrowRight","ArrowUp"].includes(event.key))return;
+      event.preventDefault();
+      const current=snapPercent(slider.value,steps);
+      const index=Math.max(0,steps.indexOf(current));
+      const direction=event.key==="ArrowRight"||event.key==="ArrowUp"?1:-1;
+      apply(steps[Math.max(0,Math.min(steps.length-1,index+direction))]);
+      slider.dispatchEvent(new Event("change",{bubbles:true}));
+    },false);
+    apply(slider.value);
+  }
+  function render(){
+    const bridge=api();
+    if(!bridge)return;
+    const closeSlider=q("rapidFireClosePercent");
+    const snapshot=bridge.snapshot({closePercent:closeSlider?closeSlider.value:100});
+    const position=snapshot.position;
+    if(position)selectedDirection=position.side;
+    const size=q("rapidFireSize");
+    const floating=q("rapidFirePl");
+    const floatingPercent=q("rapidFirePlPercent");
+    if(size)size.textContent=lot(snapshot.size,3);
+    if(floating){floating.textContent=money(snapshot.floatingPl);floating.style.color=moneyColor(snapshot.floatingPl);}
+    if(floatingPercent){floatingPercent.textContent=percent(snapshot.floatingPlPercent);floatingPercent.style.color=moneyColor(snapshot.floatingPlPercent);}
+    const dir=q("rapidFireDir");
+    if(dir){
+      const shownDirection=position?position.side:selectedDirection;
+      dir.textContent=shownDirection;
+      dir.classList.toggle("is-long",shownDirection==="LONG");
+      dir.classList.toggle("is-short",shownDirection==="SHORT");
+      dir.classList.toggle("is-locked",!!position);
+      dir.setAttribute("aria-disabled",position?"true":"false");
+      dir.title=position?"Direction follows the open position":"Click to switch LONG / SHORT";
+    }
+    const rules=bridge.lotRules();
+    const lotInput=q("rapidFireLot");
+    if(lotInput){
+      lotInput.min="0.000";
+      lotInput.step=String(rules.stepSize);
+      lotInput.dataset.precision=String(rules.precision);
+    }
+    const busy=!!snapshot.busy;
+    const actionButtons={add:q("rapidFireAdd"),double:q("rapidFireDouble"),close:q("rapidFireClose"),reverse:q("rapidFireReverse"),breakeven:q("rapidFireBreakeven")};
+    const actionLabels={add:"Add",double:"Double",close:"Close",reverse:"Reverse",breakeven:"B.E."};
+    Object.entries(actionButtons).forEach(([action,button])=>{
+      if(!button)return;
+      const active=busy&&snapshot.activeAction===action;
+      button.disabled=busy&&(!active||action==="breakeven");
+      button.classList.toggle("is-cancel",active&&(action==="close"||action==="reverse"));
+      if(active&&(action==="close"||action==="reverse"))button.textContent="Cancel";
+      else if(action!=="double"||button.dataset.armed!=="1")button.textContent=actionLabels[action];
+    });
+    if(!position){
+      q("rapidFireDouble").disabled=true;
+      q("rapidFireBreakeven").disabled=true;
+      q("rapidFireClose").disabled=true;
+      q("rapidFireReverse").disabled=true;
+      resetDoubleArm();
+    }
+  }
+  async function execute(config){
+    const bridge=api();
+    if(!bridge)return;
+    try{
+      const pending=bridge.execute(config);
+      render();
+      await pending;
+    }
+    catch(_error){}
+    render();
+  }
+  async function executeOrCancel(config){
+    const bridge=api();
+    const snapshot=bridge&&bridge.snapshot();
+    if(snapshot&&snapshot.active&&snapshot.activeAction===config.action){
+      try{await bridge.cancel();}catch(_error){}
+      render();
+      return;
+    }
+    await execute(config);
+  }
+  async function lockBreakeven(){
+    const bridge=api();
+    if(!bridge||typeof bridge.breakevenLock!=="function")return;
+    try{
+      const pending=bridge.breakevenLock();
+      render();
+      await pending;
+    }catch(_error){}
+    render();
+  }
+  function ensureWindow(){
+    let win=q("rapidFireWindow");
+    if(win)return win;
+    win=document.createElement("section");
+    win.id="rapidFireWindow";
+    win.className="calc-module-window rapid-fire-window hidden";
+    win.setAttribute("aria-label","Rapid Fire");
+    win.innerHTML=`
+      <header class="calc-module-head rapid-fire-head" id="rapidFireHead" data-floating-window-header>
+        <div class="calc-module-title">Rapid Fire</div>
+        <div class="calc-module-actions"><button id="rapidFireCloseWindow" type="button" title="Close" aria-label="Close Rapid Fire">x</button></div>
+      </header>
+      <div class="rapid-fire-body">
+        <div class="rapid-fire-summary" aria-label="Position summary">
+          <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Open Position Size</div><div class="rapid-fire-summary-value" id="rapidFireSize">0.000</div></div>
+          <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
+          <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
+        </div>
+        <div class="rapid-fire-add-row" aria-label="Add, double, or protect position">
+          <button class="rapid-fire-dir is-long" id="rapidFireDir" type="button">LONG</button>
+          <input class="rapid-fire-lot" id="rapidFireLot" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Rapid Fire lot size">
+          <button class="rapid-fire-button" id="rapidFireAdd" type="button">Add</button>
+          <button class="rapid-fire-button" id="rapidFireDouble" type="button" title="Click once to arm, then again within 3 seconds">Double</button>
+          <button class="rapid-fire-button" id="rapidFireBreakeven" type="button" title="Place a fee-aware Master SL at breakeven">B.E.</button>
+        </div>
+        <div class="rapid-fire-action-group" id="rapidFireActionGroup">
+          <div class="rapid-fire-action-row">
+            <button class="rapid-fire-action-title" id="rapidFireReverse" type="button">Reverse</button>
+            <span class="rapid-fire-slider-shell">
+              ${sliderTicks(REVERSE_PERCENT_STEPS,25,300)}
+              <input id="rapidFireReversePercent" type="range" min="25" max="300" step="1" value="100" aria-label="Reverse percentage">
+            </span>
+            <span class="rapid-fire-slider-value" id="rapidFireReversePercentText">100%</span>
+          </div>
+          <div class="rapid-fire-action-row">
+            <button class="rapid-fire-action-title" id="rapidFireClose" type="button">Close</button>
+            <span class="rapid-fire-slider-shell">
+              ${sliderTicks(CLOSE_PERCENT_STEPS,0,100)}
+              <input id="rapidFireClosePercent" type="range" min="0" max="100" step="1" value="100" aria-label="Close percentage">
+            </span>
+            <span class="rapid-fire-slider-value" id="rapidFireClosePercentText">100%</span>
+          </div>
+        </div>
+        <div class="rapid-fire-status" id="rapidFireStatus" aria-live="polite"></div>
+      </div>`;
+    document.body.appendChild(win);
+    const floating=window.BT001FloatingWindow;
+    if(floating&&typeof floating.install==="function"){
+      windowApi=floating.install(win,{header:q("rapidFireHead"),storageKey:WINDOW_KEY,minWidth:370,minHeight:258,defaultWidth:430,defaultHeight:258});
+    }
+    q("rapidFireCloseWindow").addEventListener("click",hide,false);
+    q("rapidFireDir").addEventListener("click",()=>{
+      if(api().snapshot().position)return;
+      selectedDirection=selectedDirection==="LONG"?"SHORT":"LONG";
+      render();
+    },false);
+    q("rapidFireLot").addEventListener("change",event=>{
+      const bridge=api();
+      const normalized=bridge.normalizeQuantity(event.target.value);
+      event.target.value=lot(normalized.quantity,normalized.precision);
+    },false);
+    q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",direction:selectedDirection,quantity:q("rapidFireLot").value}),false);
+    q("rapidFireDouble").addEventListener("click",()=>{
+      const button=q("rapidFireDouble");
+      const snapshot=api().snapshot();
+      if(snapshot.active&&snapshot.activeAction==="double"){
+        void executeOrCancel({action:"double"});
+        return;
+      }
+      if(button.dataset.armed==="1"){
+        resetDoubleArm();
+        void executeOrCancel({action:"double"});
+        return;
+      }
+      button.dataset.armed="1";
+      button.classList.add("is-confirm-armed");
+      button.textContent="Confirm";
+      button.title="Click again within 3 seconds to confirm";
+      doubleArmTimer=setTimeout(resetDoubleArm,3000);
+    },false);
+    q("rapidFireBreakeven").addEventListener("click",()=>{void lockBreakeven();},false);
+    const closeSlider=q("rapidFireClosePercent");
+    bindDiscreteSlider(closeSlider,q("rapidFireClosePercentText"),CLOSE_PERCENT_STEPS);
+    closeSlider.addEventListener("input",render,false);
+    q("rapidFireClose").addEventListener("click",()=>executeOrCancel({action:"close",percent:closeSlider.value}),false);
+    const reverseSlider=q("rapidFireReversePercent");
+    bindDiscreteSlider(reverseSlider,q("rapidFireReversePercentText"),REVERSE_PERCENT_STEPS);
+    q("rapidFireReverse").addEventListener("click",()=>executeOrCancel({action:"reverse",percent:reverseSlider.value}),false);
+    statusUnsubscribe=api().subscribe(detail=>{
+      setStatus(detail.message,detail.tone);
+      render();
+    });
+    window.addEventListener("v13:open-position-change",render,false);
+    return win;
+  }
+  function show(){
+    const win=ensureWindow();
+    if(windowApi)windowApi.show();else win.classList.remove("hidden");
+    api().setVisible(true);
+    render();
+    if(refreshTimer==null)refreshTimer=setInterval(()=>{if(isOpen())render();},500);
+  }
+  function hide(){
+    const win=q("rapidFireWindow");
+    if(windowApi)windowApi.hide();else if(win)win.classList.add("hidden");
+    const bridge=api();
+    if(bridge)bridge.setVisible(false);
+    resetDoubleArm();
+    if(refreshTimer!=null){clearInterval(refreshTimer);refreshTimer=null;}
+  }
+  function bind(){
+    const trigger=q("rapidFireBtn");
+    if(!trigger||trigger.dataset.bound==="1")return;
+    trigger.dataset.bound="1";
+    trigger.addEventListener("click",()=>isOpen()?hide():show(),false);
+    window.RAPID_FIRE_MODULE=Object.freeze({open:show,hide,snapshot:()=>api()?.snapshot()||null,destroy(){hide();if(statusUnsubscribe)statusUnsubscribe();}});
+  }
+
+  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",bind,{once:true});
+  else bind();
 })();
 
 </script>
@@ -14826,15 +15849,6 @@ const REFOCUS_DIAG = false;
 <script>
 /* bundled: services/rest.service.js */
 (function (global) {
-  // TEMPORARY runtime trace for the Supabase heatmap read. Intentionally records no headers,
-  // because they contain the anon credential. Inspect window.BT001HeatmapWireTrace after a run.
-  function traceHeatmapWire(entry) {
-    if (!String(entry && entry.url || "").includes("/liquidation_heatmap_snapshots")) return;
-    const trace = Object.freeze({ capturedAt: new Date().toISOString(), ...entry });
-    global.BT001HeatmapWireTrace = trace;
-    console.log("[BT001 heatmap wire trace]", trace);
-  }
-
   class RestError extends Error {
     constructor(message, details = {}) {
       super(message || "Request failed");
@@ -14907,7 +15921,6 @@ const REFOCUS_DIAG = false;
       try {
         return await fetch(url, config);
       } catch (error) {
-        traceHeatmapWire({ url: String(url), method: config.method, networkError: error && error.message || String(error) });
         throw new RestError(error.message || "Network request failed", {
           cause: error,
           url,
@@ -14919,9 +15932,6 @@ const REFOCUS_DIAG = false;
 
     async requestJson(url, options = {}) {
       const response = await this.request(url, options);
-      let rawBody = null;
-      try { rawBody = await response.clone().text(); } catch (error) { rawBody = `[body capture failed: ${error && error.message || String(error)}]`; }
-      traceHeatmapWire({ url: String(url), method: options.method || "GET", status: response.status, statusText: response.statusText, body: rawBody });
       const data = await this.parseBody(response);
 
       if (!response.ok) {
@@ -18054,7 +19064,8 @@ bind();
       return `<span class="${iconClass(code)}" aria-hidden="true"><svg viewBox="0 0 12 12"><circle cx="3" cy="6" r="1.2" fill="currentColor"/><circle cx="6" cy="6" r="1.2" fill="currentColor"/><circle cx="9" cy="6" r="1.2" fill="currentColor"/></svg></span>`;
     }
     function titleLine(title,label,fallback="-"){
-      const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\</body>") + ":\\s*(.*)$","m"));
+      const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\
+</body>") + ":\\s*(.*)$","m"));
       return m ? m[1] : fallback;
     }
     function stateText(r){
@@ -22205,6 +23216,9 @@ const SHARED_POSITION_OWNER = window.createSharedPositionFactOwner({
   onPublish:detail=>{
     BINANCE_PRIVATE_STATE.position.positionChangePublishedAt=detail.publishedAt;
     publishOpenPositionChange(detail);
+    if(detail.closed && window.BT001_WATERFALL_WINDOW && typeof window.BT001_WATERFALL_WINDOW.positionClosed === "function"){
+      window.BT001_WATERFALL_WINDOW.positionClosed(detail);
+    }
   },
   onDraw:detail=>scheduleAccountChartDraw(detail.closed?"position-closed":"position-changed")
 });
@@ -33996,58 +35010,8 @@ startTradeAuto();
     }));
   }
 
-  // WF-FLIP-DIAG2: diagnostic-only evidence for a flip reconstructed from a
-  // potentially incomplete starting lot set. This intentionally does not alter
-  // lots, matching, grouping, context expansion, or the returned reconstruction.
-  function flipRowKey12(row){
-    return [row&&row.id,row&&row.orderId,row&&row.time,row&&row.side,row&&row.qty,row&&row.price].map(value=>String(value??'')).join('|');
-  }
-
-  function flipTime12(seconds){
-    const value=n12(seconds);
-    if(!(value>0)) return {time:null,timeIso:null,timeDubai:null};
-    const date=new Date(value*1000);
-    let timeDubai=null;
-    try{
-      timeDubai=new Intl.DateTimeFormat('en-CA',{
-        timeZone:'Asia/Dubai',year:'numeric',month:'2-digit',day:'2-digit',
-        hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'
-      }).format(date);
-    }catch(_e){}
-    return {time:value,timeIso:date.toISOString(),timeDubai};
-  }
-
-  function flipDisplayContext12(){
-    try{
-      const controls=window.BT001_DISPLAY_CONTROLS;
-      const snapshot=controls&&typeof controls.snapshot==='function'?controls.snapshot():null;
-      const range=controls&&typeof controls.periodWindow==='function'?controls.periodWindow():null;
-      return {
-        period:snapshot&&snapshot.period?String(snapshot.period.value||''):'',
-        displayControlsRevision:snapshot?n12(snapshot.revision):null,
-        requestedStartMs:range&&Number.isFinite(Number(range.startMs))?Number(range.startMs):null,
-        requestedEndMs:range&&Number.isFinite(Number(range.endMs))?Number(range.endMs):null
-      };
-    }catch(_e){return {period:'',displayControlsRevision:null,requestedStartMs:null,requestedEndMs:null};}
-  }
-
-  function flipDiag12(detail){
-    try{
-      const state=window.__WF_FLIP_DIAG2 ||= {version:'WF-FLIP-DIAG2',seq:0,calls:0,events:[]};
-      const event={seq:++state.seq,at:Date.now(),iso:new Date().toISOString(),type:'flip',...(detail||{})};
-      state.events.push(event);
-      if(state.events.length>1000)state.events.splice(0,state.events.length-1000);
-      console.info('[WF-FLIP-DIAG2]',event);
-      return event;
-    }catch(_e){return null;}
-  }
-
   reconstruct = function(rows,symbol){
     const groups = groupExecutionRows12(rows || []);
-    const flipState12=window.__WF_FLIP_DIAG2 ||= {version:'WF-FLIP-DIAG2',seq:0,calls:0,events:[]};
-    const flipCallId12='reconstruct-'+(++flipState12.calls);
-    const firstProcessedGroup12=groups[0]||null;
-    const firstProcessedRow12=firstProcessedGroup12&&firstProcessedGroup12.rows&&firstProcessedGroup12.rows[0]||null;
     const markers = [];
     const links = [];
     const lots = [];
@@ -34181,72 +35145,6 @@ startTradeAuto();
       const openBefore = totalQty();
       const closeTotal = Math.min(rem,openBefore);
       let cm = null;
-
-      const earliestLot12=lots.reduce((earliest,lot)=>!earliest||n12(lot.time)<n12(earliest.time)?lot:earliest,null);
-      const earliestMarker12=earliestLot12?markers.find(marker=>marker&&marker.id===earliestLot12.markerId)||null:null;
-      const earliestWasFirstRow12=!!(
-        earliestMarker12&&firstProcessedRow12&&
-        (earliestMarker12.sourceRows||[]).some(row=>row===firstProcessedRow12||flipRowKey12(row)===flipRowKey12(firstProcessedRow12))
-      );
-      let diagnosticRemaining12=closeTotal;
-      const contributingLots12=[];
-      for(const lot of lots){
-        if(!(diagnosticRemaining12>EPS12)) break;
-        const contribution=Math.min(diagnosticRemaining12,n12(lot.remainingQty));
-        if(!(contribution>EPS12)) continue;
-        const marker=markers.find(item=>item&&item.id===lot.markerId)||null;
-        contributingLots12.push({
-          markerId:lot.markerId,
-          parentId:lot.parentTradeId||lot.chainId||null,
-          ...flipTime12(lot.time),
-          remainingQty:n12(lot.remainingQty),
-          originalQty:n12(lot.originalQty),
-          closeContributionQty:contribution,
-          entryTradeId:marker&&marker.tradeId!=null?String(marker.tradeId):null,
-          entryOrderId:marker&&marker.orderId!=null?String(marker.orderId):null,
-          entrySourceTradeIds:[...new Set((marker&&marker.sourceRows||[]).map(row=>row&&row.id).filter(value=>value!=null).map(String))]
-        });
-        diagnosticRemaining12-=contribution;
-      }
-      flipDiag12({
-        callId:flipCallId12,
-        symbol:String(symbol||''),
-        ...flipDisplayContext12(),
-        inputRowCount:Array.isArray(rows)?rows.length:0,
-        executionGroupCount:groups.length,
-        firstProcessedRow:firstProcessedRow12?{
-          tradeId:firstProcessedRow12.id!=null?String(firstProcessedRow12.id):null,
-          orderId:firstProcessedRow12.orderId!=null?String(firstProcessedRow12.orderId):null,
-          side:String(firstProcessedRow12.side||''),
-          qty:n12(firstProcessedRow12.qty),
-          price:n12(firstProcessedRow12.price),
-          ...flipTime12(Math.floor(n12(firstProcessedRow12.time)/1000))
-        }:null,
-        flipFill:{
-          tradeId:g.tradeId!=null?String(g.tradeId):null,
-          orderId:g.orderId!=null?String(g.orderId):null,
-          rawSide:String(g.side||''),
-          priorPositionSide:sideText12(ps),
-          incomingSide:sideText12(s),
-          qty:q,price:p,realizedPnl:pnl,
-          ...flipTime12(t)
-        },
-        openBefore,
-        closeTotal,
-        reverseRemainder:Math.max(0,q-closeTotal),
-        earliestContributingLot:earliestLot12?{
-          markerId:earliestLot12.markerId,
-          parentId:earliestLot12.parentTradeId||earliestLot12.chainId||null,
-          remainingQty:n12(earliestLot12.remainingQty),
-          originalQty:n12(earliestLot12.originalQty),
-          entryTradeId:earliestMarker12&&earliestMarker12.tradeId!=null?String(earliestMarker12.tradeId):null,
-          entryOrderId:earliestMarker12&&earliestMarker12.orderId!=null?String(earliestMarker12.orderId):null,
-          ...flipTime12(earliestLot12.time)
-        }:null,
-        earliestLotEntryWasFirstProcessedRow:earliestWasFirstRow12,
-        startingPositionUnverifiedAtFetchBoundary:earliestWasFirstRow12,
-        contributingLots:contributingLots12
-      });
 
       const closePnlTotal = pnl;
       if(closeTotal > EPS12){
@@ -37910,10 +38808,8 @@ startTradeAuto();
   }
   async function recoverVisibleAccounts21(reason="visibility-return"){
     if(document.hidden)return null;
-    // Evaluate stream evidence for every entry attempt before either independent debounce gate runs.
     const smartDecision=evaluateMainVisibilityRestSkip21();
-    const mainResult=await mainVisibilityRecoveryGate21.run(reason,runReason=>performVisibleAccountsRecovery21(runReason,smartDecision));
-    return mainResult;
+    return mainVisibilityRecoveryGate21.run(reason,runReason=>performVisibleAccountsRecovery21(runReason,smartDecision));
   }
   window.BT001VisibilityRecovery=Object.freeze({recover:recoverVisibleAccounts21,diagnostics:()=>{const main=mainVisibilityRecoveryGate21.diagnostics();return {active:main.inFlight,runs:main.completedRuns,main,mainSmart:{...mainSmartRecoveryDiagnostics21}};}});
   const handleAuthenticatedLifecycle21=event=>{const evidence=window.BT001LifecycleTracker.observe(event);if(event.type==="visibilitychange"&&document.hidden){captureMainHiddenStreamHistory21();return;}if(!evidence)return;recoverVisibleAccounts21(`lifecycle:${evidence.trigger}:generation-${evidence.generation}`).catch(error=>console.warn("Authenticated lifecycle recovery failed",error));};
@@ -43994,6 +44890,7 @@ if(typeof window !== "undefined"){
     closeTimer:null,
     closeRetry:0,
     closeSyncBusy:false,
+    closeSyncPending:false,
     closeSyncBaseline:"",
     liveRefreshKey:"",
     liveRefreshTimer:null,
@@ -44272,10 +45169,12 @@ if(typeof window !== "undefined"){
     }
     wfSyncState.closeRetry = 0;
     wfSyncState.closeSyncBusy = false;
+    wfSyncState.closeSyncPending = false;
     wfSyncState.closeSyncBaseline = "";
   }
   function scheduleAutoCloseSync(delayMs=1250){
     if((!wfSyncState.loaded && !visible) || (wfSyncState.loaded && wfSyncState.symbol !== currentSymbol())) return;
+    wfSyncState.closeSyncPending = true;
     if(wfSyncState.closeTimer || wfSyncState.closeSyncBusy) return;
     wfSyncState.closeSyncBaseline = activeWfSignature();
     const period = wfSyncState.period || currentPeriodValue();
@@ -44283,8 +45182,9 @@ if(typeof window !== "undefined"){
     wfSyncState.closeTimer = setTimeout(async () => {
       wfSyncState.closeTimer = null;
       wfSyncState.closeSyncBusy = true;
+      wfSyncState.closeSyncPending = false;
       try{
-        while(wfSyncState.closeRetry < 2){
+        while(wfSyncState.closeRetry < 4){
           let staleContext = false;
           const acceptResult = () => {
             const currentPeriod = currentPeriodValue();
@@ -44299,24 +45199,36 @@ if(typeof window !== "undefined"){
           const nextSignature = wfDataMode() === "fast"
             ? closedTradeFastSignature(result)
             : closedTradeSignature(result && result.report);
+          if(visible) render();
           if(result && (!wfSyncState.closeSyncBaseline || (nextSignature && nextSignature !== wfSyncState.closeSyncBaseline))){
             wfSyncState.closeRetry = 0;
             wfSyncState.closeSyncBaseline = "";
             return;
           }
           wfSyncState.closeRetry += 1;
-          if(wfSyncState.closeRetry < 2) await new Promise(resolve => setTimeout(resolve,3000));
+          if(wfSyncState.closeRetry < 4){
+            const retryDelay=[1500,3000,5000][wfSyncState.closeRetry-1]||5000;
+            await new Promise(resolve => setTimeout(resolve,retryDelay));
+          }
         }
         showWfTradesStatus("Closed trade not ready yet");
       }catch(error){
         console.warn(MODULE + " live sync failed",error);
         showWfTradesStatus("Closed trade sync failed");
       }finally{
+        const rerun=wfSyncState.closeSyncPending;
         wfSyncState.closeSyncBusy = false;
         wfSyncState.closeRetry = 0;
         wfSyncState.closeSyncBaseline = "";
+        wfSyncState.closeSyncPending = false;
+        if(rerun) scheduleAutoCloseSync(250);
       }
     },Math.max(250,delayMs));
+  }
+  function notifyPositionClosed(){
+    if(visible) render();
+    maybeRefreshLivePreview();
+    scheduleAutoCloseSync(250);
   }
   function maybeRefreshLivePreview(){
     if(!visible) return;
@@ -45677,7 +46589,7 @@ if(typeof window !== "undefined"){
     },false);
     window.addEventListener("v13:open-position-change",event => {
       const detail = event && event.detail || {};
-      if(detail && detail.closed && !(detail && detail.sideChanged && detail.current)) scheduleAutoCloseSync(1250);
+      if(detail && detail.closed && !(detail && detail.sideChanged && detail.current)) notifyPositionClosed();
       else if(detail && detail.opened) clearAutoCloseSync();
       maybeRefreshLivePreview();
     },false);
@@ -45687,7 +46599,7 @@ if(typeof window !== "undefined"){
   else install();
 
 window.BT001_WATERFALL_WINDOW = {
-  version:MODULE,show,hide,render,
+  version:MODULE,show,hide,render,positionClosed:notifyPositionClosed,
   _selfTest:runWfCrosshairSelfTests,
   _diagnostics:() => {
     const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),closedPartials=wfCurrentCampaignClosedPartialPL();
@@ -56238,7 +57150,7 @@ window.BT001_WATERFALL_WINDOW = {
 
 </script>
 <script>
-/* bundled: HeatMap database settings */
+/* bundled: heatmap-database-settings */
 (() => {
   "use strict";
 
@@ -56298,7 +57210,7 @@ window.BT001_WATERFALL_WINDOW = {
     }
     if(dbTestButton&&dbTestStatus&&typeof supabase.testDbAccess==="function"){
       dbTestButton.addEventListener("click",async()=>{
-        dbTestButton.disabled=true;dbTestStatus.textContent="Testing HeatMap database...";
+        dbTestButton.disabled=true;dbTestStatus.textContent="Testing HeatMap table...";
         try{
           setDbTestStatus(await supabase.testDbAccess());
         }catch(error){
@@ -56336,15 +57248,16 @@ window.BT001_WATERFALL_WINDOW = {
       const script = document.createElement("script");
       const embedded=document.querySelector('script[type="application/x-bt001-source"][data-bundle-path="'+src+'"]');
       const objectUrl=embedded?URL.createObjectURL(new Blob([embedded.textContent],{type:"application/javascript"})):null;
-      script.src = objectUrl || src;
+      if(!objectUrl){reject(new Error("Missing bundled implementation: " + src));return;}
+      script.src = objectUrl;
       script.defer = true;
       script.dataset.calculatorSrc = src;
       script.onload = () => {
-        if(objectUrl) URL.revokeObjectURL(objectUrl);
+        URL.revokeObjectURL(objectUrl);
         script.dataset.loaded = "1";
         resolve();
       };
-      script.onerror = () => { if(objectUrl) URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load: " + src)); };
+      script.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load: " + src)); };
       document.head.appendChild(script);
     });
   }
@@ -56360,6 +57273,7 @@ window.BT001_WATERFALL_WINDOW = {
         await loadScript("features/calculator/application/chaseEngine.js");
         await loadScript("features/calculator/infrastructure/storageAdapter.js");
         await loadScript("features/calculator/presentation/calculatorModule.js");
+        await loadScript("features/rapid-fire/rapidFireModule.js");
       }catch(error){
         console.error("Calculator feature bootstrap failed.",error);
       }
@@ -56388,15 +57302,16 @@ window.BT001_WATERFALL_WINDOW = {
       const script = document.createElement("script");
       const embedded=document.querySelector('script[type="application/x-bt001-source"][data-bundle-path="'+src+'"]');
       const objectUrl=embedded?URL.createObjectURL(new Blob([embedded.textContent],{type:"application/javascript"})):null;
-      script.src = objectUrl || src;
+      if(!objectUrl){reject(new Error("Missing bundled implementation: " + src));return;}
+      script.src = objectUrl;
       script.defer = true;
       script.dataset.gradSrc = src;
       script.onload = () => {
-        if(objectUrl) URL.revokeObjectURL(objectUrl);
+        URL.revokeObjectURL(objectUrl);
         script.dataset.loaded = "1";
         resolve();
       };
-      script.onerror = () => { if(objectUrl) URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load: " + src)); };
+      script.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load: " + src)); };
       document.head.appendChild(script);
     });
   }
@@ -56520,6 +57435,7 @@ window.BT001_WATERFALL_WINDOW = {
 })();
 
 </script>
+
 </body>
 
 <!-- V13_UI_V2_PATCH_34_CLEAN_CONSOLIDATED_BASE_R1_NOTES

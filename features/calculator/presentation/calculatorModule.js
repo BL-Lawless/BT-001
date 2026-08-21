@@ -12,11 +12,12 @@
   const CBS_ENABLED_KEY = STORE + "cbs_enabled";
   const EXPRESS_MODE_ENABLED_KEY = STORE + "express_mode_enabled";
   const ORDERS_VISIBLE_KEY = STORE + "orders_visible";
-  const OTF_CLOSE_WINDOW_KEY = STORE + "otf_close_window_v2";
+  const OTF_CLOSE_WINDOW_KEY = STORE + "otf_close_window_v3";
+  const OTF_CLOSE_PREFERENCES_KEY = STORE + "otf_close_preferences_v1";
   const OTF_CLOSE_WINDOW_MIN_WIDTH = 360;
-  const OTF_CLOSE_WINDOW_MIN_HEIGHT = 240;
+  const OTF_CLOSE_WINDOW_MIN_HEIGHT = 180;
   const OTF_CLOSE_WINDOW_DEFAULT_WIDTH = 440;
-  const OTF_CLOSE_WINDOW_DEFAULT_HEIGHT = 272;
+  const OTF_CLOSE_WINDOW_DEFAULT_HEIGHT = 194;
   const AUTO_SYNC_DISPLAY_REFRESH_MS = 500;
   const SEND_POSITION_MAX_AGE_MS = 5000;
   const FLAT_CLEANUP_CONFIRM_MS = 700;
@@ -45,6 +46,7 @@
   let cbsEnabled = false;
   let expressModeEnabled = false;
   let ordersVisible = true;
+  const ordersVisibilityConsumers = new Set();
   let calculatorRowsHydrated = false;
   let calculatorRowsHydrationPromise = null;
   let otfEnabled = false;
@@ -84,13 +86,18 @@
   let openPositionReconcileTimer = null;
   let pendingOpenPositionChange = null;
   let lastOpenPositionReconcileSignature = "";
-  let openPositionCloseUi = {open:false,percent:0,quantity:null,sending:false,mode:"CHS",chsDistTicks:2,chsValidKey:"manual"};
+  let openPositionCloseUi = loadOpenPositionClosePreferences();
   let openPositionCloseWindowApi = null;
   let openPositionClosePanelStatus = "";
   let openPositionClosePanelTone = "normal";
   let openPositionCloseLivePriceUnsubscribe = null;
   let openPositionCloseLivePriceFrame = null;
   let openPositionCloseChaseEngine = null;
+  let rapidFireChaseEngine = null;
+  let rapidFireChaseContext = null;
+  let rapidFireBreakevenBusy = false;
+  let lastRapidFireBreakeven = null;
+  const rapidFireStatusListeners = new Set();
   let rowChaseEngine = null;
   let activeRowChase = null;
   let rowChaseOriginalWatchTimer = null;
@@ -98,7 +105,6 @@
   let rowChaseOriginalWatchGeneration = 0;
   let openPositionCloseChs = {
     active:false,
-    mode:"CHS",
     canceling:false,
     symbol:"",
     side:"",
@@ -132,6 +138,28 @@
   const SYMBOL_SETTINGS_CACHE_WINDOW_MS = 30000;
 
   function q(id){ return document.getElementById(id); }
+  function loadOpenPositionClosePreferences(){
+    let stored=null;
+    try{ stored=JSON.parse(localStorage.getItem(OTF_CLOSE_PREFERENCES_KEY)||"null"); }catch(_e){ stored=null; }
+    const storedPercent=stored&&num(stored.percent);
+    const storedDist=stored&&num(stored.chsDistTicks);
+    return {
+      open:false,
+      percent:storedPercent==null?100:clamp(storedPercent,0,100),
+      quantity:null,
+      sending:false,
+      chsDistTicks:storedDist==null?1:Math.max(0,Math.round(storedDist)),
+      chsValidKey:"manual"
+    };
+  }
+  function saveOpenPositionClosePreferences(){
+    try{
+      localStorage.setItem(OTF_CLOSE_PREFERENCES_KEY,JSON.stringify({
+        percent:clamp(num(openPositionCloseUi.percent)||0,0,100),
+        chsDistTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0))
+      }));
+    }catch(_e){}
+  }
   function num(v){
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
@@ -154,6 +182,12 @@
     const n = num(v);
     if(n == null) return "$-";
     return (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(2);
+  }
+  function fmtPercent(v){
+    const n=num(v);
+    if(n==null) return "-";
+    const rounded=Number(n.toFixed(2));
+    return (rounded>0?"+":"")+rounded+"%";
   }
   function wait(ms){
     return new Promise(resolve => setTimeout(resolve,Math.max(0,Number(ms) || 0)));
@@ -180,7 +214,6 @@
   }
   function resetOpenPositionCloseChs(){
     openPositionCloseChs.active = false;
-    openPositionCloseChs.mode = "CHS";
     openPositionCloseChs.canceling = false;
     openPositionCloseChs.symbol = "";
     openPositionCloseChs.side = "";
@@ -192,7 +225,7 @@
     openPositionCloseChs.orderId = null;
     openPositionCloseChs.clientOrderId = "";
     openPositionCloseChs.startedPositionQty = 0;
-    openPositionCloseChs.distTicks = Math.max(0,num(openPositionCloseUi.chsDistTicks) || 2);
+    openPositionCloseChs.distTicks = Math.max(0,num(openPositionCloseUi.chsDistTicks) == null ? 1 : num(openPositionCloseUi.chsDistTicks));
     openPositionCloseChs.validKey = String(openPositionCloseUi.chsValidKey || "manual");
     const validOption = openPositionCloseChsValidOption(openPositionCloseChs.validKey);
     openPositionCloseChs.validMs = validOption ? validOption.ms : null;
@@ -201,21 +234,12 @@
   }
   function resetOpenPositionCloseUi(){
     openPositionCloseUi.open = false;
-    openPositionCloseUi.percent = 0;
     openPositionCloseUi.quantity = null;
     openPositionCloseUi.sending = false;
-    openPositionCloseUi.mode = "CHS";
-    openPositionCloseUi.chsDistTicks = 2;
-    openPositionCloseUi.chsValidKey = "manual";
     renderOpenPositionClosePanel();
   }
   function isOpenPositionCloseControl(hit){
     return !!(hit && hit.controlType === "open-position-close-toggle");
-  }
-  function openPositionCloseMode(){
-    if(openPositionCloseChs.active) return openPositionCloseChs.mode === "REV" ? "REV" : "CHS";
-    const mode=String(openPositionCloseUi.mode || "CHS").toUpperCase();
-    return mode === "MKT" ? "MKT" : mode === "REV" ? "REV" : "CHS";
   }
   function openPositionCloseChsValidOption(key){
     const target = String(key || "30s").toLowerCase();
@@ -241,17 +265,14 @@
     warmTopOfBook();
     if(openPositionCloseChs.active) return;
     openPositionClosePanelStatus = "";
-    openPositionCloseUi.percent = 0;
     openPositionCloseUi.quantity = null;
-    openPositionCloseUi.mode = "CHS";
-    openPositionCloseUi.chsDistTicks = 2;
-    openPositionCloseUi.chsValidKey = "manual";
   }
   function cycleOpenPositionCloseChsDist(){
     const current = currentOpenPositionCloseChsDistTicks();
     const index = OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.indexOf(current);
     const next = OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS[(index + 1 + OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.length) % OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS.length];
     openPositionCloseUi.chsDistTicks = next;
+    saveOpenPositionClosePreferences();
   }
   function cycleOpenPositionCloseChsValid(){
     const current = currentOpenPositionCloseChsValidKey();
@@ -295,32 +316,27 @@
             <div class="otf-close-summary-label">P/L</div>
             <div class="otf-close-summary-value" id="otfCloseChasePlText">$0.00</div>
           </div>
-        </div>
-        <div class="otf-close-field">
-          <div class="otf-close-label">Mode</div>
-          <div class="otf-close-segments" role="group" aria-label="Close mode">
-            <button id="otfCloseChaseModeMkt" type="button">MKT</button>
-            <button id="otfCloseChaseModeChs" type="button">CHS</button>
-            <button id="otfCloseChaseModeRev" type="button">REV</button>
+          <div class="otf-close-summary-cell">
+            <div class="otf-close-summary-label">P/L%</div>
+            <div class="otf-close-summary-value" id="otfCloseChasePlPercentText">0%</div>
           </div>
         </div>
         <label class="otf-close-field otf-close-slider-field" for="otfCloseChasePercent">
           <span class="otf-close-label">Close quantity</span>
-          <input id="otfCloseChasePercent" type="range" min="0" max="100" step="0.01" value="0">
+          <input id="otfCloseChasePercent" type="range" min="0" max="100" step="0.01" value="100">
         </label>
         <div class="otf-close-field">
           <div class="otf-close-label">Chase settings</div>
           <div class="otf-close-chips">
-            <button id="otfCloseChaseDist" type="button">Dist 2 ticks</button>
+            <button id="otfCloseChaseDist" type="button">Dist 1 tick</button>
             <button id="otfCloseChaseValid" type="button">Validity: Manual</button>
           </div>
         </div>
-        <div class="otf-close-actions">
-          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Confirm</button>
-          <button class="otf-close-cancel hidden" id="otfCloseChaseCancel" type="button">Cancel CHS</button>
-        </div>
-        <div class="otf-close-live hidden" id="otfCloseChaseLive" aria-live="polite">
-          <div id="otfCloseChaseLiveStatus"></div>
+        <div class="otf-close-execution-row">
+          <div class="otf-close-live" id="otfCloseChaseLive" aria-live="polite">
+            <div id="otfCloseChaseLiveStatus"></div>
+          </div>
+          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Execute</button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -339,27 +355,10 @@
 
     const chsGuard = () => {
       if(!openPositionCloseChs.active) return false;
-      setStatus("Open Position " + openPositionCloseMode() + " is active. Cancel it first.");
+      setStatus("Open Position CHS is active. Cancel it first.");
       return true;
     };
     q("otfCloseChaseClose").addEventListener("click",hideOpenPositionClosePanel,false);
-    q("otfCloseChaseModeMkt").addEventListener("click",() => {
-      if(chsGuard()) return;
-      openPositionCloseUi.mode = "MKT";
-      renderOpenPositionClosePanel();
-    },false);
-    q("otfCloseChaseModeChs").addEventListener("click",() => {
-      if(chsGuard()) return;
-      openPositionCloseUi.mode = "CHS";
-      renderOpenPositionClosePanel();
-    },false);
-    q("otfCloseChaseModeRev").addEventListener("click",() => {
-      if(chsGuard()) return;
-      openPositionCloseUi.mode = "REV";
-      openPositionCloseUi.percent = 100;
-      openPositionCloseUi.quantity = null;
-      renderOpenPositionClosePanel();
-    },false);
     q("otfCloseChaseDist").addEventListener("click",() => {
       if(chsGuard()) return;
       cycleOpenPositionCloseChsDist();
@@ -383,6 +382,7 @@
       }
       openPositionCloseUi.quantity = null;
       openPositionCloseUi.percent = clamp(num(event.target.value) || 0,0,100);
+      saveOpenPositionClosePreferences();
       renderOpenPositionClosePanel();
     },false);
     const qtyInput = q("otfCloseChaseQtyInput");
@@ -407,9 +407,12 @@
       event.target.value=fmtLot(preview.roundedQty);
       renderOpenPositionClosePanel();
     },false);
-    q("otfCloseChaseConfirm").addEventListener("click",() => { void confirmOpenPositionCloseOrder(); },false);
-    q("otfCloseChaseCancel").addEventListener("click",() => {
-      if(openPositionCloseChs.active) void cancelOpenPositionCloseChs("Open Position " + openPositionCloseMode() + " cancelled.",{closeUi:false});
+    q("otfCloseChaseConfirm").addEventListener("click",() => {
+      if(openPositionCloseChs.active){
+        void cancelOpenPositionCloseChs("Open Position CHS cancelled.",{closeUi:false});
+        return;
+      }
+      void confirmOpenPositionCloseOrder();
     },false);
     warmTopOfBook();
     return win;
@@ -422,7 +425,8 @@
     const percentText=q("otfCloseChasePercentText");
     const qtyInput=q("otfCloseChaseQtyInput");
     const plText=q("otfCloseChasePlText");
-    if(!percentText||!qtyInput||!plText) return null;
+    const plPercentText=q("otfCloseChasePlPercentText");
+    if(!percentText||!qtyInput||!plText||!plPercentText) return null;
     const preview=openPositionClosePreview(openPositionClosePreviewPosition()||{});
     const infoPl=preview.estPl==null?0:preview.estPl;
     percentText.textContent=Number(preview.percent.toFixed(2))+"%";
@@ -432,6 +436,9 @@
     qtyInput.max=String(preview.maxQty);
     plText.textContent=fmtChartMoney(infoPl);
     plText.style.color=moneyColor(infoPl);
+    const floatingPercent=currentFloatingPlPercent(openPositionClosePreviewPosition());
+    plPercentText.textContent=fmtPercent(floatingPercent);
+    plPercentText.style.color=moneyColor(floatingPercent);
     return preview;
   }
   function stopOpenPositionCloseLivePriceSubscription(){
@@ -479,28 +486,18 @@
     }
     const preview = refreshOpenPositionClosePreviewSummary() || openPositionClosePreview({});
     const chsActive = !!openPositionCloseChs.active;
-    const selectedMode = openPositionCloseMode();
-    const reverseMode = selectedMode === "REV";
     const validOption = openPositionCloseChsValidOption(currentOpenPositionCloseChsValidKey());
     const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : validOption.ms;
     const slider = q("otfCloseChasePercent");
     if(document.activeElement !== slider || chsActive) slider.value = String(preview.percent);
-    const sliderField=slider.closest(".otf-close-slider-field");
-    if(sliderField) sliderField.classList.toggle("hidden",reverseMode);
-    slider.disabled=reverseMode;
-    slider.setAttribute("aria-disabled",chsActive || reverseMode ? "true" : "false");
+    slider.setAttribute("aria-disabled",chsActive ? "true" : "false");
     const qtyInput=q("otfCloseChaseQtyInput");
-    qtyInput.readOnly=chsActive || reverseMode;
-    qtyInput.setAttribute("aria-disabled",chsActive || reverseMode ? "true" : "false");
-    [q("otfCloseChaseModeMkt"),q("otfCloseChaseModeChs"),q("otfCloseChaseModeRev")].forEach(button => {
-      const active = button.id.endsWith(selectedMode === "MKT" ? "Mkt" : selectedMode === "REV" ? "Rev" : "Chs");
-      button.classList.toggle("is-active",active);
-      button.setAttribute("aria-pressed",active ? "true" : "false");
-      button.setAttribute("aria-disabled",chsActive ? "true" : "false");
-    });
+    qtyInput.readOnly=chsActive;
+    qtyInput.setAttribute("aria-disabled",chsActive ? "true" : "false");
     const dist = q("otfCloseChaseDist");
     const valid = q("otfCloseChaseValid");
-    dist.textContent = "Dist " + currentOpenPositionCloseChsDistTicks() + " ticks";
+    const distTicks=currentOpenPositionCloseChsDistTicks();
+    dist.textContent = "Dist " + distTicks + (distTicks===1 ? " tick" : " ticks");
     valid.textContent = "Validity: " + (chsActive ? openPositionCloseChsTimerText(remainingValidMs) : validOption.label);
     dist.setAttribute("aria-disabled",chsActive ? "true" : "false");
     valid.setAttribute("aria-disabled",chsActive ? "true" : "false");
@@ -511,15 +508,14 @@
         filledQty:Math.max(0,num(openPositionCloseChs.filledQty) || 0),
         remainingQty:Math.max(0,num(openPositionCloseChs.remainingQty) || 0),
         activePrice:String(openPositionCloseChs.price || "")
-      },{prefix:"Open Position " + selectedMode,validText:openPositionCloseChsTimerText(remainingValidMs)}) : "";
+      },{prefix:"Open Position CHS",validText:openPositionCloseChsTimerText(remainingValidMs)}) : "";
     const statusText = openPositionClosePanelStatus || fallbackStatus;
     q("otfCloseChaseLiveStatus").textContent = statusText;
-    live.classList.toggle("hidden",!statusText);
     live.classList.toggle("is-error",openPositionClosePanelTone === "error");
-    const cancelButton=q("otfCloseChaseCancel");
-    cancelButton.classList.toggle("hidden",!chsActive);
-    cancelButton.textContent="Cancel " + selectedMode;
-    q("otfCloseChaseConfirm").setAttribute("aria-disabled",openPositionCloseUi.sending || chsActive ? "true" : "false");
+    const executeButton=q("otfCloseChaseConfirm");
+    executeButton.textContent=chsActive?"Cancel":"Execute";
+    executeButton.classList.toggle("is-cancel",chsActive);
+    executeButton.setAttribute("aria-disabled",openPositionCloseUi.sending&&!chsActive ? "true" : "false");
   }
   function symbolTickSizeValue(){
     const helper = window.BT001SymbolTradingSettings;
@@ -560,6 +556,7 @@
     const normalized=normalizeOpenPositionCloseQuantity(value,liveQty,options);
     openPositionCloseUi.quantity=normalized.quantity;
     openPositionCloseUi.percent=liveQty>0?clamp(normalized.quantity/liveQty*100,0,100):0;
+    saveOpenPositionClosePreferences();
     return openPositionClosePreview(position);
   }
   function openPositionClosePreview(positionLike){
@@ -571,20 +568,15 @@
     const normalizedQty=normalizeOpenPositionCloseQuantity(rawQty,liveQty,directQty==null
       ? {allowZero:true,roundDown:true,clampMinimum:false}
       : {allowZero:true});
-    const reverseMode=String(openPositionCloseUi.mode||"").toUpperCase()==="REV";
-    const reverseQty=reverseMode?openPositionReverseOrderQuantity(liveQty):null;
-    const roundedQty=reverseMode?reverseQty.quantity:normalizedQty.quantity;
+    const roundedQty=normalizedQty.quantity;
     const belowMinimum = rawQty > 0 && roundedQty < normalizedQty.minQty;
-    const executable = reverseMode
-      ? reverseQty.exact && roundedQty >= reverseQty.minQty && roundedQty > liveQty
-      : roundedQty >= normalizedQty.minQty && roundedQty <= liveQty + 1e-9;
+    const executable = roundedQty >= normalizedQty.minQty && roundedQty <= liveQty + 1e-9;
     const current = currentPriceReference();
     const side = String(positionLike && positionLike.side || direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-    const plQty=reverseMode?liveQty:roundedQty;
-    const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * plQty);
-    return {liveQty,entry,percent:reverseMode?100:percent,rawQty:reverseMode?liveQty*2:rawQty,roundedQty,belowMinimum,executable,estPl,side,current,stepSize:reverseMode?reverseQty.stepSize:normalizedQty.stepSize,minQty:reverseMode?reverseQty.minQty:normalizedQty.minQty,maxQty:reverseMode?reverseQty.maxQty:normalizedQty.maxQty,reverseMode};
+    const estPl = current == null || entry == null ? null : ((side === "SHORT" ? entry - current : current - entry) * roundedQty);
+    return {liveQty,entry,percent,rawQty,roundedQty,belowMinimum,executable,estPl,side,current,stepSize:normalizedQty.stepSize,minQty:normalizedQty.minQty,maxQty:normalizedQty.maxQty};
   }
-  function openPositionReverseOrderQuantity(liveQtyValue){
+  function openPositionReverseOrderQuantity(liveQtyValue,reversePercent){
     const helper=window.BT001SymbolTradingSettings;
     const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
     const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
@@ -592,7 +584,7 @@
     const stepSize=Math.max(0,num(settings&&settings.stepSize)||num(lotFilter&&lotFilter.stepSize)||0.001);
     const minQty=Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize);
     const maxQty=Math.max(minQty,num(lotFilter&&lotFilter.maxQty)||Number.MAX_SAFE_INTEGER);
-    const requested=Math.max(0,num(liveQtyValue)||0)*2;
+    const requested=Math.max(0,num(liveQtyValue)||0)*(1+clamp(num(reversePercent)||0,25,300)/100);
     const normalizedText=helper&&typeof helper.normalizeQty==="function"
       ? helper.normalizeQty(requested,settings)
       : Number(Math.round(requested/stepSize)*stepSize).toFixed(3);
@@ -633,15 +625,29 @@
     }) || null;
   }
   function openPositionCloseChsStatusText(progress,options){
-    const opts = options || {};
-    const prefix = opts.prefix || "Open Position CHS";
-    const validText = opts.validText ? " | valid " + opts.validText : "";
-    return prefix
-      + " | chasing " + fmtLot(progress.requestedQty)
-      + " | filled " + fmtLot(progress.filledQty)
-      + " | remaining " + fmtLot(progress.remainingQty)
-      + " | price " + (progress.activePrice ? fmtPrice(progress.activePrice) : "-")
-      + validText;
+    return formatChaseExecutionStatus(Object.assign({},progress||{},options||{},{active:true,statusCode:"chasing"})).message;
+  }
+  function formatChaseExecutionStatus(state){
+    const value=state||{};
+    const code=String(value.statusCode||value.result||"").toLowerCase();
+    const requested=Math.max(0,num(value.requestedQty)||0);
+    const filled=Math.max(0,num(value.filledQty)||0);
+    const remaining=Math.max(0,num(value.remainingQty)||0);
+    const fillBase=requested>0?requested:filled+remaining;
+    const fillPercent=fillBase>0?clamp(filled/fillBase*100,0,100):0;
+    const fillText=Number(fillPercent.toFixed(2));
+    if(code==="waiting") return {message:"Waiting for price...",tone:"normal"};
+    if(code==="stale") return {message:"Price feed stale",tone:"error"};
+    if(code==="repricing") return {message:"Repricing...",tone:"error"};
+    if(code==="filled"){
+      return {message:"Filled — "+(fillBase>0?fillText:100)+"%",tone:"normal"};
+    }
+    if(code==="cancelled") return {message:"Cancelled",tone:"normal"};
+    if(code==="expired") return {message:"Expired",tone:"error"};
+    if(code==="no-price") return {message:"No price data",tone:"error"};
+    if(code==="stopped"||code==="inactive") return {message:"Stopped",tone:"error"};
+    if(code==="breakeven") return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
+    return {message:"Chasing — "+fillText+"%",tone:value.tone==="error"?"error":"normal"};
   }
   async function submitOpenPositionCloseChsLimit(livePos,quantity,price){
     const clientId = freshOpenPositionCloseClientId();
@@ -654,14 +660,9 @@
       price:String(price),
       newClientOrderId:clientId
     };
-    if(openPositionCloseChs.mode === "REV"){
-      send.positionSide = "BOTH";
-      send.reduceOnly = "false";
-    }else{
-      const ps = toUpper((livePos && livePos.positionSide) || openPositionCloseChs.positionSide || "");
-      if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
-      else send.reduceOnly = "true";
-    }
+    const ps = toUpper((livePos && livePos.positionSide) || openPositionCloseChs.positionSide || "");
+    if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
+    else send.reduceOnly = "true";
     const resp = await signedOrderWrite("POST",send);
     if(!binanceWriteConfirmed(resp)) throw new Error("Unexpected Binance response.");
     openPositionCloseChs.orderId = resp && resp.orderId != null ? resp.orderId : null;
@@ -673,7 +674,7 @@
       positionSide:send.positionSide || "",
       positionGroupId:positionGroupTracker ? positionGroupTracker.positionGroupIdFor({clientOrderId:openPositionCloseChs.clientOrderId}) : null,
       roleCode:"C",
-      roleType:openPositionCloseChs.mode === "REV" ? "CHASE_REVERSE" : "CHASE_CLOSE",
+      roleType:"CHASE_CLOSE",
       owner:"CALC",
       orderId:resp && resp.orderId != null ? resp.orderId : null,
       clientOrderId:openPositionCloseChs.clientOrderId
@@ -685,20 +686,9 @@
     });
   }
   function setOpenPositionChaseStatus(message,tone,state){
-    openPositionClosePanelTone = tone === "error" ? "error" : "normal";
-    if(state && state.active){
-      openPositionClosePanelStatus = openPositionCloseChsStatusText({
-        requestedQty:state.requestedQty,
-        filledQty:state.filledQty,
-        remainingQty:state.remainingQty,
-        activePrice:state.price
-      },{
-        prefix:String(message || "Open Position CHS"),
-        validText:openPositionCloseChsTimerText(state.expiresAt ? Math.max(0,state.expiresAt - Date.now()) : null)
-      });
-    }else{
-      openPositionClosePanelStatus = String(message || "");
-    }
+    const formatted=state?formatChaseExecutionStatus(state):{message:String(message||""),tone:tone==="error"?"error":"normal"};
+    openPositionClosePanelTone = formatted.tone;
+    openPositionClosePanelStatus = formatted.message;
     const el = q("calcModuleStatus");
     if(el) el.textContent = openPositionClosePanelStatus;
     renderOpenPositionClosePanel();
@@ -764,15 +754,9 @@
         calculate();
       },
       onFinish:async state => {
-        const progress = {
-          requestedQty:state.requestedQty,
-          filledQty:state.filledQty,
-          remainingQty:state.remainingQty,
-          activePrice:state.price
-        };
         resetOpenPositionCloseChs();
         calculate();
-        setOpenPositionChaseStatus(openPositionCloseChsStatusText(progress,{prefix:state.message}),state.tone,null);
+        setOpenPositionChaseStatus(state.message,state.tone,state);
         try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_ignored){}
       }
     });
@@ -790,7 +774,7 @@
       calculate();
       return;
     }
-    await engine.cancel(reason || "Open Position CHS cancelled",{result:"cancelled"});
+    await engine.cancel(reason || "Open Position CHS cancelled",{result:"cancelled",statusCode:"cancelled"});
   }
   function hideOpenPositionClosePanel(){
     if(!openPositionCloseUi.open) return false;
@@ -814,7 +798,11 @@
       return;
     }
     if(openPositionCloseChs.active){
-      setStatus("Open Position " + openPositionCloseMode() + " is already active. Use Cancel.");
+      setStatus("Open Position CHS is already active. Use Cancel.");
+      return;
+    }
+    if(rapidFireChaseContext){
+      setStatus("Open Position close blocked while Rapid Fire is active.");
       return;
     }
     if(typeof hasKeys !== "function" || !hasKeys()){
@@ -838,52 +826,32 @@
           : "Open Position close blocked: selected lot is not executable.");
         return;
       }
-      const selectedMode=openPositionCloseMode();
-      if(selectedMode === "CHS" || selectedMode === "REV"){
-        const validOption = openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
-        openPositionCloseChs.active = true;
-        openPositionCloseChs.mode = selectedMode;
-        openPositionCloseChs.canceling = false;
-        openPositionCloseChs.symbol = String(currentSymbol());
-        openPositionCloseChs.side = preview.side === "SHORT" ? "BUY" : "SELL";
-        openPositionCloseChs.positionSide = selectedMode === "REV" ? "BOTH" : toUpper(livePos.positionSide || "");
-        openPositionCloseChs.requestedQty = preview.roundedQty;
-        openPositionCloseChs.filledQty = 0;
-        openPositionCloseChs.remainingQty = preview.roundedQty;
-        openPositionCloseChs.startedPositionQty = Math.max(0,num(livePos.qty) || 0);
-        openPositionCloseChs.distTicks = Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks) || 1));
-        openPositionCloseChs.validKey = validOption.key;
-        openPositionCloseChs.validMs = validOption.ms;
-        openPositionCloseChs.startedAt = Date.now();
-        openPositionCloseChs.expiresAt = validOption.ms == null ? 0 : (openPositionCloseChs.startedAt + validOption.ms);
-        openPositionCloseUi.open = true;
-        openPositionCloseUi.mode = selectedMode;
-        const engine = ensureOpenPositionCloseChaseEngine();
-        await engine.start({
-          label:selectedMode === "REV" ? "Open Position REV" : "Open Position CHS",
-          symbol:openPositionCloseChs.symbol,
-          quantity:preview.roundedQty,
-          expiresAt:openPositionCloseChs.expiresAt,
-          meta:{distTicks:openPositionCloseChs.distTicks,type:selectedMode === "REV" ? "otf-reverse" : "otf-close",mode:selectedMode}
-        });
-        return;
-      }
-      const send = {
-        symbol:String(currentSymbol()),
-        side:preview.side === "SHORT" ? "BUY" : "SELL",
-        type:"MARKET",
-        quantity:fmtLot(preview.roundedQty)
-      };
-      const ps = toUpper(livePos.positionSide || "");
-      if(ps === "LONG" || ps === "SHORT") send.positionSide = ps;
-      else send.reduceOnly = "true";
-      setStatus("Open Position close: sending " + send.side + " MARKET " + send.quantity + "...");
-      const resp = await signedOrderWrite("POST",send);
-      if(!binanceWriteConfirmed(resp)) throw new Error("Unexpected Binance response.");
-      resetOpenPositionCloseUi();
-      calculate();
-      setStatus("Open Position close sent: " + send.side + " MARKET " + send.quantity + ".");
-      try{ await readBinance({preserveSendPlan:true,source:"postSendRefresh"}); }catch(_e){}
+      const validOption = openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
+      openPositionCloseChs.active = true;
+      openPositionCloseChs.canceling = false;
+      openPositionCloseChs.symbol = String(currentSymbol());
+      openPositionCloseChs.side = preview.side === "SHORT" ? "BUY" : "SELL";
+      openPositionCloseChs.positionSide = toUpper(livePos.positionSide || "");
+      openPositionCloseChs.requestedQty = preview.roundedQty;
+      openPositionCloseChs.filledQty = 0;
+      openPositionCloseChs.remainingQty = preview.roundedQty;
+      openPositionCloseChs.startedPositionQty = Math.max(0,num(livePos.qty) || 0);
+      const configuredDist=num(openPositionCloseUi.chsDistTicks);
+      openPositionCloseChs.distTicks = Math.max(0,Math.round(configuredDist==null?1:configuredDist));
+      openPositionCloseChs.validKey = validOption.key;
+      openPositionCloseChs.validMs = validOption.ms;
+      openPositionCloseChs.startedAt = Date.now();
+      openPositionCloseChs.expiresAt = validOption.ms == null ? 0 : (openPositionCloseChs.startedAt + validOption.ms);
+      openPositionCloseUi.open = true;
+      const engine = ensureOpenPositionCloseChaseEngine();
+      await engine.start({
+        label:"Open Position CHS",
+        symbol:openPositionCloseChs.symbol,
+        quantity:preview.roundedQty,
+        expiresAt:openPositionCloseChs.expiresAt,
+        meta:{distTicks:openPositionCloseChs.distTicks,type:"otf-close"}
+      });
+      return;
     }catch(e){
       if(openPositionCloseChs.active && (!openPositionCloseChaseEngine || !openPositionCloseChaseEngine.isActive())) resetOpenPositionCloseChs();
       setStatus("Open Position close failed: " + (e && e.message ? e.message : String(e)));
@@ -891,6 +859,392 @@
       openPositionCloseUi.sending = false;
       renderOpenPositionClosePanel();
     }
+  }
+  function rapidFirePositionSnapshot(){
+    const position=openPositionClosePreviewPosition();
+    if(!position||!(num(position.qty!=null?position.qty:position.lot)>0)) return null;
+    return {
+      symbol:String(currentSymbol()),
+      side:String(position.side||direction).toUpperCase()==="SHORT"?"SHORT":"LONG",
+      qty:Math.abs(num(position.qty!=null?position.qty:position.lot)||0),
+      entry:num(position.entry!=null?position.entry:position.level),
+      positionSide:toUpper(position.positionSide||"")
+    };
+  }
+  function rapidFireCloseMetrics(fullFloating,fullMargin,closePercentValue){
+    const closePercent=clamp(num(closePercentValue)==null?100:num(closePercentValue),0,100);
+    const closeRatio=closePercent/100;
+    const floating=fullFloating==null?null:num(fullFloating)*closeRatio;
+    const margin=fullMargin==null?null:num(fullMargin);
+    return {
+      closePercent,
+      closeRatio,
+      floatingPl:floating,
+      floatingPlPercent:floating!=null&&margin>0?floating/margin*100:null,
+      margin
+    };
+  }
+  function rapidFireSnapshot(options){
+    const opts=options||{};
+    const position=rapidFirePositionSnapshot();
+    const fullFloating=position?currentFloatingPl():null;
+    const fullMargin=position?currentOpenPositionMargin(position):null;
+    const metrics=rapidFireCloseMetrics(fullFloating,fullMargin,opts.closePercent);
+    return {
+      symbol:String(currentSymbol()),
+      position,
+      direction:position?position.side:direction,
+      size:position?position.qty:0,
+      floatingPl:metrics.floatingPl,
+      floatingPlPercent:metrics.floatingPlPercent,
+      margin:metrics.margin,
+      closePercent:metrics.closePercent,
+      closeQty:position?position.qty*metrics.closeRatio:0,
+      active:!!rapidFireChaseContext,
+      busy:!!rapidFireChaseContext||rapidFireBreakevenBusy,
+      activeAction:rapidFireChaseContext&&rapidFireChaseContext.action||(rapidFireBreakevenBusy?"breakeven":null),
+      lastBreakeven:lastRapidFireBreakeven,
+      sharedSettings:{
+        distTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0)),
+        validKey:String(openPositionCloseUi.chsValidKey||"manual"),
+        validMs:openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey).ms
+      }
+    };
+  }
+  function rapidFireLotRules(){
+    const helper=window.BT001SymbolTradingSettings;
+    const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+    const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
+    const lotFilter=filters.find(filter=>toUpper(filter&&filter.filterType)==="LOT_SIZE")||null;
+    const stepSize=Math.max(0,num(settings&&settings.stepSize)||num(lotFilter&&lotFilter.stepSize)||0.001);
+    const minQty=Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize);
+    const maxQty=Math.max(minQty,num(lotFilter&&lotFilter.maxQty)||Number.MAX_SAFE_INTEGER);
+    const stepText=String((settings&&settings.stepSize)||(lotFilter&&lotFilter.stepSize)||stepSize);
+    const precision=(stepText.split(".")[1]||"").replace(/0+$/g,"").length;
+    return {helper,settings,stepSize,minQty,maxQty,precision};
+  }
+  function normalizeRapidFireQuantity(value,options){
+    const opts=options||{};
+    const rules=rapidFireLotRules();
+    const raw=Math.max(0,num(value)||0);
+    const scaled=opts.roundDown?Math.floor((raw+rules.stepSize*1e-9)/rules.stepSize)*rules.stepSize:raw;
+    const normalizedText=rules.helper&&typeof rules.helper.normalizeQty==="function"
+      ? rules.helper.normalizeQty(scaled,rules.settings)
+      : Number(Math.round(scaled/rules.stepSize)*rules.stepSize).toFixed(rules.precision);
+    const quantity=Math.min(rules.maxQty,Math.max(0,num(normalizedText)||0));
+    return {...rules,quantity,text:quantity.toFixed(rules.precision),executable:quantity>=rules.minQty};
+  }
+  function rapidFireOpenEntryCommission(livePos,takerRate){
+    const qty=Math.max(0,num(livePos&&livePos.qty)||0);
+    const entry=num(livePos&&livePos.entry);
+    const fallback={amount:entry>0&&qty>0?entry*qty*takerRate:null,source:"live-account-taker-rate"};
+    if(typeof openLotLinks==="undefined"||typeof fillMarkers==="undefined"||!Array.isArray(openLotLinks)||!Array.isArray(fillMarkers)) return fallback;
+    const symbol=toUpper(currentSymbol());
+    const side=toUpper(livePos&&livePos.side)==="SHORT"?"SHORT":"LONG";
+    const links=openLotLinks.filter(link=>link&&toUpper(link.symbol)===symbol&&toUpper(link.side)===side&&num(link.qty)>0);
+    let coveredQty=0;
+    let amount=0;
+    links.forEach(link=>{
+      const marker=fillMarkers.find(item=>item&&String(item.id)===String(link.entryMarkerId));
+      const linkQty=Math.max(0,num(link.qty)||0);
+      const markerQty=Math.max(0,num(marker&&marker.qty)||0);
+      const markerFee=marker&&marker.fee!=null?num(marker.fee):null;
+      if(!(linkQty>0&&markerQty>0&&markerFee!=null&&markerFee>=0)) return;
+      const allocatedQty=Math.min(linkQty,markerQty);
+      coveredQty+=allocatedQty;
+      amount+=markerFee*(allocatedQty/markerQty);
+    });
+    const tolerance=Math.max(1e-9,qty*1e-6);
+    return coveredQty+ tolerance>=qty&&amount>=0
+      ? {amount,source:"actual-open-fill-commission",coveredQty}
+      : fallback;
+  }
+  function feeAwareBreakevenStop(entryPrice,quantity,entryCommission,side,exitRate,tickSize){
+    const entry=num(entryPrice);
+    const qty=num(quantity);
+    const commission=Math.max(0,num(entryCommission)||0);
+    const rate=exitRate==null?null:num(exitRate);
+    const tick=num(tickSize);
+    const directionText=toUpper(side)==="SHORT"?"SHORT":"LONG";
+    if(!(entry>0)) throw new Error("Open-position entry price is unavailable.");
+    if(!(qty>0)) throw new Error("Open-position quantity is unavailable.");
+    if(!(rate>=0&&rate<1)) throw new Error("Binance taker commission rate is unavailable.");
+    if(!(tick>0)) throw new Error("Symbol tick size is unavailable.");
+    const raw=directionText==="LONG"
+      ? (entry*qty+commission)/(qty*(1-rate))
+      : (entry*qty-commission)/(qty*(1+rate));
+    const tickCount=directionText==="LONG"
+      ? Math.ceil(raw/tick-1e-10)
+      : Math.floor(raw/tick+1e-10);
+    const rounded=tickCount*tick;
+    if(directionText==="LONG"&&!(rounded>entry)) throw new Error("Long breakeven must be above entry.");
+    if(directionText==="SHORT"&&!(rounded<entry)) throw new Error("Short breakeven must be below entry.");
+    return {raw,rounded};
+  }
+  async function replaceMasterStopAtBreakeven(livePos,triggerPrice,off){
+    const symbol=String(currentSymbol());
+    const orderSide=livePos.side==="SHORT"?"BUY":"SELL";
+    const positionSide=toUpper(livePos.positionSide||"");
+    let snapshot=await readOpenOrdersSnapshot({off});
+    if(snapshot.algoFetchError) throw snapshot.algoFetchError;
+    const existing=findStopOrderForPosition(livePos,snapshot,true);
+    if(existing&&normalizeLevelComparable(existing.price)===normalizeLevelComparable(triggerPrice)){
+      currentStopAlgoMeta=buildAlgoOrderMeta(existing.order);
+      masterStopDraftDirty=false;
+      return {replaced:false,unchanged:true,response:null};
+    }
+    const executionContext={slReplaceState:new Map(),off};
+    if(existing&&existing.order){
+      const meta=buildAlgoOrderMeta(existing.order);
+      await runPlanWriteRow({
+        writable:true,
+        mode:"sl-cancel",
+        payload:{symbol:meta.symbol||symbol,algoId:meta.algoId,clientAlgoId:meta.clientAlgoId,meta}
+      },livePos.side,executionContext);
+      snapshot=await readOpenOrdersSnapshot({off});
+      if(snapshot.algoFetchError) throw snapshot.algoFetchError;
+      if(findStopOrderForPosition(livePos,snapshot,true)) throw new Error("Existing Master SL cancellation was not confirmed.");
+    }
+    const result=await runPlanWriteRow({
+      writable:true,
+      mode:"sl-create",
+      payload:{
+        symbol,
+        side:orderSide,
+        positionSide,
+        triggerPrice:String(triggerPrice),
+        workingType:"CONTRACT_PRICE",
+        replaceAfterCancel:false
+      }
+    },livePos.side,executionContext);
+    return {replaced:!!existing,unchanged:false,response:result&&result.response||null};
+  }
+  async function executeRapidFireBreakevenLock(){
+    if(rapidFireBreakevenBusy) return lastRapidFireBreakeven;
+    if(rapidFireChaseContext) throw new Error("A Rapid Fire action is already active.");
+    if(openPositionCloseChs.active||openPositionCloseUi.sending) throw new Error("OTF execution is active. Cancel it first.");
+    if(typeof hasKeys!=="function"||!hasKeys()) throw new Error("API keys required.");
+    rapidFireBreakevenBusy=true;
+    publishRapidFireStatus({statusCode:"breakeven",message:"Calculating B.E....",tone:"normal"});
+    try{
+      const gateway=window.BT001_BINANCE_TRADING;
+      if(!gateway||typeof gateway.commissionRate!=="function") throw new Error("Binance commission-rate service is unavailable.");
+      const symbol=String(currentSymbol());
+      const off=typeof timeOffset==="function"?await timeOffset():0;
+      const settingsApi=window.BT001SymbolTradingSettings;
+      const [live,commission,settings]=await Promise.all([
+        signedPosition({off}),
+        gateway.commissionRate(symbol),
+        settingsApi&&typeof settingsApi.get==="function"?settingsApi.get(symbol):Promise.resolve(null)
+      ]);
+      if(!live||!(num(live.qty)>0)) throw new Error("No open position.");
+      const takerRate=commission&&commission.takerCommissionRate!=null?num(commission.takerCommissionRate):null;
+      if(!(takerRate>=0&&takerRate<1)) throw new Error("Binance taker commission rate is unavailable.");
+      const tickSize=num(settings&&settings.tickSize)||symbolTickSizeValue();
+      const entryFee=rapidFireOpenEntryCommission(live,takerRate);
+      const breakeven=feeAwareBreakevenStop(live.entry,live.qty,entryFee.amount,live.side,takerRate,tickSize);
+      const helper=window.BT001SymbolTradingSettings;
+      const normalized=helper&&typeof helper.normalizePrice==="function"
+        ? helper.normalizePrice(breakeven.rounded,settings)
+        : String(Number(breakeven.rounded.toFixed(8)));
+      const level=num(normalized);
+      if(!(level>0)) throw new Error("Breakeven price normalization failed.");
+      const stopInput=q("calcModuleStopLevel");
+      if(!stopInput) throw new Error("Calculator Master SL field is unavailable.");
+      stopInput.value=String(normalized);
+      masterStopMarkedForDeletion=false;
+      masterStopDraftDirty=true;
+      lastStopEdit="level";
+      syncStopFromLevel(live.entry);
+      markSendPlanStale("Master SL changed by Rapid Fire B.E.");
+      calculate();
+      const write=await replaceMasterStopAtBreakeven(live,level,off);
+      lastRapidFireBreakeven=Object.freeze({
+        at:new Date().toISOString(),symbol,side:live.side,entry:live.entry,quantity:live.qty,
+        makerCommissionRate:num(commission&&commission.makerCommissionRate),
+        takerCommissionRate:takerRate,
+        entryCommission:entryFee.amount,entryFeeSource:entryFee.source,
+        entryEffectiveRate:entryFee.amount/(live.entry*live.qty),exitFeeRate:takerRate,
+        rawPrice:breakeven.raw,stopPrice:level,orderType:"STOP_MARKET",
+        replaced:write.replaced,unchanged:write.unchanged
+      });
+      publishRapidFireStatus({statusCode:"breakeven",message:"B.E. locked — "+String(normalized),tone:"normal"});
+      try{await readBinance({preserveSendPlan:true,source:"postSendRefresh",off});}catch(_ignored){}
+      return lastRapidFireBreakeven;
+    }catch(error){
+      publishRapidFireStatus({statusCode:"breakeven",message:"B.E. failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+      throw error;
+    }finally{
+      rapidFireBreakevenBusy=false;
+    }
+  }
+  function publishRapidFireStatus(state){
+    const formatted=formatChaseExecutionStatus(state||{});
+    const detail=Object.freeze({...formatted,state:state||null,snapshot:rapidFireSnapshot()});
+    rapidFireStatusListeners.forEach(listener=>{try{listener(detail);}catch(_e){}});
+    try{window.dispatchEvent(new CustomEvent("bt001:rapid-fire-status",{detail}));}catch(_e){}
+    return detail;
+  }
+  function freshRapidFireClientId(){
+    return ("RAPID_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7)).slice(0,36);
+  }
+  function rapidFireIdentityParams(identity){
+    const send={symbol:String(identity&&identity.symbol||currentSymbol())};
+    if(identity&&identity.orderId!=null) send.orderId=String(identity.orderId);
+    else if(identity&&identity.clientOrderId) send.origClientOrderId=String(identity.clientOrderId);
+    return send;
+  }
+  function ensureRapidFireChaseEngine(){
+    if(rapidFireChaseEngine) return rapidFireChaseEngine;
+    const factory=window.CalculatorChaseEngine;
+    if(!factory||typeof factory.create!=="function") throw new Error("Shared chase engine is unavailable.");
+    rapidFireChaseEngine=factory.create({
+      label:"Rapid Fire",
+      pollMs:OPEN_POSITION_CLOSE_CHS_POLL_MS,
+      getTopOfBook:()=>{
+        const hub=window.PUBLIC_MARKET_DATA_HUB;
+        return hub&&typeof hub.getTopOfBook==="function"?hub.getTopOfBook():null;
+      },
+      waitForTopOfBook:options=>{
+        const hub=window.PUBLIC_MARKET_DATA_HUB;
+        return hub&&typeof hub.ensureTopOfBook==="function"?hub.ensureTopOfBook(options):Promise.resolve(null);
+      },
+      firstBookTimeoutMs:3000,
+      priceFor:(top,state)=>rapidFireChaseContext?normalizedChasePrice(rapidFireChaseContext.orderSide,top,state&&state.meta?state.meta.distTicks:rapidFireChaseContext.distTicks):"",
+      samePrice:(left,right)=>normalizeLevelComparable(left)===normalizeLevelComparable(right),
+      submit:async ({quantity,price})=>{
+        if(!rapidFireChaseContext) throw new Error("Rapid Fire context is unavailable.");
+        const clientId=freshRapidFireClientId();
+        const normalized=normalizeRapidFireQuantity(quantity);
+        const send={
+          symbol:rapidFireChaseContext.symbol,
+          side:rapidFireChaseContext.orderSide,
+          type:"LIMIT",
+          timeInForce:"GTX",
+          quantity:normalized.text,
+          price:String(price),
+          newClientOrderId:clientId
+        };
+        if(rapidFireChaseContext.positionSide) send.positionSide=rapidFireChaseContext.positionSide;
+        if(rapidFireChaseContext.reduceOnly!=null) send.reduceOnly=rapidFireChaseContext.reduceOnly?"true":"false";
+        const response=await signedOrderWrite("POST",send);
+        if(!binanceWriteConfirmed(response)) throw new Error("Unexpected Binance response.");
+        registerTrackedOrderMeta({
+          symbol:send.symbol,side:send.side,positionSide:send.positionSide||"",roleCode:"C",
+          roleType:rapidFireChaseContext.roleType,owner:"RAPID_FIRE",
+          orderId:response&&response.orderId!=null?response.orderId:null,
+          clientOrderId:String(response&&response.clientOrderId||clientId)
+        });
+        return Object.assign({clientOrderId:clientId,price:send.price},response||{});
+      },
+      amend:async ({identity,quantity,price})=>{
+        if(!rapidFireChaseContext) throw new Error("Rapid Fire context is unavailable.");
+        const send=rapidFireIdentityParams(identity);
+        send.side=rapidFireChaseContext.orderSide;
+        send.quantity=normalizeRapidFireQuantity(quantity).text;
+        send.price=String(price);
+        return signedOrderWrite("PUT",send);
+      },
+      query:async identity=>{
+        try{return await signedOrderWrite("GET",rapidFireIdentityParams(identity));}
+        catch(error){if(Number(error&&error.code)===-2013)return null;throw error;}
+      },
+      cancel:async identity=>signedOrderWrite("DELETE",rapidFireIdentityParams(identity)),
+      verifyCanceled:async identity=>{
+        const snapshot=await readOpenOrdersSnapshot();
+        if(snapshot.normalFetchError) throw snapshot.normalFetchError;
+        return !findOpenPositionCloseChsOrder(snapshot,identity);
+      },
+      onUpdate:state=>publishRapidFireStatus(state),
+      onFinish:async state=>{
+        rapidFireChaseContext=null;
+        setBookTickerVisibilityConsumer("rapid-fire-action",false);
+        publishRapidFireStatus(state);
+        calculate();
+        try{await readBinance({preserveSendPlan:true,source:"postSendRefresh"});}catch(_ignored){}
+      }
+    });
+    return rapidFireChaseEngine;
+  }
+  async function executeRapidFireChase(config){
+    const input=config||{};
+    const action=String(input.action||"add").toLowerCase();
+    if(rapidFireChaseContext) throw new Error("A Rapid Fire action is already active.");
+    if(openPositionCloseChs.active||openPositionCloseUi.sending) throw new Error("OTF execution is active. Cancel it first.");
+    if(typeof hasKeys!=="function"||!hasKeys()) throw new Error("API keys required.");
+    const startingContext={starting:true,action};
+    rapidFireChaseContext=startingContext;
+    try{
+      const live=await signedPosition();
+      if(rapidFireChaseContext!==startingContext) return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
+      const hasPosition=!!(live&&num(live.qty)>0);
+      const liveSide=hasPosition&&String(live.side).toUpperCase()==="SHORT"?"SHORT":"LONG";
+      const selectedDirection=hasPosition?liveSide:(String(input.direction).toUpperCase()==="SHORT"?"SHORT":"LONG");
+      if(action!=="add"&&!hasPosition) throw new Error("No open position.");
+      let requested=0;
+      let orderSide=selectedDirection==="SHORT"?"SELL":"BUY";
+      let positionSide="";
+      let reduceOnly=null;
+      let roleType="CHASE_ADD";
+      if(action==="double") requested=Math.abs(num(live.qty)||0);
+      else if(action==="close"){
+        requested=Math.abs(num(live.qty)||0)*clamp(num(input.percent)||0,0,100)/100;
+        orderSide=liveSide==="SHORT"?"BUY":"SELL";
+        roleType="CHASE_CLOSE";
+      }else if(action==="reverse"){
+        const reverse=openPositionReverseOrderQuantity(Math.abs(num(live.qty)||0),input.percent);
+        requested=reverse.requested;
+        orderSide=liveSide==="SHORT"?"BUY":"SELL";
+        positionSide="BOTH";
+        reduceOnly=false;
+        roleType="CHASE_REVERSE";
+      }else requested=num(input.quantity)||0;
+      const normalized=normalizeRapidFireQuantity(requested,{roundDown:action==="close"});
+      if(!normalized.executable) throw new Error("Lot size is below the symbol minimum of "+normalized.minQty+".");
+      if(action==="close"&&normalized.quantity>Math.abs(num(live.qty)||0)+1e-9) throw new Error("Close quantity exceeds the open position.");
+      if(action!=="reverse"){
+        const livePositionSide=toUpper(live&&live.positionSide||"");
+        const helper=window.BT001SymbolTradingSettings;
+        const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+        const hedgeMode=toUpper(settings&&settings.positionMode)==="HEDGE";
+        if(livePositionSide==="LONG"||livePositionSide==="SHORT") positionSide=livePositionSide;
+        else if(hedgeMode) positionSide=selectedDirection;
+        if(action==="close"&&!positionSide) reduceOnly=true;
+      }
+      const validOption=openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
+      const startedAt=Date.now();
+      rapidFireChaseContext={
+        action,symbol:String(currentSymbol()),direction:selectedDirection,orderSide,positionSide,reduceOnly,
+        roleType,distTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0)),
+        requestedQty:normalized.quantity,startedAt,expiresAt:validOption.ms==null?0:startedAt+validOption.ms
+      };
+      setBookTickerVisibilityConsumer("rapid-fire-action",true);
+      warmTopOfBook();
+      await ensureRapidFireChaseEngine().start({
+        label:"Rapid Fire "+action,
+        symbol:rapidFireChaseContext.symbol,
+        quantity:normalized.quantity,
+        expiresAt:rapidFireChaseContext.expiresAt,
+        meta:{action,distTicks:rapidFireChaseContext.distTicks,validKey:validOption.key}
+      });
+      return rapidFireChaseEngine.state();
+    }catch(error){
+      rapidFireChaseContext=null;
+      setBookTickerVisibilityConsumer("rapid-fire-action",false);
+      publishRapidFireStatus({active:false,statusCode:"stopped",tone:"error",message:error&&error.message?error.message:String(error)});
+      throw error;
+    }
+  }
+  async function cancelRapidFireChase(){
+    if(!rapidFireChaseEngine||!rapidFireChaseEngine.isActive()){
+      if(rapidFireChaseContext){
+        rapidFireChaseContext=null;
+        setBookTickerVisibilityConsumer("rapid-fire-action",false);
+        publishRapidFireStatus({active:false,result:"cancelled",statusCode:"cancelled"});
+      }
+      return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
+    }
+    return rapidFireChaseEngine.cancel("Rapid Fire cancelled",{result:"cancelled",statusCode:"cancelled"});
   }
   function moneyColor(v){
     const n = num(v);
@@ -1206,16 +1560,34 @@
       return true;
     }
   }
+  function effectiveOrdersVisible(){
+    return !!ordersVisible||ordersVisibilityConsumers.size>0;
+  }
+  function renderOrdersVisibleState(){
+    const effective=effectiveOrdersVisible();
+    const btn=q("calcModuleOrdersToggle");
+    if(btn){
+      btn.classList.toggle("is-on",effective);
+      btn.classList.toggle("is-off",!effective);
+      btn.classList.toggle("is-forced",!ordersVisible&&effective);
+      btn.setAttribute("aria-pressed",effective?"true":"false");
+      btn.title=!ordersVisible&&effective?"Orders (temporarily shown by Rapid Fire)":"Orders";
+    }
+    try{if(typeof draw==="function")draw();}catch(_e){}
+  }
   function saveOrdersVisible(next){
     ordersVisible = !!next;
     try{ localStorage.setItem(ORDERS_VISIBLE_KEY,ordersVisible ? "1" : "0"); }catch(_e){}
-    const btn = q("calcModuleOrdersToggle");
-    if(btn){
-      btn.classList.toggle("is-on",ordersVisible);
-      btn.classList.toggle("is-off",!ordersVisible);
-      btn.setAttribute("aria-pressed",ordersVisible ? "true" : "false");
-    }
-    try{ if(typeof draw === "function") draw(); }catch(_e){}
+    renderOrdersVisibleState();
+  }
+  function setOrdersVisibilityConsumer(consumerId,active){
+    const key=String(consumerId||"").trim();
+    if(!key)return effectiveOrdersVisible();
+    if(active===true)ordersVisibilityConsumers.add(key);
+    else ordersVisibilityConsumers.delete(key);
+    renderOrdersVisibleState();
+    if(effectiveOrdersVisible())ensureCalculatorRowsHydratedForOrders().catch(()=>{});
+    return effectiveOrdersVisible();
   }
   function hasReliableCalculatorPrivateState(){
     const cache = window.BINANCE_OPEN_ORDERS_CACHE;
@@ -1317,7 +1689,7 @@
     }
   }
   function toggleOtfEnabled(){
-    if(!otfEnabled && !ordersVisible){
+    if(!otfEnabled && !effectiveOrdersVisible()){
       saveOtfEnabled(false);
       setStatus("Turn Orders ON before enabling OTF.");
       return;
@@ -1529,7 +1901,7 @@
     }
     btn.onclick = toggleOrdersVisible;
     saveOrdersVisible(ordersVisible);
-    if(ordersVisible) ensureCalculatorRowsHydratedForOrders().catch(() => {});
+    if(effectiveOrdersVisible()) ensureCalculatorRowsHydratedForOrders().catch(() => {});
     let otfBtn = q("calcModuleOtfToggle");
     if(!otfBtn){
       otfBtn = document.createElement("button");
@@ -1581,7 +1953,7 @@
       <div class="calc-module-body" id="calcModuleBody">
         <div class="calc-module-panel">
           <div class="calc-module-section-title is-toggle calc-module-table-title" id="calcModuleEntriesTitle">
-            <span class="calc-module-section-main">Entries <button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></span>
+            <span class="calc-module-section-main"><button class="calc-module-dir is-long" id="calcModuleDir" type="button" title="Click to switch Long/Short">LONG</button><span class="calc-module-title-sum" id="calcModuleEntrySum">0.000</span></span>
             <span class="calc-module-section-actions"><button class="calc-module-add calc-module-header-add" id="calcModuleAddEntry" type="button">Add Entry</button><span class="calc-module-collapsed-summary"><span id="calcModuleCollapsedEntryAvg">-</span><span id="calcModuleCollapsedEntryFloating">-</span></span><span class="calc-module-caret" id="calcModuleEntriesCaret">▾</span></span>
           </div>
           <div id="calcModuleEntriesBody">
@@ -1761,6 +2133,22 @@
       found = true;
     });
     return found ? total : null;
+  }
+  function currentOpenPositionMargin(positionLike){
+    const margins=currentPositionBoxesForCalculator()
+      .map(box=>typeof openBoxMargin==="function"?num(openBoxMargin(box)):null)
+      .filter(value=>value!=null&&value>0);
+    if(margins.length) return margins.reduce((sum,value)=>sum+value,0);
+    const position=positionLike||openPositionClosePreviewPosition()||{};
+    const qty=Math.max(0,num(position.qty!=null?position.qty:position.lot)||0);
+    const entry=num(position.entry!=null?position.entry:position.level);
+    const leverage=currentCalculatorLeverage();
+    return qty>0&&entry>0&&leverage>0?entry*qty/leverage:null;
+  }
+  function currentFloatingPlPercent(positionLike){
+    const floating=currentFloatingPl();
+    const margin=currentOpenPositionMargin(positionLike);
+    return floating==null||!(margin>0)?null:floating/margin*100;
   }
   function currentCalculatorLeverage(){
     const box = currentPositionBoxesForCalculator().find(item => num(item && item.leverage) > 0);
@@ -2080,6 +2468,13 @@
   }
   function isOpenPositionRow(row){
     return !!(row && row.dataset && row.dataset.openPosition === "1");
+  }
+  function pinOpenPositionEntryRow(){
+    const container=q("calcModuleEntryRows");
+    if(!container) return null;
+    const openRow=rows("calcModuleEntryRows").find(isOpenPositionRow)||null;
+    if(openRow&&container.firstElementChild!==openRow) container.insertBefore(openRow,container.firstElementChild);
+    return openRow;
   }
   function snapshotManualRows(containerId){
     return rows(containerId)
@@ -2874,6 +3269,7 @@
     });
   }
   function refreshEntryRowNumbers(){
+    pinOpenPositionEntryRow();
     let index = 0;
     rows("calcModuleEntryRows").forEach(row => {
       const idx = row.querySelector(".calc-module-entry-index");
@@ -2985,6 +3381,7 @@
       calculate();
     },false);
     container.appendChild(row);
+    if(isEntry) pinOpenPositionEntryRow();
     refreshEntryRowVisualState(row);
     refreshEntryRowNumbers();
     refreshPartialStopRowNumbers();
@@ -3019,6 +3416,7 @@
       );
     });
     retainedOriginalRows.forEach(row=>container.appendChild(row));
+    if(containerId==="calcModuleEntryRows") pinOpenPositionEntryRow();
   }
   function clearCalculatorLocal(){
     markSendPlanStale("Calculator cleared after preflight.");
@@ -4249,7 +4647,8 @@
     overlayLevelBoxes = [];
     const calculatorOpen = calculatorWindowVisible();
     if(calculatorOpen && !levelsVisible) return;
-    if(!calculatorOpen && !ordersVisible) return;
+    const showOrders=effectiveOrdersVisible();
+    if(!calculatorOpen && !showOrders) return;
     if(!canvas || !ctx) return;
     const state = currentPriceLineState || {};
     const top = num(state.top);
@@ -4267,7 +4666,7 @@
       overlayRows.partialStops || [],
       overlayRows.newAverage ? [overlayRows.newAverage] : []
     )
-      .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && ordersVisible)))
+      .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && showOrders)))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
         const text = item.openPosition
@@ -4337,7 +4736,7 @@
       const y = cy - labelH / 2;
       const collides = placed.some(prev => normalX < prev.x + prev.w && normalX + w > prev.x && y < prev.y + prev.h && y + labelH > prev.y);
       const hiddenByStandardRule = y < top || y + labelH > chartBottom || collides;
-      const ordersOpenPositionException = !calculatorOpen && ordersVisible && !!item.openPosition && hiddenByStandardRule;
+      const ordersOpenPositionException = !calculatorOpen && showOrders && !!item.openPosition && hiddenByStandardRule;
       if(hiddenByStandardRule && !ordersOpenPositionException) return;
       const x = ordersOpenPositionException
         ? clamp(normalX - w * 1.2,left + 2,chartRight - w - 2)
@@ -7728,7 +8127,29 @@
       getStopMath(){
         return calculateStopMath(readEntry(),num(q("calcModuleStopLevel")?.value),readPartialStops());
       },
-      reconcileOpenPositionChange:reconcileOpenPositionRow
+      reconcileOpenPositionChange:reconcileOpenPositionRow,
+      getOtfPreferences(){
+        return {percent:openPositionCloseUi.percent,chsDistTicks:openPositionCloseUi.chsDistTicks,chsValidKey:openPositionCloseUi.chsValidKey};
+      },
+      rapidFire:Object.freeze({
+        snapshot:rapidFireSnapshot,
+        lotRules:rapidFireLotRules,
+        normalizeQuantity:normalizeRapidFireQuantity,
+        execute:executeRapidFireChase,
+        breakevenLock:executeRapidFireBreakevenLock,
+        cancel:cancelRapidFireChase,
+        isActive:()=>!!rapidFireChaseContext,
+        setVisible(active){
+          setBookTickerVisibilityConsumer("rapid-fire",active===true);
+          setOrdersVisibilityConsumer("rapid-fire",active===true);
+          if(active) warmTopOfBook();
+        },
+        subscribe(listener){
+          if(typeof listener!=="function") return ()=>{};
+          rapidFireStatusListeners.add(listener);
+          return ()=>rapidFireStatusListeners.delete(listener);
+        }
+      })
     };
     if(!window.__calculatorOpenPositionReconcileBound){
       window.__calculatorOpenPositionReconcileBound = true;

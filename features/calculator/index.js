@@ -37,6 +37,7 @@
         await loadScript("features/calculator/application/chaseEngine.js");
         await loadScript("features/calculator/infrastructure/storageAdapter.js");
         await loadScript("features/calculator/presentation/calculatorModule.js");
+        await loadScript("features/rapid-fire/rapidFireModule.js");
       }catch(error){
         console.error("Calculator feature bootstrap failed.",error);
       }

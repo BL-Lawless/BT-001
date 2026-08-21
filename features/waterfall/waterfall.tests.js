@@ -15,6 +15,10 @@ assert(wfSource.includes('const MODULE = "BT001_WATERFALL_WINDOW_V1";'),"module 
 assert(wfSource.includes("window.__bt001WaterfallWindowInstalled"),"install guard must be unchanged");
 assert(wfSource.includes("window.BT001_WATERFALL_WINDOW = {"),"external export must be unchanged");
 assert(wfSource.includes("version:MODULE,show,hide,render,"),"external export shape (version/show/hide/render) must be unchanged");
+assert(wfSource.includes("positionClosed:notifyPositionClosed"),"WF must expose the canonical full-position-close refresh hook");
+assert(source.includes("window.BT001_WATERFALL_WINDOW.positionClosed(detail)"),"the authoritative closed transition must directly notify WF");
+assert(wfSource.includes("closeSyncPending:true")||wfSource.includes("closeSyncPending = true"),"WF close refreshes must queue signals received while another refresh is pending");
+assert(wfSource.includes("while(wfSyncState.closeRetry < 4)"),"WF must retain a bounded multi-attempt close refresh window");
 assert(wfSource.includes("_selfTest:runWfCrosshairSelfTests,"),"external export must still expose _selfTest");
 assert(wfSource.includes("_diagnostics:() => {"),"external export must still expose _diagnostics");
 assert(source.includes("window.BT001_WATERFALL_WINDOW && typeof window.BT001_WATERFALL_WINDOW.render === \"function\""),"Patch 36's call into WF must remain unmodified in main.js");

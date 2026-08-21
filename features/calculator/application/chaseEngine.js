@@ -105,15 +105,16 @@
     }
     async function submitFresh(top,recovery){
       if(!run) return;
+      run.everReceivedBook = !!usableBook(top) || run.everReceivedBook;
       const qty = remaining();
-      if(!(qty > 0)) return finish(run.label + " filled","normal",{result:"filled"});
+      if(!(qty > 0)) return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
       const price = desiredPrice(top);
       if(!price){
-        update(run.label + " waiting for a valid book price","error");
+        update(run.label + " waiting for a valid book price","error",{statusCode:"stale"});
         schedule();
         return;
       }
-      update(recovery ? "Order cancelled by exchange (price crossed) — resubmitting GTX" : run.label + " submitting GTX",recovery ? "error" : "normal");
+      update(recovery ? "Order cancelled by exchange (price crossed) — resubmitting GTX" : run.label + " submitting GTX",recovery ? "error" : "normal",{statusCode:recovery?"repricing":"chasing"});
       try{
         const response = await opts.submit({quantity:qty,price,state:snapshot(),recovery:!!recovery});
         if(!run) return;
@@ -122,10 +123,10 @@
         run.price = String((response && response.price) || price);
         run.pendingAmend = false;
         run.needsSubmit = false;
-        update(run.label + " chasing");
+        update(run.label + " chasing","normal",{statusCode:"chasing"});
       }catch(error){
         if(!run) return;
-        update(run.label + " GTX rejected — retrying safely: " + (error && error.message ? error.message : String(error)),"error");
+        update(run.label + " GTX rejected — retrying safely: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
       }
       schedule();
     }
@@ -134,11 +135,11 @@
       if(order) applyOrder(order);
       carryCurrentFill();
       run.pendingAmend = false;
-      if(!(remaining() > 0)) return finish(run.label + " filled","normal",{result:"filled"});
+      if(!(remaining() > 0)) return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
       const currentBook = book();
       if(!currentBook){
         run.needsSubmit = true;
-        update("Book data stale — chase paused","error",{reason:"stale-book"});
+        update("Book data stale — chase paused","error",{reason:"stale-book",statusCode:"stale"});
         schedule();
         return;
       }
@@ -162,7 +163,8 @@
         }
         if(run.expiresAt && Date.now() >= run.expiresAt){
           busy = false;
-          await cancel(run.label + " expired — remaining qty cancelled",{result:"expired"});
+          const noPrice=!run.everReceivedBook;
+          await cancel(noPrice?run.label + " expired — no book data received":run.label + " expired — remaining qty cancelled",noPrice?{result:"no-price",statusCode:"no-price"}:{result:"expired",statusCode:"expired"});
           return;
         }
         let rawBook = bookState();
@@ -172,25 +174,26 @@
             const hasData = !!(rawBook && (rawBook.hasData === true || rawBook.state === "stale"));
             if(!hasData && !run.firstBookWaitCompleted && typeof opts.waitForTopOfBook === "function"){
               run.firstBookWaitCompleted = true;
-              update("Waiting for book data...","normal",{reason:"waiting-book"});
+              update("Waiting for book data...","normal",{reason:"waiting-book",statusCode:"waiting"});
               try{ rawBook = await opts.waitForTopOfBook({timeoutMs:Number(opts.firstBookTimeoutMs) || 3000}); }
               catch(_ignored){ rawBook = null; }
               if(!run) return;
               if(run.expiresAt && Date.now() >= run.expiresAt){
                 busy = false;
-                await cancel(run.label + " expired — no book data received",{result:"expired"});
+                await cancel(run.label + " expired — no book data received",{result:"no-price",statusCode:"no-price"});
                 return;
               }
               top = usableBook(rawBook);
               if(top){
+                run.everReceivedBook = true;
                 await submitFresh(top,run.recovering);
                 run.recovering = false;
                 return;
               }
-              update("Book data unavailable — chase paused","error",{reason:"missing-book"});
+              update("Book data unavailable — chase paused","normal",{reason:"missing-book",statusCode:"waiting"});
               return;
             }
-            update(hasData ? "Book data stale — chase paused" : "Book data unavailable — chase paused","error",{reason:hasData ? "stale-book" : "missing-book"});
+            update(hasData ? "Book data stale — chase paused" : "Book data unavailable — chase paused",hasData?"error":"normal",{reason:hasData ? "stale-book" : "missing-book",statusCode:hasData?"stale":"waiting"});
             return;
           }
           await submitFresh(top,run.recovering);
@@ -201,14 +204,14 @@
         try{
           order = await queryCurrent();
         }catch(error){
-          update(run.label + " status check failed — chase paused: " + (error && error.message ? error.message : String(error)),"error");
+          update(run.label + " status check failed — chase paused: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
           return;
         }
         if(!run) return;
         if(order) applyOrder(order);
         const status = upper(order && order.status);
         if(status === "FILLED" || !(remaining() > 0)){
-          await finish(run.label + " filled","normal",{result:"filled"});
+          await finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
           return;
         }
         if(!order || CANCELED.has(status)){
@@ -216,25 +219,26 @@
             await recoverCrossing(top,order);
             return;
           }
-          await finish(run.label + " inactive — remaining qty not chased","error",{result:"inactive"});
+          await finish(run.label + " inactive — remaining qty not chased","error",{result:"inactive",statusCode:"stopped"});
           return;
         }
         if(run.pendingAmend) run.pendingAmend = false;
         if(status && !ACTIVE.has(status)){
-          await finish(run.label + " stopped: " + status,"error",{result:"inactive"});
+          await finish(run.label + " stopped: " + status,"error",{result:"inactive",statusCode:"stopped"});
           return;
         }
         if(!top){
-          update("Book data stale — chase paused","error",{reason:"stale-book"});
+          update("Book data stale — chase paused","error",{reason:"stale-book",statusCode:"stale"});
           return;
         }
+        run.everReceivedBook = true;
         const price = desiredPrice(top);
         if(!price){
-          update(run.label + " waiting for a valid book price","error");
+          update(run.label + " waiting for a valid book price","error",{statusCode:"stale"});
           return;
         }
         if(samePrice(run.price,price)){
-          update(run.label + " chasing");
+          update(run.label + " chasing","normal",{statusCode:"chasing"});
           return;
         }
         run.pendingAmend = true;
@@ -254,7 +258,7 @@
             return;
           }
           run.price = String((response && response.price) || price);
-          update(run.label + " chasing");
+          update(run.label + " chasing","normal",{statusCode:"chasing"});
         }catch(error){
           if(!run) return;
           let checked = null;
@@ -265,7 +269,7 @@
           }
           applyOrder(checked);
           run.pendingAmend = false;
-          update(run.label + " amend rejected — chase paused: " + (error && error.message ? error.message : String(error)),"error");
+          update(run.label + " amend rejected — chase paused: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
         }
       }finally{
         busy = false;
@@ -293,11 +297,12 @@
         needsSubmit:true,
         recovering:false,
         firstBookWaitCompleted:false,
+        everReceivedBook:false,
         canceling:false,
         cancelIntent:null,
         meta:input.meta || null
       };
-      update(run.label + " starting");
+      update(run.label + " starting","normal",{statusCode:"chasing"});
       await tick();
       return snapshot();
     }
@@ -308,7 +313,7 @@
       run.cancelIntent = {reason:cancelReason,extra:extra || null};
       clearTimer();
       run.canceling = true;
-      update(reason || run.label + " canceling");
+      update(reason || run.label + " canceling","normal",{statusCode:"canceling"});
       const id = {symbol:run.symbol,orderId:run.orderId,clientOrderId:run.clientOrderId};
       if(id.orderId == null && !id.clientOrderId) return finish(cancelReason,"normal",extra);
       try{
@@ -321,12 +326,12 @@
         if(finalOrder) applyOrder(finalOrder);
         const confirmed = await opts.verifyCanceled(id,snapshot());
         if(!confirmed) throw new Error("cancel was not confirmed by the live open-orders snapshot");
-        if(upper(finalOrder && finalOrder.status) === "FILLED") return finish(run.label + " filled","normal",{result:"filled"});
-        return finish(cancelReason,"normal",extra);
+        if(upper(finalOrder && finalOrder.status) === "FILLED") return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
+        return finish(cancelReason,"normal",Object.assign({statusCode:"cancelled"},extra||{}));
       }catch(error){
         if(!run) return Object.freeze({active:false});
         run.canceling = false;
-        update(run.label + " cancel not confirmed — chase remains locked: " + (error && error.message ? error.message : String(error)),"error");
+        update(run.label + " cancel not confirmed — chase remains locked: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
         schedule();
         return snapshot();
       }
