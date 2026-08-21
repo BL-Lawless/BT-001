@@ -17362,16 +17362,15 @@ BT001LoggingWorkerMain();
 /* bundled: main-account-settings */
 (()=>{
 "use strict";
-const $=id=>document.getElementById(id),STORE="btc_futures_chart_v12_api_nickname_main",FUTURES_BASE="https://fapi.binance.com";let offset={value:0,at:0},lastSync=0;
+const $=id=>document.getElementById(id),STORE="btc_futures_chart_v12_api_nickname_main",BASE="https://fapi.binance.com";let clock={value:0,at:0};
 const credentials=()=>({key:$("apiKey")?.value.trim()||"",secret:$("apiSecret")?.value.trim()||""});
 const nickname=()=>{try{return localStorage.getItem(STORE)||"Main"}catch(_e){return "Main"}};
 async function hmac(secret,message){const enc=new TextEncoder(),key=await crypto.subtle.importKey("raw",enc.encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]),sig=await crypto.subtle.sign("HMAC",key,enc.encode(message));return [...new Uint8Array(sig)].map(v=>v.toString(16).padStart(2,"0")).join("")}
-async function timeOffset(){if(Date.now()-offset.at<30000)return offset.value;const data=await window.restService.get(FUTURES_BASE+"/fapi/v1/time");offset={value:Number(data.serverTime)-Date.now(),at:Date.now()};return offset.value}
-async function get(path,params={}){const c=credentials();if(!c.key||!c.secret)throw new Error("API key and secret are not configured.");const q=new URLSearchParams({...params,recvWindow:"5000",timestamp:String(Date.now()+await timeOffset())}).toString(),sig=await hmac(c.secret,q);return window.restService.requestJson(FUTURES_BASE+path+"?"+q+"&signature="+sig,{method:"GET",cache:"no-store",headers:{"X-MBX-APIKEY":c.key}})}
-const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-async function openStatus(){const win=$("apiAccountStatusWindow"),content=$("apiAccountStatusContent"),title=$("apiAccountStatusTitle"),sub=$("apiAccountStatusSubtitle");if(!win||!content)return;title.textContent=nickname()+" — Binance Account Status";sub.textContent="Main account";content.textContent="Reading Binance account status…";win.classList.remove("hidden");try{const account=await get("/fapi/v2/account");lastSync=Date.now();content.innerHTML='<div class="api-capability-grid"><div class="api-capability-row"><span class="api-capability-label">Last successful sync</span><span class="api-capability-value">'+esc(new Date(lastSync).toLocaleString())+'</span></div><div class="api-capability-row"><span class="api-capability-label">Futures reachable</span><span class="api-capability-value">Yes</span></div><div class="api-capability-row"><span class="api-capability-label">Can trade</span><span class="api-capability-value">'+esc(account.canTrade===true?"Yes":"No")+'</span></div></div>'}catch(error){content.textContent=error?.message||String(error)}}
-function bind(){const name=$("apiNicknameMain"),read=$("readBinanceAccountMain"),close=$("closeApiAccountStatus");if(name){name.value=nickname();name.addEventListener("change",()=>{try{localStorage.setItem(STORE,name.value.trim()||"Main")}catch(_e){}})}read?.addEventListener("click",openStatus);close?.addEventListener("click",()=>$("apiAccountStatusWindow")?.classList.add("hidden"));}
-bind();
+async function offset(){if(Date.now()-clock.at<30000)return clock.value;const data=await window.restService.get(BASE+"/fapi/v1/time");clock={value:Number(data.serverTime)-Date.now(),at:Date.now()};return clock.value}
+async function get(path){const c=credentials();if(!c.key||!c.secret)throw new Error("API key and secret are not configured.");const q=new URLSearchParams({recvWindow:"5000",timestamp:String(Date.now()+await offset())}).toString(),signature=await hmac(c.secret,q);return window.restService.requestJson(BASE+path+"?"+q+"&signature="+signature,{method:"GET",cache:"no-store",headers:{"X-MBX-APIKEY":c.key}})}
+const esc=value=>String(value??"").replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+async function open(){const panel=$("apiAccountStatusWindow"),content=$("apiAccountStatusContent");if(!panel||!content)return;$("apiAccountStatusTitle").textContent=nickname()+" — Binance Account Status";$("apiAccountStatusSubtitle").textContent="Main account";content.textContent="Reading Binance account status…";panel.classList.remove("hidden");try{const account=await get("/fapi/v2/account");content.innerHTML='<div class="api-capability-grid"><div class="api-capability-row"><span class="api-capability-label">Last successful sync</span><span class="api-capability-value">'+esc(new Date().toLocaleString())+'</span></div><div class="api-capability-row"><span class="api-capability-label">Futures reachable</span><span class="api-capability-value">Yes</span></div><div class="api-capability-row"><span class="api-capability-label">Can trade</span><span class="api-capability-value">'+esc(account.canTrade===true?"Yes":"No")+'</span></div></div>'}catch(error){content.textContent=error?.message||String(error)}}
+const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventListener("change",()=>{try{localStorage.setItem(STORE,name.value.trim()||"Main")}catch(_e){}})}$("readBinanceAccountMain")?.addEventListener("click",open);$("closeApiAccountStatus")?.addEventListener("click",()=>$("apiAccountStatusWindow")?.classList.add("hidden"));
 })();
 </script>
 <script>
@@ -19064,8 +19063,7 @@ bind();
       return `<span class="${iconClass(code)}" aria-hidden="true"><svg viewBox="0 0 12 12"><circle cx="3" cy="6" r="1.2" fill="currentColor"/><circle cx="6" cy="6" r="1.2" fill="currentColor"/><circle cx="9" cy="6" r="1.2" fill="currentColor"/></svg></span>`;
     }
     function titleLine(title,label,fallback="-"){
-      const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\
-</body>") + ":\\s*(.*)$","m"));
+      const m = String(title || "").match(new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + ":\\s*(.*)$","m"));
       return m ? m[1] : fallback;
     }
     function stateText(r){
@@ -44869,6 +44867,8 @@ if(typeof window !== "undefined"){
   };
   const WF_AXIS_MIN_ABS = 10;
   const WF_MAX_BAR_WIDTH_PX = 90;
+  const WF_FAST_REPORT_MAX_AGE_MS = 45000;
+  const WF_CLOSED_TRADES_SAFETY_POLL_MS = 45000;
   const WF_GREEN = "#047857";
   const WF_RED = "#7f1d1d";
   const WF_BLACK = "#1e2329";
@@ -44895,6 +44895,16 @@ if(typeof window !== "undefined"){
     liveRefreshKey:"",
     liveRefreshTimer:null,
     liveTicker:null,
+    livePlaceholderId:"",
+    livePlaceholderSymbol:"",
+    livePlaceholderSide:"",
+    livePlaceholderSequence:0,
+    safetyPollTimer:null,
+    safetyPollBusy:false,
+    safetyPollAttempts:0,
+    safetyPollCommits:0,
+    safetyPollLastAt:0,
+    safetyPollLastOutcome:"idle",
     sideWidthKey:"",
     sideWidthPx:116,
     resizeQueued:false,
@@ -45017,6 +45027,16 @@ if(typeof window !== "undefined"){
       String(period.period || "").toLowerCase() === currentPeriodValue()
     );
   }
+  function wfFastReportAgeMs(){
+    const snap = closedTradesOwnerSnapshot();
+    const report = snap && snap.fastReport;
+    const reportEnd = num(report && report.period && report.period.end);
+    const loadedAt = reportEnd != null ? reportEnd : num(snap && snap.updatedAt);
+    return loadedAt == null ? Infinity : Math.max(0,Date.now() - loadedAt);
+  }
+  function wfHasFreshCurrentFastReport(){
+    return wfHasCurrentFastReport() && wfFastReportAgeMs() <= WF_FAST_REPORT_MAX_AGE_MS;
+  }
   function wfHasCurrentDetailReport(){
     const snap = closedTradesOwnerSnapshot();
     const report = snap && snap.reportProjection;
@@ -45049,9 +45069,23 @@ if(typeof window !== "undefined"){
   }
   async function ensureFastWfData(opt={}){
     if(typeof window.hasKeys !== "function" || !window.hasKeys()) return null;
-    if(!opt.force && wfHasCurrentFastReport()) return closedTradesOwnerSnapshot().fastReport;
+    if(!opt.force && wfHasFreshCurrentFastReport()) return closedTradesOwnerSnapshot().fastReport;
     const period = opt.period || currentPeriodValue();
     return window.loadClosedTradesFastForPeriod(period,displayControlsLoadRequest(period,opt));
+  }
+  function clearLivePlaceholderIdentity(){
+    wfSyncState.livePlaceholderId = "";
+    wfSyncState.livePlaceholderSymbol = "";
+    wfSyncState.livePlaceholderSide = "";
+  }
+  function livePlaceholderIdentity(symbol,side){
+    if(!wfSyncState.livePlaceholderId || wfSyncState.livePlaceholderSymbol !== symbol || wfSyncState.livePlaceholderSide !== side){
+      wfSyncState.livePlaceholderSequence += 1;
+      wfSyncState.livePlaceholderId = ["wf_pending",symbol,side,wfSyncState.livePlaceholderSequence].join("_");
+      wfSyncState.livePlaceholderSymbol = symbol;
+      wfSyncState.livePlaceholderSide = side;
+    }
+    return wfSyncState.livePlaceholderId;
   }
   function livePreviewTrade(){
     const visual = window.BT001_OPEN_POSITION_VISUAL && typeof window.BT001_OPEN_POSITION_VISUAL.snapshot === "function"
@@ -45060,19 +45094,27 @@ if(typeof window !== "undefined"){
     const authoritative = window.BT001_SHARED_POSITION && typeof window.BT001_SHARED_POSITION.snapshot === "function"
       ? window.BT001_SHARED_POSITION.snapshot()
       : null;
-    if(!visual || !authoritative || visual.symbol !== currentSymbol() || visual.authoritativePositionRevision !== authoritative.revision) return null;
-    if(visual.status === "unavailable" || visual.status === "stale" || visual.status === "error") return null;
+    if(!visual || !authoritative || visual.symbol !== currentSymbol() || visual.authoritativePositionRevision !== authoritative.revision){
+      return null;
+    }
+    if(visual.status === "unavailable" || visual.status === "stale" || visual.status === "error"){
+      if(!authoritative.position) clearLivePlaceholderIdentity();
+      return null;
+    }
     const markersSource = visual.markers || [];
     const boxesSource = visual.boxes || [];
     const boxChainIds = boxesSource.map(window.stateChainId).filter(Boolean);
     const chainIds = (visual.activeParentChainIds || []).concat(boxChainIds).filter(Boolean);
-    const parentId = chainIds[0] || null;
-    if(!parentId) return null;
-    const markers = markersSource.filter(m => window.stateChainId(m) === parentId).slice().sort((a,b) => (num(a && a.time) || 0) - (num(b && b.time) || 0));
-    const boxes = boxesSource.filter(b => window.stateChainId(b) === parentId);
+    const realParentId = chainIds[0] || null;
+    const authoritativeSide = String(authoritative.position && authoritative.position.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const parentId = realParentId || livePlaceholderIdentity(currentSymbol(),authoritativeSide);
+    if(realParentId) clearLivePlaceholderIdentity();
+    const markers = (realParentId ? markersSource.filter(m => window.stateChainId(m) === realParentId) : markersSource.filter(m => !window.stateChainId(m)))
+      .slice().sort((a,b) => (num(a && a.time) || 0) - (num(b && b.time) || 0));
+    const boxes = realParentId ? boxesSource.filter(b => window.stateChainId(b) === realParentId) : boxesSource.filter(b => !window.stateChainId(b));
     if(!markers.length && !boxes.length) return null;
     const entries = markers.filter(m => m && m.role === "entry");
-    const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || authoritativeSide).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const realizedPartials = num(visual.realizedPartials && visual.realizedPartials.byChain && visual.realizedPartials.byChain[parentId]) || 0;
     const livePrice = currentLivePrice();
     const floatingPL = boxes.length
@@ -45098,6 +45140,7 @@ if(typeof window !== "undefined"){
       parentTradeId:parentId,
       chainId:parentId,
       live:true,
+      placeholderIdentity:!realParentId,
       dir:side === "SHORT" ? "S" : "L",
       net:netLivePL,
       realizedPartials,
@@ -45296,8 +45339,8 @@ if(typeof window !== "undefined"){
   function wfCrosshairMoney(value,{signed=false}={}){
     const amount=Math.abs(Number(value) || 0).toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1});
     if(Math.abs(Number(value) || 0)<0.005) return "$0";
-    if(Number(value)<0) return `−${amount}`;
-    return `${signed ? "+" : ""}${amount}`;
+    if(Number(value)<0) return `−$${amount}`;
+    return `${signed ? "+" : ""}$${amount}`;
   }
   function wfCrosshairDifferenceText(selected,current){
     return wfCrosshairMoney(Number(selected)-Number(current),{signed:true});
@@ -45411,6 +45454,54 @@ if(typeof window !== "undefined"){
       wfSyncState.liveRefreshTimer = null;
     }
   }
+  async function runClosedTradesSafetyPoll(){
+    if(!visible || wfSyncState.safetyPollBusy) return null;
+    if(typeof window.hasKeys !== "function" || !window.hasKeys()){
+      wfSyncState.safetyPollLastOutcome = "unavailable";
+      return null;
+    }
+    wfSyncState.safetyPollBusy = true;
+    wfSyncState.safetyPollAttempts += 1;
+    wfSyncState.safetyPollLastAt = Date.now();
+    const period = currentPeriodValue();
+    try{
+      let committed = false;
+      let result = null;
+      if(wfDataMode() === "detail"){
+        const owner = window.BT001_CLOSED_TRADES;
+        if(owner && typeof owner.loadDetail === "function"){
+          result = await owner.loadDetail(period,displayControlsLoadRequest(period,{silent:true}));
+          committed = !!(result && result.outcome === "committed");
+          wfSyncState.safetyPollLastOutcome = String(result && result.outcome || "unavailable");
+        }else{
+          wfSyncState.safetyPollLastOutcome = "unavailable";
+        }
+      }else{
+        result = await window.loadClosedTradesFastForPeriod(period,displayControlsLoadRequest(period,{silent:true}));
+        committed = !!result;
+        wfSyncState.safetyPollLastOutcome = committed ? "committed" : "not-committed";
+      }
+      if(committed) wfSyncState.safetyPollCommits += 1;
+      return result;
+    }catch(error){
+      wfSyncState.safetyPollLastOutcome = "error";
+      console.warn(MODULE + " safety poll failed",error);
+      return null;
+    }finally{
+      wfSyncState.safetyPollBusy = false;
+    }
+  }
+  function startClosedTradesSafetyLoop(){
+    if(wfSyncState.safetyPollTimer) return;
+    wfSyncState.safetyPollTimer = setInterval(() => {
+      runClosedTradesSafetyPoll().catch(() => {});
+    },WF_CLOSED_TRADES_SAFETY_POLL_MS);
+  }
+  function stopClosedTradesSafetyLoop(){
+    if(!wfSyncState.safetyPollTimer) return;
+    clearInterval(wfSyncState.safetyPollTimer);
+    wfSyncState.safetyPollTimer = null;
+  }
   function queueWfResizeRender(){
     if(wfSyncState.resizeQueued || !visible) return;
     wfSyncState.resizeQueued = true;
@@ -45512,7 +45603,7 @@ if(typeof window !== "undefined"){
     const scaled = magnitude / unit[0];
     const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
     const text = scaled.toFixed(decimals).replace(/\.0+$/g,"").replace(/(\.\d*?)0+$/g,"$1");
-    return `${n > 0 ? "+" : n < 0 ? "-" : ""}${text}${unit[1]}`;
+    return `${n > 0 ? "+" : n < 0 ? "-" : ""}$${text}${unit[1]}`;
   }
   // WF-COS02: the result column's width now flexes to fit each value's exact text (see
   // updateWfSideWidth below), so on a normal render the value already fits at its full
@@ -46379,6 +46470,9 @@ if(typeof window !== "undefined"){
     return null;
   }
   function bridgeTradeIsolate(trade){
+    // A pending live identity exists only inside WF's view model. Never leak it into
+    // the shared closed-trade isolation state while reconstruction is still pending.
+    if(trade && trade.placeholderIdentity) return;
     if(!(tglResults && tglResults.checked)){
       showWfTradesStatus("Turn Trades ON to isolate trade");
       return;
@@ -46497,6 +46591,7 @@ if(typeof window !== "undefined"){
     if(!win) return;
     win.classList.remove("hidden");
     startLiveRefreshLoop();
+    startClosedTradesSafetyLoop();
     applyExpandedRect(win);
     render();
     if(wfDataMode() === "detail" && wfHasCurrentDetailReport()) return;
@@ -46508,6 +46603,7 @@ if(typeof window !== "undefined"){
   function hide(){
     visible = false;
     stopLiveRefreshLoop();
+    stopClosedTradesSafetyLoop();
     hideWfCrosshair();
     const win = q("wfWindow");
     if(win) win.classList.add("hidden");
@@ -46603,12 +46699,27 @@ window.BT001_WATERFALL_WINDOW = {
   _selfTest:runWfCrosshairSelfTests,
   _diagnostics:() => {
     const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),closedPartials=wfCurrentCampaignClosedPartialPL();
+    const liveTrade=lastModel&&lastModel.liveTrade;
     // WF-COS06: Value 2 (amount) now lives inside the same chart overlay as Value 1, so
     // its own box is the meaningful rect here instead of a separate values container.
     const amountNode=overlay && overlay.querySelector(".wf-crosshair-amount");
     const amountRect=amountNode && amountNode.getBoundingClientRect();
     return {
       visible,listenerBindings:crosshair.listenerBindings,active:crosshair.active,updates:crosshair.updates,
+      liveIdentity:liveTrade&&liveTrade.parentTradeId||null,
+      liveDirection:liveTrade&&liveTrade.dir||null,
+      livePlaceholder:!!(liveTrade&&liveTrade.placeholderIdentity),
+      fastReportAgeMs:wfHasCurrentFastReport()?wfFastReportAgeMs():null,
+      fastReportMaxAgeMs:WF_FAST_REPORT_MAX_AGE_MS,
+      safetyPoll:{
+        intervalMs:WF_CLOSED_TRADES_SAFETY_POLL_MS,
+        active:!!wfSyncState.safetyPollTimer,
+        busy:wfSyncState.safetyPollBusy,
+        attempts:wfSyncState.safetyPollAttempts,
+        commits:wfSyncState.safetyPollCommits,
+        lastAt:wfSyncState.safetyPollLastAt||null,
+        lastOutcome:wfSyncState.safetyPollLastOutcome
+      },
       selectedLevel:crosshair.selectedLevel,currentCampaignClosedPartials:closedPartials,
       amountToLevel:Number.isFinite(crosshair.selectedLevel) ? crosshair.selectedLevel-closedPartials : null,
       selectedText:overlay && overlay.querySelector(".wf-crosshair-selected") && overlay.querySelector(".wf-crosshair-selected").textContent || "",
@@ -50070,7 +50181,7 @@ window.BT001_WATERFALL_WINDOW = {
     function stopDetailLines(management){
       const stop = management && management.stopEvaluation;
       if(!stop) return ["Stop evaluation: UNAVAILABLE","Recommendation: UNAVAILABLE \u2014 REQUIRED DATA STALE"];
-      const lossMoney = value => value == null ? "Unavailable" : `${Math.abs(Number(value)).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+      const lossMoney = value => value == null ? "Unavailable" : `$${Math.abs(Number(value)).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
       const simulation = stop.simulation || {};
       const invalidation = stop.invalidation || {};
       const technical = stop.technical || {};
@@ -53792,9 +53903,9 @@ window.BT001_WATERFALL_WINDOW = {
     if(bias === "SHORT"){
       const levels = [];
       if(anchor) levels.push(`Sell bounce: ${anchor.text}`);
-      else if(recentHigh != null) levels.push(`Sell bounce: recent resistance ${tooltipPrice37(recentHigh)}`);
-      if(recentHigh != null) levels.push(`Invalid above: recent high ${tooltipPrice37(recentHigh)}`);
-      if(recentLow != null) levels.push(`Trim: recent low ${tooltipPrice37(recentLow)}`);
+      else if(recentHigh != null) levels.push(`Sell bounce: recent resistance $${tooltipPrice37(recentHigh)}`);
+      if(recentHigh != null) levels.push(`Invalid above: recent high $${tooltipPrice37(recentHigh)}`);
+      if(recentLow != null) levels.push(`Trim: recent low $${tooltipPrice37(recentLow)}`);
       if(anchor) levels.push(`Close if: ${anchor.text} reclaimed and bull pressure overtakes`);
       else if(recentHigh != null) levels.push("Close if: price breaks the recent high and bull pressure overtakes");
       return levels.length ? levels : ["No anchored short level is available"];
@@ -53802,9 +53913,9 @@ window.BT001_WATERFALL_WINDOW = {
     if(bias === "LONG"){
       const levels = [];
       if(anchor) levels.push(`Buy pullback: ${anchor.text}`);
-      else if(recentLow != null) levels.push(`Buy pullback: recent support ${tooltipPrice37(recentLow)}`);
-      if(recentLow != null) levels.push(`Invalid below: recent low ${tooltipPrice37(recentLow)}`);
-      if(recentHigh != null) levels.push(`Trim: recent high ${tooltipPrice37(recentHigh)}`);
+      else if(recentLow != null) levels.push(`Buy pullback: recent support $${tooltipPrice37(recentLow)}`);
+      if(recentLow != null) levels.push(`Invalid below: recent low $${tooltipPrice37(recentLow)}`);
+      if(recentHigh != null) levels.push(`Trim: recent high $${tooltipPrice37(recentHigh)}`);
       if(anchor) levels.push(`Close if: ${anchor.text} lost and bear pressure overtakes`);
       else if(recentLow != null) levels.push("Close if: price breaks the recent low and bear pressure overtakes");
       return levels.length ? levels : ["No anchored long level is available"];
@@ -53834,7 +53945,7 @@ window.BT001_WATERFALL_WINDOW = {
       const current = num37(event.currentPrice);
       const anchor = num37(event.anchorNow);
       if(current != null && anchor != null){
-        const distance = `${tooltipDistance37(current-anchor)}`;
+        const distance = `$${tooltipDistance37(current-anchor)}`;
         if(event.direction < 0){
           lines.push(current <= anchor ? `Price remains ${distance} below ${eventAnchor}` : `Price reclaimed ${eventAnchor} by ${distance}`);
         }else{

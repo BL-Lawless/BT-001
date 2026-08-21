@@ -19,6 +19,14 @@ assert(wfSource.includes("positionClosed:notifyPositionClosed"),"WF must expose 
 assert(source.includes("window.BT001_WATERFALL_WINDOW.positionClosed(detail)"),"the authoritative closed transition must directly notify WF");
 assert(wfSource.includes("closeSyncPending:true")||wfSource.includes("closeSyncPending = true"),"WF close refreshes must queue signals received while another refresh is pending");
 assert(wfSource.includes("while(wfSyncState.closeRetry < 4)"),"WF must retain a bounded multi-attempt close refresh window");
+assert(wfSource.includes("WF_FAST_REPORT_MAX_AGE_MS = 45000"),"WF cached fast reports must have a bounded freshness lifetime");
+assert(wfSource.includes("wfHasFreshCurrentFastReport()"),"WF reopen must validate fast-report age before reusing it");
+assert(wfSource.includes("function livePlaceholderIdentity(symbol,side)"),"WF must create a rendering-only identity for risk-only live positions");
+assert(wfSource.includes("placeholderIdentity:!realParentId"),"WF live rows must identify whether their identity is temporary");
+assert(wfSource.includes("if(trade && trade.placeholderIdentity) return;"),"WF must not leak placeholder identities into shared trade isolation");
+assert(wfSource.includes("WF_CLOSED_TRADES_SAFETY_POLL_MS = 45000"),"WF must retain the bounded visible safety-poll interval");
+assert(wfSource.includes("startClosedTradesSafetyLoop();")&&wfSource.includes("stopClosedTradesSafetyLoop();"),"WF show/hide must own the safety-poll lifecycle");
+assert(wfSource.includes("runClosedTradesSafetyPoll().catch"),"WF safety poll must execute independently of position events");
 assert(wfSource.includes("_selfTest:runWfCrosshairSelfTests,"),"external export must still expose _selfTest");
 assert(wfSource.includes("_diagnostics:() => {"),"external export must still expose _diagnostics");
 assert(source.includes("window.BT001_WATERFALL_WINDOW && typeof window.BT001_WATERFALL_WINDOW.render === \"function\""),"Patch 36's call into WF must remain unmodified in main.js");

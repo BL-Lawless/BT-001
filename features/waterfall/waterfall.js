@@ -63,6 +63,8 @@
   };
   const WF_AXIS_MIN_ABS = 10;
   const WF_MAX_BAR_WIDTH_PX = 90;
+  const WF_FAST_REPORT_MAX_AGE_MS = 45000;
+  const WF_CLOSED_TRADES_SAFETY_POLL_MS = 45000;
   const WF_GREEN = "#047857";
   const WF_RED = "#7f1d1d";
   const WF_BLACK = "#1e2329";
@@ -89,6 +91,16 @@
     liveRefreshKey:"",
     liveRefreshTimer:null,
     liveTicker:null,
+    livePlaceholderId:"",
+    livePlaceholderSymbol:"",
+    livePlaceholderSide:"",
+    livePlaceholderSequence:0,
+    safetyPollTimer:null,
+    safetyPollBusy:false,
+    safetyPollAttempts:0,
+    safetyPollCommits:0,
+    safetyPollLastAt:0,
+    safetyPollLastOutcome:"idle",
     sideWidthKey:"",
     sideWidthPx:116,
     resizeQueued:false,
@@ -211,6 +223,16 @@
       String(period.period || "").toLowerCase() === currentPeriodValue()
     );
   }
+  function wfFastReportAgeMs(){
+    const snap = closedTradesOwnerSnapshot();
+    const report = snap && snap.fastReport;
+    const reportEnd = num(report && report.period && report.period.end);
+    const loadedAt = reportEnd != null ? reportEnd : num(snap && snap.updatedAt);
+    return loadedAt == null ? Infinity : Math.max(0,Date.now() - loadedAt);
+  }
+  function wfHasFreshCurrentFastReport(){
+    return wfHasCurrentFastReport() && wfFastReportAgeMs() <= WF_FAST_REPORT_MAX_AGE_MS;
+  }
   function wfHasCurrentDetailReport(){
     const snap = closedTradesOwnerSnapshot();
     const report = snap && snap.reportProjection;
@@ -243,9 +265,23 @@
   }
   async function ensureFastWfData(opt={}){
     if(typeof window.hasKeys !== "function" || !window.hasKeys()) return null;
-    if(!opt.force && wfHasCurrentFastReport()) return closedTradesOwnerSnapshot().fastReport;
+    if(!opt.force && wfHasFreshCurrentFastReport()) return closedTradesOwnerSnapshot().fastReport;
     const period = opt.period || currentPeriodValue();
     return window.loadClosedTradesFastForPeriod(period,displayControlsLoadRequest(period,opt));
+  }
+  function clearLivePlaceholderIdentity(){
+    wfSyncState.livePlaceholderId = "";
+    wfSyncState.livePlaceholderSymbol = "";
+    wfSyncState.livePlaceholderSide = "";
+  }
+  function livePlaceholderIdentity(symbol,side){
+    if(!wfSyncState.livePlaceholderId || wfSyncState.livePlaceholderSymbol !== symbol || wfSyncState.livePlaceholderSide !== side){
+      wfSyncState.livePlaceholderSequence += 1;
+      wfSyncState.livePlaceholderId = ["wf_pending",symbol,side,wfSyncState.livePlaceholderSequence].join("_");
+      wfSyncState.livePlaceholderSymbol = symbol;
+      wfSyncState.livePlaceholderSide = side;
+    }
+    return wfSyncState.livePlaceholderId;
   }
   function livePreviewTrade(){
     const visual = window.BT001_OPEN_POSITION_VISUAL && typeof window.BT001_OPEN_POSITION_VISUAL.snapshot === "function"
@@ -254,19 +290,27 @@
     const authoritative = window.BT001_SHARED_POSITION && typeof window.BT001_SHARED_POSITION.snapshot === "function"
       ? window.BT001_SHARED_POSITION.snapshot()
       : null;
-    if(!visual || !authoritative || visual.symbol !== currentSymbol() || visual.authoritativePositionRevision !== authoritative.revision) return null;
-    if(visual.status === "unavailable" || visual.status === "stale" || visual.status === "error") return null;
+    if(!visual || !authoritative || visual.symbol !== currentSymbol() || visual.authoritativePositionRevision !== authoritative.revision){
+      return null;
+    }
+    if(visual.status === "unavailable" || visual.status === "stale" || visual.status === "error"){
+      if(!authoritative.position) clearLivePlaceholderIdentity();
+      return null;
+    }
     const markersSource = visual.markers || [];
     const boxesSource = visual.boxes || [];
     const boxChainIds = boxesSource.map(window.stateChainId).filter(Boolean);
     const chainIds = (visual.activeParentChainIds || []).concat(boxChainIds).filter(Boolean);
-    const parentId = chainIds[0] || null;
-    if(!parentId) return null;
-    const markers = markersSource.filter(m => window.stateChainId(m) === parentId).slice().sort((a,b) => (num(a && a.time) || 0) - (num(b && b.time) || 0));
-    const boxes = boxesSource.filter(b => window.stateChainId(b) === parentId);
+    const realParentId = chainIds[0] || null;
+    const authoritativeSide = String(authoritative.position && authoritative.position.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const parentId = realParentId || livePlaceholderIdentity(currentSymbol(),authoritativeSide);
+    if(realParentId) clearLivePlaceholderIdentity();
+    const markers = (realParentId ? markersSource.filter(m => window.stateChainId(m) === realParentId) : markersSource.filter(m => !window.stateChainId(m)))
+      .slice().sort((a,b) => (num(a && a.time) || 0) - (num(b && b.time) || 0));
+    const boxes = realParentId ? boxesSource.filter(b => window.stateChainId(b) === realParentId) : boxesSource.filter(b => !window.stateChainId(b));
     if(!markers.length && !boxes.length) return null;
     const entries = markers.filter(m => m && m.role === "entry");
-    const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const side = String((entries[0] && entries[0].side) || (boxes[0] && boxes[0].side) || authoritativeSide).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const realizedPartials = num(visual.realizedPartials && visual.realizedPartials.byChain && visual.realizedPartials.byChain[parentId]) || 0;
     const livePrice = currentLivePrice();
     const floatingPL = boxes.length
@@ -292,6 +336,7 @@
       parentTradeId:parentId,
       chainId:parentId,
       live:true,
+      placeholderIdentity:!realParentId,
       dir:side === "SHORT" ? "S" : "L",
       net:netLivePL,
       realizedPartials,
@@ -604,6 +649,54 @@
       clearTimeout(wfSyncState.liveRefreshTimer);
       wfSyncState.liveRefreshTimer = null;
     }
+  }
+  async function runClosedTradesSafetyPoll(){
+    if(!visible || wfSyncState.safetyPollBusy) return null;
+    if(typeof window.hasKeys !== "function" || !window.hasKeys()){
+      wfSyncState.safetyPollLastOutcome = "unavailable";
+      return null;
+    }
+    wfSyncState.safetyPollBusy = true;
+    wfSyncState.safetyPollAttempts += 1;
+    wfSyncState.safetyPollLastAt = Date.now();
+    const period = currentPeriodValue();
+    try{
+      let committed = false;
+      let result = null;
+      if(wfDataMode() === "detail"){
+        const owner = window.BT001_CLOSED_TRADES;
+        if(owner && typeof owner.loadDetail === "function"){
+          result = await owner.loadDetail(period,displayControlsLoadRequest(period,{silent:true}));
+          committed = !!(result && result.outcome === "committed");
+          wfSyncState.safetyPollLastOutcome = String(result && result.outcome || "unavailable");
+        }else{
+          wfSyncState.safetyPollLastOutcome = "unavailable";
+        }
+      }else{
+        result = await window.loadClosedTradesFastForPeriod(period,displayControlsLoadRequest(period,{silent:true}));
+        committed = !!result;
+        wfSyncState.safetyPollLastOutcome = committed ? "committed" : "not-committed";
+      }
+      if(committed) wfSyncState.safetyPollCommits += 1;
+      return result;
+    }catch(error){
+      wfSyncState.safetyPollLastOutcome = "error";
+      console.warn(MODULE + " safety poll failed",error);
+      return null;
+    }finally{
+      wfSyncState.safetyPollBusy = false;
+    }
+  }
+  function startClosedTradesSafetyLoop(){
+    if(wfSyncState.safetyPollTimer) return;
+    wfSyncState.safetyPollTimer = setInterval(() => {
+      runClosedTradesSafetyPoll().catch(() => {});
+    },WF_CLOSED_TRADES_SAFETY_POLL_MS);
+  }
+  function stopClosedTradesSafetyLoop(){
+    if(!wfSyncState.safetyPollTimer) return;
+    clearInterval(wfSyncState.safetyPollTimer);
+    wfSyncState.safetyPollTimer = null;
   }
   function queueWfResizeRender(){
     if(wfSyncState.resizeQueued || !visible) return;
@@ -1573,6 +1666,9 @@
     return null;
   }
   function bridgeTradeIsolate(trade){
+    // A pending live identity exists only inside WF's view model. Never leak it into
+    // the shared closed-trade isolation state while reconstruction is still pending.
+    if(trade && trade.placeholderIdentity) return;
     if(!(tglResults && tglResults.checked)){
       showWfTradesStatus("Turn Trades ON to isolate trade");
       return;
@@ -1691,6 +1787,7 @@
     if(!win) return;
     win.classList.remove("hidden");
     startLiveRefreshLoop();
+    startClosedTradesSafetyLoop();
     applyExpandedRect(win);
     render();
     if(wfDataMode() === "detail" && wfHasCurrentDetailReport()) return;
@@ -1702,6 +1799,7 @@
   function hide(){
     visible = false;
     stopLiveRefreshLoop();
+    stopClosedTradesSafetyLoop();
     hideWfCrosshair();
     const win = q("wfWindow");
     if(win) win.classList.add("hidden");
@@ -1797,12 +1895,27 @@ window.BT001_WATERFALL_WINDOW = {
   _selfTest:runWfCrosshairSelfTests,
   _diagnostics:() => {
     const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),closedPartials=wfCurrentCampaignClosedPartialPL();
+    const liveTrade=lastModel&&lastModel.liveTrade;
     // WF-COS06: Value 2 (amount) now lives inside the same chart overlay as Value 1, so
     // its own box is the meaningful rect here instead of a separate values container.
     const amountNode=overlay && overlay.querySelector(".wf-crosshair-amount");
     const amountRect=amountNode && amountNode.getBoundingClientRect();
     return {
       visible,listenerBindings:crosshair.listenerBindings,active:crosshair.active,updates:crosshair.updates,
+      liveIdentity:liveTrade&&liveTrade.parentTradeId||null,
+      liveDirection:liveTrade&&liveTrade.dir||null,
+      livePlaceholder:!!(liveTrade&&liveTrade.placeholderIdentity),
+      fastReportAgeMs:wfHasCurrentFastReport()?wfFastReportAgeMs():null,
+      fastReportMaxAgeMs:WF_FAST_REPORT_MAX_AGE_MS,
+      safetyPoll:{
+        intervalMs:WF_CLOSED_TRADES_SAFETY_POLL_MS,
+        active:!!wfSyncState.safetyPollTimer,
+        busy:wfSyncState.safetyPollBusy,
+        attempts:wfSyncState.safetyPollAttempts,
+        commits:wfSyncState.safetyPollCommits,
+        lastAt:wfSyncState.safetyPollLastAt||null,
+        lastOutcome:wfSyncState.safetyPollLastOutcome
+      },
       selectedLevel:crosshair.selectedLevel,currentCampaignClosedPartials:closedPartials,
       amountToLevel:Number.isFinite(crosshair.selectedLevel) ? crosshair.selectedLevel-closedPartials : null,
       selectedText:overlay && overlay.querySelector(".wf-crosshair-selected") && overlay.querySelector(".wf-crosshair-selected").textContent || "",
