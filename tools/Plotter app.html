@@ -1,0 +1,2276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SSSC Historical Plotter Prototype</title>
+  <style>
+    :root{
+      --bg:#fff;--panel:#fff;--panel2:#f5f5f5;--panel3:#eef0f2;
+      --border:#e6e8ea;--grid:#edf0f2;--text:#1e2329;--muted:#707a8a;
+      --bull:#0ecb81;--bear:#f6465d;--blue:#1e88e5;--amber:#f59e0b;
+      --mixed:#8a8f98;--purple:#4b5563;--cyan:#1e88e5;
+      --candle-up-body:rgb(255,255,255);--candle-down-body:rgb(145,145,145);--candle-stroke:rgb(133,133,133);
+      --accent:#f0b90b;--radius:5px;--sidebar-width:260px;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:Arial,Helvetica,sans-serif}
+    body{padding:12px;font-size:12px}
+    button,input,select{font:inherit}
+    button,input,select{
+      min-height:28px;border:1px solid var(--border);border-radius:5px;
+      background:var(--panel2);color:var(--text);padding:5px 7px;outline:none
+    }
+    button{cursor:pointer;font-weight:700;background:var(--accent,#f0b90b);color:#111;border:0}
+    button:hover{filter:brightness(1.04)}
+    button.primary{background:#f0b90b;color:#111}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    input[type=checkbox]{min-height:auto;accent-color:var(--blue)}
+    input[type=range]{padding:0}
+    label{color:var(--muted)}
+    h1,h2,h3,p{margin:0}
+    h1{font-size:18px;letter-spacing:.02em}
+    h2{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:#1e2329}
+    .app{max-width:1800px;margin:auto}
+    .topbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:10px}
+    .title{display:flex;align-items:center;gap:7px}
+    .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--border);border-radius:999px;background:var(--panel)}
+    .dot{width:7px;height:7px;border-radius:50%;background:var(--mixed)}
+    .dot.ok{background:var(--bull)}.dot.busy{background:var(--amber)}.dot.bad{background:var(--bear)}
+    .panel{border:1px solid var(--border);border-radius:var(--radius);background:var(--panel)}
+    .top-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+    .money-distance{display:flex;align-items:center;gap:5px}.money-distance input{min-width:0;flex:1}.money-distance output{min-width:56px;text-align:right;color:var(--text);font-weight:700}
+    .field{display:grid;gap:3px}.field span{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+    .workspace{display:grid;grid-template-columns:var(--sidebar-width) 8px minmax(0,1fr);gap:0;align-items:start}
+    .sidebar{position:sticky;top:8px;display:grid;gap:8px;max-height:calc(100vh - 16px);overflow:auto;padding-right:2px}
+    .sidebar-resizer{position:sticky;top:8px;height:calc(100vh - 16px);cursor:col-resize;touch-action:none}
+    .sidebar-resizer:before{content:"";position:absolute;left:3px;top:0;bottom:0;width:2px;background:#d9dce1}
+    .sidebar-resizer:hover:before,.sidebar-resizer.dragging:before{background:#707a8a}
+    .control-card{padding:9px}
+    .signal-source-block{border-top:1px solid var(--border);margin-top:9px;padding-top:9px}
+    .signal-source-block:first-child{border-top:none;margin-top:0;padding-top:0}
+    .signal-source-block-title{font-weight:700;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px}
+    .snapshot-layer{margin-bottom:6px;padding:7px 9px}
+    .snapshot-layer:last-child{margin-bottom:0}
+    .snapshot-layer-head label{display:flex;align-items:center;gap:6px;font-weight:600}
+    .snapshot-layer-status{margin-top:3px;margin-left:20px}
+    .control-card>h2{margin-bottom:8px;cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between}
+    .control-card>h2::after{content:"▾";font-size:9px;color:var(--muted);margin-left:6px}
+    .control-card.collapsed>h2{margin-bottom:0}
+    .control-card.collapsed>h2::after{content:"▸"}
+    .control-card.collapsed>*:not(h2){display:none}
+    .control-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+    .control-grid .wide{grid-column:1/-1}
+    .checks{display:grid;gap:5px}
+    .checks label,.inline-checks label{display:flex;gap:6px;align-items:center;color:var(--text)}
+    .inline-checks{display:flex;flex-wrap:wrap;gap:5px 10px}
+    .main{min-width:0;display:grid;gap:9px;margin-left:9px}
+    .chart-card{overflow:hidden}
+    .chart-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-bottom:1px solid var(--border)}
+    .segments{display:flex;gap:4px}.segments button{min-width:38px;min-height:24px;padding:2px 6px}
+    .segments button{background:#eef0f2;border:1px solid var(--border);color:var(--text)}
+    .segments button.active{border-color:#9ca3af;background:#fff;color:var(--text)}
+    .chart-wrap{position:relative;background:var(--bg)}
+    canvas{display:block;width:100%;touch-action:none}
+    #priceChart{height:430px}
+    #timelineChart,#aggregateChart{height:100%}
+    .timeline-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;min-height:34px;padding:5px 8px;border-top:1px solid var(--border);background:#f5f5f5}
+    .timeline-legend{display:flex;flex-wrap:wrap;align-items:center;gap:5px 10px;color:var(--muted);font-size:10px}
+    .legend-item{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+    .legend-swatch{display:inline-block;width:18px;height:9px;border:1px solid #969696;background:#fff}
+    .legend-swatch.bullish{border-color:#0ecb81;background:#0ecb81}.legend-swatch.bearish{border-color:#f6465d;background:#f6465d}.legend-swatch.mixed{border-color:#8a8f98;background:#8a8f98}
+    .legend-swatch.opacity{background:linear-gradient(90deg,rgba(30,136,229,.18),rgba(30,136,229,.9));border-color:#1e88e5}
+    .legend-swatch.phase{height:10px;border:1px solid #d9dce1;border-top:3px solid #f59e0b;background:#fff}
+    .legend-swatch.missing{background:#fff;border-style:dashed}
+    .line-legend label{display:inline-flex;align-items:center;gap:4px;color:var(--text)}
+    .line-dot{width:9px;height:9px;border-radius:50%;background:var(--line-color)}
+    .legend-button{min-height:22px;padding:2px 6px;background:#eef0f2;border:1px solid var(--border);color:var(--text);font-weight:700}
+    .chart-help{position:absolute;right:8px;top:7px;color:var(--muted);font-size:9px;pointer-events:none}
+    .tooltip{
+      position:fixed;z-index:30;display:none;max-width:min(560px,calc(100vw - 30px));max-height:70vh;
+      overflow:auto;padding:9px;border:1px solid #d9dce1;border-radius:5px;
+      background:rgba(255,255,255,.98);box-shadow:0 10px 24px rgba(15,23,42,.14);
+      color:var(--text);font:11px/1.38 Consolas,Monaco,monospace;white-space:pre-wrap;pointer-events:none
+    }
+    .summary{display:grid;grid-template-columns:repeat(10,minmax(80px,1fr));gap:5px}
+    .stats-groups{display:grid;gap:7px}.stats-group{padding:0}.stats-group h2{margin:0}
+    .stat{padding:7px;border:1px solid var(--border);border-radius:6px;background:var(--panel2);text-align:center}
+    .stat span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase}
+    .stat b{display:block;margin-top:3px;font-size:13px;font-variant-numeric:tabular-nums}
+    .results{overflow:hidden}
+    .results-head{display:flex;justify-content:space-between;align-items:center;padding:8px 9px;border-bottom:1px solid var(--border)}
+    .lower-panel{position:relative;display:flex;min-height:var(--panel-min-height,72px);height:var(--panel-height,180px);flex-direction:column;overflow:hidden}
+    .lower-panel-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:34px;padding:6px 9px;border-bottom:1px solid var(--border);background:#f5f5f5}
+    .lower-panel-body{flex:1;min-height:0;overflow:auto}
+    .lower-panel.collapsed{height:35px!important;min-height:35px}.lower-panel.collapsed .lower-panel-body,.lower-panel.collapsed .panel-resize-handle{display:none}
+    .panel-collapse-button{min-height:22px;padding:2px 7px;background:#eef0f2;border:1px solid var(--border);color:var(--text);font-weight:700}
+    .panel-resize-handle{flex:0 0 7px;position:relative;cursor:row-resize;touch-action:none;background:#fff}
+    .panel-resize-handle:before{content:"";position:absolute;left:calc(50% - 22px);top:3px;width:44px;height:1px;background:#d9dce1}
+    .panel-resize-handle:hover:before,.panel-resize-handle.dragging:before{background:#707a8a}
+    .timeline-panel{--panel-height:196px;--panel-min-height:118px}.aggregate-panel{--panel-height:244px;--panel-min-height:130px}
+    .stats-group{--panel-height:118px;--panel-min-height:74px}.results{--panel-height:360px;--panel-min-height:150px}
+    .stats-group .lower-panel-body{padding:8px}.results .lower-panel-body{overflow:auto}
+    th[draggable=true]{cursor:grab;user-select:none}th.dragging{opacity:.45}th.drag-over{box-shadow:inset 2px 0 #1e88e5}
+    .table-wrap{height:100%;max-height:none;overflow:auto}
+    table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:10px}
+    th,td{padding:5px 7px;border-bottom:1px solid var(--border);text-align:right;font-variant-numeric:tabular-nums}
+    th{position:sticky;top:0;z-index:2;background:#eef0f2;color:var(--muted);font-weight:700}
+    th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+    tbody tr{cursor:pointer}tbody tr:hover{background:#f5f5f5}
+    tbody tr.highlight{outline:1px solid var(--blue);background:#eef0f2}
+    .bull{color:var(--bull)}.bear{color:var(--bear)}.warn{color:var(--amber)}.muted{color:var(--muted)}
+    .statusline{padding:8px 9px;color:var(--text);line-height:1.45}
+    .statusline.error{color:var(--bear)}.statusline.success{color:var(--bull)}
+    .testline{font:10px/1.4 Consolas,Monaco,monospace;color:var(--muted)}
+    .hidden{display:none!important}
+    @media(max-width:1050px){
+      .workspace{grid-template-columns:1fr}.sidebar{position:static;max-height:none;grid-template-columns:repeat(2,minmax(0,1fr))}.sidebar-resizer{display:none}.main{margin-left:0}
+      .summary{grid-template-columns:repeat(5,1fr)}
+    }
+    @media(max-width:650px){
+      body{padding:6px}.sidebar{grid-template-columns:1fr}.summary{grid-template-columns:repeat(2,1fr)}
+      #priceChart{height:350px}.topbar{align-items:flex-start;flex-direction:column}
+    }
+  </style>
+</head>
+<body>
+<main class="app">
+  <header class="topbar">
+    <div class="title">
+      <h1>SSSC Historical Plotter <span class="muted">/ standalone prototype</span></h1>
+    </div>
+    <div class="top-actions">
+      <button id="loadButton" class="primary">Load Local DB + Binance</button>
+      <div class="badge"><i id="statusDot" class="dot"></i><span id="statusBadge">Idle</span></div>
+      <div class="badge" id="autoRefreshBadge" style="display:none"><i class="dot ok"></i><span>Auto-refresh: 60s</span></div>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <aside class="sidebar">
+      <section class="panel control-card">
+        <h2>Dataset</h2>
+        <div class="control-grid">
+          <label class="field wide"><span>Machine ID</span><select id="machineSelect"><option value="">All machines</option></select></label>
+          <label class="field"><span>Recorded TF</span><select id="recordedTf"><option value="">Any</option><option>1h</option><option>15m</option><option>5m</option><option>3m</option><option>1m</option></select></label>
+          <label class="field"><span>Reliability</span><select id="reliability"><option value="all">Include minimum</option><option value="full">Full warmup only</option></select></label>
+        </div>
+        <div id="datasetStatus" class="statusline">No data loaded.</div>
+      </section>
+
+      <section class="panel control-card">
+        <h2>Signals</h2>
+        <div class="inline-checks" id="signalSourceChecks">
+          <label><input class="signal-source" type="checkbox" value="SSSC" checked> SSSC</label>
+          <label><input class="signal-source" type="checkbox" value="V1" checked> Scalp V1</label>
+          <label><input class="signal-source" type="checkbox" value="V2" checked> Scalp V2</label>
+        </div>
+        <div class="muted" style="margin-top:6px;line-height:1.35">Toggle which signal sources are loaded, filtered, and shown. Future signal tables plug in here as additional checkboxes.</div>
+        <div id="signalParamFilters" class="signal-param-filters" style="margin-top:9px"></div>
+      </section>
+
+      <section class="panel control-card">
+        <h2>Snapshots</h2>
+        <div class="muted" style="margin-bottom:7px;line-height:1.35">Each snapshot source is its own layer. Any combination can be visible at once.</div>
+        <div id="snapshotLayerList" class="snapshot-layer-list"></div>
+      </section>
+
+      <section class="panel control-card">
+        <h2>Outcome model</h2>
+        <div class="control-grid">
+          <label class="field"><span>Fee / slippage units</span><select id="costUnit"><option value="bps">basis points</option><option value="percent">percent</option></select></label>
+          <label class="field"><span>Take-profit distance ($)</span><span class="money-distance"><input id="takeProfit" type="number" min="0" step="1" value="30"><output id="takeProfitDisplay">$30</output></span></label>
+          <label class="field"><span>Stop-loss distance ($)</span><span class="money-distance"><input id="stopLoss" type="number" min="0" step="1" value="20"><output id="stopLossDisplay">$20</output></span></label>
+          <label class="field"><span>Fee / side</span><input id="fee" type="number" min="0" step=".01" value="4"></label>
+          <label class="field"><span>Slippage / side</span><input id="slippage" type="number" min="0" step=".01" value="1"></label>
+          <label class="field wide"><span>Hypothetical test lot (BTC)</span><input id="testLot" type="number" min="0.0001" step="0.0001" value="0.001"></label>
+        </div>
+      </section>
+
+      <section class="panel control-card">
+        <h2>Layers</h2>
+        <div class="checks">
+          <label><input id="showMarkers" type="checkbox" checked> Signal markers</label>
+          <label><input id="showShading" type="checkbox" checked> Active-action shading</label>
+          <label><input id="showTimeline" type="checkbox" checked> SSSC timeline</label>
+          <label><input id="showAggregate" type="checkbox" checked> Aggregate lines</label>
+          <label><input id="showOutcomes" type="checkbox" checked> Outcome labels</label>
+          <label><input id="showResults" type="checkbox" checked> Results panel</label>
+        </div>
+        <div class="inline-checks" id="tfVisibility" style="margin-top:7px">
+          <label><input type="checkbox" value="1h" checked>1h</label>
+          <label><input type="checkbox" value="15m" checked>15m</label>
+          <label><input type="checkbox" value="5m" checked>5m</label>
+          <label><input type="checkbox" value="3m" checked>3m</label>
+          <label><input type="checkbox" value="1m" checked>1m</label>
+        </div>
+        <div class="muted" style="margin-top:9px;margin-bottom:4px">Result columns</div>
+        <div class="inline-checks" id="resultColumnVisibility"></div>
+      </section>
+
+      <div id="selfTestError" class="testline bear" style="display:none"></div>
+    </aside>
+    <div id="sidebarResizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize side menu" tabindex="0"></div>
+
+    <section class="main">
+
+      <section class="panel chart-card">
+        <div class="chart-head">
+          <div><b>BTCUSDT</b> <span id="rangeLabel" class="muted">—</span></div>
+          <div id="timeframeButtons" class="segments">
+            <button data-minutes="1" class="active">1m</button><button data-minutes="3">3m</button>
+            <button data-minutes="5">5m</button><button data-minutes="15">15m</button><button data-minutes="60">1h</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="priceChart"></canvas>
+          <section id="timelinePanel" class="lower-panel timeline-panel" data-panel-key="timeline" data-default-height="196" data-min-height="118">
+            <div id="timelineToolbar" class="timeline-toolbar lower-panel-header">
+              <div id="ssscTimelineViewButtons" class="segments"><button type="button" data-view="blocks" class="active">Blocks</button><button type="button" data-view="lines">Lines</button><button type="button" data-view="momentum">Momentum</button><button type="button" data-view="atr">ATR</button></div>
+              <div id="ssscMomentumStyleButtons" class="segments hidden"><button type="button" data-momentum-style="blocks" class="active">Blocks</button><button type="button" data-momentum-style="lines">Lines</button></div>
+              <div id="momentumSmoothingControl" class="hidden" style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)">
+                <label for="momentumSmoothing">Smoothing</label>
+                <input id="momentumSmoothing" type="range" min="0" max="300" step="5" value="0">
+                <span id="momentumSmoothingValue">0s</span>
+              </div>
+              <div id="blockTimelineLegend" class="timeline-legend">
+                <span class="legend-item"><i class="legend-swatch bullish"></i>Bullish</span>
+                <span class="legend-item"><i class="legend-swatch bearish"></i>Bearish</span>
+                <span class="legend-item"><i class="legend-swatch mixed"></i>Mixed</span>
+                <span class="legend-item"><i class="legend-swatch opacity"></i>Strength opacity = |direction score|</span>
+                <span class="legend-item"><i class="legend-swatch phase"></i>Top edge = phase</span>
+                <span class="legend-item"><i class="legend-swatch missing"></i>Empty gap = missing / unavailable / no record</span>
+              </div>
+              <div id="lineTimelineLegend" class="timeline-legend line-legend hidden">
+                <button id="lineTfAll" type="button" class="legend-button">All</button><button id="lineTfNone" type="button" class="legend-button">None</button>
+                <label style="--line-color:#1e88e5"><input class="line-tf-toggle" type="checkbox" value="1h" checked><i class="line-dot"></i>1h</label>
+                <label style="--line-color:#0ecb81"><input class="line-tf-toggle" type="checkbox" value="15m" checked><i class="line-dot"></i>15m</label>
+                <label style="--line-color:#f59e0b"><input class="line-tf-toggle" type="checkbox" value="5m" checked><i class="line-dot"></i>5m</label>
+                <label style="--line-color:#f6465d"><input class="line-tf-toggle" type="checkbox" value="3m" checked><i class="line-dot"></i>3m</label>
+                <label style="--line-color:#4b5563"><input class="line-tf-toggle" type="checkbox" value="1m" checked><i class="line-dot"></i>1m</label>
+              </div>
+              <button type="button" class="panel-collapse-button" data-collapse-panel="timeline" aria-label="Collapse SSSC timeline">Collapse</button>
+            </div>
+            <div class="lower-panel-body"><canvas id="timelineChart"></canvas></div>
+            <div class="panel-resize-handle" data-resize-panel="timeline" aria-label="Resize SSSC timeline"></div>
+          </section>
+          <section id="aggregatePanel" class="lower-panel aggregate-panel" data-panel-key="aggregate" data-default-height="244" data-min-height="130">
+            <div class="lower-panel-header">
+              <h2>SSSC aggregate panels</h2>
+              <div class="inline-checks" id="aggregateComponentToggles" style="gap:7px 10px;flex:1;justify-content:center">
+                <label><input class="aggregate-component-toggle" type="checkbox" value="marketBias" checked> Bias</label>
+                <label><input class="aggregate-component-toggle" type="checkbox" value="marketStrength" checked> Strength</label>
+                <label><input class="aggregate-component-toggle" type="checkbox" value="marketAcceleration" checked> Accel</label>
+                <label><input class="aggregate-component-toggle" type="checkbox" value="aggregateConfidence" checked> Confidence</label>
+                <label><input class="aggregate-component-toggle" type="checkbox" value="timingRisk" checked> Risk</label>
+              </div>
+              <button type="button" class="panel-collapse-button" data-collapse-panel="aggregate">Collapse</button>
+            </div>
+            <div class="lower-panel-body"><canvas id="aggregateChart"></canvas></div>
+            <div class="panel-resize-handle" data-resize-panel="aggregate" aria-label="Resize SSSC aggregate"></div>
+          </section>
+          <div class="chart-help">wheel zoom · drag pan · double-click reset · synchronized crosshair</div>
+        </div>
+      </section>
+
+      <div class="stats-groups">
+        <section id="ssscStatsPanel" class="panel stats-group lower-panel" data-panel-key="sssc-stats" data-default-height="118" data-min-height="74"><div class="lower-panel-header"><h2>SSSC hypothetical statistics</h2><button type="button" class="panel-collapse-button" data-collapse-panel="sssc-stats">Collapse</button></div><div class="lower-panel-body"><div class="summary" id="summary"></div></div><div class="panel-resize-handle" data-resize-panel="sssc-stats"></div></section>
+        <section id="scalpStatsPanel" class="panel stats-group lower-panel" data-panel-key="scalp-stats" data-default-height="118" data-min-height="74"><div class="lower-panel-header"><h2>SCALP statistics — actual and hypothetical remain separate</h2><button type="button" class="panel-collapse-button" data-collapse-panel="scalp-stats">Collapse</button></div><div class="lower-panel-body"><div class="summary" id="scalpSummary"></div></div><div class="panel-resize-handle" data-resize-panel="scalp-stats"></div></section>
+        <section id="agreementStatsPanel" class="panel stats-group lower-panel" data-panel-key="agreement-stats" data-default-height="118" data-min-height="74"><div class="lower-panel-header"><h2>SCALP + prior SSSC agreement statistics</h2><button type="button" class="panel-collapse-button" data-collapse-panel="agreement-stats">Collapse</button></div><div class="lower-panel-body"><div class="summary" id="agreementSummary"></div></div><div class="panel-resize-handle" data-resize-panel="agreement-stats"></div></section>
+      </div>
+
+      <section id="resultsPanel" class="panel results lower-panel" data-panel-key="results" data-default-height="360" data-min-height="150">
+        <div class="results-head lower-panel-header"><h2>Chronological results</h2><div><span id="resultCount" class="muted">0 rows</span> <button id="exportResultsCsv" type="button" class="panel-collapse-button">Export CSV</button> <button type="button" class="panel-collapse-button" data-collapse-panel="results">Collapse</button></div></div>
+        <div class="lower-panel-body table-wrap">
+          <table>
+            <thead><tr id="resultsHeader"></tr></thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </div>
+        <div class="panel-resize-handle" data-resize-panel="results"></div>
+      </section>
+    </section>
+  </div>
+</main>
+<div id="tooltip" class="tooltip"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const TABLE="sssc_snapshots";
+  const SCALP_SIGNAL_TABLE="scalp_v1_signals";
+  const SCALP_V2_TABLE="scalp_v2_signals";
+  const SSSC_SIGNALS_TABLE="sssc_signals";
+  const SIGB_SNAPSHOTS_TABLE="sig_b_snapshots";
+  const FUTURES_SNAPSHOTS_TABLE="futures_market_snapshots";
+  const LOCAL_API_BASE="http://127.0.0.1:3001";
+  const SNAPSHOT_SOURCES=Object.freeze([
+    {key:"sssc",label:"SSSC",table:TABLE},
+    {key:"sigb",label:"Signal B",table:SIGB_SNAPSHOTS_TABLE},
+    {key:"futures",label:"Futures market",table:FUTURES_SNAPSHOTS_TABLE}
+  ]);
+  const SIGNAL_SOURCES=Object.freeze([
+    {key:"SSSC",label:"SSSC",table:SSSC_SIGNALS_TABLE},
+    {key:"V1",label:"Scalp V1",table:SCALP_SIGNAL_TABLE},
+    {key:"V2",label:"Scalp V2",table:SCALP_V2_TABLE}
+  ]);
+  const SYMBOL="BTCUSDT";
+  const LOGGED_TFS=["1h","15m","5m","3m","1m"];
+  const PAGE_SIZE=1000;
+  const BINANCE_LIMIT=1500;
+  const MINUTE=60000;
+  const DUBAI_TZ="Asia/Dubai";
+  const SIDEBAR_WIDTH_SLOT="bt001_sssc_plotter_sidebar_width_v1";
+  const PANEL_STATE_SLOT="bt001_sssc_plotter_lower_panels_v1";
+  const RESULT_COLUMN_ORDER_SLOT="bt001_sssc_plotter_result_columns_v1";
+  const RESULT_COLUMN_VISIBILITY_SLOT="bt001_sssc_plotter_result_column_visibility_v1";
+  const SIDEBAR_CARD_STATE_SLOT="bt001_sssc_plotter_sidebar_cards_v1";
+  const SIDEBAR_MIN=220,SIDEBAR_MAX=520;
+  const SSSC_RECORDING_INTERVAL_MS=30000;
+  const SSSC_CADENCE_TOLERANCE_MS=5000;
+  const SSSC_CONNECT_THRESHOLD_MS=SSSC_RECORDING_INTERVAL_MS+SSSC_CADENCE_TOLERANCE_MS;
+  const SSSC_LINE_WIDTH=2,SSSC_POINT_RADIUS=2.5;
+  const RESULT_COLUMNS=Object.freeze([
+    ["time","Dubai time*"],["source","Source"],["signal","Action / event"],["basis","Result basis"],
+    ["quantity","Qty BTC"],["entry","Entry"],["exit","Exit"],["return","Return"],["pnl","P/L"],
+    ["mfe","MFE"],["mae","MAE"],["best","Best"],["worst","Worst"],["barrier","Barrier / exit"],
+    ["confidence","Confidence"],["risk","Risk"]
+  ]);
+  const COLORS={
+    bg:"#ffffff",panel:"#ffffff",grid:"#edf0f2",verticalGrid:"#f4f5f7",axis:"#707a8a",text:"#1e2329",
+    bull:"#0ecb81",bear:"#f6465d",mixed:"#8a8f98",blue:"#1e88e5",
+    amber:"#f59e0b",purple:"#4b5563",cyan:"#1e88e5",candleUp:"rgb(255,255,255)",candleDown:"rgb(145,145,145)",candleStroke:"rgb(133,133,133)"
+  };
+  const PHASE_COLORS={
+    "Bullish Trend / Expansion":COLORS.bull,"Bearish Trend / Expansion":COLORS.bear,
+    "Compressed":COLORS.amber,"Transition":COLORS.blue,"Directionally Mixed":COLORS.mixed,
+    "Decelerating":COLORS.purple
+  };
+  const TIMEFRAME_LINE_COLORS=Object.freeze({"1h":"#1e88e5","15m":"#0ecb81","5m":"#f59e0b","3m":"#f6465d","1m":"#4b5563"});
+  const $=id=>document.getElementById(id);
+  const finite=value=>{
+    if(value===null||value===undefined||value==="")return null;
+    const n=Number(value);return Number.isFinite(n)?n:null;
+  };
+  const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
+  const escapeHtml=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+  const fmt=(value,digits=2)=>finite(value)===null?"—":Number(value).toFixed(digits);
+  const signed=(value,digits=1)=>finite(value)===null?"—":`${Number(value)>0?"+":""}${Number(value).toFixed(digits)}`;
+  const formatPrice=value=>finite(value)===null?"—":Math.round(Number(value)).toLocaleString("en-US");
+  const formatPriceDistance=value=>finite(value)===null?"—":`$${Math.round(Math.abs(Number(value))).toLocaleString("en-US")}`;
+  const formatUsd=value=>{
+    const number=finite(value);if(number===null)return "—";
+    const absolute=Math.abs(number).toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1});
+    return number<0?`-$${absolute}`:`$${absolute}`;
+  };
+  const formatPercent=value=>finite(value)===null?"—":`${signed(value,2)}%`;
+  const formatQuantity=value=>finite(value)===null?"—":Number(value).toLocaleString("en-US",{minimumFractionDigits:4,maximumFractionDigits:8});
+  const median=values=>{
+    const clean=values.filter(Number.isFinite).sort((a,b)=>a-b);
+    if(!clean.length)return null;
+    const m=Math.floor(clean.length/2);return clean.length%2?clean[m]:(clean[m-1]+clean[m])/2;
+  };
+  const dubaiFormatter=new Intl.DateTimeFormat("en-GB",{timeZone:DUBAI_TZ,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+  const dubai=time=>Number.isFinite(time)?dubaiFormatter.format(new Date(time)):"—";
+  const iso=time=>Number.isFinite(time)?new Date(time).toISOString():"—";
+
+  const state={
+    rows:[],machineRows:[],candles1m:[],displayCandles:[],events:[],filteredEvents:[],outcomes:new Map(),
+    scalpSignals:[],scalpEvents:[],filteredScalpEvents:[],scalpTrades:[],scalpErrors:[],
+    scalpV2Signals:[],ssscSignals:[],sigBSnapshots:[],futuresSnapshots:[],
+    signalSourcesEnabled:{SSSC:true,V1:true,V2:true},
+    snapshotLayersEnabled:{sssc:true,sigb:true,futures:true},
+    resultColumnsVisible:null,
+    ssscTimelineView:"blocks",ssscMomentumStyle:"blocks",timelineLineHits:[],
+    viewStart:null,viewEnd:null,fullStart:null,fullEnd:null,crosshairTime:null,drag:null,
+    displayMinutes:1,highlightId:null,markerHits:[],malformed:0,duplicates:0,
+    timestampApproximate:true,source:"none",loading:false
+  };
+  let resultColumnOrder=RESULT_COLUMNS.map(([key])=>key);
+
+  function setStatus(text,tone=""){
+    $("statusBadge").textContent=text;
+    $("statusDot").className=`dot ${tone==="success"?"ok":tone==="busy"?"busy":tone==="error"?"bad":""}`;
+  }
+
+  function readJsonSlot(slot,fallback){
+    try{
+      const value=JSON.parse(localStorage.getItem(slot)||"null");
+      return value&&typeof value==="object"?value:fallback;
+    }catch(_error){return fallback;}
+  }
+  function writeJsonSlot(slot,value){try{localStorage.setItem(slot,JSON.stringify(value));return true;}catch(_error){return false;}}
+  function resolvedPanelHeight(value,minHeight,maxHeight){
+    return clamp(finite(value)??minHeight,minHeight,maxHeight);
+  }
+  function savePanelStates(){
+    const saved={};
+    document.querySelectorAll(".lower-panel[data-panel-key]").forEach(panel=>{
+      const minHeight=finite(panel.dataset.minHeight)??72;
+      const expandedHeight=finite(panel.dataset.expandedHeight)??finite(panel.style.height)??finite(panel.dataset.defaultHeight)??minHeight;
+      saved[panel.dataset.panelKey]={height:Math.round(expandedHeight),collapsed:panel.classList.contains("collapsed")};
+    });
+    writeJsonSlot(PANEL_STATE_SLOT,saved);
+  }
+  function setPanelCollapsed(panel,collapsed,save=true){
+    if(!panel)return;
+    if(collapsed&&!panel.classList.contains("collapsed")){
+      panel.dataset.expandedHeight=String(Math.round(panel.getBoundingClientRect().height||finite(panel.style.height)||finite(panel.dataset.defaultHeight)||180));
+    }
+    panel.classList.toggle("collapsed",!!collapsed);
+    const button=panel.querySelector("[data-collapse-panel]");
+    if(button){button.textContent=collapsed?"Expand":"Collapse";button.setAttribute("aria-expanded",String(!collapsed));}
+    if(!collapsed){
+      const minHeight=finite(panel.dataset.minHeight)??72,maxHeight=Math.max(minHeight,window.innerHeight-48);
+      const height=resolvedPanelHeight(panel.dataset.expandedHeight||panel.dataset.defaultHeight,minHeight,maxHeight);
+      panel.style.height=`${height}px`;panel.dataset.expandedHeight=String(height);
+    }
+    if(save)savePanelStates();
+    requestAnimationFrame(drawAll);
+  }
+  function restoreLowerPanels(){
+    const saved=readJsonSlot(PANEL_STATE_SLOT,{});
+    document.querySelectorAll(".lower-panel[data-panel-key]").forEach(panel=>{
+      const key=panel.dataset.panelKey,minHeight=finite(panel.dataset.minHeight)??72,maxHeight=Math.max(minHeight,window.innerHeight-48);
+      const height=resolvedPanelHeight(saved[key]?.height??panel.dataset.defaultHeight,minHeight,maxHeight);
+      panel.style.height=`${height}px`;panel.dataset.expandedHeight=String(height);
+      setPanelCollapsed(panel,!!saved[key]?.collapsed,false);
+    });
+  }
+  function sidebarCardKey(card){
+    return (card.querySelector("h2")?.textContent||"").trim();
+  }
+  function setSidebarCardCollapsed(card,collapsed,save=true){
+    card.classList.toggle("collapsed",!!collapsed);
+    if(save){
+      const saved=readJsonSlot(SIDEBAR_CARD_STATE_SLOT,{});
+      saved[sidebarCardKey(card)]=!!collapsed;
+      writeJsonSlot(SIDEBAR_CARD_STATE_SLOT,saved);
+    }
+    requestAnimationFrame(drawAll);
+  }
+  function restoreSidebarCards(){
+    const saved=readJsonSlot(SIDEBAR_CARD_STATE_SLOT,{});
+    document.querySelectorAll(".sidebar .control-card").forEach(card=>{
+      setSidebarCardCollapsed(card,!!saved[sidebarCardKey(card)],false);
+    });
+  }
+  function bindSidebarCards(){
+    document.querySelectorAll(".sidebar .control-card").forEach(card=>{
+      const heading=card.querySelector("h2");
+      if(!heading)return;
+      heading.addEventListener("click",()=>setSidebarCardCollapsed(card,!card.classList.contains("collapsed")));
+    });
+  }
+
+  function bindLowerPanels(){
+    document.querySelectorAll("[data-collapse-panel]").forEach(button=>button.addEventListener("click",()=>{
+      const panel=document.querySelector(`.lower-panel[data-panel-key="${button.dataset.collapsePanel}"]`);
+      setPanelCollapsed(panel,!panel?.classList.contains("collapsed"));
+    }));
+    document.querySelectorAll("[data-resize-panel]").forEach(handle=>handle.addEventListener("pointerdown",event=>{
+      const panel=document.querySelector(`.lower-panel[data-panel-key="${handle.dataset.resizePanel}"]`);
+      if(!panel||panel.classList.contains("collapsed"))return;
+      event.preventDefault();handle.setPointerCapture?.(event.pointerId);
+      const startY=event.clientY,startHeight=panel.getBoundingClientRect().height;
+      const move=moveEvent=>{
+        const minHeight=finite(panel.dataset.minHeight)??72,maxHeight=Math.max(minHeight,window.innerHeight-48);
+        const height=resolvedPanelHeight(startHeight+moveEvent.clientY-startY,minHeight,maxHeight);
+        panel.style.height=`${height}px`;panel.dataset.expandedHeight=String(height);
+        requestAnimationFrame(drawAll);
+      };
+      const end=endEvent=>{
+        handle.removeEventListener("pointermove",move);handle.removeEventListener("pointerup",end);handle.removeEventListener("pointercancel",end);
+        try{handle.releasePointerCapture?.(endEvent.pointerId);}catch(_error){}
+        savePanelStates();drawAll();
+      };
+      handle.addEventListener("pointermove",move);handle.addEventListener("pointerup",end);handle.addEventListener("pointercancel",end);
+    }));
+  }
+  function restoreResultColumnOrder(){
+    const saved=readJsonSlot(RESULT_COLUMN_ORDER_SLOT,[]);
+    const valid=RESULT_COLUMNS.map(([key])=>key);
+    if(Array.isArray(saved)&&saved.length===valid.length&&saved.every(key=>valid.includes(key))&&new Set(saved).size===valid.length)resultColumnOrder=saved.slice();
+  }
+  function saveResultColumnOrder(){writeJsonSlot(RESULT_COLUMN_ORDER_SLOT,resultColumnOrder);}
+  function resolvedSidebarWidth(width,viewport=window.innerWidth){
+    const max=Math.min(SIDEBAR_MAX,Math.max(SIDEBAR_MIN,viewport-520));
+    return clamp(Math.round(Number(width)||260),SIDEBAR_MIN,max);
+  }
+  function applySidebarWidth(width,save=false){
+    const resolved=resolvedSidebarWidth(width);
+    document.documentElement.style.setProperty("--sidebar-width",`${resolved}px`);
+    if(save)try{localStorage.setItem(SIDEBAR_WIDTH_SLOT,String(resolved));}catch(_error){}
+    requestAnimationFrame(drawAll);
+    return resolved;
+  }
+  function restoreSidebarWidth(){
+    let stored=null;try{stored=finite(localStorage.getItem(SIDEBAR_WIDTH_SLOT));}catch(_error){}
+    applySidebarWidth(stored??260,false);
+  }
+  function bindSidebarResizer(){
+    const handle=$("sidebarResizer");let drag=null;
+    handle.addEventListener("pointerdown",event=>{
+      drag={x:event.clientX,width:parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"))||260};
+      handle.classList.add("dragging");handle.setPointerCapture(event.pointerId);event.preventDefault();
+    });
+    handle.addEventListener("pointermove",event=>{if(drag)applySidebarWidth(drag.width+event.clientX-drag.x,false);});
+    const finish=event=>{
+      if(!drag)return;
+      const width=parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"))||260;
+      drag=null;handle.classList.remove("dragging");applySidebarWidth(width,true);
+      try{handle.releasePointerCapture(event.pointerId);}catch(_error){}
+    };
+    handle.addEventListener("pointerup",finish);handle.addEventListener("pointercancel",finish);
+    handle.addEventListener("keydown",event=>{
+      if(!["ArrowLeft","ArrowRight"].includes(event.key))return;
+      const width=parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"))||260;
+      applySidebarWidth(width+(event.key==="ArrowRight"?16:-16),true);event.preventDefault();
+    });
+  }
+
+  function bestTimestamp(row){
+    const candidates=[
+      ["event_at",false],
+      ["source_timestamp",false],["capture_timestamp",false],["captured_at",false],
+      ["snapshot_at",false],["recorded_at",false],["candle_time",false],
+      ["created_at",true],["inserted_at",true]
+    ];
+    for(const [field,approximate] of candidates){
+      const value=row&&row[field];
+      if(value===null||value===undefined||value==="")continue;
+      const numeric=typeof value==="number"?(value<1e12?value*1000:value):Date.parse(value);
+      if(Number.isFinite(numeric))return {time:numeric,field,approximate};
+    }
+    return {time:null,field:null,approximate:true};
+  }
+
+  function normalizeSnapshot(raw,index){
+    if(!raw||typeof raw!=="object")return null;
+    const stamp=bestTimestamp(raw);
+    if(!Number.isFinite(stamp.time))return null;
+    const timeframes=raw.timeframes&&typeof raw.timeframes==="object"?raw.timeframes:{};
+    const aggregate=raw.aggregate&&typeof raw.aggregate==="object"?raw.aggregate:{};
+    const normalizedTfs={};
+    for(const tf of LOGGED_TFS){
+      const source=timeframes[tf];
+      normalizedTfs[tf]=source&&typeof source==="object"?{...source}:null;
+    }
+    return {
+      id:String(raw.id??`${stamp.time}-${index}`),time:stamp.time,timestampField:stamp.field,
+      timestampApproximate:stamp.approximate,machineId:String(raw.machine_id??"").trim()||"(missing)",
+      symbol:String(raw.symbol??""),timeframes:normalizedTfs,aggregate:{...aggregate},raw
+    };
+  }
+
+  function normalizeRows(rawRows){
+    let malformed=0,duplicates=0;
+    const valid=[];
+    rawRows.forEach((row,index)=>{const normalized=normalizeSnapshot(row,index);normalized?valid.push(normalized):malformed++;});
+    valid.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));
+    const seen=new Set(),deduped=[];
+    for(const row of valid){
+      const signature=`${row.machineId}|${row.time}|${JSON.stringify(row.timeframes)}|${JSON.stringify(row.aggregate)}`;
+      if(seen.has(signature)){duplicates++;continue;}
+      seen.add(signature);deduped.push(row);
+    }
+    return {rows:deduped,malformed,duplicates};
+  }
+
+  async function paginate(fetchPage,pageSize=PAGE_SIZE,onPage=()=>{}){
+    const output=[];
+    for(let offset=0;;offset+=pageSize){
+      const page=await fetchPage(offset,pageSize);
+      if(!Array.isArray(page))throw new Error("Pagination endpoint did not return an array");
+      output.push(...page);onPage(output.length);
+      if(page.length<pageSize)break;
+    }
+    return output;
+  }
+
+  async function loadLocalSnapshots(){
+    return paginate(async(offset,limit)=>{
+      const endpoint=`${LOCAL_API_BASE}/${TABLE}?select=*&symbol=eq.${SYMBOL}&order=created_at.asc&limit=${limit}&offset=${offset}`;
+      const response=await fetch(endpoint,{headers:{Accept:"application/json"}});
+      if(!response.ok){
+        let detail="";try{detail=await response.text();}catch(_error){}
+        throw new Error(`Local API HTTP ${response.status}${detail?`: ${detail.slice(0,240)}`:""}`);
+      }
+      return response.json();
+    },PAGE_SIZE,count=>{
+      $("datasetStatus").textContent=`Loading ${TABLE}: ${count.toLocaleString()} rows…`;
+    });
+  }
+
+  async function loadLocalTable(table){
+    return paginate(async(offset,limit)=>{
+      const endpoint=`${LOCAL_API_BASE}/${table}?select=*&symbol=eq.${SYMBOL}&order=created_at.asc&limit=${limit}&offset=${offset}`;
+      const response=await fetch(endpoint,{headers:{Accept:"application/json"}});
+      if(!response.ok){
+        let detail="";try{detail=await response.text();}catch(_error){}
+        throw new Error(`${table} HTTP ${response.status}${detail?`: ${detail.slice(0,180)}`:""}`);
+      }
+      return response.json();
+    },PAGE_SIZE,count=>{$("datasetStatus").textContent=`Loading ${table}: ${count.toLocaleString()} rows…`;});
+  }
+
+  function objectValue(value){
+    if(value&&typeof value==="object")return value;
+    if(typeof value==="string")try{const parsed=JSON.parse(value);return parsed&&typeof parsed==="object"?parsed:null;}catch(_error){}
+    return null;
+  }
+  function timeMs(value){
+    const number=finite(value);
+    if(number!==null)return number<1e11?Math.round(number*1000):Math.round(number);
+    const parsed=Date.parse(value);return Number.isFinite(parsed)?parsed:null;
+  }
+  function scalpMetric(detector,key){
+    return finite(detector&&detector[key])??finite(detector&&detector.raw&&detector.raw[key])??finite(detector&&detector.rankDiagnostics&&detector.rankDiagnostics[key]);
+  }
+  function normalizeScalpSignals(rawRows){
+    const signals=[],malformed=[];
+    (Array.isArray(rawRows)?rawRows:[]).forEach((raw,index)=>{
+      const detector=objectValue(raw&&raw.detector_state),action=String(raw&&raw.action||"").toUpperCase();
+      if(!detector||!["DETECTION_QUALIFIED","RANK_REJECTED"].includes(action)){malformed.push(raw);return;}
+      const eventType=String(detector.eventType||"").toUpperCase(),direction=String(detector.direction||"").toUpperCase();
+      if(!["CROSS","BOUNCE"].includes(eventType)||!["LONG","SHORT"].includes(direction)){malformed.push(raw);return;}
+      const eventAt=timeMs(raw.event_at),trueCandleTime=timeMs(detector.candleTime),inserted=timeMs(raw.created_at),published=timeMs(detector.publishedAt);
+      const timestamp=eventAt??trueCandleTime??published??inserted;
+      if(timestamp===null){malformed.push(raw);return;}
+      const rank=finite(detector.rankValue)??finite(detector.rankDiagnostics&&detector.rankDiagnostics.rankValue);
+      signals.push({
+        id:`scalp|${raw.id??index}|${detector.eventId||timestamp}`,kind:"SCALP",time:timestamp,
+        timestampField:eventAt!==null?"event_at":trueCandleTime!==null?"detector_state.candleTime":published!==null?"detector_state.publishedAt":"created_at",
+        timestampApproximate:eventAt===null&&trueCandleTime===null,direction,eventType,side:direction==="LONG"?1:-1,
+        sourceTimeframe:String(raw.source_timeframe||detector.source||"").toLowerCase(),
+        rank,recordedAction:action,eventState:detector.eventState||detector.phase||null,
+        qualified:detector.qualified===true,projected:detector.projected===true,
+        blockingReason:detector.rejectionReason||null,reason:detector.reason||null,
+        eventId:String(detector.eventId||detector.freshnessKey||""),freshnessKey:String(detector.freshnessKey||""),
+        machineId:String(raw.machine_id||"").trim()||"(missing)",symbol:String(raw.symbol||""),
+        detectorState:detector,cascadeAgreement:objectValue(raw.cascade_agreement),raw,linkedTrade:null,ssscMatch:null
+      });
+    });
+    const seen=new Set(),deduped=[];
+    for(const signal of signals.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id))){
+      const key=`${signal.machineId}|${signal.eventId||signal.freshnessKey}|${signal.recordedAction}|${signal.time}`;
+      if(seen.has(key))continue;seen.add(key);deduped.push(signal);
+    }
+    return {signals:deduped,malformed:malformed.length,duplicates:signals.length-deduped.length};
+  }
+  function normalizeSsscSignals(rawRows){
+    const signals=[],malformed=[];
+    (Array.isArray(rawRows)?rawRows:[]).forEach((raw,index)=>{
+      const action=String(raw&&raw.action||"").toUpperCase();
+      if(!["FRESH LONG","FRESH SHORT","EXIT LONG","EXIT SHORT"].includes(action)){malformed.push(raw);return;}
+      const time=timeMs(raw.event_at)??timeMs(raw.created_at);
+      if(time===null){malformed.push(raw);return;}
+      signals.push({
+        id:`ssscsig|${raw.id??index}`,kind:"SSSC_SIGNAL",source:"SSSC",time,
+        timestampField:timeMs(raw.event_at)!==null?"event_at":"created_at",
+        timestampApproximate:timeMs(raw.event_at)===null,
+        action,side:action.includes("LONG")?1:-1,reason:raw.reason||null,
+        snapshotId:raw.snapshot_id??null,
+        machineId:String(raw.machine_id||"").trim()||"(missing)",symbol:String(raw.symbol||""),raw
+      });
+    });
+    signals.sort((a,b)=>a.time-b.time);
+    return {signals,malformed:malformed.length};
+  }
+  function normalizeSigBSnapshots(rawRows){
+    const rows=[],malformed=[];
+    (Array.isArray(rawRows)?rawRows:[]).forEach((raw,index)=>{
+      const time=timeMs(raw.event_at)??timeMs(raw.created_at);
+      if(time===null){malformed.push(raw);return;}
+      rows.push({
+        id:`sigb|${raw.id??index}`,time,source:"sigb",
+        timestampField:timeMs(raw.event_at)!==null?"event_at":"created_at",
+        timestampApproximate:timeMs(raw.event_at)===null,
+        direction:raw.direction||null,entryState:raw.entry_state||null,
+        confidence:finite(raw.confidence),setupScore:finite(raw.setup_score),
+        triggerScore:finite(raw.trigger_score),currentEntryScore:finite(raw.current_entry_score),
+        readinessScore:finite(raw.readiness_score),chaseDistanceAtr:finite(raw.chase_distance_atr),
+        chaseWarning:raw.chase_warning===true,finalStateReason:raw.final_state_reason||null,
+        machineId:String(raw.machine_id||"").trim()||"(missing)",symbol:String(raw.symbol||""),raw
+      });
+    });
+    rows.sort((a,b)=>a.time-b.time);
+    return {rows,malformed:malformed.length};
+  }
+  function normalizeFuturesSnapshots(rawRows){
+    const rows=[],malformed=[];
+    (Array.isArray(rawRows)?rawRows:[]).forEach((raw,index)=>{
+      const time=timeMs(raw.event_at)??timeMs(raw.created_at);
+      if(time===null){malformed.push(raw);return;}
+      rows.push({
+        id:`futures|${raw.id??index}`,time,source:"futures",
+        timestampField:timeMs(raw.event_at)!==null?"event_at":"created_at",
+        timestampApproximate:timeMs(raw.event_at)===null,
+        fundingRate:finite(raw.funding_rate),openInterest:finite(raw.open_interest),
+        machineId:String(raw.machine_id||"").trim()||"(missing)",symbol:String(raw.symbol||""),raw
+      });
+    });
+    rows.sort((a,b)=>a.time-b.time);
+    return {rows,malformed:malformed.length};
+  }
+  function normalizeScalpTrades(rawRows){
+    return (Array.isArray(rawRows)?rawRows:[]).map((raw,index)=>{
+      const session=objectValue(raw&&raw.raw_session)||{},eventId=String(session.eventId||"");
+      const eventAt=timeMs(raw.event_at),createdAt=timeMs(raw.created_at);
+      const exitEventAt=timeMs(raw.exit_event_at),closedAt=timeMs(raw.closed_at);
+      return {
+        id:`trade|${raw.id??index}`,eventId,
+        time:eventAt??createdAt,timestampField:eventAt!==null?"event_at":"created_at",timestampApproximate:eventAt===null,
+        closedTime:exitEventAt??closedAt,closedTimestampField:exitEventAt!==null?"exit_event_at":"closed_at",closedTimestampApproximate:exitEventAt===null,
+        direction:String(raw.direction||"").toUpperCase(),sourceTimeframe:String(raw.source_timeframe||"").toLowerCase(),
+        eventType:String(raw.event_type||"").toUpperCase(),entryPrice:finite(raw.avg_entry_price),
+        exitPrice:finite(raw.exit_price),exitReason:raw.exit_reason??null,estimatedPnlUsd:finite(raw.estimated_realized_pnl_usd),
+        entryCommission:finite(raw.entry_commission),requestedQty:finite(raw.requested_qty),filledQty:finite(raw.filled_qty),
+        deviceId:String(raw.device_id||""),rawSession:session,raw
+      };
+    }).filter(trade=>Number.isFinite(trade.time));
+  }
+
+  async function loadBinance1m(startMs,endMs){
+    const output=[];
+    let cursor=Math.floor(startMs/MINUTE)*MINUTE;
+    const end=Math.min(endMs,Date.now()-MINUTE);
+    while(cursor<=end){
+      const endpoint=`https://fapi.binance.com/fapi/v1/klines?symbol=${SYMBOL}&interval=1m&startTime=${cursor}&endTime=${end}&limit=${BINANCE_LIMIT}`;
+      const response=await fetch(endpoint);
+      if(!response.ok)throw new Error(`Binance Futures HTTP ${response.status}`);
+      const page=await response.json();
+      if(!Array.isArray(page))throw new Error("Binance returned malformed candle data");
+      for(const k of page){
+        const candle={openTime:Number(k[0]),open:Number(k[1]),high:Number(k[2]),low:Number(k[3]),close:Number(k[4]),volume:Number(k[5]),closeTime:Number(k[6])};
+        if([candle.openTime,candle.open,candle.high,candle.low,candle.close,candle.closeTime].every(Number.isFinite))output.push(candle);
+      }
+      $("datasetStatus").textContent=`Loading Binance 1m: ${output.length.toLocaleString()} candles…`;
+      if(!page.length)break;
+      const next=Number(page.at(-1)[0])+MINUTE;
+      if(next<=cursor)break;
+      cursor=next;
+      if(page.length<BINANCE_LIMIT)break;
+    }
+    const unique=new Map(output.map(c=>[c.openTime,c]));
+    return [...unique.values()].sort((a,b)=>a.openTime-b.openTime);
+  }
+
+  function aggregateCandles(candles,minutes){
+    if(minutes===1)return candles.slice();
+    const bucketMs=minutes*MINUTE,buckets=new Map();
+    for(const c of candles){
+      const key=Math.floor(c.openTime/bucketMs)*bucketMs;
+      const hit=buckets.get(key);
+      if(!hit)buckets.set(key,{openTime:key,open:c.open,high:c.high,low:c.low,close:c.close,volume:c.volume,closeTime:key+bucketMs-1});
+      else{hit.high=Math.max(hit.high,c.high);hit.low=Math.min(hit.low,c.low);hit.close=c.close;hit.volume+=c.volume;}
+    }
+    return [...buckets.values()].sort((a,b)=>a.openTime-b.openTime);
+  }
+
+  function buildEvents(rows){
+    const byMachine=new Map();
+    for(const row of rows){
+      if(!byMachine.has(row.machineId))byMachine.set(row.machineId,[]);
+      byMachine.get(row.machineId).push(row);
+    }
+    const events=[];
+    for(const [machine,machineRows] of byMachine){
+      let previous=null;
+      for(const row of machineRows.sort((a,b)=>a.time-b.time)){
+        const action=String(row.aggregate.setupAction||"WAIT").toUpperCase();
+        if(!["FRESH LONG","FRESH SHORT","WAIT"].includes(action))continue;
+        if(action===previous)continue;
+        events.push({
+          id:`${machine}|${row.id}|${action}`,time:row.time,action,side:action==="FRESH LONG"?1:action==="FRESH SHORT"?-1:0,
+          snapshot:row,machineId:machine,previousAction:previous
+        });
+        previous=action;
+      }
+    }
+    return events.sort((a,b)=>a.time-b.time);
+  }
+
+  function attachScalpContext(){
+    const tradeByEvent=new Map();
+    for(const trade of state.scalpTrades)if(trade.eventId){
+      if(!tradeByEvent.has(trade.eventId))tradeByEvent.set(trade.eventId,[]);
+      tradeByEvent.get(trade.eventId).push(trade);
+    }
+    const ssscByMachine=new Map();
+    for(const row of state.rows){
+      if(!ssscByMachine.has(row.machineId))ssscByMachine.set(row.machineId,[]);
+      ssscByMachine.get(row.machineId).push(row);
+    }
+    for(const rows of ssscByMachine.values())rows.sort((a,b)=>a.time-b.time);
+    for(const signal of [...state.scalpSignals,...state.scalpV2Signals]){
+      const exactTrades=tradeByEvent.get(signal.eventId)||[];
+      signal.linkedTrade=exactTrades.length===1?exactTrades[0]:null;
+      const candidates=ssscByMachine.get(signal.machineId)||[];
+      let prior=null;
+      for(const row of candidates){if(row.time<=signal.time)prior=row;else break;}
+      signal.ssscMatch=prior;
+    }
+    state.scalpEvents=[...state.scalpSignals,...state.scalpV2Signals];
+  }
+
+  function scalpSsscAgreement(signal){
+    const match=signal&&signal.ssscMatch,agg=match&&match.aggregate;
+    if(!agg)return false;
+    const bias=finite(agg.marketBias),strength=finite(agg.marketStrength);
+    if(bias===null||strength===null||Math.sign(bias)!==signal.side||Math.sign(strength)!==signal.side)return false;
+    const action=String(agg.setupAction||"WAIT").toUpperCase();
+    if(action==="FRESH LONG"&&signal.side<0||action==="FRESH SHORT"&&signal.side>0)return false;
+    return true;
+  }
+
+  function costPercentInput(id){
+    const value=Math.max(0,finite($(id).value)??0);
+    return $("costUnit").value==="bps"?value/100:value;
+  }
+  function priceDistanceInput(id){return Math.max(0,finite($(id).value)??0);}
+  function updateDistanceDisplays(){
+    $("takeProfitDisplay").textContent=formatPriceDistance(priceDistanceInput("takeProfit"));
+    $("stopLossDisplay").textContent=formatPriceDistance(priceDistanceInput("stopLoss"));
+  }
+  function monetaryPnl({entryPrice,exitPrice,side,quantity,feePercent=0}={}){
+    const entry=finite(entryPrice),exit=finite(exitPrice),direction=Math.sign(finite(side)??0),lot=Math.max(0,finite(quantity)??0),fee=Math.max(0,finite(feePercent)??0);
+    if(entry===null||exit===null||!direction||!lot)return {grossPnlUsd:null,feesUsd:null,pnlUsd:null,returnPercent:null};
+    const grossPnlUsd=direction*(exit-entry)*lot;
+    const feesUsd=(Math.abs(entry)+Math.abs(exit))*lot*fee/100;
+    const pnlUsd=grossPnlUsd-feesUsd;
+    return {grossPnlUsd,feesUsd,pnlUsd,returnPercent:entry*lot?pnlUsd/(entry*lot)*100:null};
+  }
+
+  function evaluateOutcome(event){
+    if(!event.side)return {status:"NO_DIRECTION",barrier:null};
+    const complete=state.candles1m.filter(c=>c.closeTime<Date.now()).slice().sort((a,b)=>a.openTime-b.openTime);
+    const entryIndex=complete.findIndex(c=>c.openTime>event.time);
+    if(entryIndex<0)return {status:"OPEN / UNRESOLVED",barrier:"OPEN / UNRESOLVED",entryTime:null,entryPrice:null,exitPrice:null,barrierReturn:null,pnlUsd:null};
+    const window=complete.slice(entryIndex);
+    const side=event.side,slip=costPercentInput("slippage")/100,fee=costPercentInput("fee"),testLot=Math.max(0,finite($("testLot").value)??0);
+    const tpDistance=priceDistanceInput("takeProfit"),slDistance=priceDistanceInput("stopLoss");
+    const entryRaw=window[0].open,entry=entryRaw*(1+side*slip);
+    let mfe=-Infinity,mae=Infinity,bestMinute=null,worstMinute=null;
+    const tp=entry+side*tpDistance,sl=entry-side*slDistance;
+    let barrier="OPEN / UNRESOLVED",barrierMinute=null,resolutionCandle=null;
+    for(let i=0;i<window.length;i++){
+      const candle=window[i];
+      const favourable=side>0?(candle.high-entry)/entry*100:(entry-candle.low)/entry*100;
+      const adverse=side>0?(candle.low-entry)/entry*100:(entry-candle.high)/entry*100;
+      if(favourable>mfe){mfe=favourable;bestMinute=i+1;}
+      if(adverse<mae){mae=adverse;worstMinute=i+1;}
+      const hitTp=tpDistance>0&&(side>0?candle.high>=tp:candle.low<=tp),hitSl=slDistance>0&&(side>0?candle.low<=sl:candle.high>=sl);
+      if(hitTp&&hitSl){barrier="AMBIGUOUS";barrierMinute=i+1;resolutionCandle=candle;break;}
+      if(hitTp){barrier="TP";barrierMinute=i+1;resolutionCandle=candle;break;}
+      if(hitSl){barrier="SL";barrierMinute=i+1;resolutionCandle=candle;break;}
+    }
+    const resolved=barrier==="TP"||barrier==="SL";
+    const exitPrice=barrier==="TP"?tp:barrier==="SL"?sl:null;
+    const money=resolved?monetaryPnl({entryPrice:entry,exitPrice,side,quantity:testLot,feePercent:fee}):{grossPnlUsd:null,feesUsd:null,pnlUsd:null,returnPercent:null};
+    return {
+      status:resolved?"RESOLVED":barrier==="AMBIGUOUS"?"AMBIGUOUS":"OPEN / UNRESOLVED",
+      entryTime:window[0].openTime,entryPrice:entry,entryRaw,
+      exitTime:resolved?resolutionCandle?.openTime??null:null,closeTime:resolved?resolutionCandle?.closeTime??null:null,
+      lastObservedTime:window.at(-1)?.closeTime??null,mfe,mae,
+      timeToBest:bestMinute,timeToWorst:worstMinute,barrier,barrierMinute,barrierReturn:money.returnPercent,exitPrice,testLot,
+      tpDistance,slDistance,targetPrice:tp,stopPrice:sl,grossPnlUsd:money.grossPnlUsd,feesUsd:money.feesUsd,pnlUsd:money.pnlUsd,
+      timestampApproximate:event.snapshot?.timestampApproximate??event.timestampApproximate??true
+    };
+  }
+
+  function evaluateAllOutcomes(){
+    state.outcomes.clear();
+    for(const event of [...state.events,...state.scalpEvents])state.outcomes.set(event.id,evaluateOutcome(event));
+  }
+
+  function checkedValues(selector){return [...document.querySelectorAll(selector)].filter(el=>el.checked).map(el=>el.value);}
+  function metric(row,key){return finite(row&&row.aggregate&&row.aggregate[key]);}
+  function eventDirection(event){return event.side||Math.sign(metric(event.snapshot,"marketBias")||0);}
+
+  function sourceChecked(key){return !!(document.querySelector(`.signal-source[value="${key}"]`)?.checked);}
+
+  function passesFilters(event){
+    if(!sourceChecked("SSSC"))return false;
+    const allowed=checkedValues(".sssc-action-filter");
+    if(allowed.length&&!allowed.includes(event.action))return false;
+    const row=event.snapshot,agg=row.aggregate,tfFilter=$("recordedTf")?.value||"";
+    if(tfFilter&&!row.timeframes[tfFilter])return false;
+    const confidence=finite(agg.aggregateConfidence),risk=finite(agg.timingRisk),bias=finite(agg.marketBias),strength=finite(agg.marketStrength);
+    if($("ssscMinConfidence")&&(confidence===null||confidence<(finite($("ssscMinConfidence").value)??0)))return false;
+    if($("ssscMaxRisk")&&(risk===null||risk>(finite($("ssscMaxRisk").value)??100)))return false;
+    if($("ssscMinBias")&&(bias===null||Math.abs(bias)<(finite($("ssscMinBias").value)??0)))return false;
+    if($("ssscMinStrength")&&(strength===null||Math.abs(strength)<(finite($("ssscMinStrength").value)??0)))return false;
+    if($("ssscDirectionStrengthAgree")?.checked&&(bias===0||strength===0||Math.sign(bias)!==Math.sign(strength)))return false;
+    const phase=$("ssscPhaseFilter")?.value||"",stateValue=$("ssscStateFilter")?.value||"";
+    const candidateTfs=tfFilter?[row.timeframes[tfFilter]]:Object.values(row.timeframes);
+    if(phase&&!candidateTfs.some(d=>d&&d.phase===phase))return false;
+    if(stateValue&&!candidateTfs.some(d=>d&&d.state===stateValue))return false;
+    if($("reliability")?.value==="full"&&!candidateTfs.some(d=>d&&d.available!==false&&d.reliability==="full-warmup"))return false;
+    if($("ssscIncludeUnavailable")&&!$("ssscIncludeUnavailable").checked&&Object.values(row.timeframes).some(d=>!d||d.available===false))return false;
+    return true;
+  }
+
+  function passesScalpFilters(signal){
+    const src=signal.source||"V1";
+    if(!sourceChecked(src))return false;
+    const p=src.toLowerCase();
+    const el=id=>$(`${p}${id}`);
+    if(el("Tf")?.value&&signal.sourceTimeframe!==el("Tf").value)return false;
+    if(el("Direction")?.value&&signal.direction!==el("Direction").value)return false;
+    if(el("Type")?.value&&signal.eventType!==el("Type").value)return false;
+    const categories=checkedValues(`.${p}-scalp-category`);
+    if(categories.length&&!categories.includes(signal.eventType))return false;
+    const minimum=finite(el("MinRank")?.value)??0;
+    if(minimum>0&&(signal.rank===null||signal.rank<minimum))return false;
+    if(el("Eligibility")?.value&&signal.recordedAction!==el("Eligibility").value)return false;
+    if(el("Status")?.value&&String(signal.eventState||"")!==el("Status").value)return false;
+    if(el("Blocking")?.value&&String(signal.blockingReason||"")!==el("Blocking").value)return false;
+    if(el("Execution")?.value==="executed"&&!signal.linkedTrade)return false;
+    if(el("Execution")?.value==="detector"&&signal.linkedTrade)return false;
+    const machine=$("machineSelect")?.value;
+    if(machine&&signal.machineId!==machine)return false;
+    return true;
+  }
+  function visibleSignalSets(){
+    return {
+      sssc:sourceChecked("SSSC")?state.filteredEvents:[],
+      scalp:state.filteredScalpEvents
+    };
+  }
+
+  function applyFilters(){
+    state.filteredEvents=state.events.filter(passesFilters);
+    state.filteredScalpEvents=state.scalpEvents.filter(passesScalpFilters);
+    renderSummary();
+    renderScalpSummaries();
+    renderResults();
+    drawAll();
+  }
+
+  function renderSummary(){
+    const directed=state.filteredEvents.filter(e=>e.side);
+    const outcomes=directed.map(e=>state.outcomes.get(e.id)).filter(Boolean);
+    const usable=outcomes.filter(o=>o.status==="RESOLVED"&&Number.isFinite(o.barrierReturn));
+    const wins=usable.filter(o=>o.barrierReturn>0).length;
+    const counts={
+      signal:directed.length,long:directed.filter(e=>e.side>0).length,short:directed.filter(e=>e.side<0).length,
+      win:usable.length?wins/usable.length*100:null,median:median(usable.map(o=>o.barrierReturn)),
+      expectancy:usable.length?usable.reduce((sum,o)=>sum+o.barrierReturn,0)/usable.length:null,
+      mfe:median(outcomes.map(o=>o.mfe)),mae:median(outcomes.map(o=>o.mae)),
+      tp:outcomes.filter(o=>o.barrier==="TP").length,sl:outcomes.filter(o=>o.barrier==="SL").length,
+      ambiguous:outcomes.filter(o=>o.status==="AMBIGUOUS").length,open:outcomes.filter(o=>o.status==="OPEN / UNRESOLVED").length
+    };
+    const stats=[
+      ["Signals",counts.signal],["Long / Short",`${counts.long} / ${counts.short}`],
+      ["Win rate",counts.win===null?"—":`${fmt(counts.win,1)}%`],["Median net",counts.median===null?"—":`${signed(counts.median,2)}%`],
+      ["Expectancy",counts.expectancy===null?"—":`${signed(counts.expectancy,2)}%`],["Median MFE",counts.mfe===null?"—":`${signed(counts.mfe,2)}%`],
+      ["Median MAE",counts.mae===null?"—":`${signed(counts.mae,2)}%`],["TP / SL",`${counts.tp} / ${counts.sl}`],
+      ["Ambiguous",counts.ambiguous],["Open / unresolved",counts.open],
+      ["Test-lot P/L",formatUsd(usable.reduce((sum,outcome)=>sum+(finite(outcome.pnlUsd)??0),0))]
+    ];
+    $("summary").innerHTML=stats.map(([label,value])=>`<div class="stat"><span>${label}</span><b>${value}</b></div>`).join("");
+  }
+
+  function statCards(target,stats){
+    $(target).innerHTML=stats.map(([label,value])=>`<div class="stat"><span>${escapeHtml(label)}</span><b>${value}</b></div>`).join("");
+  }
+  function renderScalpSummaries(){
+    const signals=state.filteredScalpEvents;
+    const hypothetical=signals.filter(signal=>!signal.linkedTrade).map(signal=>state.outcomes.get(signal.id)).filter(outcome=>outcome?.status==="RESOLVED"&&Number.isFinite(outcome.barrierReturn));
+    const actual=signals.map(signal=>signal.linkedTrade).filter(Boolean),actualPnl=actual.map(trade=>trade.estimatedPnlUsd).filter(Number.isFinite);
+    statCards("scalpSummary",[
+      ["Detector events",signals.length],["Cross / Bounce",`${signals.filter(s=>s.eventType==="CROSS").length} / ${signals.filter(s=>s.eventType==="BOUNCE").length}`],
+      ["Exact-linked trades",actual.length],["Detector-only",signals.filter(s=>!s.linkedTrade).length],
+      ["Hypo win rate",hypothetical.length?`${fmt(hypothetical.filter(o=>o.barrierReturn>0).length/hypothetical.length*100,1)}%`:"—"],
+      ["Hypo expectancy",hypothetical.length?`${signed(hypothetical.reduce((sum,o)=>sum+o.barrierReturn,0)/hypothetical.length,2)}%`:"—"],
+      ["Hypo P/L",formatUsd(hypothetical.reduce((sum,o)=>sum+(finite(o.pnlUsd)??0),0))],
+      ["Actual wins",actualPnl.length?`${actualPnl.filter(v=>v>0).length}/${actualPnl.length}`:"—"],
+      ["Actual P&L USD",actualPnl.length?formatUsd(actualPnl.reduce((a,b)=>a+b,0)):"—"],
+      ["Rank rejected",signals.filter(s=>s.recordedAction==="RANK_REJECTED").length],["Missing rank",signals.filter(s=>s.rank===null).length]
+    ]);
+    const agreed=signals.filter(scalpSsscAgreement),agreedHypo=agreed.filter(s=>!s.linkedTrade).map(s=>state.outcomes.get(s.id)).filter(o=>o?.status==="RESOLVED"&&Number.isFinite(o.barrierReturn));
+    statCards("agreementSummary",[
+      ["Matched prior SSSC",signals.filter(s=>s.ssscMatch).length],["Directional agreement",agreed.length],
+      ["Agreement rate",signals.length?`${fmt(agreed.length/signals.length*100,1)}%`:"—"],["No prior SSSC",signals.filter(s=>!s.ssscMatch).length],
+      ["Agreed hypo count",agreedHypo.length],["Agreed win rate",agreedHypo.length?`${fmt(agreedHypo.filter(o=>o.barrierReturn>0).length/agreedHypo.length*100,1)}%`:"—"],
+      ["Agreed expectancy",agreedHypo.length?`${signed(agreedHypo.reduce((sum,o)=>sum+o.barrierReturn,0)/agreedHypo.length,2)}%`:"—"],
+      ["Opposed / mixed",signals.filter(s=>s.ssscMatch&&!scalpSsscAgreement(s)).length],
+      ["Future matches",signals.filter(s=>s.ssscMatch&&s.ssscMatch.time>s.time).length],["Rule","latest ≤ signal"]
+    ]);
+  }
+
+  function orderedResultCells(cells){
+    const visible=state.resultColumnsVisible||{};
+    return resultColumnOrder.map(key=>`<td data-column-key="${key}"${visible[key]===false?' style="display:none"':""}>${cells[key]??"—"}</td>`).join("");
+  }
+  function resultRow(event,outcome){
+    const agg=event.snapshot.aggregate,cls=event.side>0?"bull":event.side<0?"bear":"muted";
+    const resolved=outcome?.status==="RESOLVED",barrier=outcome?.barrier||"—";
+    const cells={
+      time:`<span title="${escapeHtml(iso(event.time))}">${escapeHtml(dubai(event.time))}${event.snapshot.timestampApproximate?"*":""}</span>`,
+      source:"SSSC",signal:`<span class="${cls}">${escapeHtml(event.action)}</span>`,basis:"HYPOTHETICAL",
+      quantity:formatQuantity(outcome?.testLot),entry:formatPrice(outcome?.entryPrice),exit:resolved?formatPrice(outcome?.exitPrice):"—",
+      return:resolved?formatPercent(outcome?.barrierReturn):"—",pnl:resolved?formatUsd(outcome?.pnlUsd):"—",
+      mfe:formatPercent(outcome?.mfe),mae:formatPercent(outcome?.mae),
+      best:finite(outcome?.timeToBest)===null?"—":`${outcome.timeToBest}m`,worst:finite(outcome?.timeToWorst)===null?"—":`${outcome.timeToWorst}m`,
+      barrier:`<span class="${barrier==="TP"?"bull":barrier==="SL"?"bear":barrier==="AMBIGUOUS"?"warn":""}">${escapeHtml(barrier)}</span>`,
+      confidence:finite(agg.aggregateConfidence)===null?"—":`${fmt(agg.aggregateConfidence,1)}%`,
+      risk:finite(agg.timingRisk)===null?"—":`${fmt(agg.timingRisk,1)}%`
+    };
+    return `<tr data-event-id="${escapeHtml(event.id)}" class="${state.highlightId===event.id?"highlight":""}">${orderedResultCells(cells)}</tr>`;
+  }
+  function scalpResultRow(signal,outcome){
+    const cls=signal.side>0?"bull":"bear",trade=signal.linkedTrade,match=signal.ssscMatch?.aggregate,resolved=outcome?.status==="RESOLVED";
+    const actualReturn=trade&&finite(trade.entryPrice)!==null&&finite(trade.exitPrice)!==null
+      ?signal.side*(trade.exitPrice-trade.entryPrice)/trade.entryPrice*100:null;
+    const barrier=trade?.exitReason??outcome?.barrier??"—";
+    const cells={
+      time:`<span title="${escapeHtml(iso(signal.time))}">${escapeHtml(dubai(signal.time))}${signal.timestampApproximate?"*":""}</span>`,
+      source:'<span class="warn">SCALP</span>',signal:`<span class="${cls}">${escapeHtml(`${signal.direction} ${signal.eventType}`)}</span>`,
+      basis:trade?"ACTUAL RECORDED":"HYPOTHETICAL",
+      quantity:formatQuantity(trade?.filledQty??trade?.requestedQty??outcome?.testLot),
+      entry:formatPrice(trade?.entryPrice??outcome?.entryPrice),exit:formatPrice(trade?.exitPrice??(resolved?outcome?.exitPrice:null)),
+      return:trade?formatPercent(actualReturn):resolved?formatPercent(outcome?.barrierReturn):"—",
+      pnl:trade?formatUsd(trade.estimatedPnlUsd):resolved?formatUsd(outcome?.pnlUsd):"—",
+      mfe:trade?"—":formatPercent(outcome?.mfe),mae:trade?"—":formatPercent(outcome?.mae),
+      best:trade||finite(outcome?.timeToBest)===null?"—":`${outcome.timeToBest}m`,
+      worst:trade||finite(outcome?.timeToWorst)===null?"—":`${outcome.timeToWorst}m`,
+      barrier:escapeHtml(barrier),
+      confidence:finite(match?.aggregateConfidence)===null?"—":`${fmt(match.aggregateConfidence,1)}%`,
+      risk:finite(match?.timingRisk)===null?"—":`${fmt(match.timingRisk,1)}%`
+    };
+    return `<tr data-event-id="${escapeHtml(signal.id)}" class="${state.highlightId===signal.id?"highlight":""}">${orderedResultCells(cells)}</tr>`;
+  }
+
+  function renderResultHeader(){
+    const labels=Object.fromEntries(RESULT_COLUMNS),visible=state.resultColumnsVisible||{};
+    $("resultsHeader").innerHTML=resultColumnOrder.map(key=>`<th draggable="true" data-column-key="${key}"${visible[key]===false?' style="display:none"':""} title="Drag to rearrange">${escapeHtml(labels[key])}</th>`).join("");
+    let draggedKey=null;
+    $("resultsHeader").querySelectorAll("th").forEach(header=>{
+      header.addEventListener("dragstart",event=>{draggedKey=header.dataset.columnKey;header.classList.add("dragging");event.dataTransfer?.setData("text/plain",draggedKey);});
+      header.addEventListener("dragend",()=>{header.classList.remove("dragging");draggedKey=null;});
+      header.addEventListener("dragover",event=>{event.preventDefault();header.classList.add("drag-over");});
+      header.addEventListener("dragleave",()=>header.classList.remove("drag-over"));
+      header.addEventListener("drop",event=>{
+        event.preventDefault();header.classList.remove("drag-over");
+        const source=draggedKey||event.dataTransfer?.getData("text/plain"),target=header.dataset.columnKey;
+        if(!source||source===target)return;
+        const next=resultColumnOrder.filter(key=>key!==source),targetIndex=next.indexOf(target);
+        next.splice(targetIndex,0,source);resultColumnOrder=next;saveResultColumnOrder();renderResults();
+      });
+    });
+  }
+
+  function renderResults(){
+    renderResultHeader();
+    const sets=visibleSignalSets(),sssc=sets.sssc.filter(e=>e.side),scalp=sets.scalp;
+    const rows=[
+      ...sssc.map(event=>({time:event.time,html:resultRow(event,state.outcomes.get(event.id))})),
+      ...scalp.map(signal=>({time:signal.time,html:scalpResultRow(signal,state.outcomes.get(signal.id))}))
+    ].sort((a,b)=>a.time-b.time);
+    $("resultsBody").innerHTML=rows.map(row=>row.html).join("");
+    $("resultCount").textContent=`${rows.length} rows`;
+    $("resultsPanel").classList.toggle("hidden",!$("showResults").checked);
+    $("resultsBody").querySelectorAll("tr").forEach(tr=>tr.addEventListener("click",()=>{
+      const event=[...state.events,...state.scalpEvents].find(e=>e.id===tr.dataset.eventId);
+      if(event)focusEvent(event);
+    }));
+  }
+
+  function exportResultsCsv(){
+    const headerCells=[...$("resultsHeader").querySelectorAll("th")].filter(cell=>cell.style.display!=="none");
+    const headers=headerCells.map(cell=>cell.textContent.trim());
+    const rows=[...$("resultsBody").querySelectorAll("tr")].map(row=>[...row.querySelectorAll("td")].filter(cell=>cell.style.display!=="none").map(cell=>cell.textContent.trim()));
+    const csv=[headers,...rows].map(columns=>columns.map(value=>`"${String(value).replace(/"/g,'""')}"`).join(",")).join("\r\n");
+    const blob=new Blob([csv],{type:"text/csv;charset=utf-8"}),url=URL.createObjectURL(blob),anchor=document.createElement("a");
+    anchor.href=url;anchor.download=`sssc-scalp-results-${new Date().toISOString().slice(0,10)}.csv`;anchor.click();
+    setTimeout(()=>URL.revokeObjectURL(url),0);
+  }
+
+  function focusEvent(event){
+    const width=Math.max(90*MINUTE,(state.viewEnd-state.viewStart)||180*MINUTE);
+    const focusTime=event.linkedTrade?.time??state.outcomes.get(event.id)?.entryTime??event.time;
+    state.viewStart=focusTime-width/2;state.viewEnd=focusTime+width/2;state.highlightId=event.id;
+    renderResults();drawAll();
+  }
+
+  function updateMachineRows(){
+    const machine=$("machineSelect").value;
+    state.machineRows=machine?state.rows.filter(row=>row.machineId===machine):state.rows.slice();
+    state.events=buildEvents(state.machineRows);
+    populateCategoricalFilters();
+    populateScalpFilters();
+    evaluateAllOutcomes();
+    applyFilters();
+  }
+
+  let machineDefaultApplied=false;
+  const DEFAULT_MACHINE_PREFIX="160bbac";
+  function populateMachineSelect(){
+    const machines=[...new Set([...state.rows.map(r=>r.machineId),...state.scalpSignals.map(r=>r.machineId)])].sort();
+    const current=$("machineSelect").value;
+    $("machineSelect").innerHTML=`<option value="">All machines (${machines.length})</option>`+machines.map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("");
+    if(machines.includes(current)){
+      $("machineSelect").value=current;
+    }else if(!machineDefaultApplied){
+      const preferred=machines.find(id=>id.startsWith(DEFAULT_MACHINE_PREFIX));
+      if(preferred)$("machineSelect").value=preferred;
+      machineDefaultApplied=true;
+    }
+  }
+
+  function populateSelect(id,values){
+    const el=$(id);if(!el)return;
+    const current=el.value;
+    el.innerHTML='<option value="">Any</option>'+[...values].sort().map(v=>`<option>${escapeHtml(v)}</option>`).join("");
+    if(values.has(current))el.value=current;
+  }
+  function populateCategoricalFilters(){
+    const phases=new Set(),states=new Set();
+    for(const row of state.machineRows)for(const diagnostic of Object.values(row.timeframes)){
+      if(diagnostic&&diagnostic.phase)phases.add(diagnostic.phase);
+      if(diagnostic&&diagnostic.state)states.add(diagnostic.state);
+    }
+    populateSelect("ssscPhaseFilter",phases);populateSelect("ssscStateFilter",states);
+  }
+  function populateScalpFilters(){
+    for(const src of ["V1","V2"]){
+      const p=src.toLowerCase();
+      const signals=src==="V1"?state.scalpSignals:state.scalpV2Signals;
+      const statuses=new Set(),blocking=new Set();
+      for(const signal of signals){
+        if(signal.eventState)statuses.add(String(signal.eventState));
+        if(signal.blockingReason)blocking.add(String(signal.blockingReason));
+      }
+      populateSelect(`${p}Status`,statuses);populateSelect(`${p}Blocking`,blocking);
+    }
+  }
+
+  const SSSC_PARAM_FILTER_HTML=`
+    <div class="signal-source-block" data-source="SSSC">
+      <div class="signal-source-block-title">SSSC</div>
+      <div class="checks">
+        <label><input class="sssc-action-filter" type="checkbox" value="FRESH LONG" checked> FRESH LONG</label>
+        <label><input class="sssc-action-filter" type="checkbox" value="FRESH SHORT" checked> FRESH SHORT</label>
+        <label><input class="sssc-action-filter" type="checkbox" value="WAIT" checked> WAIT transitions</label>
+      </div>
+      <div class="control-grid" style="margin-top:7px">
+        <label class="field"><span>Min confidence</span><input id="ssscMinConfidence" type="number" min="0" max="100" step="1" value="0"></label>
+        <label class="field"><span>Max timing risk</span><input id="ssscMaxRisk" type="number" min="0" max="100" step="1" value="100"></label>
+        <label class="field"><span>Min |bias|</span><input id="ssscMinBias" type="number" min="0" max="100" step="1" value="0"></label>
+        <label class="field"><span>Min |strength|</span><input id="ssscMinStrength" type="number" min="0" max="100" step="1" value="0"></label>
+        <label class="field"><span>Phase</span><select id="ssscPhaseFilter"><option value="">Any</option></select></label>
+        <label class="field"><span>State</span><select id="ssscStateFilter"><option value="">Any</option></select></label>
+      </div>
+      <div class="checks" style="margin-top:7px">
+        <label><input id="ssscDirectionStrengthAgree" type="checkbox"> Require direction / strength agreement</label>
+        <label><input id="ssscIncludeUnavailable" type="checkbox" checked> Include unavailable timeframe data</label>
+      </div>
+    </div>`;
+  function scalpParamFilterHtml(src){
+    const p=src.toLowerCase(),label=src==="V1"?"Scalp V1":"Scalp V2";
+    return `
+    <div class="signal-source-block" data-source="${src}">
+      <div class="signal-source-block-title">${label}</div>
+      <div class="control-grid">
+        <label class="field"><span>Timeframe</span><select id="${p}Tf"><option value="">Any</option><option>1m</option><option>3m</option><option>5m</option><option>15m</option></select></label>
+        <label class="field"><span>Direction</span><select id="${p}Direction"><option value="">Any</option><option>LONG</option><option>SHORT</option></select></label>
+        <label class="field"><span>Event type</span><select id="${p}Type"><option value="">Any</option><option>CROSS</option><option>BOUNCE</option></select></label>
+        <label class="field"><span>Minimum rank</span><input id="${p}MinRank" type="number" min="0" max="100" step="1" value="0"></label>
+        <label class="field"><span>Recorded action</span><select id="${p}Eligibility"><option value="">Any</option><option value="DETECTION_QUALIFIED">Detection qualified</option><option value="RANK_REJECTED">Rank rejected</option></select></label>
+        <label class="field"><span>Event status</span><select id="${p}Status"><option value="">Any</option></select></label>
+        <label class="field"><span>Blocking reason</span><select id="${p}Blocking"><option value="">Any</option></select></label>
+        <label class="field wide"><span>Execution evidence</span><select id="${p}Execution"><option value="">All detector events</option><option value="executed">Exact linked trade only</option><option value="detector">Detector-only</option></select></label>
+      </div>
+      <div class="inline-checks" style="margin-top:7px">
+        <label><input class="${p}-scalp-category" type="checkbox" value="CROSS" checked> CR - Crossover markers</label>
+        <label><input class="${p}-scalp-category" type="checkbox" value="BOUNCE" checked> BN - Bounce markers</label>
+      </div>
+    </div>`;
+  }
+  function renderSignalParamFilters(){
+    const container=$("signalParamFilters");if(!container)return;
+    const parts=[];
+    if(sourceChecked("SSSC"))parts.push(SSSC_PARAM_FILTER_HTML);
+    if(sourceChecked("V1"))parts.push(scalpParamFilterHtml("V1"));
+    if(sourceChecked("V2"))parts.push(scalpParamFilterHtml("V2"));
+    container.innerHTML=parts.join("")||'<div class="muted">No signal sources selected.</div>';
+    bindSignalParamControls();
+    populateCategoricalFilters();populateScalpFilters();
+  }
+  function bindSignalParamControls(){
+    const container=$("signalParamFilters");if(!container)return;
+    container.querySelectorAll("input,select").forEach(el=>{
+      el.addEventListener("input",()=>{applyFilters();},false);
+      el.addEventListener("change",()=>{applyFilters();},false);
+    });
+  }
+  function renderSnapshotLayerList(){
+    const container=$("snapshotLayerList");if(!container)return;
+    container.innerHTML=SNAPSHOT_SOURCES.map(source=>{
+      const countMap={sssc:()=>state.machineRows.length,sigb:()=>state.sigBSnapshots.length,futures:()=>state.futuresSnapshots.length};
+      const count=countMap[source.key]?countMap[source.key]():0;
+      return `<div class="snapshot-layer control-card" data-snapshot-key="${source.key}">
+        <div class="snapshot-layer-head"><label><input class="snapshot-layer-toggle" type="checkbox" data-snapshot-key="${source.key}" ${state.snapshotLayersEnabled[source.key]?"checked":""}> ${escapeHtml(source.label)}</label></div>
+        <div class="muted snapshot-layer-status" data-snapshot-status="${source.key}">${count.toLocaleString()} rows loaded</div>
+      </div>`;
+    }).join("");
+    container.querySelectorAll(".snapshot-layer-toggle").forEach(el=>{
+      el.addEventListener("change",()=>{
+        state.snapshotLayersEnabled[el.dataset.snapshotKey]=el.checked;
+        drawAll();
+      },false);
+    });
+  }
+  function renderResultColumnVisibility(){
+    const container=$("resultColumnVisibility");if(!container)return;
+    if(!state.resultColumnsVisible){
+      const stored=readJsonSlot(RESULT_COLUMN_VISIBILITY_SLOT,null);
+      state.resultColumnsVisible=stored||Object.fromEntries(RESULT_COLUMNS.map(([key])=>[key,true]));
+    }
+    container.innerHTML=RESULT_COLUMNS.map(([key,label])=>
+      `<label><input class="result-column-toggle" type="checkbox" data-column-key="${key}" ${state.resultColumnsVisible[key]!==false?"checked":""}> ${escapeHtml(label)}</label>`
+    ).join("");
+    container.querySelectorAll(".result-column-toggle").forEach(el=>{
+      el.addEventListener("change",()=>{
+        state.resultColumnsVisible[el.dataset.columnKey]=el.checked;
+        writeJsonSlot(RESULT_COLUMN_VISIBILITY_SLOT,state.resultColumnsVisible);
+        renderResultHeader();renderResults();
+      },false);
+    });
+  }
+
+  function resetView(){
+    if(!state.candles1m.length)return;
+    const machine=$("machineSelect").value,scalpTimes=state.scalpSignals.filter(s=>!machine||s.machineId===machine).map(s=>s.time);
+    const recordTimes=[...state.machineRows.map(r=>r.time),...scalpTimes];
+    const rowStart=recordTimes.length?Math.min(...recordTimes):state.candles1m[0].openTime;
+    const rowEnd=recordTimes.length?Math.max(...recordTimes):state.candles1m.at(-1).closeTime;
+    state.fullStart=Math.max(state.candles1m[0].openTime,rowStart-90*MINUTE);
+    state.fullEnd=Math.min(state.candles1m.at(-1).closeTime,rowEnd+90*MINUTE);
+    state.viewStart=state.fullStart;state.viewEnd=state.fullEnd;
+    drawAll();
+  }
+
+  function dprValue(){return window.devicePixelRatio||1;}
+  function hairline(){return 1/dprValue();}
+  function snapWidth(width){const ratio=dprValue();return Math.max(1/ratio,Math.round(width*ratio)/ratio);}
+  function px(value){const ratio=dprValue();return (Math.round(Number(value)*ratio)+.5)/ratio;}
+  function ix(value){const ratio=dprValue();return Math.round(Number(value)*ratio)/ratio;}
+  function canvasSize(canvas){
+    const ratio=dprValue(),cssW=Math.max(1,canvas.clientWidth||1),cssH=Math.max(1,canvas.clientHeight||1);
+    const width=Math.max(1,Math.round(cssW*ratio)),height=Math.max(1,Math.round(cssH*ratio));
+    if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;}
+    const ctx=canvas.getContext("2d");ctx.setTransform(ratio,0,0,ratio,0,0);
+    ctx.imageSmoothingEnabled=false;ctx.globalAlpha=1;ctx.globalCompositeOperation="source-over";ctx.setLineDash([]);
+    return {ctx,width:cssW,height:cssH,left:58,right:66,top:16,bottom:24};
+  }
+
+  function plotGeometry(canvas){
+    const size=canvasSize(canvas);
+    return {...size,plotW:Math.max(1,size.width-size.left-size.right),plotH:Math.max(1,size.height-size.top-size.bottom)};
+  }
+  function xFor(time,g){return g.left+(time-state.viewStart)/(state.viewEnd-state.viewStart)*g.plotW;}
+  function timeFor(x,g){return state.viewStart+(x-g.left)/g.plotW*(state.viewEnd-state.viewStart);}
+  function visibleCandles(){return state.displayCandles.filter(c=>c.closeTime>=state.viewStart&&c.openTime<=state.viewEnd);}
+  function markerSpecsForEvent(event,scalp=false){
+    const outcome=state.outcomes.get(event.id),trade=scalp?event.linkedTrade:null,specs=[];
+    if(trade){
+      if(Number.isFinite(trade.time)&&finite(trade.entryPrice)!==null)specs.push({role:"ENTRY",time:trade.time,price:trade.entryPrice,event,outcome,scalp,actual:true,timeBasis:`recorded trade ${trade.timestampField}`});
+      if(Number.isFinite(trade.closedTime)&&finite(trade.exitPrice)!==null)specs.push({role:"EXIT",time:trade.closedTime,price:trade.exitPrice,event,outcome,scalp,actual:true,pnlUsd:trade.estimatedPnlUsd,timeBasis:`recorded trade ${trade.closedTimestampField}`});
+      return specs;
+    }
+    if(Number.isFinite(outcome?.entryTime)&&finite(outcome?.entryPrice)!==null)specs.push({role:"ENTRY",time:outcome.entryTime,price:outcome.entryPrice,event,outcome,scalp,actual:false,timeBasis:"modeled entry candle open"});
+    if(outcome?.status==="RESOLVED"&&Number.isFinite(outcome.exitTime)&&finite(outcome.exitPrice)!==null){
+      specs.push({role:"EXIT",time:outcome.exitTime,price:outcome.exitPrice,event,outcome,scalp,actual:false,pnlUsd:outcome.pnlUsd,timeBasis:"open timestamp of 1m candle containing barrier touch"});
+    }
+    return specs;
+  }
+  function tradeMarkerSpecs(sets){
+    return [
+      ...(sets?.sssc||[]).filter(event=>event.side).flatMap(event=>markerSpecsForEvent(event,false)),
+      ...(sets?.scalp||[]).flatMap(event=>markerSpecsForEvent(event,true))
+    ];
+  }
+  function markerCoordinates(marker,g,yForPrice){return {x:xFor(marker.time,g),y:yForPrice(marker.price)};}
+
+  function clearCanvas(g){
+    g.ctx.clearRect(0,0,g.width,g.height);g.ctx.fillStyle=COLORS.bg;g.ctx.fillRect(0,0,g.width,g.height);
+  }
+  function drawGrid(g,hLines=5){
+    const ctx=g.ctx;ctx.strokeStyle=COLORS.grid;ctx.lineWidth=hairline();ctx.beginPath();
+    for(let i=0;i<=hLines;i++){const y=px(g.top+i*g.plotH/hLines);ctx.moveTo(px(g.left),y);ctx.lineTo(px(g.left+g.plotW),y);}
+    ctx.stroke();ctx.strokeStyle=COLORS.verticalGrid;ctx.lineWidth=hairline();ctx.beginPath();
+    const divisions=8;
+    for(let i=0;i<=divisions;i++){const x=px(g.left+i*g.plotW/divisions);ctx.moveTo(x,px(g.top));ctx.lineTo(x,px(g.top+g.plotH));}
+    ctx.stroke();
+    ctx.fillStyle=COLORS.axis;ctx.font="10px Arial";ctx.textAlign="center";
+    for(let i=0;i<=divisions;i++){const time=state.viewStart+i*(state.viewEnd-state.viewStart)/divisions;ctx.fillText(dubai(time).slice(0,16),g.left+i*g.plotW/divisions,g.height-7);}
+  }
+
+  function drawPrice(){
+    const canvas=$("priceChart"),g=plotGeometry(canvas);clearCanvas(g);drawGrid(g,6);
+    const candles=visibleCandles();
+    if(!candles.length){g.ctx.fillStyle=COLORS.axis;g.ctx.fillText("Load local database + Binance data to begin.",g.left+20,g.top+30);return;}
+    const sets=visibleSignalSets(),markerSpecs=tradeMarkerSpecs(sets),visibleMarkerSpecs=markerSpecs.filter(marker=>marker.time>=state.viewStart&&marker.time<=state.viewEnd);
+    let min=Math.min(...candles.map(c=>c.low)),max=Math.max(...candles.map(c=>c.high));
+    for(const marker of visibleMarkerSpecs){min=Math.min(min,marker.price);max=Math.max(max,marker.price);}
+    const pad=Math.max((max-min)*.08,max*.0002);min-=pad;max+=pad;
+    state.priceAxisRange={min,max,top:g.top,plotH:g.plotH};
+    const y=value=>g.top+(max-value)/(max-min)*g.plotH;
+    const ctx=g.ctx;
+    ctx.fillStyle=COLORS.axis;ctx.textAlign="right";ctx.font="10px Arial";
+    for(let i=0;i<=6;i++){const value=max-i*(max-min)/6;ctx.fillText(formatPrice(value),g.width-5,g.top+i*g.plotH/6+3);}
+
+    if($("showShading").checked&&sourceChecked("SSSC")){
+      const all=state.events.filter(e=>e.action!=="WAIT");
+      for(let i=0;i<all.length;i++){
+        const e=all[i],next=state.events.find(candidate=>candidate.machineId===e.machineId&&candidate.time>e.time&&candidate.action!==e.action);
+        const end=next?.time??state.viewEnd;
+        if(end<state.viewStart||e.time>state.viewEnd)continue;
+        ctx.fillStyle=e.side>0?"rgba(14,203,129,.055)":"rgba(246,70,93,.055)";
+        ctx.fillRect(xFor(Math.max(e.time,state.viewStart),g),g.top,xFor(Math.min(end,state.viewEnd),g)-xFor(Math.max(e.time,state.viewStart),g),g.plotH);
+      }
+    }
+
+    const estimatedWidth=Math.max(2,Math.min(13,g.plotW/Math.max(1,candles.length)*.68));
+    for(const c of candles){
+      const x=xFor(c.openTime+(c.closeTime-c.openTime)/2,g),up=c.close>=c.open,body=up?COLORS.candleUp:COLORS.candleDown;
+      const wickX=px(x),highY=px(y(c.high)),lowY=px(y(c.low));
+      ctx.strokeStyle=COLORS.candleStroke;ctx.fillStyle=body;ctx.lineWidth=hairline();
+      ctx.beginPath();ctx.moveTo(wickX,highY);ctx.lineTo(wickX,lowY);ctx.stroke();
+      const top=ix(Math.min(y(c.open),y(c.close))),height=Math.max(1,ix(Math.abs(y(c.open)-y(c.close))));
+      const width=Math.max(2,ix(estimatedWidth)),left=ix(x-width/2);
+      ctx.fillRect(left,top,width,height);ctx.strokeRect(px(left),px(top),width,height);
+    }
+
+    state.markerHits=[];
+    if($("showMarkers").checked){
+      for(const marker of visibleMarkerSpecs){
+        const coordinates=markerCoordinates(marker,g,y),x=coordinates.x,markerY=coordinates.y,direction=marker.event.side;
+        const directionColor=direction>0?COLORS.bull:COLORS.bear;
+        ctx.lineWidth=snapWidth(1.5);ctx.strokeStyle=directionColor;ctx.fillStyle=directionColor;ctx.beginPath();
+        if(marker.role==="EXIT"){
+          ctx.rect(x-5,markerY-5,10,10);ctx.fill();ctx.stroke();
+          ctx.strokeStyle="#fff";ctx.lineWidth=snapWidth(1.2);ctx.beginPath();ctx.moveTo(x-3,markerY-3);ctx.lineTo(x+3,markerY+3);ctx.moveTo(x+3,markerY-3);ctx.lineTo(x-3,markerY+3);ctx.stroke();
+        }else if(marker.scalp){
+          ctx.arc(x,markerY,8,0,Math.PI*2);ctx.fill();ctx.stroke();
+          ctx.fillStyle="#fff";ctx.font="bold 8px Arial";ctx.textAlign="center";ctx.textBaseline="middle";
+          ctx.fillText(marker.event.eventType==="CROSS"?"CR":"BN",x,markerY+.5);
+          ctx.textBaseline="alphabetic";
+        }else{
+          if(direction>0){ctx.moveTo(x,markerY-6);ctx.lineTo(x-5,markerY+4);ctx.lineTo(x+5,markerY+4);}
+          else{ctx.moveTo(x,markerY+6);ctx.lineTo(x-5,markerY-4);ctx.lineTo(x+5,markerY-4);}
+          ctx.closePath();ctx.fill();ctx.stroke();
+        }
+        if(state.highlightId===marker.event.id){ctx.strokeStyle=COLORS.cyan;ctx.lineWidth=2;ctx.strokeRect(x-9,markerY-9,18,18);}
+        if(marker.role==="EXIT"&&$("showOutcomes").checked&&finite(marker.pnlUsd)!==null){
+          ctx.fillStyle=marker.pnlUsd>=0?COLORS.bull:COLORS.bear;ctx.font="9px Arial";ctx.textAlign="center";
+          ctx.fillText(formatUsd(marker.pnlUsd),x,markerY+(direction>0?16:-11));
+        }
+        state.markerHits.push({x,y:markerY,event:marker.event,outcome:marker.outcome,scalp:marker.scalp,markerRole:marker.role,markerTime:marker.time,markerPrice:marker.price,actual:marker.actual,timeBasis:marker.timeBasis});
+      }
+    }
+    drawSharedCrosshair(g,true);
+  }
+
+  function rgba(hex,alpha){
+    const h=hex.replace("#","");const n=parseInt(h,16);
+    return `rgba(${n>>16},${n>>8&255},${n&255},${alpha})`;
+  }
+
+  function drawTimeline(){
+    const canvas=$("timelineChart");
+    $("timelinePanel").classList.toggle("hidden",!$("showTimeline").checked);
+    if(!$("showTimeline").checked)return;
+    if($("timelinePanel").classList.contains("collapsed"))return;
+    if(state.ssscTimelineView==="lines")drawLineTimeline(canvas,"direction");
+    else if(state.ssscTimelineView==="momentum"){
+      if(state.ssscMomentumStyle==="lines")drawLineTimeline(canvas,"directionalAcceleration");
+      else drawBlockTimeline(canvas,"directionalAcceleration");
+    }
+    else if(state.ssscTimelineView==="atr"){
+      if(state.ssscMomentumStyle==="lines")drawAtrLines(canvas);
+      else drawAtrBlocks(canvas);
+    }
+    else drawBlockTimeline(canvas,"direction");
+  }
+
+  function smoothedRowsForMetric(rows,tf,metric,windowMs){
+    if(!windowMs||windowMs<=0)return rows;
+    const ordered=rows.slice().sort((a,b)=>(finite(a?.time)??Infinity)-(finite(b?.time)??Infinity));
+    return ordered.map((row,i)=>{
+      const point=timeframeReading(row,tf,metric);
+      if(!point.valid)return row;
+      let sum=0,count=0;
+      for(let j=i;j>=0;j--){
+        const p=timeframeReading(ordered[j],tf,metric);
+        if(!p.valid||point.time-p.time>windowMs)break;
+        sum+=p.reading;count++;
+      }
+      const avg=count?sum/count:point.reading;
+      return {...row,timeframes:{...row.timeframes,[tf]:{...row.timeframes[tf],[metric]:avg}}};
+    });
+  }
+
+  function drawBlockTimeline(canvas,metric="direction"){
+    const g=plotGeometry(canvas);clearCanvas(g);
+    const visibleTfs=LOGGED_TFS.filter(tf=>checkedValues("#tfVisibility input").includes(tf));
+    const rowH=g.plotH/Math.max(1,visibleTfs.length),rows=state.machineRows.filter(r=>r.time>=state.viewStart-60000&&r.time<=state.viewEnd+60000);
+    const ctx=g.ctx,smoothWindowMs=metric==="directionalAcceleration"?Number($("momentumSmoothing")?.value||0)*1000:0;
+    ctx.font="10px Arial";ctx.textAlign="right";
+    for(let i=0;i<visibleTfs.length;i++){
+      const tf=visibleTfs[i],y=g.top+i*rowH,effectiveRows=smoothWindowMs>0?smoothedRowsForMetric(rows,tf,metric,smoothWindowMs):rows;
+      ctx.fillStyle=COLORS.axis;ctx.fillText(tf,g.left-7,y+rowH/2+3);
+      ctx.strokeStyle=COLORS.grid;ctx.lineWidth=hairline();ctx.strokeRect(px(g.left),px(y),ix(g.plotW),ix(rowH));
+      for(const interval of blockIntervals(effectiveRows,tf,metric)){
+        const {row,diagnostic:d,reading}=interval,start=Math.max(interval.start,state.viewStart),end=Math.min(interval.end,state.viewEnd);
+        if(end<=start)continue;
+        const x=xFor(start,g),w=Math.max(1,xFor(end,g)-x);
+        const alpha=.18+.72*Math.min(1,Math.abs(reading)/100);
+        const color=reading>10?COLORS.bull:reading< -10?COLORS.bear:COLORS.mixed;
+        ctx.fillStyle=rgba(color,alpha);ctx.fillRect(x,y+2,w,Math.max(1,rowH-4));
+        ctx.fillStyle=PHASE_COLORS[d.phase]||COLORS.mixed;ctx.fillRect(x,y+1,w,2);
+      }
+    }
+    const label=metric==="directionalAcceleration"?"momentum":"direction";
+    const smoothNote=smoothWindowMs>0?` · smoothed over ${fmt(smoothWindowMs/1000,0)}s`:"";
+    ctx.fillStyle=COLORS.axis;ctx.textAlign="left";ctx.fillText(`Recorded rows · maximum 30s extent · opacity = |${label}|${smoothNote} · empty = missing/unavailable/no record`,g.left,g.height-5);
+    drawSharedCrosshair(g,false);
+  }
+
+  function drawLineTimeline(canvas,metric="direction"){
+    const g=plotGeometry(canvas);clearCanvas(g);
+    const ctx=g.ctx,visibleTfs=LOGGED_TFS.filter(tf=>checkedValues(".line-tf-toggle").includes(tf));
+    const rows=state.machineRows.filter(row=>row.time>=state.viewStart-60000&&row.time<=state.viewEnd+60000);
+    const smoothWindowMs=metric==="directionalAcceleration"?Number($("momentumSmoothing")?.value||0)*1000:0;
+    state.timelineLineHits=[];
+    ctx.font="10px Arial";ctx.textAlign="right";
+    for(const value of [100,50,0,-50,-100]){
+      const y=px(g.top+(100-value)/200*g.plotH);
+      ctx.strokeStyle=value===0?"#969696":COLORS.grid;ctx.lineWidth=value===0?hairline()*2:hairline();
+      ctx.beginPath();ctx.moveTo(px(g.left),y);ctx.lineTo(px(g.left+g.plotW),y);ctx.stroke();
+      ctx.fillStyle=COLORS.axis;ctx.fillText(value>0?`+${value}`:String(value),g.left-6,g.top+(100-value)/200*g.plotH+3);
+    }
+    for(const tf of visibleTfs){
+      ctx.strokeStyle=TIMEFRAME_LINE_COLORS[tf];ctx.fillStyle=TIMEFRAME_LINE_COLORS[tf];ctx.lineWidth=snapWidth(SSSC_LINE_WIDTH);
+      const effectiveRows=smoothWindowMs>0?smoothedRowsForMetric(rows,tf,metric,smoothWindowMs):rows;
+      for(const segment of recordedDirectionSegments(effectiveRows,tf,metric)){
+        ctx.beginPath();
+        segment.forEach((point,index)=>{
+          const x=xFor(point.row.time,g),y=g.top+(100-clamp(point.reading,-100,100))/200*g.plotH;
+          index?ctx.lineTo(x,y):ctx.moveTo(x,y);
+          state.timelineLineHits.push({x,y,row:point.row,tf,diagnostic:point.diagnostic,reading:point.reading});
+        });
+        ctx.stroke();
+        if(segment.length===1){
+          const point=segment[0],x=xFor(point.row.time,g),y=g.top+(100-clamp(point.reading,-100,100))/200*g.plotH;
+          ctx.beginPath();ctx.arc(x,y,SSSC_POINT_RADIUS,0,Math.PI*2);ctx.fill();
+        }
+      }
+    }
+    const label=metric==="directionalAcceleration"?"momentum":"direction";
+    const smoothNote=smoothWindowMs>0?` · smoothed over ${fmt(smoothWindowMs/1000,0)}s`:"";
+    ctx.fillStyle=COLORS.axis;ctx.textAlign="left";
+    ctx.fillText(`Recorded ${label} · fixed -100 to +100${smoothNote} · connects within cadence (±${fmt(SSSC_CADENCE_TOLERANCE_MS/1000,0)}s jitter tolerance) · gaps break the line`,g.left,g.height-5);
+    drawSharedCrosshair(g,false);
+  }
+
+  function atrDynamicMax(rows,visibleTfs){
+    let max=0;
+    for(const row of rows){
+      for(const tf of visibleTfs){
+        const v=finite(row?.timeframes?.[tf]?.atrBps);
+        if(v!==null)max=Math.max(max,v);
+      }
+    }
+    return Math.max(1,max);
+  }
+
+  function drawAtrBlocks(canvas){
+    const g=plotGeometry(canvas);clearCanvas(g);
+    const visibleTfs=LOGGED_TFS.filter(tf=>checkedValues("#tfVisibility input").includes(tf));
+    const rowH=g.plotH/Math.max(1,visibleTfs.length),rows=state.machineRows.filter(r=>r.time>=state.viewStart-60000&&r.time<=state.viewEnd+60000);
+    const ctx=g.ctx,maxAtr=atrDynamicMax(rows,visibleTfs);
+    ctx.font="10px Arial";ctx.textAlign="right";
+    for(let i=0;i<visibleTfs.length;i++){
+      const tf=visibleTfs[i],y=g.top+i*rowH;
+      ctx.fillStyle=COLORS.axis;ctx.fillText(tf,g.left-7,y+rowH/2+3);
+      ctx.strokeStyle=COLORS.grid;ctx.lineWidth=hairline();ctx.strokeRect(px(g.left),px(y),ix(g.plotW),ix(rowH));
+      for(const interval of blockIntervals(rows,tf,"atrBps")){
+        const {row,diagnostic:d,reading}=interval,start=Math.max(interval.start,state.viewStart),end=Math.min(interval.end,state.viewEnd);
+        if(end<=start)continue;
+        const x=xFor(start,g),w=Math.max(1,xFor(end,g)-x);
+        const alpha=.18+.72*Math.min(1,reading/maxAtr);
+        ctx.fillStyle=rgba(COLORS.blue,alpha);ctx.fillRect(x,y+2,w,Math.max(1,rowH-4));
+        ctx.fillStyle=PHASE_COLORS[d.phase]||COLORS.mixed;ctx.fillRect(x,y+1,w,2);
+      }
+    }
+    ctx.fillStyle=COLORS.axis;ctx.textAlign="left";
+    ctx.fillText(`Recorded rows · maximum 30s extent · opacity = atrBps relative to view max (${fmt(maxAtr,1)}bps) · empty = missing/unavailable/no record`,g.left,g.height-5);
+    drawSharedCrosshair(g,false);
+  }
+
+  function drawAtrLines(canvas){
+    const g=plotGeometry(canvas);clearCanvas(g);
+    const ctx=g.ctx,visibleTfs=LOGGED_TFS.filter(tf=>checkedValues(".line-tf-toggle").includes(tf));
+    const rows=state.machineRows.filter(row=>row.time>=state.viewStart-60000&&row.time<=state.viewEnd+60000);
+    state.timelineLineHits=[];
+    const maxAtr=atrDynamicMax(rows,visibleTfs),headroomPx=4;
+    const valueToY=value=>g.top+headroomPx+(1-clamp(value,0,maxAtr)/maxAtr)*(g.plotH-headroomPx*2);
+    ctx.font="10px Arial";ctx.textAlign="right";
+    for(const frac of [1,.75,.5,.25,0]){
+      const value=maxAtr*frac,y=px(valueToY(value));
+      ctx.strokeStyle=frac===0?"#969696":COLORS.grid;ctx.lineWidth=frac===0?hairline()*2:hairline();
+      ctx.beginPath();ctx.moveTo(px(g.left),y);ctx.lineTo(px(g.left+g.plotW),y);ctx.stroke();
+      ctx.fillStyle=COLORS.axis;ctx.fillText(fmt(value,1),g.left-6,valueToY(value)+3);
+    }
+    for(const tf of visibleTfs){
+      ctx.strokeStyle=TIMEFRAME_LINE_COLORS[tf];ctx.fillStyle=TIMEFRAME_LINE_COLORS[tf];ctx.lineWidth=snapWidth(SSSC_LINE_WIDTH);
+      for(const segment of recordedDirectionSegments(rows,tf,"atrBps")){
+        ctx.beginPath();
+        segment.forEach((point,index)=>{
+          const x=xFor(point.row.time,g),y=valueToY(point.reading);
+          index?ctx.lineTo(x,y):ctx.moveTo(x,y);
+          state.timelineLineHits.push({x,y,row:point.row,tf,diagnostic:point.diagnostic,reading:point.reading});
+        });
+        ctx.stroke();
+        if(segment.length===1){
+          const point=segment[0],x=xFor(point.row.time,g),y=valueToY(point.reading);
+          ctx.beginPath();ctx.arc(x,y,SSSC_POINT_RADIUS,0,Math.PI*2);ctx.fill();
+        }
+      }
+    }
+    ctx.fillStyle=COLORS.axis;ctx.textAlign="left";
+    ctx.fillText(`Recorded ATR (bps) · dynamic 0–${fmt(maxAtr,1)}bps range · connects within cadence (±${fmt(SSSC_CADENCE_TOLERANCE_MS/1000,0)}s jitter tolerance) · gaps break the line`,g.left,g.height-5);
+    drawSharedCrosshair(g,false);
+  }
+
+  function timeframeReading(row,tf,metric="direction"){
+    const time=finite(row?.time),diagnostic=row&&row.timeframes&&row.timeframes[tf],reading=finite(diagnostic&&diagnostic[metric]);
+    return {valid:time!==null&&!!diagnostic&&diagnostic.available!==false&&reading!==null,time,diagnostic,reading,row};
+  }
+
+  function blockIntervals(rows,tf,metric="direction"){
+    const ordered=(Array.isArray(rows)?rows:[]).slice().sort((a,b)=>(finite(a?.time)??Infinity)-(finite(b?.time)??Infinity)),intervals=[];
+    for(let index=0;index<ordered.length;index++){
+      const point=timeframeReading(ordered[index],tf,metric);
+      if(!point.valid)continue;
+      const nextTime=finite(ordered[index+1]?.time);
+      const maximumEnd=point.time+SSSC_RECORDING_INTERVAL_MS;
+      const end=nextTime===null?maximumEnd:nextTime>point.time?Math.min(maximumEnd,nextTime):point.time;
+      intervals.push({row:point.row,diagnostic:point.diagnostic,reading:point.reading,start:point.time,end});
+    }
+    return intervals;
+  }
+
+  function recordedDirectionSegments(rows,tf,metric="direction"){
+    const segments=[];let current=[],lastTime=null;
+    for(const row of Array.isArray(rows)?rows:[]){
+      const point=timeframeReading(row,tf,metric);
+      const cadenceGap=lastTime!==null&&point.valid&&(point.time-lastTime>SSSC_CONNECT_THRESHOLD_MS||point.time<lastTime);
+      if(!point.valid||cadenceGap){
+        if(current.length)segments.push(current);
+        current=[];
+        if(!point.valid){lastTime=null;continue;}
+      }
+      current.push({row:point.row,diagnostic:point.diagnostic,reading:point.reading});
+      lastTime=point.time;
+    }
+    if(current.length)segments.push(current);
+    return segments;
+  }
+
+  function recordingGapAt(rows,time){
+    const sorted=(Array.isArray(rows)?rows:[]).filter(row=>finite(row?.time)!==null).slice().sort((a,b)=>a.time-b.time);
+    for(let index=1;index<sorted.length;index++){
+      const before=sorted[index-1],after=sorted[index];
+      if(after.time-before.time>SSSC_CONNECT_THRESHOLD_MS&&time>before.time&&time<after.time){
+        return {before:before.time,after:after.time,duration:after.time-before.time};
+      }
+    }
+    return null;
+  }
+
+  function timelineHoverText(time,tfSelector,metric="direction"){
+    const visibleTfs=LOGGED_TFS.filter(tf=>checkedValues(tfSelector).includes(tf));
+    if(!visibleTfs.length)return "No SSSC timeframes selected.";
+    const gap=recordingGapAt(state.machineRows,time);
+    if(gap)return [
+      "NO RECORDED DATA",
+      `${dubai(gap.before)} GST → ${dubai(gap.after)} GST`,
+      `Gap ${fmt(gap.duration/1000,1)}s exceeds the ${fmt(SSSC_CONNECT_THRESHOLD_MS/1000,1)}s connect threshold (${fmt(SSSC_RECORDING_INTERVAL_MS/1000,0)}s cadence + ${fmt(SSSC_CADENCE_TOLERANCE_MS/1000,0)}s jitter tolerance).`,
+      "Lines resume at the next valid recorded snapshot without interpolation."
+    ].join("\n");
+    const row=state.machineRows.reduce((best,item)=>Math.abs(item.time-time)<Math.abs((best?.time??Infinity)-time)?item:best,null);
+    if(!row)return "No recorded SSSC snapshot at this time.";
+    const metricLabel=metric==="directionalAcceleration"?"Momentum":metric==="atrBps"?"ATR":"SSSC";
+    const lines=[`${metricLabel} recorded snapshot · ${dubai(row.time)} GST (${iso(row.time)})`,`Timestamp source: ${row.timestampField}${row.timestampApproximate?" · approximate insertion time":""}`,""];
+    for(const tf of visibleTfs){
+      const diagnostic=row.timeframes[tf],reading=finite(diagnostic&&diagnostic[metric]);
+      if(!diagnostic)lines.push(`${tf}: UNAVAILABLE · timeframe object not recorded`);
+      else if(diagnostic.available===false)lines.push(`${tf}: UNAVAILABLE · ${diagnostic.reason||"recorded available=false"} · phase ${diagnostic.phase??"unavailable"} · state ${diagnostic.state??"unavailable"}`);
+      else if(reading===null)lines.push(`${tf}: READING UNAVAILABLE · ${metric} field is null/missing · phase ${diagnostic.phase??"unavailable"} · state ${diagnostic.state??"unavailable"}`);
+      else if(metric==="atrBps"){
+        lines.push(`${tf}: ${fmt(reading,2)}bps · phase ${diagnostic.phase??"unavailable"} · state ${diagnostic.state??"unavailable"}`);
+      }else{
+        const interpretation=metric==="directionalAcceleration"?(reading>10?"ACCELERATING":reading< -10?"DECELERATING":"FLAT"):(reading>10?"BULLISH":reading< -10?"BEARISH":"MIXED");
+        lines.push(`${tf}: ${signed(reading,2)} · ${interpretation} · phase ${diagnostic.phase??"unavailable"} · state ${diagnostic.state??"unavailable"}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  function drawLine(ctx,g,rows,key,color,min,max,top,height){
+    ctx.strokeStyle=color;ctx.lineWidth=snapWidth(1.5);ctx.beginPath();let started=false;
+    for(const row of rows){
+      const value=finite(row.aggregate[key]);if(value===null)continue;
+      const x=xFor(row.time,g),y=top+(max-value)/(max-min)*height;
+      if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
+    }
+    if(started)ctx.stroke();
+  }
+
+  function aggregateComponentEnabled(key){
+    const input=document.querySelector(`.aggregate-component-toggle[value="${key}"]`);
+    return input?input.checked:true;
+  }
+
+  function drawAggregate(){
+    const canvas=$("aggregateChart");
+    $("aggregatePanel").classList.toggle("hidden",!$("showAggregate").checked);
+    if(!$("showAggregate").checked)return;
+    if($("aggregatePanel").classList.contains("collapsed"))return;
+    const g=plotGeometry(canvas);clearCanvas(g);
+    const signedTop=g.top,signedH=g.plotH*.57,pctTop=g.top+g.plotH*.67,pctH=g.plotH*.28;
+    const rows=state.machineRows.filter(r=>r.time>=state.viewStart&&r.time<=state.viewEnd),ctx=g.ctx;
+
+    const SIGNED_HEADROOM_PX=4;
+    const signedKeys=["marketBias","marketStrength","marketAcceleration"].filter(aggregateComponentEnabled);
+    const signedValues=rows.flatMap(row=>signedKeys.map(key=>finite(row.aggregate[key]))).filter(value=>value!==null);
+    const signedRange=Math.max(1,signedValues.length?Math.max(...signedValues.map(Math.abs)):100);
+    const signedCenter=signedTop+signedH/2;
+    const signedContentHalf=Math.max(1,signedH/2-SIGNED_HEADROOM_PX);
+    const valueToSignedY=value=>signedCenter-clamp(value,-signedRange,signedRange)/signedRange*signedContentHalf;
+
+    ctx.strokeStyle=COLORS.grid;ctx.lineWidth=hairline();
+    ctx.strokeRect(px(g.left),px(signedTop),ix(g.plotW),ix(signedH));ctx.strokeRect(px(g.left),px(pctTop),ix(g.plotW),ix(pctH));
+    ctx.beginPath();ctx.moveTo(px(g.left),px(signedCenter));ctx.lineTo(px(g.left+g.plotW),px(signedCenter));ctx.stroke();
+
+    function drawSignedLine(key,color){
+      if(!aggregateComponentEnabled(key))return;
+      ctx.strokeStyle=color;ctx.lineWidth=snapWidth(1.5);ctx.beginPath();let started=false;
+      for(const row of rows){
+        const value=finite(row.aggregate[key]);if(value===null)continue;
+        const x=xFor(row.time,g),y=valueToSignedY(value);
+        if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
+      }
+      if(started)ctx.stroke();
+    }
+    drawSignedLine("marketBias",COLORS.blue);
+    drawSignedLine("marketStrength",COLORS.bull);
+    drawSignedLine("marketAcceleration",COLORS.purple);
+    if(aggregateComponentEnabled("aggregateConfidence"))drawLine(ctx,g,rows,"aggregateConfidence",COLORS.cyan,0,100,pctTop,pctH);
+    if(aggregateComponentEnabled("timingRisk"))drawLine(ctx,g,rows,"timingRisk",COLORS.amber,0,100,pctTop,pctH);
+
+    ctx.font="10px Arial";ctx.textAlign="right";ctx.fillStyle=COLORS.axis;
+    ctx.fillText(`+${fmt(signedRange,0)}`,g.left-5,signedTop+SIGNED_HEADROOM_PX+4);
+    ctx.fillText("0",g.left-5,signedCenter+3);
+    ctx.fillText(`-${fmt(signedRange,0)}`,g.left-5,signedTop+signedH-SIGNED_HEADROOM_PX);
+    ctx.fillText("100%",g.left-5,pctTop+4);ctx.fillText("0%",g.left-5,pctTop+pctH);
+    ctx.textAlign="left";
+    let labelX=g.left+5;
+    if(aggregateComponentEnabled("marketBias")){ctx.fillStyle=COLORS.blue;ctx.fillText("BIAS",labelX,11);labelX+=38;}
+    if(aggregateComponentEnabled("marketStrength")){ctx.fillStyle=COLORS.bull;ctx.fillText("STRENGTH",labelX,11);labelX+=62;}
+    if(aggregateComponentEnabled("marketAcceleration")){ctx.fillStyle=COLORS.purple;ctx.fillText("ACCEL",labelX,11);labelX+=53;}
+    if(aggregateComponentEnabled("aggregateConfidence")){ctx.fillStyle=COLORS.cyan;ctx.fillText("CONFIDENCE",labelX,11);labelX+=74;}
+    if(aggregateComponentEnabled("timingRisk")){ctx.fillStyle=COLORS.amber;ctx.fillText("RISK",labelX,11);}
+    drawSharedCrosshair(g,false);
+  }
+
+  function drawSharedCrosshair(g,pricePanel){
+    if(!Number.isFinite(state.crosshairTime)||state.crosshairTime<state.viewStart||state.crosshairTime>state.viewEnd)return;
+    const x=xFor(state.crosshairTime,g),ctx=g.ctx,snappedX=px(x);
+    ctx.strokeStyle="rgba(112,122,138,.38)";ctx.lineWidth=hairline();ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(snappedX,px(g.top));ctx.lineTo(snappedX,px(g.top+g.plotH));ctx.stroke();ctx.setLineDash([]);
+    if(pricePanel){
+      const label=`${dubai(state.crosshairTime)} GST`,boxY=g.top+g.plotH-20,paddingX=6;
+      ctx.font="10px Arial";
+      const textW=ctx.measureText(label).width,boxW=textW+paddingX*2;
+      const boxX=clamp(x-boxW/2,g.left,g.left+g.plotW-boxW);
+      ctx.fillStyle=COLORS.text;ctx.fillRect(boxX,boxY,boxW,16);
+      ctx.fillStyle="#fff";ctx.textAlign="center";ctx.textBaseline="middle";
+      ctx.fillText(label,boxX+boxW/2,boxY+8.5);
+      ctx.textBaseline="alphabetic";
+    }
+  }
+
+  function drawAll(){
+    state.displayCandles=aggregateCandles(state.candles1m,state.displayMinutes);
+    drawPrice();drawTimeline();drawAggregate();
+  }
+
+  function formattedOutcomeText(outcome){
+    if(!outcome)return "Status: unavailable";
+    return [
+      `Status: ${outcome.status??"unavailable"}`,
+      `Quantity: ${formatQuantity(outcome.testLot)} BTC`,
+      `Entry: ${formatPrice(outcome.entryPrice)} · Exit: ${formatPrice(outcome.exitPrice)}`,
+      `TP distance: ${formatPriceDistance(outcome.tpDistance)} → target ${formatPrice(outcome.targetPrice)} · SL distance: ${formatPriceDistance(outcome.slDistance)} → stop ${formatPrice(outcome.stopPrice)}`,
+      `Return: ${formatPercent(outcome.barrierReturn)} · P/L: ${formatUsd(outcome.pnlUsd)}`,
+      `Gross P/L: ${formatUsd(outcome.grossPnlUsd)} · fees: ${formatUsd(outcome.feesUsd)}`,
+      `MFE: ${formatPercent(outcome.mfe)} · MAE: ${formatPercent(outcome.mae)}`,
+      `Best / worst: ${finite(outcome.timeToBest)===null?"—":`${outcome.timeToBest}m`} / ${finite(outcome.timeToWorst)===null?"—":`${outcome.timeToWorst}m`}`,
+      `Barrier: ${outcome.barrier??"—"}${finite(outcome.barrierMinute)===null?"":` at ${outcome.barrierMinute}m`}`
+    ].join("\n");
+  }
+
+  function markerHeading(marker){
+    if(!marker)return "";
+    return `${marker.markerRole} MARKER · ${marker.actual?"ACTUAL RECORDED":"HYPOTHETICAL"} · ${dubai(marker.markerTime)} GST · price ${formatPrice(marker.markerPrice)} · ${marker.timeBasis||"timestamp basis unavailable"}\n`;
+  }
+  function eventTooltip(event,outcome,marker=null){
+    const row=event.snapshot,agg=row.aggregate||{};
+    return [
+      markerHeading(marker),
+      `${event.action} · ${dubai(event.time)} GST`,
+      `Timestamp source: ${row.timestampField}${row.timestampApproximate?" — approximate":""}`,
+      `Bias ${fmt(agg.marketBias,1)} · Strength ${fmt(agg.marketStrength,1)} · Accel ${fmt(agg.marketAcceleration,1)}`,
+      `Confidence ${fmt(agg.aggregateConfidence,1)} · Risk ${fmt(agg.timingRisk,1)}`,
+      "",
+      "OUTCOME (hypothetical, active until TP or SL)",
+      formattedOutcomeText(outcome)
+    ].join("\n");
+  }
+  function scalpTooltip(signal,outcome,marker=null){
+    const match=signal.ssscMatch;
+    return [
+      markerHeading(marker),
+      `SCALP ${signal.direction} ${signal.eventType} · rank ${signal.rank??"unavailable"}`,
+      `${dubai(signal.time)} GST`,
+      `Timestamp source: ${signal.timestampField}${signal.timestampApproximate?" — approximate":""}`,
+      `Recorded action: ${signal.recordedAction} · status: ${signal.eventState??"not recorded"}`,
+      signal.blockingReason?`Blocking/rejection reason: ${signal.blockingReason}`:"",
+      "",
+      signal.linkedTrade
+        ?`ACTUAL TRADE · qty ${formatQuantity(signal.linkedTrade.filledQty??signal.linkedTrade.requestedQty)} BTC · entry ${formatPrice(signal.linkedTrade.entryPrice)} · exit ${formatPrice(signal.linkedTrade.exitPrice)} · P/L ${formatUsd(signal.linkedTrade.estimatedPnlUsd)}`
+        :"Detector-only · no exact-linked trade recorded",
+      "",
+      `Prior SSSC: ${match?`${dubai(match.time)} GST`:"none same-machine"} · Directional agreement: ${scalpSsscAgreement(signal)?"YES":"NO / UNAVAILABLE"}`,
+      "",
+      signal.linkedTrade?"":"OUTCOME (hypothetical)",
+      signal.linkedTrade?"":formattedOutcomeText(outcome)
+    ].join("\n");
+  }
+
+  function aggregateHoverText(time){
+    if(!Number.isFinite(time))return "";
+    const row=state.machineRows.reduce((best,item)=>Math.abs(item.time-time)<Math.abs((best?.time??Infinity)-time)?item:best,null);
+    if(!row)return "No recorded SSSC snapshot at this time.";
+    const agg=row.aggregate||{};
+    const lines=[`SSSC recorded snapshot · ${dubai(row.time)} GST`,""];
+    const components=[["marketBias","Bias"],["marketStrength","Strength"],["marketAcceleration","Accel"],["aggregateConfidence","Confidence"],["timingRisk","Risk"]];
+    for(const [key,label] of components){
+      if(!aggregateComponentEnabled(key))continue;
+      lines.push(`${label}: ${fmt(agg[key],2)}`);
+    }
+    return lines.join("\n");
+  }
+
+  function drawPriceAxisTag(g,mouseY){
+    const range=state.priceAxisRange;
+    if(!range||mouseY<range.top||mouseY>range.top+range.plotH)return;
+    const price=range.max-(mouseY-range.top)/range.plotH*(range.max-range.min);
+    const ctx=g.ctx,label=formatPrice(price),paddingX=6,boxH=16;
+    ctx.font="10px Arial";
+    const textW=ctx.measureText(label).width,boxW=textW+paddingX*2;
+    const boxX=g.width-boxW,boxY=clamp(mouseY-boxH/2,g.top,g.top+g.plotH-boxH);
+    ctx.fillStyle=COLORS.text;ctx.fillRect(boxX,boxY,boxW,boxH);
+    ctx.fillStyle="#fff";ctx.textAlign="left";ctx.textBaseline="middle";
+    ctx.fillText(label,boxX+paddingX,boxY+boxH/2+1);
+    ctx.textBaseline="alphabetic";
+  }
+
+  function bindCanvasInteraction(canvas){
+    canvas.addEventListener("wheel",event=>{
+      if(!Number.isFinite(state.viewStart)||!Number.isFinite(state.viewEnd))return;
+      event.preventDefault();
+      const g=plotGeometry(canvas),rect=canvas.getBoundingClientRect(),focus=timeFor(event.clientX-rect.left,g);
+      const factor=event.deltaY>0?1.18:.84,oldWidth=state.viewEnd-state.viewStart,newWidth=clamp(oldWidth*factor,20*MINUTE,(state.fullEnd-state.fullStart)*2);
+      const ratio=(focus-state.viewStart)/oldWidth;
+      state.viewStart=focus-newWidth*ratio;state.viewEnd=state.viewStart+newWidth;drawAll();
+    },{passive:false});
+    canvas.addEventListener("pointerdown",event=>{
+      const g=plotGeometry(canvas);state.drag={x:event.clientX,start:state.viewStart,end:state.viewEnd,g};
+      canvas.setPointerCapture(event.pointerId);
+    });
+    canvas.addEventListener("pointermove",event=>{
+      const rect=canvas.getBoundingClientRect(),g=plotGeometry(canvas),x=event.clientX-rect.left;
+      state.crosshairTime=timeFor(x,g);
+      if(state.drag){
+        const shift=-(event.clientX-state.drag.x)/g.plotW*(state.drag.end-state.drag.start);
+        state.viewStart=state.drag.start+shift;state.viewEnd=state.drag.end+shift;
+      }
+      drawAll();
+      if(canvas===$("priceChart")&&!state.drag){
+        const y=event.clientY-rect.top,hit=state.markerHits.find(m=>Math.hypot(m.x-x,m.y-y)<13);
+        if(hit)showTooltip(event.clientX,event.clientY,hit.scalp?scalpTooltip(hit.event,hit.outcome,hit):eventTooltip(hit.event,hit.outcome,hit));else hideTooltip();
+        drawPriceAxisTag(g,event.clientY-rect.top);
+      }else if(canvas===$("timelineChart")&&!state.drag){
+        let selector,metric;
+        if(state.ssscTimelineView==="lines"){selector=".line-tf-toggle";metric="direction";}
+        else if(state.ssscTimelineView==="momentum"){selector=state.ssscMomentumStyle==="lines"?".line-tf-toggle":"#tfVisibility input";metric="directionalAcceleration";}
+        else if(state.ssscTimelineView==="atr"){selector=state.ssscMomentumStyle==="lines"?".line-tf-toggle":"#tfVisibility input";metric="atrBps";}
+        else{selector="#tfVisibility input";metric="direction";}
+        showTooltip(event.clientX,event.clientY,timelineHoverText(state.crosshairTime,selector,metric));
+      }else if(canvas===$("aggregateChart")&&!state.drag){
+        showTooltip(event.clientX,event.clientY,aggregateHoverText(state.crosshairTime));
+      }
+    });
+    const end=event=>{state.drag=null;try{canvas.releasePointerCapture(event.pointerId);}catch(_error){}};
+    canvas.addEventListener("pointerup",end);canvas.addEventListener("pointercancel",end);
+    canvas.addEventListener("pointerleave",()=>{if(!state.drag){state.crosshairTime=null;hideTooltip();drawAll();}});
+    canvas.addEventListener("dblclick",resetView);
+  }
+
+  function showTooltip(x,y,text){
+    const tip=$("tooltip");tip.textContent=text;tip.style.display="block";
+    const width=tip.offsetWidth,height=tip.offsetHeight;
+    tip.style.left=`${Math.min(window.innerWidth-width-8,x+12)}px`;tip.style.top=`${Math.min(window.innerHeight-height-8,y+12)}px`;
+  }
+  function hideTooltip(){$("tooltip").style.display="none";}
+
+  function updateDatasetStatus(){
+    const times=[...state.rows.map(r=>r.time),...state.scalpSignals.map(r=>r.time),...state.scalpTrades.flatMap(t=>[t.time,t.closedTime]).filter(Number.isFinite)];
+    if(!state.rows.length&&!state.scalpSignals.length){
+      $("datasetStatus").className="statusline";$("datasetStatus").textContent="No usable records loaded.";
+      $("rangeLabel").textContent="—";
+      return;
+    }
+    if(state.scalpErrors.length){
+      $("datasetStatus").className="statusline error";
+      $("datasetStatus").innerHTML=state.scalpErrors.map(escapeHtml).join("<br>");
+    }else{
+      $("datasetStatus").className="statusline";
+      $("datasetStatus").textContent="";
+    }
+    $("rangeLabel").textContent=times.length?`${dubai(Math.min(...times))} → ${dubai(Math.max(...times))} GST`:"—";
+  }
+
+  const AUTO_REFRESH_MS=60000;
+  let autoRefreshTimer=null;
+  function scheduleAutoRefresh(){
+    if(autoRefreshTimer)clearInterval(autoRefreshTimer);
+    autoRefreshTimer=setInterval(()=>{if(!state.loading)loadRealData(true);},AUTO_REFRESH_MS);
+    $("autoRefreshBadge").style.display="";
+  }
+
+  async function loadRealData(auto=false){
+    if(state.loading)return;
+    state.loading=true;$("loadButton").disabled=true;setStatus(auto?"Auto-refreshing":"Loading","busy");
+    $("datasetStatus").className="statusline";
+    const previousViewStart=state.viewStart,previousViewEnd=state.viewEnd;
+    try{
+      const [ssscResult,v1Result,v2Result,ssscSigResult,sigBResult,futuresResult]=await Promise.allSettled([
+        loadLocalSnapshots(),
+        loadLocalTable(SCALP_SIGNAL_TABLE),
+        loadLocalTable(SCALP_V2_TABLE),
+        loadLocalTable(SSSC_SIGNALS_TABLE),
+        loadLocalTable(SIGB_SNAPSHOTS_TABLE),
+        loadLocalTable(FUTURES_SNAPSHOTS_TABLE)
+      ]);
+      if(ssscResult.status==="rejected")throw ssscResult.reason;
+      const normalized=normalizeRows(ssscResult.value);
+      if(!normalized.rows.length)throw new Error(`No usable ${SYMBOL} rows found in ${TABLE}`);
+      state.rows=normalized.rows;state.malformed=normalized.malformed;state.duplicates=normalized.duplicates;state.source="local";
+      state.scalpErrors=[];
+      if(v1Result.status==="fulfilled"){
+        const scalp=normalizeScalpSignals(v1Result.value);
+        state.scalpSignals=scalp.signals;
+        if(scalp.malformed)state.scalpErrors.push(`${scalp.malformed} malformed ${SCALP_SIGNAL_TABLE} rows skipped`);
+      }else{state.scalpSignals=[];state.scalpErrors.push(v1Result.reason?.message||String(v1Result.reason));}
+      if(v2Result.status==="fulfilled"){
+        const scalp=normalizeScalpSignals(v2Result.value);
+        state.scalpV2Signals=scalp.signals.map(signal=>({...signal,kind:"SCALP_V2",source:"V2"}));
+        if(scalp.malformed)state.scalpErrors.push(`${scalp.malformed} malformed ${SCALP_V2_TABLE} rows skipped`);
+      }else{state.scalpV2Signals=[];state.scalpErrors.push(v2Result.reason?.message||String(v2Result.reason));}
+      state.scalpSignals=state.scalpSignals.map(signal=>({...signal,source:"V1"}));
+      if(ssscSigResult.status==="fulfilled"){
+        const sig=normalizeSsscSignals(ssscSigResult.value);
+        state.ssscSignals=sig.signals;
+        if(sig.malformed)state.scalpErrors.push(`${sig.malformed} malformed ${SSSC_SIGNALS_TABLE} rows skipped`);
+      }else{state.ssscSignals=[];state.scalpErrors.push(ssscSigResult.reason?.message||String(ssscSigResult.reason));}
+      if(sigBResult.status==="fulfilled"){
+        const sig=normalizeSigBSnapshots(sigBResult.value);
+        state.sigBSnapshots=sig.rows;
+        if(sig.malformed)state.scalpErrors.push(`${sig.malformed} malformed ${SIGB_SNAPSHOTS_TABLE} rows skipped`);
+      }else{state.sigBSnapshots=[];state.scalpErrors.push(sigBResult.reason?.message||String(sigBResult.reason));}
+      if(futuresResult.status==="fulfilled"){
+        const fut=normalizeFuturesSnapshots(futuresResult.value);
+        state.futuresSnapshots=fut.rows;
+        if(fut.malformed)state.scalpErrors.push(`${fut.malformed} malformed ${FUTURES_SNAPSHOTS_TABLE} rows skipped`);
+      }else{state.futuresSnapshots=[];state.scalpErrors.push(futuresResult.reason?.message||String(futuresResult.reason));}
+      state.scalpTrades=[];
+      attachScalpContext();
+      populateMachineSelect();state.machineRows=state.rows.slice();
+      const combinedTimes=[...state.rows.map(r=>r.time),...state.scalpSignals.map(r=>r.time),...state.scalpV2Signals.map(r=>r.time),...state.ssscSignals.map(r=>r.time)];
+      const minTime=Math.min(...combinedTimes),maxTime=Math.max(...combinedTimes);
+      state.candles1m=await loadBinance1m(minTime-360*MINUTE,maxTime+240*MINUTE);
+      if(!state.candles1m.length)throw new Error("No Binance 1m candles returned for the snapshot range");
+      updateMachineRows();renderSnapshotLayerList();renderSignalParamFilters();
+      if(auto&&Number.isFinite(previousViewStart)&&Number.isFinite(previousViewEnd)&&state.candles1m.length){
+        const machine=$("machineSelect").value,scalpTimes=state.scalpSignals.filter(s=>!machine||s.machineId===machine).map(s=>s.time);
+        const recordTimes=[...state.machineRows.map(r=>r.time),...scalpTimes];
+        const rowStart=recordTimes.length?Math.min(...recordTimes):state.candles1m[0].openTime;
+        const rowEnd=recordTimes.length?Math.max(...recordTimes):state.candles1m.at(-1).closeTime;
+        const wasAtLiveEdge=Math.abs(previousViewEnd-state.fullEnd)<2*MINUTE;
+        state.fullStart=Math.max(state.candles1m[0].openTime,rowStart-90*MINUTE);
+        state.fullEnd=Math.min(state.candles1m.at(-1).closeTime,rowEnd+90*MINUTE);
+        if(wasAtLiveEdge){
+          const width=previousViewEnd-previousViewStart;
+          state.viewEnd=state.fullEnd;state.viewStart=state.fullEnd-width;
+        }else{
+          state.viewStart=previousViewStart;state.viewEnd=previousViewEnd;
+        }
+        drawAll();
+      }else{
+        resetView();
+      }
+      updateDatasetStatus();setStatus(auto?"Auto-updated":"Loaded","success");
+      scheduleAutoRefresh();
+    }catch(error){
+      console.error(error);$("datasetStatus").className="statusline error";$("datasetStatus").textContent=error.message||String(error);setStatus(auto?"Auto-refresh failed":"Load failed","error");
+    }finally{state.loading=false;$("loadButton").disabled=false;}
+  }
+
+  function makeTf(direction,overrides={}){
+    if(overrides===null)return null;
+    return {
+      available:true,direction,directionalStrength:direction*.72,acceleration:direction*.18,
+      expansionContraction:Math.abs(direction)*.22,directionalAcceleration:direction*.12,
+      stackDir:direction,slopeDir:direction*.8,sprDir:direction*.65,crossoverContribution:direction>0?4.2:-4.2,
+      atr:54.2,atrBps:8.3,recentRV:.0042,priorRV:.0037,
+      resolvedElapsedHorizons:{recentMs:480000,priorMs:480000,crossoverStaleMs:1440000},
+      role:"trigger",reliability:"full-warmup",phase:direction>10?"Bullish Trend / Expansion":direction< -10?"Bearish Trend / Expansion":"Directionally Mixed",
+      state:direction>10?"Bullish":direction< -10?"Bearish":"Mixed",...overrides
+    };
+  }
+
+  function mockRecord(time,action,bias,machine="mock-alpha",overrides={}){
+    const direction=Math.sign(bias)||1;
+    const timeframes=Object.fromEntries(LOGGED_TFS.map((tf,index)=>[tf,makeTf(clamp(bias-index*direction*4,-100,100),{role:["structure","bridge","bridge","execution","trigger"][index]})]));
+    return {
+      id:`mock-${machine}-${time}-${action}`,created_at:new Date(time).toISOString(),machine_id:machine,symbol:SYMBOL,timeframes,
+      aggregate:{
+        marketBias:bias,marketStrength:bias*.7,marketAcceleration:bias*.2,aggregateConfidence:Math.min(96,55+Math.abs(bias)*.35),
+        timingRisk:Math.max(8,58-Math.abs(bias)*.3),setupAction:action,roleCoverage:{regime:0,structure:1,bridge:1,execution:1,trigger:1},
+        alignment:.82,coverage:1,reason:"Mock validation fixture",unanimousStrongOpposition:false,missingTimeframes:[]
+      },...overrides
+    };
+  }
+  function mockScalpSignal(time,direction,eventType,rank,action="DETECTION_QUALIFIED",machine="mock-alpha"){
+    const candleTime=Math.floor(time/1000),eventId=`1m|${eventType}|${direction}|${candleTime}|1|LIVE`;
+    return {
+      id:`mock-scalp-${time}-${eventType}`,created_at:new Date(time+4000).toISOString(),machine_id:machine,symbol:SYMBOL,
+      action,source_timeframe:"1m",
+      detector_state:{
+        source:"1m",eventId,freshnessKey:`1m|${eventType}|${direction}|${candleTime}`,eventType,direction,eventState:"LIVE",phase:"LIVE",
+        qualified:true,projected:false,rejectionReason:"",candleTime,publishedAt:time+2500,reason:"Representative recorded detector event",
+        rankValue:rank,rank:rank>=80?"A":rank>=60?"B":"C",raw:{atr:48,priorAtr:44,atrChange:.09,fastSlope:direction==="LONG"?.18:-.18,slowSlope:direction==="LONG"?.04:-.04,separation:.32},
+        rankDiagnostics:{rankValue:rank,emaScore:rank-3,pressureAvailable:true,pressureScore:rank+4,relativeVolume:1.4}
+      },
+      cascade_agreement:{direction,count:2,timeframes:["1m","5m"],records:[]}
+    };
+  }
+
+  function buildMockFixture(){
+    const start=Date.UTC(2026,6,25,4,0,0),raw=[],scalpRaw=[];
+    raw.push(mockRecord(start,"WAIT",8));
+    raw.push(mockRecord(start+30000,"FRESH LONG",62));
+    raw.push(mockRecord(start+60000,"FRESH LONG",66));
+    raw.push(mockRecord(start+90000,"WAIT",12));
+    raw.push(mockRecord(start+120000,"FRESH SHORT",-68));
+    raw.push(mockRecord(start+150000,"FRESH LONG",71));
+    raw.push(mockRecord(start+180000,"FRESH LONG",74));
+    const missing=mockRecord(start+210000,"WAIT",5);missing.timeframes["3m"]={available:false,reason:"normalization-unavailable",role:"execution",reliability:null};missing.timeframes["1m"].atr=null;raw.push(missing);
+    raw.push(JSON.parse(JSON.stringify(raw[1])));
+    raw.push({machine_id:"mock-alpha",symbol:SYMBOL,timeframes:{},aggregate:{}});
+    raw.push(mockRecord(start+240000,"FRESH SHORT",-57,"mock-beta"));
+    scalpRaw.push(mockScalpSignal(start+45000,"LONG","CROSS",84));
+    scalpRaw.push(mockScalpSignal(start+125000,"SHORT","BOUNCE",71));
+    scalpRaw.push(mockScalpSignal(start+165000,"LONG","CROSS",48,"RANK_REJECTED"));
+    const executedSignal=mockScalpSignal(start+185000,"LONG","BOUNCE",88);scalpRaw.push(executedSignal);
+    const scalpTrades=[{
+      id:"mock-trade-1",created_at:new Date(start+186000).toISOString(),closed_at:new Date(start+246000).toISOString(),
+      symbol:SYMBOL,direction:"LONG",mode:"CONTINUOUS",source_timeframe:"1m",event_type:"BOUNCE",auto_entered:false,
+      avg_entry_price:118040,exit_price:118095,exit_reason:"PARTIAL_TP",estimated_realized_pnl_usd:.52,
+      requested_qty:.01,filled_qty:.01,entry_commission:.47,device_id:"mock-alpha",
+      raw_session:{eventId:executedSignal.detector_state.eventId,trancheId:"mock-long-1"}
+    }];
+    const candles=[];
+    let price=118000;
+    for(let i=-360;i<270;i++){
+      const openTime=start+i*MINUTE,drift=i<2?7:i<4?-12:i<7?16:-1.5;
+      const open=price,close=open+drift+Math.sin(i*.7)*8;
+      candles.push({openTime,open,high:Math.max(open,close)+18,low:Math.min(open,close)-17,close,volume:100+i%17,closeTime:openTime+MINUTE-1});
+      price=close;
+    }
+    return {raw,scalpRaw,scalpTrades,candles};
+  }
+
+  async function runSelfTests(){
+    const cases=[];
+    const assert=(condition,name)=>{if(!condition)throw new Error(name);cases.push(name);};
+    try{
+      const pages=[Array.from({length:1000},(_,i)=>i),Array.from({length:1000},(_,i)=>i+1000),[2000,2001,2002]];
+      const paged=await paginate(async offset=>pages[offset/1000]||[],1000);
+      assert(paged.length===2003,"local API pagination > 1,000");
+      const bPages=[Array.from({length:1500},(_,i)=>i),[1500,1501]];
+      const bPaged=await paginate(async offset=>bPages[offset/1500]||[],1500);
+      assert(bPaged.length===1502,"Binance-style pagination > 1,500");
+      const fixture=buildMockFixture(),normalized=normalizeRows(fixture.raw);
+      const normalizedScalp=normalizeScalpSignals(fixture.scalpRaw),normalizedTrades=normalizeScalpTrades(fixture.scalpTrades);
+      assert(normalizedScalp.signals.length===4&&new Set(normalizedScalp.signals.map(s=>s.eventType)).size===2,"SCALP CROSS + BOUNCE schema normalization");
+      assert(normalizedScalp.signals.some(s=>s.recordedAction==="RANK_REJECTED"),"SCALP recorded rank rejection");
+      const executedMock=normalizedScalp.signals.find(s=>s.eventId===normalizedTrades[0].eventId);
+      assert(!!executedMock&&normalizedTrades[0].entryPrice===118040,"SCALP exact eventId trade linkage input");
+      assert(normalized.duplicates===1&&normalized.malformed===1,"duplicates + malformed rows");
+      const alpha=normalized.rows.filter(r=>r.machineId==="mock-alpha"),events=buildEvents(alpha);
+      assert(events.map(e=>e.action).join("|")==="WAIT|FRESH LONG|WAIT|FRESH SHORT|FRESH LONG|WAIT","WAIT/long/short/reversal consolidation");
+      assert(alpha.some(r=>r.timeframes["3m"]?.available===false),"missing timeframe remains distinct");
+      assert(alpha.some(r=>r.timeframes["1m"]?.atr===null),"null metric remains null");
+      const futureProbe=normalizedScalp.signals[0],eligiblePrior=alpha.filter(row=>row.time<=futureProbe.time).at(-1);
+      assert(eligiblePrior&&eligiblePrior.time<=futureProbe.time&&alpha.find(row=>row.time>futureProbe.time)!==eligiblePrior,"SCALP matching never uses future SSSC");
+      const oldRows=state.rows,oldCandles=state.candles1m,oldScalpSignals=state.scalpSignals,oldScalpTrades=state.scalpTrades,oldScalpEvents=state.scalpEvents;
+      state.rows=alpha;state.scalpSignals=normalizedScalp.signals.map(s=>({...s,source:"V1"}));state.scalpV2Signals=[];state.scalpTrades=normalizedTrades;
+      renderSignalParamFilters();
+      if($("v1MinRank")){
+        const oldMinRank=$("v1MinRank").value;$("v1MinRank").value="80";
+        assert(state.scalpSignals.filter(passesScalpFilters).length===2,"SCALP rank filter uses recorded rank");
+        $("v1MinRank").value=oldMinRank;
+      }
+      assert(drawPrice.toString().includes("visibleSignalSets")&&renderResults.toString().includes("visibleSignalSets"),"shared filtered sets drive markers + results");
+      state.candles1m=fixture.candles;
+      const longEvent=events.find(e=>e.action==="FRESH LONG");
+      const outcome=evaluateOutcome(longEvent);
+      assert(outcome.entryTime>longEvent.time,"no look-ahead: entry after signal");
+      const oldCostUnit=$("costUnit").value,oldTp=$("takeProfit").value,oldSl=$("stopLoss").value,oldFee=$("fee").value,oldSlip=$("slippage").value,oldLot=$("testLot").value;
+      $("costUnit").value="percent";$("takeProfit").value="1";$("stopLoss").value="1";$("fee").value="0";$("slippage").value="0";
+      const lifecycleStart=Date.UTC(2026,6,20),lifecycleEvent=side=>({id:`lifecycle-${side}`,side,time:lifecycleStart-1,snapshot:{timestampApproximate:false}});
+      const lifecycleCandles=(count,final={})=>Array.from({length:count},(_,index)=>({
+        openTime:lifecycleStart+index*MINUTE,closeTime:lifecycleStart+(index+1)*MINUTE-1,
+        open:100,close:100,high:index===count-1?(final.high??100.5):100.5,low:index===count-1?(final.low??99.5):99.5,volume:1
+      }));
+      state.candles1m=lifecycleCandles(251,{high:101.2,low:99.5});
+      const lateLongTp=evaluateOutcome(lifecycleEvent(1));
+      assert(lateLongTp.barrier==="TP"&&lateLongTp.barrierMinute===251,"TP after former 240m horizon still resolves");
+      state.candles1m=lifecycleCandles(251,{high:100.5,low:98.8});
+      assert(evaluateOutcome(lifecycleEvent(1)).barrier==="SL","SL after former 240m horizon still resolves");
+      state.candles1m=lifecycleCandles(20);
+      assert(evaluateOutcome(lifecycleEvent(1)).status==="OPEN / UNRESOLVED","no barrier before data end remains open/unresolved");
+      state.candles1m=lifecycleCandles(1,{high:101.2,low:98.8});
+      assert(evaluateOutcome(lifecycleEvent(1)).status==="AMBIGUOUS","same 1m candle TP+SL is ambiguous");
+      state.candles1m=lifecycleCandles(2,{high:100.5,low:98.8});
+      assert(evaluateOutcome(lifecycleEvent(-1)).barrier==="TP","short TP direction is correct");
+      state.candles1m=lifecycleCandles(2,{high:101.2,low:99.5});
+      assert(evaluateOutcome(lifecycleEvent(-1)).barrier==="SL","short SL direction is correct");
+      const longMoney=monetaryPnl({entryPrice:63000,exitPrice:63500,side:1,quantity:.01,feePercent:0});
+      const shortMoney=monetaryPnl({entryPrice:63000,exitPrice:62500,side:-1,quantity:.01,feePercent:0});
+      assert(longMoney.pnlUsd===5&&shortMoney.pnlUsd===5,"long and short P/L use direction × price difference × lot");
+      assert(monetaryPnl({entryPrice:63000,exitPrice:63500,side:1,quantity:.02,feePercent:0}).pnlUsd===10,"P/L scales immediately with configured lot");
+      const distanceEvent={id:"distance-event",side:1,time:lifecycleStart-1,snapshot:{timestampApproximate:false}};
+      $("takeProfit").value="500";$("stopLoss").value="500";$("testLot").value=".01";
+      state.candles1m=[{openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:63000,close:63500,high:63510,low:62950,volume:1}];
+      const distanceLong=evaluateOutcome(distanceEvent);
+      $("testLot").value=".02";const distanceLongDouble=evaluateOutcome(distanceEvent);
+      assert(distanceLong.targetPrice===63500&&distanceLong.stopPrice===62500&&distanceLong.tpDistance===500&&distanceLong.slDistance===500,"long TP/SL dollar distances derive correct prices");
+      assert(distanceLong.pnlUsd===5&&distanceLongDouble.pnlUsd===10&&distanceLong.stopPrice===distanceLongDouble.stopPrice,"lot changes P/L without changing price distance");
+      const distanceShort={...distanceEvent,id:"distance-short",side:-1};
+      state.candles1m=[{openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:63000,close:62500,high:63050,low:62490,volume:1}];
+      const shortDistanceOutcome=evaluateOutcome(distanceShort);
+      assert(shortDistanceOutcome.targetPrice===62500&&shortDistanceOutcome.stopPrice===63500&&shortDistanceOutcome.pnlUsd===10,"short TP/SL dollar distances and P/L are directionally correct");
+      updateDistanceDisplays();assert($("stopLossDisplay").textContent==="$500","63,000 entry to 62,500 stop displays SL distance as $500");
+      const markerEvent={id:"marker-fixture",side:1,time:1,snapshot:{timestampApproximate:false}};
+      state.outcomes.set(markerEvent.id,{status:"RESOLVED",entryTime:1000,entryPrice:63000,exitTime:61000,exitPrice:63500,pnlUsd:5});
+      const resolvedMarkers=markerSpecsForEvent(markerEvent,false);
+      assert(resolvedMarkers.length===2&&resolvedMarkers[0].time===1000&&resolvedMarkers[0].price===63000&&resolvedMarkers[1].time===61000&&resolvedMarkers[1].price===63500,"hypothetical entry/exit markers use exact outcome timestamp and price");
+      state.outcomes.set(markerEvent.id,{status:"OPEN / UNRESOLVED",entryTime:1000,entryPrice:63000,exitTime:null,exitPrice:null});
+      assert(markerSpecsForEvent(markerEvent,false).map(marker=>marker.role).join("|")==="ENTRY","open trade has entry marker only");
+      state.outcomes.set(markerEvent.id,{status:"AMBIGUOUS",entryTime:1000,entryPrice:63000,exitTime:null,exitPrice:null});
+      assert(markerSpecsForEvent(markerEvent,false).map(marker=>marker.role).join("|")==="ENTRY","ambiguous trade fabricates no exit marker or price");
+      const actualMarkerEvent={id:"actual-marker",side:1,linkedTrade:{time:2000,entryPrice:63010,closedTime:62000,exitPrice:63490,estimatedPnlUsd:4.8}};
+      const actualMarkers=markerSpecsForEvent(actualMarkerEvent,true);
+      assert(actualMarkers[0].time===2000&&actualMarkers[0].price===63010&&actualMarkers[1].time===62000&&actualMarkers[1].price===63490,"actual markers use recorded entry and exit timestamp/price");
+      const oldViewStart=state.viewStart,oldViewEnd=state.viewEnd;state.viewStart=0;state.viewEnd=100000;
+      const markerPoint=markerCoordinates(resolvedMarkers[0],{left:50,plotW:1000},price=>price/100);
+      assert(markerPoint.x===60&&markerPoint.y===630,"marker coordinates remain exact through chart transforms");
+      state.viewStart=oldViewStart;state.viewEnd=oldViewEnd;state.outcomes.delete(markerEvent.id);
+      $("costUnit").value=oldCostUnit;$("takeProfit").value=oldTp;$("stopLoss").value=oldSl;$("fee").value=oldFee;$("slippage").value=oldSlip;$("testLot").value=oldLot;updateDistanceDisplays();
+      state.rows=oldRows;state.candles1m=oldCandles;state.scalpSignals=oldScalpSignals;state.scalpTrades=oldScalpTrades;state.scalpEvents=oldScalpEvents;
+      const permissive={aggregateConfidence:80,timingRisk:20,marketBias:60,marketStrength:40};
+      assert(permissive.aggregateConfidence>=70&&permissive.timingRisk<=30,"filter predicate boundaries");
+      const lineFixture=[
+        {time:1,timeframes:{"1m":{available:true,direction:40,directionalStrength:-99}}},
+        {time:2,timeframes:{"1m":{available:false,direction:88}}},
+        {time:3,timeframes:{"1m":{available:true,direction:-25,directionalStrength:77}}}
+      ],lineSegments=recordedDirectionSegments(lineFixture,"1m");
+      assert(lineSegments.length===2&&lineSegments[0][0].reading===40&&lineSegments[1][0].reading===-25,"line view uses recorded direction and gaps unavailable rows");
+      const cadenceFixture=[
+        {time:100000,timeframes:{"1m":{available:true,direction:12}}},
+        {time:130000,timeframes:{"1m":{available:true,direction:18}}},
+        {time:190001,timeframes:{"1m":{available:true,direction:24}}}
+      ],cadenceSegments=recordedDirectionSegments(cadenceFixture,"1m");
+      assert(cadenceSegments.length===2&&cadenceSegments[0].length===2&&cadenceSegments[1].length===1,"Lines connect at ≤30s and break at >30s");
+      const jitterFixture=[
+        {time:200000,timeframes:{"1m":{available:true,direction:12}}},
+        {time:234000,timeframes:{"1m":{available:true,direction:18}}},
+        {time:270000,timeframes:{"1m":{available:true,direction:24}}}
+      ],jitterSegments=recordedDirectionSegments(jitterFixture,"1m");
+      assert(jitterSegments.length===2&&jitterSegments[0].length===2&&jitterSegments[1].length===1,"34s gap still connects (jitter tolerance), 36s gap breaks (real gap)");
+      const blockGapFixture=[
+        {time:100000,timeframes:{"1m":{available:true,direction:12}}},
+        {time:160001,timeframes:{"1m":{available:true,direction:24}}}
+      ],blockGapIntervals=blockIntervals(blockGapFixture,"1m");
+      assert(blockGapIntervals[0].end===130000&&blockGapIntervals[1].end===190001,"Blocks extend valid readings no more than 30s");
+      assert(recordingGapAt(blockGapFixture,140000)?.duration===60001&&timelineHoverText.toString().includes("NO RECORDED DATA"),"recording interruption is identified as NO RECORDED DATA");
+      const invalidTfFixture=[
+        {time:0,timeframes:{"1m":{available:true,direction:20}}},
+        {time:30000,timeframes:{}},
+        {time:60000,timeframes:{"1m":{available:false,direction:30}}},
+        {time:90000,timeframes:{"1m":{available:true,direction:null}}},
+        {time:120000,timeframes:{"1m":{available:true,direction:"malformed"}}},
+        {time:150000,timeframes:{"1m":{available:true,direction:-20}}}
+      ];
+      assert(blockIntervals(invalidTfFixture,"1m").length===2&&recordedDirectionSegments(invalidTfFixture,"1m").length===2,"Blocks and Lines share missing/unavailable/null/malformed validity");
+      assert(drawLineTimeline.toString().includes("segment.length===1")&&drawLineTimeline.toString().includes("ctx.arc")&&drawLineTimeline.toString().includes("ctx.lineTo"),"line view connects readings within cadence and shows isolated readings as points");
+      assert(SSSC_LINE_WIDTH===2,"line view stroke is 2px");
+      assert(!drawBlockTimeline.toString().includes("recordedDirectionSegments"),"Blocks remain interval blocks and never connect readings");
+      assert(LOGGED_TFS.join("|")==="1h|15m|5m|3m|1m","line view contains only five recorded timeframes");
+      const lineInputs=[...document.querySelectorAll(".line-tf-toggle")];
+      setLineTimeframeVisibility("none");assert(lineInputs.every(input=>!input.checked),"line legend None");
+      setLineTimeframeVisibility("all");assert(lineInputs.every(input=>input.checked),"line legend All");
+      const savedViewStart=state.viewStart,savedViewEnd=state.viewEnd;
+      setSsscTimelineView("lines");setSsscTimelineView("momentum");
+      assert(!$("ssscMomentumStyleButtons").classList.contains("hidden"),"momentum view shows its blocks/lines sub-style toggle");
+      assert(drawTimeline.toString().includes('"directionalAcceleration"'),"momentum view renders the directionalAcceleration metric");
+      setSsscMomentumStyle("lines");assert(state.ssscMomentumStyle==="lines","momentum sub-style switches to lines");
+      setSsscMomentumStyle("blocks");assert(state.ssscMomentumStyle==="blocks","momentum sub-style switches to blocks");
+      setSsscTimelineView("blocks");
+      assert($("ssscMomentumStyleButtons").classList.contains("hidden"),"momentum sub-style toggle hides outside momentum view");
+      setSsscTimelineView("atr");
+      assert(!$("ssscMomentumStyleButtons").classList.contains("hidden")&&$("momentumSmoothingControl").classList.contains("hidden"),"ATR view shares the blocks/lines sub-style toggle but has no smoothing control");
+      assert(drawTimeline.toString().includes('"atrBps"')||drawAtrBlocks.toString().includes("atrBps"),"ATR view renders the atrBps metric");
+      assert($("blockTimelineLegend").classList.contains("hidden")&&$("lineTimelineLegend").classList.contains("hidden"),"ATR view hides the direction-specific bullish/bearish legends");
+      setSsscTimelineView("momentum");
+      assert(!$("momentumSmoothingControl").classList.contains("hidden"),"momentum view shows its smoothing control");
+      const smoothingInput=$("momentumSmoothing");
+      assert(Number(smoothingInput.min)===0&&Number(smoothingInput.max)===300,"momentum smoothing range is 0-300 seconds");
+      const smoothFixture=[
+        {time:0,timeframes:{"1m":{available:true,direction:0,directionalAcceleration:0}}},
+        {time:30000,timeframes:{"1m":{available:true,direction:0,directionalAcceleration:100}}},
+        {time:60000,timeframes:{"1m":{available:true,direction:0,directionalAcceleration:0}}}
+      ],smoothedRows=smoothedRowsForMetric(smoothFixture,"1m","directionalAcceleration",90000);
+      assert(smoothedRows[2].timeframes["1m"].directionalAcceleration===(0+100+0)/3,"smoothing trailing-averages within the window without lookahead");
+      setSsscTimelineView("blocks");
+      assert(state.viewStart===savedViewStart&&state.viewEnd===savedViewEnd,"timeline switching preserves visible range");
+      assert(document.documentElement.innerHTML.includes("Strength opacity = |direction score|")&&document.documentElement.innerHTML.includes("Empty gap = missing / unavailable / no record"),"block legend describes encoding");
+      assert(!$("horizon")&&!evaluateOutcome.toString().includes("slice(entryIndex,entryIndex+"),"Active Horizon UI and expiry logic removed");
+      assert(!document.querySelector(".title small")&&!document.querySelector(".notice"),"specified header descriptions removed");
+      assert(LOCAL_API_BASE==="http://127.0.0.1:3001","fixed local API endpoint");
+      assert(resolvedSidebarWidth(10,1400)===SIDEBAR_MIN&&resolvedSidebarWidth(900,1400)===SIDEBAR_MAX,"sidebar width min/max clamp");
+      assert(formatPrice(118450.49)==="118,450"&&formatUsd(123.44)==="$123.4"&&formatUsd(-7.16)==="-$7.2","price and P/L precision");
+      assert(RESULT_COLUMNS.every(([key])=>resultColumnOrder.includes(key))&&$("resultsHeader").querySelectorAll("th[draggable=true]").length===RESULT_COLUMNS.length,"every result column is draggable");
+      assert(document.querySelectorAll(".lower-panel[data-panel-key]").length===6&&document.querySelectorAll("[data-resize-panel]").length===6,"every lower panel is independently collapsible and resizable");
+      assert(COLORS.candleUp==="rgb(255,255,255)"&&COLORS.candleDown==="rgb(145,145,145)"&&COLORS.candleStroke==="rgb(133,133,133)","exact required candle body, outline and wick colours");
+      assert(canvasSize.toString().includes("devicePixelRatio")===false&&dprValue.toString().includes("devicePixelRatio")&&canvasSize.toString().includes("imageSmoothingEnabled=false"),"main-app DPR backing scale and sharp canvas reset");
+      assert(renderResults.toString().includes(".sort((a,b)=>a.time-b.time)"),"chronological results remain oldest to newest");
+      const errEl=$("selfTestError");if(errEl)errEl.style.display="none";
+    }catch(error){
+      const errEl=$("selfTestError");
+      if(errEl){errEl.style.display="";errEl.innerHTML=`<span class="bear">Self-test failure:</span> ${escapeHtml(error.message||String(error))}`;}
+      console.error("SSSC plotter self-test failure",error);
+    }
+  }
+
+  function setSsscTimelineView(view){
+    state.ssscTimelineView=["lines","momentum","atr"].includes(view)?view:"blocks";
+    $("ssscTimelineViewButtons").querySelectorAll("button").forEach(button=>button.classList.toggle("active",button.dataset.view===state.ssscTimelineView));
+    const subStyled=["momentum","atr"].includes(state.ssscTimelineView);
+    $("ssscMomentumStyleButtons").classList.toggle("hidden",!subStyled);
+    $("momentumSmoothingControl").classList.toggle("hidden",state.ssscTimelineView!=="momentum");
+    if(state.ssscTimelineView==="atr"){
+      $("blockTimelineLegend").classList.add("hidden");
+      $("lineTimelineLegend").classList.add("hidden");
+    }else{
+      const effectiveStyle=state.ssscTimelineView==="momentum"?state.ssscMomentumStyle:state.ssscTimelineView;
+      $("blockTimelineLegend").classList.toggle("hidden",effectiveStyle!=="blocks");
+      $("lineTimelineLegend").classList.toggle("hidden",effectiveStyle!=="lines");
+    }
+    drawTimeline();
+  }
+  function setSsscMomentumStyle(style){
+    state.ssscMomentumStyle=style==="lines"?"lines":"blocks";
+    $("ssscMomentumStyleButtons").querySelectorAll("button").forEach(button=>button.classList.toggle("active",button.dataset.momentumStyle===state.ssscMomentumStyle));
+    if(state.ssscTimelineView==="momentum"){
+      $("blockTimelineLegend").classList.toggle("hidden",state.ssscMomentumStyle!=="blocks");
+      $("lineTimelineLegend").classList.toggle("hidden",state.ssscMomentumStyle!=="lines");
+    }
+    drawTimeline();
+  }
+  function setLineTimeframeVisibility(mode){
+    document.querySelectorAll(".line-tf-toggle").forEach(input=>{input.checked=mode==="all";});
+    drawTimeline();
+  }
+
+  function bindControls(){
+    $("loadButton").addEventListener("click",()=>loadRealData(false));
+    $("exportResultsCsv").addEventListener("click",exportResultsCsv);
+    $("machineSelect").addEventListener("change",updateMachineRows);
+    $("ssscTimelineViewButtons").querySelectorAll("button").forEach(button=>button.addEventListener("click",()=>setSsscTimelineView(button.dataset.view)));
+    $("ssscMomentumStyleButtons").querySelectorAll("button").forEach(button=>button.addEventListener("click",()=>setSsscMomentumStyle(button.dataset.momentumStyle)));
+    $("momentumSmoothing").addEventListener("input",()=>{
+      $("momentumSmoothingValue").textContent=`${$("momentumSmoothing").value}s`;
+      drawTimeline();
+    });
+    $("lineTfAll").addEventListener("click",()=>setLineTimeframeVisibility("all"));
+    $("lineTfNone").addEventListener("click",()=>setLineTimeframeVisibility("none"));
+    document.querySelectorAll(".signal-source").forEach(box=>box.addEventListener("change",renderSignalParamFilters,false));
+    document.querySelectorAll("input,select").forEach(control=>{
+      if(control.id==="machineSelect")return;
+      control.addEventListener("change",()=>{
+        if(["takeProfit","stopLoss","fee","slippage","costUnit","testLot"].includes(control.id))evaluateAllOutcomes();
+        if(["takeProfit","stopLoss"].includes(control.id))updateDistanceDisplays();
+        applyFilters();
+      });
+    });
+    ["takeProfit","stopLoss","testLot"].forEach(id=>$(id).addEventListener("input",()=>{
+      if(id!=="testLot")updateDistanceDisplays();
+      evaluateAllOutcomes();applyFilters();
+    }));
+    $("timeframeButtons").querySelectorAll("button").forEach(button=>button.addEventListener("click",()=>{
+      state.displayMinutes=Number(button.dataset.minutes);
+      $("timeframeButtons").querySelectorAll("button").forEach(b=>b.classList.toggle("active",b===button));drawAll();
+    }));
+    ["priceChart","timelineChart","aggregateChart"].forEach(id=>bindCanvasInteraction($(id)));
+    bindSidebarResizer();bindLowerPanels();
+    if(window.ResizeObserver){
+      const chartWrap=document.querySelector(".chart-wrap");
+      if(chartWrap)new ResizeObserver(()=>requestAnimationFrame(drawAll)).observe(chartWrap);
+    }
+    window.addEventListener("resize",()=>{
+      applySidebarWidth(parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"))||260,false);
+      document.querySelectorAll(".lower-panel[data-panel-key]:not(.collapsed)").forEach(panel=>{
+        const minHeight=finite(panel.dataset.minHeight)??72,maxHeight=Math.max(minHeight,window.innerHeight-48);
+        const height=resolvedPanelHeight(panel.dataset.expandedHeight||panel.dataset.defaultHeight,minHeight,maxHeight);
+        panel.style.height=`${height}px`;panel.dataset.expandedHeight=String(height);
+      });
+      drawAll();
+    });
+  }
+
+  restoreSidebarWidth();restoreResultColumnOrder();restoreLowerPanels();restoreSidebarCards();bindSidebarCards();updateDistanceDisplays();bindControls();renderSignalParamFilters();renderSnapshotLayerList();renderResultColumnVisibility();renderResults();runSelfTests();renderSummary();renderScalpSummaries();drawAll();
+})();
+</script>
+</body>
+</html>
