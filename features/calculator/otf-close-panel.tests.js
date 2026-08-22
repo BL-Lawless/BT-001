@@ -34,7 +34,8 @@ for(const label of ["%","SIZE","P/L","P/L%"]){
 assert.equal((calculator.match(/class="otf-close-summary-cell"/g)||[]).length,4,"the summary must render four metric cells");
 assert(calculator.includes("currentFloatingPlPercent(openPositionClosePreviewPosition())"),"P/L percent must be derived from floating P/L and open-position margin");
 assert(calculator.includes("floating/margin*100"),"margin-based P/L percent must use floating P/L divided by margin");
-assert(calculator.includes('<div class="otf-close-execution-row">')&&calculator.indexOf('id="otfCloseChaseLive"')<calculator.indexOf('id="otfCloseChaseConfirm"'),"feedback status must render left of the single Execute/Cancel button");
+assert(calculator.includes('<div class="otf-close-execution-row">')&&calculator.indexOf('id="otfCloseChaseLive"')<calculator.indexOf('id="otfCloseChaseConfirm"'),"feedback status must render left of the single Close/Cancel button");
+assert(calculator.includes('id="otfCloseChaseConfirm" type="button">Close</button>')&&calculator.includes('executeButton.textContent=chsActive?"Cancel":"Close"'),"OTF must use Close while idle and Cancel while chasing");
 for(const message of [
   "Waiting for price...","Chasing — ","Price feed stale","Repricing...",
   "Filled — ","Cancelled","Expired","No price data","Stopped"
@@ -96,8 +97,9 @@ assert(floating.includes('["n","ne","e","se","s","sw","w","nw"].forEach(edge => 
 assert(floating.includes("localStorage.setItem(key,JSON.stringify(value))"),"window geometry must persist through localStorage");
 const otfCss=css.slice(css.indexOf(".otf-close-window{"),css.indexOf(".calc-module-window.is-collapsed",css.indexOf(".otf-close-window{")));
 assert(otfCss.includes("grid-template-columns:repeat(4,minmax(0,1fr))"),"OTF summary must lay out four cells");
-assert(/\.otf-close-execution-row \.otf-close-confirm\{[^}]*width:46px;[^}]*height:46px;/s.test(otfCss),"Execute/Cancel must be square");
-assert(otfCss.includes("grid-template-columns:minmax(0,1fr) 46px"),"status must occupy the left column and Execute/Cancel the right column");
+assert(/\.otf-close-execution-row \.otf-close-confirm\{[^}]*width:40px;[^}]*height:46px;/s.test(otfCss),"Close/Cancel must use the compact width sized for the shorter label");
+assert(otfCss.includes("grid-template-columns:minmax(0,1fr) 40px"),"status must occupy the left column and compact Close/Cancel the right column");
+assert(otfCss.includes("--otf-close-range-progress")&&otfCss.includes("#aeb4bc")&&otfCss.includes("background:#6b7280"),"OTF slider must use the lighter-grey fill and unchanged dark-grey thumb");
 assert(/\.otf-close-window\{[^}]*height:194px;[^}]*min-height:180px;/s.test(otfCss),"OTF CSS height and resize floor must match compact geometry");
 assert(/\.otf-close-live\{[^}]*height:46px;[^}]*min-height:46px;/s.test(otfCss),"status must exactly match the Execute/Cancel height");
 assert(/\.otf-close-live\{[^}]*border:1px solid #d9dce1;[^}]*background:#f7f8f9;/s.test(otfCss),"status must be a bordered light-grey box");

@@ -17,7 +17,7 @@ function harness(overrides={}){
   const context={window:{},Date:FakeDate,Object,Set,String,Number,Math,Promise,clearTimeout:()=>{},setTimeout:()=>1};
   vm.createContext(context);
   vm.runInContext(source,context);
-  let book={symbol:"BTCUSDT",bid:100,ask:101,at:0,ageMs:0,fresh:true,staleAfterMs:2500};
+  let book={symbol:"BTCUSDT",bid:100,ask:101,at:0,ageMs:0,fresh:true,staleAfterMs:400};
   let order={symbol:"BTCUSDT",orderId:1,clientOrderId:"c1",status:"NEW",price:"101",origQty:"1",executedQty:"0"};
   const options={
     label:"Test CHS",

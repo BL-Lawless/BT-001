@@ -23,7 +23,7 @@
   const FLAT_CLEANUP_CONFIRM_MS = 700;
   const ROW_CHASE_TERMINAL_SUPPRESSION_MS = 5000;
   const ROW_CHASE_ORIGINAL_POLL_MS = 500;
-  const OPEN_POSITION_CLOSE_CHS_POLL_MS = 1000;
+  const OPEN_POSITION_CLOSE_CHS_POLL_MS = 250;
   const OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS = [0,1,2,5];
   const OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS = [
     {key:"10s",label:"10s",ms:10000},
@@ -261,7 +261,7 @@
   }
   function primeOpenPositionClosePanelDefaults(){
     openPositionCloseUi.open = true;
-    setBookTickerVisibilityConsumer("otf-close",true);
+    setTopOfBookVisibilityConsumer("otf-close",true);
     warmTopOfBook();
     if(openPositionCloseChs.active) return;
     openPositionClosePanelStatus = "";
@@ -284,10 +284,10 @@
     const hub = window.PUBLIC_MARKET_DATA_HUB;
     if(hub && typeof hub.ensureTopOfBook === "function") hub.ensureTopOfBook({timeoutMs:3000}).catch(() => {});
   }
-  function setBookTickerVisibilityConsumer(consumerId,active){
+  function setTopOfBookVisibilityConsumer(consumerId,active){
     const hub=window.PUBLIC_MARKET_DATA_HUB;
-    if(hub && typeof hub.setBookTickerConsumerActive === "function"){
-      hub.setBookTickerConsumerActive(consumerId,active===true);
+    if(hub && typeof hub.setTopOfBookConsumerActive === "function"){
+      hub.setTopOfBookConsumerActive(consumerId,active===true);
     }
   }
   function ensureOpenPositionCloseWindow(){
@@ -336,7 +336,7 @@
           <div class="otf-close-live" id="otfCloseChaseLive" aria-live="polite">
             <div id="otfCloseChaseLiveStatus"></div>
           </div>
-          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Execute</button>
+          <button class="otf-close-confirm" id="otfCloseChaseConfirm" type="button">Close</button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -382,6 +382,7 @@
       }
       openPositionCloseUi.quantity = null;
       openPositionCloseUi.percent = clamp(num(event.target.value) || 0,0,100);
+      event.target.style.setProperty("--otf-close-range-progress",openPositionCloseUi.percent+"%");
       saveOpenPositionClosePreferences();
       renderOpenPositionClosePanel();
     },false);
@@ -471,7 +472,7 @@
     });
   }
   function renderOpenPositionClosePanel(){
-    setBookTickerVisibilityConsumer("otf-close",!!openPositionCloseUi.open);
+    setTopOfBookVisibilityConsumer("otf-close",!!openPositionCloseUi.open);
     syncOpenPositionCloseLivePriceSubscription(!!openPositionCloseUi.open);
     const win = q("otfCloseChaseWindow");
     if(!win) return;
@@ -490,6 +491,7 @@
     const remainingValidMs = chsActive ? openPositionCloseChsRemainingValidMs() : validOption.ms;
     const slider = q("otfCloseChasePercent");
     if(document.activeElement !== slider || chsActive) slider.value = String(preview.percent);
+    slider.style.setProperty("--otf-close-range-progress",preview.percent+"%");
     slider.setAttribute("aria-disabled",chsActive ? "true" : "false");
     const qtyInput=q("otfCloseChaseQtyInput");
     qtyInput.readOnly=chsActive;
@@ -513,7 +515,7 @@
     q("otfCloseChaseLiveStatus").textContent = statusText;
     live.classList.toggle("is-error",openPositionClosePanelTone === "error");
     const executeButton=q("otfCloseChaseConfirm");
-    executeButton.textContent=chsActive?"Cancel":"Execute";
+    executeButton.textContent=chsActive?"Cancel":"Close";
     executeButton.classList.toggle("is-cancel",chsActive);
     executeButton.setAttribute("aria-disabled",openPositionCloseUi.sending&&!chsActive ? "true" : "false");
   }
@@ -890,6 +892,9 @@
     const fullFloating=position?currentFloatingPl():null;
     const fullMargin=position?currentOpenPositionMargin(position):null;
     const metrics=rapidFireCloseMetrics(fullFloating,fullMargin,opts.closePercent);
+    const requestedCloseQty=position?position.qty*metrics.closeRatio:0;
+    const normalizedClose=normalizeRapidFireQuantity(requestedCloseQty,{roundDown:true});
+    const closeQty=normalizedClose.executable?Math.min(position?position.qty:0,normalizedClose.quantity):0;
     return {
       symbol:String(currentSymbol()),
       position,
@@ -899,7 +904,7 @@
       floatingPlPercent:metrics.floatingPlPercent,
       margin:metrics.margin,
       closePercent:metrics.closePercent,
-      closeQty:position?position.qty*metrics.closeRatio:0,
+      closeQty,
       active:!!rapidFireChaseContext,
       busy:!!rapidFireChaseContext||rapidFireBreakevenBusy,
       activeAction:rapidFireChaseContext&&rapidFireChaseContext.action||(rapidFireBreakevenBusy?"breakeven":null),
@@ -1158,7 +1163,7 @@
       onUpdate:state=>publishRapidFireStatus(state),
       onFinish:async state=>{
         rapidFireChaseContext=null;
-        setBookTickerVisibilityConsumer("rapid-fire-action",false);
+        setTopOfBookVisibilityConsumer("rapid-fire-action",false);
         publishRapidFireStatus(state);
         calculate();
         try{await readBinance({preserveSendPlan:true,source:"postSendRefresh"});}catch(_ignored){}
@@ -1218,7 +1223,7 @@
         roleType,distTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0)),
         requestedQty:normalized.quantity,startedAt,expiresAt:validOption.ms==null?0:startedAt+validOption.ms
       };
-      setBookTickerVisibilityConsumer("rapid-fire-action",true);
+      setTopOfBookVisibilityConsumer("rapid-fire-action",true);
       warmTopOfBook();
       await ensureRapidFireChaseEngine().start({
         label:"Rapid Fire "+action,
@@ -1230,7 +1235,7 @@
       return rapidFireChaseEngine.state();
     }catch(error){
       rapidFireChaseContext=null;
-      setBookTickerVisibilityConsumer("rapid-fire-action",false);
+      setTopOfBookVisibilityConsumer("rapid-fire-action",false);
       publishRapidFireStatus({active:false,statusCode:"stopped",tone:"error",message:error&&error.message?error.message:String(error)});
       throw error;
     }
@@ -1239,7 +1244,7 @@
     if(!rapidFireChaseEngine||!rapidFireChaseEngine.isActive()){
       if(rapidFireChaseContext){
         rapidFireChaseContext=null;
-        setBookTickerVisibilityConsumer("rapid-fire-action",false);
+        setTopOfBookVisibilityConsumer("rapid-fire-action",false);
         publishRapidFireStatus({active:false,result:"cancelled",statusCode:"cancelled"});
       }
       return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
@@ -1575,17 +1580,26 @@
     }
     try{if(typeof draw==="function")draw();}catch(_e){}
   }
+  function handleEffectiveOrdersVisibilityChange(wasEffective){
+    const effective=effectiveOrdersVisible();
+    if(wasEffective&&!effective)saveOtfEnabled(false);
+    return effective;
+  }
   function saveOrdersVisible(next){
+    const wasEffective=effectiveOrdersVisible();
     ordersVisible = !!next;
     try{ localStorage.setItem(ORDERS_VISIBLE_KEY,ordersVisible ? "1" : "0"); }catch(_e){}
     renderOrdersVisibleState();
+    handleEffectiveOrdersVisibilityChange(wasEffective);
   }
   function setOrdersVisibilityConsumer(consumerId,active){
     const key=String(consumerId||"").trim();
     if(!key)return effectiveOrdersVisible();
+    const wasEffective=effectiveOrdersVisible();
     if(active===true)ordersVisibilityConsumers.add(key);
     else ordersVisibilityConsumers.delete(key);
     renderOrdersVisibleState();
+    handleEffectiveOrdersVisibilityChange(wasEffective);
     if(effectiveOrdersVisible())ensureCalculatorRowsHydratedForOrders().catch(()=>{});
     return effectiveOrdersVisible();
   }
@@ -1623,7 +1637,6 @@
   }
   async function toggleOrdersVisible(){
     const next = !ordersVisible;
-    if(!next) saveOtfEnabled(false);
     saveOrdersVisible(next);
     if(!next) return;
     try{ await ensureCalculatorRowsHydratedForOrders(); }catch(_e){}
@@ -7951,7 +7964,7 @@
 
     function showCalculator(){
       win.classList.remove("hidden");
-      setBookTickerVisibilityConsumer("calculator",true);
+      setTopOfBookVisibilityConsumer("calculator",true);
       win.style.zIndex = String(++zTop);
       openBtn.classList.add("is-on");
       clearCalculatorExecutionNotice();
@@ -7963,7 +7976,7 @@
     function hideCalculator(){
       stopAutoSyncDisplayRefresh();
       win.classList.add("hidden");
-      setBookTickerVisibilityConsumer("calculator",false);
+      setTopOfBookVisibilityConsumer("calculator",false);
       openBtn.classList.remove("is-on");
       openBtn.setAttribute("aria-pressed","false");
     }
@@ -8140,7 +8153,7 @@
         cancel:cancelRapidFireChase,
         isActive:()=>!!rapidFireChaseContext,
         setVisible(active){
-          setBookTickerVisibilityConsumer("rapid-fire",active===true);
+          setTopOfBookVisibilityConsumer("rapid-fire",active===true);
           setOrdersVisibilityConsumer("rapid-fire",active===true);
           if(active) warmTopOfBook();
         },

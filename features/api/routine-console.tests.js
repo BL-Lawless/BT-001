@@ -18,7 +18,7 @@ assert(!gate.includes('this.logger.info("[Binance REST gate] Request pause ended
 assert(!calculator.includes('console.info(MODULE + " read diagnostic"'));
 assert(!calculator.includes('console.info(MODULE + " flat cleanup"'));
 
-assert(main.includes("window.binanceRealtimeDiagnostics = () => ({...diag,bookTicker:bookTickerDiagnostics()});"));
+assert(main.includes("window.binanceRealtimeDiagnostics = () => ({...diag,topOfBookFeed:topOfBookDiagnostics()});"));
 assert(clock.includes("Object.freeze({now,fromLocal,offset,sync,ensureSynchronized,isReliable,status,CACHE_MS,maxRoundTripMs})"));
 assert(supabase.includes("log,flushPending,pendingCount,loggingStatus"));
 assert(!supabase.includes("setLatestSnapshot"));

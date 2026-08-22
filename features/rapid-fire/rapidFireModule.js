@@ -26,6 +26,11 @@
   }
   function moneyColor(value){const parsed=number(value);return parsed==null||parsed===0?"#111":parsed>0?"#047857":"#f6465d";}
   function lot(value,precision=3){const parsed=number(value);return parsed==null?"0.000":parsed.toFixed(Math.max(0,precision));}
+  function positionSizeParts(sizeValue,closeQtyValue){
+    const size=Math.max(0,number(sizeValue)||0);
+    const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
+    return {closed,remaining:size-closed};
+  }
   function isOpen(){const win=q("rapidFireWindow");return !!(win&&!win.classList.contains("hidden"));}
 
   function resetDoubleArm(){
@@ -35,7 +40,7 @@
     if(!button)return;
     button.classList.remove("is-confirm-armed");
     delete button.dataset.armed;
-    button.textContent="Double";
+    button.textContent="DBL";
     button.title="Click once to arm, then again within 3 seconds";
   }
   function setStatus(message,tone){
@@ -49,15 +54,19 @@
     if(target==null||!Array.isArray(steps)||!steps.length)return 0;
     return steps.reduce((best,current)=>Math.abs(current-target)<Math.abs(best-target)?current:best,steps[0]);
   }
-  function sliderTicks(steps,min,max){
+  function sliderTicks(steps,min,max,emphasizedValue){
     const span=Math.max(1,max-min);
-    return `<span class="rapid-fire-slider-ticks" aria-hidden="true">${steps.map(value=>`<i style="left:${((value-min)/span*100).toFixed(4)}%"></i>`).join("")}</span>`;
+    return `<span class="rapid-fire-slider-ticks" aria-hidden="true">${steps.map(value=>`<i${value===emphasizedValue?' class="is-reference"':''} style="left:${((value-min)/span*100).toFixed(4)}%"></i>`).join("")}</span>`;
   }
   function bindDiscreteSlider(slider,textNode,steps){
     const apply=value=>{
       const snapped=snapPercent(value,steps);
       slider.value=String(snapped);
       textNode.textContent=snapped+"%";
+      const min=number(slider.min)||0;
+      const max=number(slider.max)||100;
+      const progress=max===min?0:(snapped-min)/(max-min)*100;
+      slider.style.setProperty("--rapid-fire-range-progress",progress+"%");
     };
     slider.addEventListener("input",()=>apply(slider.value),false);
     slider.addEventListener("keydown",event=>{
@@ -81,7 +90,10 @@
     const size=q("rapidFireSize");
     const floating=q("rapidFirePl");
     const floatingPercent=q("rapidFirePlPercent");
-    if(size)size.textContent=lot(snapshot.size,3);
+    if(size){
+      const {closed,remaining}=positionSizeParts(snapshot.size,snapshot.closeQty);
+      size.innerHTML=`<span class="rapid-fire-size-closed">${lot(closed,3)}</span><span class="rapid-fire-size-separator"> / </span><span class="rapid-fire-size-remaining">${lot(remaining,3)}</span>`;
+    }
     if(floating){floating.textContent=money(snapshot.floatingPl);floating.style.color=moneyColor(snapshot.floatingPl);}
     if(floatingPercent){floatingPercent.textContent=percent(snapshot.floatingPlPercent);floatingPercent.style.color=moneyColor(snapshot.floatingPlPercent);}
     const dir=q("rapidFireDir");
@@ -103,13 +115,13 @@
     }
     const busy=!!snapshot.busy;
     const actionButtons={add:q("rapidFireAdd"),double:q("rapidFireDouble"),close:q("rapidFireClose"),reverse:q("rapidFireReverse"),breakeven:q("rapidFireBreakeven")};
-    const actionLabels={add:"Add",double:"Double",close:"Close",reverse:"Reverse",breakeven:"B.E."};
+    const actionLabels={add:"ADD",double:"DBL",close:"Close",reverse:"Reverse",breakeven:"B.E."};
     Object.entries(actionButtons).forEach(([action,button])=>{
       if(!button)return;
       const active=busy&&snapshot.activeAction===action;
       button.disabled=busy&&(!active||action==="breakeven");
-      button.classList.toggle("is-cancel",active&&(action==="close"||action==="reverse"));
-      if(active&&(action==="close"||action==="reverse"))button.textContent="Cancel";
+      button.classList.toggle("is-cancel",active&&action!=="breakeven");
+      if(active&&action!=="breakeven")button.textContent="Cancel";
       else if(action!=="double"||button.dataset.armed!=="1")button.textContent=actionLabels[action];
     });
     if(!position){
@@ -165,23 +177,23 @@
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Open Position Size</div><div class="rapid-fire-summary-value" id="rapidFireSize">0.000</div></div>
+          <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Position Size</div><div class="rapid-fire-summary-value" id="rapidFireSize"><span class="rapid-fire-size-closed">0.000</span><span class="rapid-fire-size-separator"> / </span><span class="rapid-fire-size-remaining">0.000</span></div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
         <div class="rapid-fire-add-row" aria-label="Add, double, or protect position">
           <button class="rapid-fire-dir is-long" id="rapidFireDir" type="button">LONG</button>
           <input class="rapid-fire-lot" id="rapidFireLot" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Rapid Fire lot size">
-          <button class="rapid-fire-button" id="rapidFireAdd" type="button">Add</button>
-          <button class="rapid-fire-button" id="rapidFireDouble" type="button" title="Click once to arm, then again within 3 seconds">Double</button>
+          <button class="rapid-fire-button" id="rapidFireAdd" type="button">ADD</button>
+          <button class="rapid-fire-button" id="rapidFireDouble" type="button" title="Click once to arm, then again within 3 seconds">DBL</button>
           <button class="rapid-fire-button" id="rapidFireBreakeven" type="button" title="Place a fee-aware Master SL at breakeven">B.E.</button>
         </div>
         <div class="rapid-fire-action-group" id="rapidFireActionGroup">
           <div class="rapid-fire-action-row">
             <button class="rapid-fire-action-title" id="rapidFireReverse" type="button">Reverse</button>
             <span class="rapid-fire-slider-shell">
-              ${sliderTicks(REVERSE_PERCENT_STEPS,25,300)}
-              <input id="rapidFireReversePercent" type="range" min="25" max="300" step="1" value="100" aria-label="Reverse percentage">
+              ${sliderTicks(REVERSE_PERCENT_STEPS,25,300,100)}
+              <input class="rapid-fire-reverse-slider" id="rapidFireReversePercent" type="range" min="25" max="300" step="1" value="100" aria-label="Reverse percentage">
             </span>
             <span class="rapid-fire-slider-value" id="rapidFireReversePercentText">100%</span>
           </div>
@@ -202,6 +214,7 @@
       windowApi=floating.install(win,{header:q("rapidFireHead"),storageKey:WINDOW_KEY,minWidth:370,minHeight:258,defaultWidth:430,defaultHeight:258});
     }
     q("rapidFireCloseWindow").addEventListener("click",hide,false);
+    q("rapidFireStatus").addEventListener("click",()=>setStatus(""),false);
     q("rapidFireDir").addEventListener("click",()=>{
       if(api().snapshot().position)return;
       selectedDirection=selectedDirection==="LONG"?"SHORT":"LONG";
@@ -249,6 +262,7 @@
   function show(){
     const win=ensureWindow();
     if(windowApi)windowApi.show();else win.classList.remove("hidden");
+    window.BT001_RAPID_FIRE_VISIBLE=true;
     api().setVisible(true);
     render();
     if(refreshTimer==null)refreshTimer=setInterval(()=>{if(isOpen())render();},500);
@@ -256,6 +270,7 @@
   function hide(){
     const win=q("rapidFireWindow");
     if(windowApi)windowApi.hide();else if(win)win.classList.add("hidden");
+    window.BT001_RAPID_FIRE_VISIBLE=false;
     const bridge=api();
     if(bridge)bridge.setVisible(false);
     resetDoubleArm();

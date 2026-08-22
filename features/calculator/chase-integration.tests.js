@@ -10,20 +10,25 @@ const main=fs.readFileSync(path.join(root,"main.js"),"utf8");
 const calculator=fs.readFileSync(path.join(__dirname,"presentation","calculatorModule.js"),"utf8");
 const css=fs.readFileSync(path.join(root,"style.css"),"utf8");
 
-assert(!main.slice(main.indexOf("function currentStreams"),main.indexOf("function intervalMs")).includes("bookTicker"),"the permanent market connection must not request bookTicker");
-assert(main.includes('const stream=symbol.toLowerCase()+"@bookTicker"'),"the on-demand public connection must request symbol bookTicker");
+assert(!main.slice(main.indexOf("function currentStreams"),main.indexOf("function intervalMs")).includes("depth5@100ms"),"the permanent market connection must not duplicate the top-of-book depth stream");
+assert(main.includes('const stream=symbol.toLowerCase()+"@depth5@100ms"'),"the on-demand public connection must request bounded depth5@100ms");
 assert(main.includes("getTopOfBook:topOfBookSnapshot"),"the public market hub must expose one shared getTopOfBook API");
 assert(main.includes("ensureTopOfBook,"),"the public market hub must expose proactive first-tick readiness");
-assert(main.includes("const TOP_OF_BOOK_STALE_MS = 2500"),"top-of-book freshness must use the documented 2.5-second gate");
-const bookQueue=main.slice(main.indexOf("function queueBookTicker"),main.indexOf("function handleKline"));
-assert(!bookQueue.includes("publishMarketUpdate"),"bookTicker ticks must only update stored top-of-book state");
-assert(main.includes('connectionKey:"public-book-ticker"'),"bookTicker must use an independent WebSocket connection");
+assert(main.includes("const TOP_OF_BOOK_STALE_MS = 400"),"top-of-book freshness must use the tightened 400ms gate");
+assert(main.includes("const TOP_OF_BOOK_HEALTHY_STALE_MS = 5000"),"a confirmed healthy top-of-book connection must tolerate up to 5s of jitter");
+const topOfBookQueue=main.slice(main.indexOf("function queueTopOfBookDepth"),main.indexOf("function handleKline"));
+assert(!topOfBookQueue.includes("publishMarketUpdate"),"depth ticks must only update stored top-of-book state");
+assert(topOfBookQueue.includes("const eventAt = Number(d && d.E)"),"depth freshness must use Binance event time E");
+assert(topOfBookQueue.includes("d.b[0][0]")&&topOfBookQueue.includes("d.a[0][0]"),"depth top-of-book must extract index zero bid and ask prices");
+assert(main.includes('connectionKey:"public-top-of-book"'),"top-of-book depth must use an independent WebSocket connection");
 const mainConnectStart=main.indexOf("function connect({force=false");
 const mainMessageStart=main.indexOf("onMessage:event =>",mainConnectStart);
 const mainMessageEnd=main.indexOf("onError:",mainMessageStart);
-assert(!main.slice(mainMessageStart,mainMessageEnd).includes("bookTicker"),"the permanent market socket handler must not process bookTicker traffic");
-assert(calculator.includes('setBookTickerVisibilityConsumer("calculator",true)')&&calculator.includes('setBookTickerVisibilityConsumer("calculator",false)'),"Calculator visibility must own one bookTicker consumer");
-assert(calculator.includes('setBookTickerVisibilityConsumer("otf-close",!!openPositionCloseUi.open)'),"OTF panel visibility must own one bookTicker consumer");
+assert(!main.slice(mainMessageStart,mainMessageEnd).includes("depth5@100ms"),"the permanent market socket handler must not process top-of-book depth traffic");
+assert(calculator.includes('setTopOfBookVisibilityConsumer("calculator",true)')&&calculator.includes('setTopOfBookVisibilityConsumer("calculator",false)'),"Calculator visibility must own one top-of-book consumer");
+assert(calculator.includes('setTopOfBookVisibilityConsumer("otf-close",!!openPositionCloseUi.open)'),"OTF panel visibility must own one top-of-book consumer");
+assert(calculator.includes("const OPEN_POSITION_CLOSE_CHS_POLL_MS = 250"),"shared OTF/RF chase polling must use the tightened 250ms interval");
+assert.equal((calculator.match(/pollMs:OPEN_POSITION_CLOSE_CHS_POLL_MS/g)||[]).length,2,"OTF and Rapid Fire must both consume the same tightened chase interval");
 assert.equal((calculator.match(/getTopOfBook/g)||[]).length>=2,true,"both OTF and row engines must consume the shared API");
 assert.equal((calculator.match(/timeInForce:"GTX"/g)||[]).length>=2,true,"OTF and row placement paths must both use GTX");
 assert(calculator.includes('signedOrderWrite("PUT",send)'),"chases must amend through PUT /fapi/v1/order");
@@ -141,60 +146,128 @@ assert.equal(reconciledWrite,null,"an existing Binance-backed row must retain it
 assert.deepEqual(JSON.parse(JSON.stringify(existingContext.chaseIdentity)),{symbol:"BTCUSDT",orderId:78,clientOrderId:"row-chase-2"},"the GTX identity must be tracked separately from the original row");
 
 let clock=10000;
+const queueContext={
+  topOfBookFeedState:{topOfBook:null,waiters:new Set()},
+  topOfBookFeedDiag:{lastMessageTime:0,lastError:null},
+  diag:{latestBid:null,latestAsk:null,latestTopOfBookTime:0},
+  now:()=>clock,
+  ensureBufferSymbol:()=>"BTCUSDT",
+  Number,String,Object
+};
+const queueTopOfBookDepth=vm.runInNewContext(`(${topOfBookQueue.trim()})`,queueContext);
+queueTopOfBookDepth({E:1234,u:9,s:"BTCUSDT",b:[["100","2"]],a:[["101","3"]]});
+assert.equal(queueContext.topOfBookFeedState.topOfBook.bid,100,"top depth bid must become Bid1");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.ask,101,"top depth ask must become Ask1");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.at,1234,"stored top-of-book timestamp must be Binance depth event time E");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.receivedAt,10000,"local receipt time should remain available separately for diagnostics");
+assert.equal(queueContext.topOfBookFeedDiag.lastMessageTime,10000,"socket activity diagnostics should continue using local receipt time");
+assert.equal(queueContext.diag.latestTopOfBookTime,1234,"market-data diagnostics should expose Binance depth event time");
+const timestampedBook=queueContext.topOfBookFeedState.topOfBook;
+queueTopOfBookDepth({u:10,s:"BTCUSDT",b:[["102","2"]],a:[["103","3"]]});
+assert.equal(queueContext.topOfBookFeedState.topOfBook,timestampedBook,"depth messages without Binance event time E must not replace timestamped data");
+
 const bookStart=main.indexOf("function topOfBookSnapshot");
 const bookEnd=main.indexOf("function ensureTopOfBook",bookStart);
-const getTopOfBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim()})`,{
-  bookTickerState:{topOfBook:{symbol:"BTCUSDT",bid:100,ask:101,at:7501}},
+const delayedTopOfBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim()})`,{
+  topOfBookFeedState:queueContext.topOfBookFeedState,
+  topOfBookSocketOpen:()=>false,
+  topOfBookFeedDiag:{status:"connecting",symbol:"BTCUSDT",streams:["btcusdt@depth5@100ms"]},
   cfg:()=>({symbol:"BTCUSDT"}),
-  now:()=>clock,
-  Number,String,Math,Object,
-  TOP_OF_BOOK_STALE_MS:2500
+  getExchangeNowMs:()=>17234,
+  Number,String,Math,Object,Array,
+  TOP_OF_BOOK_STALE_MS:400,
+  TOP_OF_BOOK_HEALTHY_STALE_MS:5000
+});
+assert.equal(delayedTopOfBook().ageMs,16000,"a delayed event must retain its true 16s exchange age after local processing");
+assert.equal(delayedTopOfBook().fresh,false,"a delayed event must not pass freshness just because it was processed locally now");
+const getTopOfBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim()})`,{
+  topOfBookFeedState:{topOfBook:{symbol:"BTCUSDT",bid:100,ask:101,at:9601}},
+  topOfBookSocketOpen:()=>false,
+  topOfBookFeedDiag:{status:"connecting",symbol:"BTCUSDT",streams:["btcusdt@depth5@100ms"]},
+  cfg:()=>({symbol:"BTCUSDT"}),
+  getExchangeNowMs:()=>clock,
+  Number,String,Math,Object,Array,
+  TOP_OF_BOOK_STALE_MS:400,
+  TOP_OF_BOOK_HEALTHY_STALE_MS:5000
 });
 assert.equal(getTopOfBook().fresh,true);
 assert.equal(getTopOfBook().state,"fresh");
 clock=10002;
-assert.equal(getTopOfBook().fresh,false,"book data older than 2.5 seconds must be stale");
+assert.equal(getTopOfBook().fresh,false,"book data older than 400ms must be stale");
 assert.equal(getTopOfBook().state,"stale");
+assert.equal(getTopOfBook().connectionHealthy,false);
+assert.equal(getTopOfBook().staleAfterMs,400,"an uncertain connection must retain the tight ceiling");
+
+clock=10000;
+const getHealthyTopOfBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim()})`,{
+  topOfBookFeedState:{topOfBook:{symbol:"BTCUSDT",bid:100,ask:101,at:5001}},
+  topOfBookSocketOpen:()=>true,
+  topOfBookFeedDiag:{status:"live",symbol:"BTCUSDT",streams:["btcusdt@depth5@100ms"]},
+  cfg:()=>({symbol:"BTCUSDT"}),
+  getExchangeNowMs:()=>clock,
+  Number,String,Math,Object,Array,
+  TOP_OF_BOOK_STALE_MS:400,
+  TOP_OF_BOOK_HEALTHY_STALE_MS:5000
+});
+assert.equal(getHealthyTopOfBook().fresh,true,"a matching live depth socket must tolerate harmless jitter below 5s");
+assert.equal(getHealthyTopOfBook().connectionHealthy,true);
+assert.equal(getHealthyTopOfBook().staleAfterMs,5000);
+clock=10002;
+assert.equal(getHealthyTopOfBook().fresh,false,"even a healthy depth socket must reject data older than 5s");
+
+clock=10000;
+const getWrongStreamTopOfBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim()})`,{
+  topOfBookFeedState:{topOfBook:{symbol:"BTCUSDT",bid:100,ask:101,at:9000}},
+  topOfBookSocketOpen:()=>true,
+  topOfBookFeedDiag:{status:"live",symbol:"BTCUSDT",streams:["ethusdt@depth5@100ms"]},
+  cfg:()=>({symbol:"BTCUSDT"}),
+  getExchangeNowMs:()=>clock,
+  Number,String,Math,Object,Array,
+  TOP_OF_BOOK_STALE_MS:400,
+  TOP_OF_BOOK_HEALTHY_STALE_MS:5000
+});
+assert.equal(getWrongStreamTopOfBook().fresh,false,"an open socket on the wrong stream must use the tight ceiling");
+assert.equal(getWrongStreamTopOfBook().connectionHealthy,false);
 const waitingBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim()})`,{
-  bookTickerState:{topOfBook:null},cfg:()=>({symbol:"BTCUSDT"}),now:()=>clock,Number,String,Math,Object,TOP_OF_BOOK_STALE_MS:2500
+  topOfBookFeedState:{topOfBook:null},topOfBookSocketOpen:()=>false,topOfBookFeedDiag:{status:"waiting",symbol:"",streams:[]},cfg:()=>({symbol:"BTCUSDT"}),getExchangeNowMs:()=>clock,Number,String,Math,Object,Array,TOP_OF_BOOK_STALE_MS:400,TOP_OF_BOOK_HEALTHY_STALE_MS:5000
 });
 assert.equal(waitingBook().state,"waiting","never-received book data must not be labeled stale");
 assert.equal(waitingBook().hasData,false);
 
 const wsStart=main.indexOf("function wsBase");
-const wsEnd=main.indexOf("function bookTickerWsBase",wsStart);
+const wsEnd=main.indexOf("function topOfBookWsBase",wsStart);
 const wsBase=vm.runInNewContext(`(${main.slice(wsStart,wsEnd).trim()})`,{String,cfg:()=>({ws:"wss://fstream.binance.com/market/stream"})});
 assert.equal(wsBase(),"wss://fstream.binance.com/market/stream","the permanent hub must use Binance's market-routed combined-stream endpoint");
-const bookWsStart=wsEnd;
-const bookWsEnd=main.indexOf("function socketState",bookWsStart);
-const bookTickerWsBase=vm.runInNewContext(`(${main.slice(bookWsStart,bookWsEnd).trim()})`,{String,cfg:()=>({ws:"wss://fstream.binance.com/market/stream"})});
-assert.equal(bookTickerWsBase(),"wss://fstream.binance.com/public/stream","bookTicker must use Binance's public-routed combined-stream endpoint");
+const topOfBookWsStart=wsEnd;
+const topOfBookWsEnd=main.indexOf("function socketState",topOfBookWsStart);
+const topOfBookWsBase=vm.runInNewContext(`(${main.slice(topOfBookWsStart,topOfBookWsEnd).trim()})`,{String,cfg:()=>({ws:"wss://fstream.binance.com/market/stream"})});
+assert.equal(topOfBookWsBase(),"wss://fstream.binance.com/public/stream","top-of-book depth must use Binance's public-routed combined-stream endpoint");
 
-const lifecycleStart=main.indexOf("function bookTickerSocketState");
-const lifecycleEnd=main.indexOf("function subscribeBookTickerTick",lifecycleStart);
+const lifecycleStart=main.indexOf("function topOfBookSocketState");
+const lifecycleEnd=main.indexOf("function subscribeTopOfBookTick",lifecycleStart);
 let lifecycleConnects=0,lifecycleDisconnects=0;
 const lifecycleContext={
-  bookTickerState:{socket:null,generation:0,reconnectTimer:null,connectStartedAt:0,consumers:new Set(),topOfBook:null},
-  bookTickerDiag:{status:"inactive",symbol:null,streams:[],socketStatus:"closed",activeUrl:"",connectCount:0,disconnectCount:0,reconnectCount:0,lastMessageTime:0,lastError:null},
-  diag:{latestBid:null,latestAsk:null,latestBookTickerTime:0},
-  WebSocket:{CONNECTING:0,OPEN:1},String,JSON,Math,Number,
-  now:()=>1000,ensureBufferSymbol:()=>"BTCUSDT",bookTickerWsBase:()=>"wss://fstream.binance.com/public/stream",
-  clearTimeout:()=>{},setTimeout:()=>1,queueBookTicker:()=>{},
+  topOfBookFeedState:{socket:null,generation:0,reconnectTimer:null,connectStartedAt:0,consumers:new Set(),topOfBook:null},
+  topOfBookFeedDiag:{status:"inactive",symbol:null,streams:[],socketStatus:"closed",activeUrl:"",connectCount:0,disconnectCount:0,reconnectCount:0,lastMessageTime:0,lastError:null},
+  diag:{latestBid:null,latestAsk:null,latestTopOfBookTime:0},
+  WebSocket:{CONNECTING:0,OPEN:1},String,JSON,Math,Number,Array,
+  now:()=>1000,ensureBufferSymbol:()=>"BTCUSDT",topOfBookWsBase:()=>"wss://fstream.binance.com/public/stream",
+  clearTimeout:()=>{},setTimeout:()=>1,queueTopOfBookDepth:()=>{},
   closeSocket:connection=>{if(connection){connection.readyState=3;lifecycleDisconnects++;}},
   API:{connectWebSocket:url=>{lifecycleConnects++;return {url,readyState:0};}},
-  bookTickerDiagnostics:()=>({})
+  topOfBookDiagnostics:()=>({})
 };
 vm.createContext(lifecycleContext);
 vm.runInContext(main.slice(lifecycleStart,lifecycleEnd),lifecycleContext);
-lifecycleContext.setBookTickerConsumerActive("calculator",true);
-assert.equal(lifecycleConnects,1,"opening Calculator must activate the public bookTicker connection");
-lifecycleContext.setBookTickerConsumerActive("otf-close",true);
-assert.equal(lifecycleConnects,1,"opening OTF while Calculator is open must reuse the independent bookTicker connection");
-lifecycleContext.setBookTickerConsumerActive("calculator",false);
-assert.equal(lifecycleDisconnects,0,"closing Calculator must retain bookTicker while OTF remains open");
-lifecycleContext.setBookTickerConsumerActive("otf-close",false);
-assert.equal(lifecycleDisconnects,1,"closing the final visible consumer must disconnect bookTicker");
-assert.equal(lifecycleContext.bookTickerState.socket,null);
+lifecycleContext.setTopOfBookConsumerActive("calculator",true);
+assert.equal(lifecycleConnects,1,"opening Calculator must activate the public top-of-book depth connection");
+lifecycleContext.setTopOfBookConsumerActive("otf-close",true);
+assert.equal(lifecycleConnects,1,"opening OTF while Calculator is open must reuse the independent top-of-book connection");
+lifecycleContext.setTopOfBookConsumerActive("calculator",false);
+assert.equal(lifecycleDisconnects,0,"closing Calculator must retain top-of-book depth while OTF remains open");
+lifecycleContext.setTopOfBookConsumerActive("otf-close",false);
+assert.equal(lifecycleDisconnects,1,"closing the final visible consumer must disconnect top-of-book depth");
+assert.equal(lifecycleContext.topOfBookFeedState.socket,null);
 
 const priceStart=calculator.indexOf("function normalizedChasePrice");
 const priceEnd=calculator.indexOf("function findOpenPositionCloseChsOrder",priceStart);

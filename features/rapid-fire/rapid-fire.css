@@ -69,9 +69,12 @@
   text-overflow:ellipsis;
   white-space:nowrap;
 }
+.rapid-fire-size-closed{color:#4b5563}
+.rapid-fire-size-separator{color:#6b7280}
+.rapid-fire-size-remaining{color:#111}
 .rapid-fire-add-row{
   display:grid;
-  grid-template-columns:74px 86px 50px 62px 44px;
+  grid-template-columns:82px 86px repeat(3,minmax(0,1fr));
   gap:6px;
   align-items:stretch;
   justify-content:start;
@@ -164,9 +167,53 @@
   background:rgba(107,114,128,.28);
   transform:translateX(-.5px);
 }
-.rapid-fire-slider-shell input[type="range"]{width:100%;min-width:0;margin:0;accent-color:#6b7280}
+.rapid-fire-slider-ticks i.is-reference{background:#4b5563}
+.rapid-fire-slider-shell input[type="range"]{
+  --rapid-fire-range-progress:0%;
+  width:100%;
+  min-width:0;
+  height:4px;
+  margin:6px 0 0;
+  appearance:none;
+  border-radius:2px;
+  background:linear-gradient(to right,#aeb4bc 0 var(--rapid-fire-range-progress),#d9dce1 var(--rapid-fire-range-progress) 100%);
+}
+.rapid-fire-slider-shell input[type="range"]::-webkit-slider-thumb{
+  width:16px;
+  height:16px;
+  margin-top:0;
+  appearance:none;
+  border:0;
+  border-radius:50%;
+  background:#6b7280;
+}
+.rapid-fire-slider-shell input[type="range"]::-moz-range-track{
+  height:4px;
+  border:0;
+  border-radius:2px;
+  background:#d9dce1;
+}
+.rapid-fire-slider-shell input[type="range"]::-moz-range-progress{
+  height:4px;
+  border-radius:2px;
+  background:#aeb4bc;
+}
+.rapid-fire-slider-shell input[type="range"]::-moz-range-thumb{
+  width:16px;
+  height:16px;
+  border:0;
+  border-radius:50%;
+  background:#6b7280;
+}
+.rapid-fire-slider-shell input[type="range"].rapid-fire-reverse-slider{
+  background:#d9dce1;
+}
+.rapid-fire-slider-shell input[type="range"].rapid-fire-reverse-slider::-moz-range-progress{
+  background:transparent;
+}
 .rapid-fire-slider-value{font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
 .rapid-fire-action-title{width:82px;min-width:82px;padding:5px 4px;overflow:hidden}
+.rapid-fire-button.is-cancel,
 .rapid-fire-action-title.is-cancel{
   border-color:#f3b3bb;
   background:#fde8eb;
@@ -178,6 +225,7 @@
   min-height:34px;
   box-sizing:border-box;
   display:flex;
+  cursor:pointer;
   align-items:center;
   padding:5px 7px;
   border:1px solid #d9dce1;
