@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BT-001 Architecture Map</title>
+<style>
+  :root{--bg:#07111f;--panel:#0c1828;--panel2:#101f32;--line:#7f91a8;--text:#eaf2fb;--muted:#9db0c5;--accent:#59d8ff;--cluster:#19304a;--entry:#60a5fa;--service:#34d399;--cron:#fbbf24;--store:#c084fc;--external:#fb7185;--model:#f97316}
+  *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:14px/1.45 Inter,Segoe UI,Arial,sans-serif}
+  body{display:grid;grid-template-columns:minmax(0,1fr) 340px}
+  #mapShell{position:relative;min-width:0;overflow:hidden;background:radial-gradient(circle at 30% 10%,#102945 0,#07111f 45%,#050b14 100%);touch-action:none}
+  #map{width:100%;height:100%;display:block;cursor:grab;user-select:none}#map.panning{cursor:grabbing}
+  #toolbar{position:absolute;left:14px;top:14px;display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:8px;background:#081525e8;border:1px solid #29415c;border-radius:10px;box-shadow:0 8px 28px #0008}
+  button{border:1px solid #38516c;border-radius:7px;background:#11243a;color:var(--text);padding:7px 10px;cursor:pointer;font:inherit}button:hover{background:#193553}button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  #zoomReadout{min-width:48px;text-align:center;color:var(--muted);font-variant-numeric:tabular-nums}
+  aside{height:100%;overflow:auto;background:linear-gradient(180deg,#0d1b2d,#081320);border-left:1px solid #263c54;padding:20px}
+  h1{font-size:20px;margin:0 0 4px;font-weight:650;letter-spacing:.02em}h2{font-size:15px;margin:22px 0 8px}p{margin:7px 0;color:var(--muted)}
+  .meta{font-size:12px;color:#7f95ad}.count{color:var(--accent);font-weight:650}.detail{min-height:176px;padding:14px;border:1px solid #2a415b;border-radius:10px;background:#0f2034}
+  #detailTitle{margin:0 0 5px;font-size:17px;color:#fff}#detailKind{display:inline-block;border:1px solid currentColor;border-radius:999px;padding:2px 7px;font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+  #detailText{color:#ced9e6}code{color:#b9d9f5;background:#081525;padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}
+  .legend{display:grid;grid-template-columns:1fr 1fr;gap:8px}.legendItem{display:flex;gap:8px;align-items:center;color:#c8d5e2;font-size:12px}.swatch{width:15px;height:11px;border:2px solid currentColor;background:color-mix(in srgb,currentColor 22%,transparent)}
+  .swatch.cron{border-radius:999px}.swatch.store{border-radius:50%}.swatch.external{transform:rotate(45deg);width:12px;height:12px}.swatch.model{clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)}
+  .note{font-size:12px;border-left:3px solid #fbbf24;padding-left:10px;color:#b9c8d8}.privacy{border-left-color:#34d399}
+  .cluster rect{fill:#0c1c2d99;stroke:#2e4a67;stroke-width:2;stroke-dasharray:8 7}.cluster text{fill:#8fb0ce;font-size:19px;font-weight:650;letter-spacing:.04em}
+  .edge path{fill:none;stroke:var(--line);stroke-width:2;opacity:.52;marker-end:url(#arrow)}.edge text{fill:#b9c7d6;font-size:12px;text-anchor:middle;paint-order:stroke;stroke:#07111f;stroke-width:5px;stroke-linejoin:round}.edge.related path{stroke:#4dd4ff;opacity:.94;stroke-width:3}.edge.dim path,.edge.dim text{opacity:.07}
+  .node{cursor:pointer}.node .shape{stroke-width:2.5;filter:drop-shadow(0 5px 7px #0008)}.node text{fill:#f4f8fc;text-anchor:middle;pointer-events:none}.node .label{font-size:14px;font-weight:650}.node .sub{font-size:11px;fill:#b4c2d2}.node.selected .shape{stroke:#fff;stroke-width:4;filter:drop-shadow(0 0 9px #59d8ff)}.node.dim{opacity:.16}.node:hover .shape{stroke:#fff}
+  .kind-entry{color:var(--entry)}.kind-service{color:var(--service)}.kind-cron{color:var(--cron)}.kind-store{color:var(--store)}.kind-external{color:var(--external)}.kind-model-tool{color:var(--model)}
+  .node.kind-entry .shape{fill:#183a61;stroke:var(--entry)}.node.kind-service .shape{fill:#123b35;stroke:var(--service)}.node.kind-cron .shape{fill:#44350c;stroke:var(--cron)}.node.kind-store .shape{fill:#34214b;stroke:var(--store)}.node.kind-external .shape{fill:#4b1f2c;stroke:var(--external)}.node.kind-model-tool .shape{fill:#4b2710;stroke:var(--model)}
+  @media(max-width:820px){body{grid-template-columns:1fr;grid-template-rows:62% 38%}aside{border-left:0;border-top:1px solid #263c54;padding:14px}.detail{min-height:120px}.legend{grid-template-columns:repeat(3,1fr)}h2{margin-top:14px}}
+</style>
+</head>
+<body>
+<main id="mapShell" aria-label="Interactive BT-001 architecture map">
+  <svg id="map" role="img" aria-labelledby="svgTitle svgDesc">
+    <title id="svgTitle">BT-001 architecture and data-flow map</title>
+    <desc id="svgDesc">Draggable architecture nodes grouped by feature area, with labeled directed connections. Pan the background and use the mouse wheel to zoom.</desc>
+    <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7f91a8"/></marker></defs>
+    <g id="viewport"><g id="clusters"></g><g id="edges"></g><g id="nodes"></g></g>
+  </svg>
+  <div id="toolbar" aria-label="Map controls">
+    <button id="fitBtn" type="button">Fit map</button><button id="resetBtn" type="button">Reset layout</button><button id="minusBtn" type="button" aria-label="Zoom out">−</button><span id="zoomReadout">100%</span><button id="plusBtn" type="button" aria-label="Zoom in">+</button>
+  </div>
+</main>
+<aside aria-label="Architecture details">
+  <h1>BT-001 architecture</h1>
+  <p class="meta"><span class="count" id="nodeCount"></span> nodes · <span class="count" id="edgeCount"></span> flows · <span class="count" id="groupCount"></span> groups</p>
+  <div class="detail" aria-live="polite">
+    <h2 id="detailTitle">Select a node</h2><span id="detailKind" class="kind-service">overview</span>
+    <p id="detailText">Click any node to inspect its role and source. Drag nodes to rearrange; drag empty space to pan; scroll to zoom.</p>
+    <p class="meta" id="detailSource"></p>
+  </div>
+  <h2>Node taxonomy</h2>
+  <div class="legend">
+    <div class="legendItem kind-entry"><span class="swatch"></span>Entry</div><div class="legendItem kind-service"><span class="swatch"></span>Service</div>
+    <div class="legendItem kind-cron"><span class="swatch cron"></span>Cron / interval</div><div class="legendItem kind-store"><span class="swatch store"></span>Store</div>
+    <div class="legendItem kind-external"><span class="swatch external"></span>External / infra</div><div class="legendItem kind-model-tool"><span class="swatch model"></span>Model / tool</div>
+  </div>
+  <h2>Investigation notes</h2>
+  <p class="note">The legacy Strategy Lab calls OpenAI Chat Completions with Binance data collected by app code. Its request contains no tool declaration, so the LLM does not have Binance REST tool access.</p>
+  <p class="note">The newer Assess module creates a clipboard packet only and explicitly states that no GPT API call is made.</p>
+  <p class="note">The Plotter’s local archive is evidenced by a PostgREST-style loopback endpoint at <code>127.0.0.1:3001</code>; the database/server implementation is not present in this repository.</p>
+  <p class="note privacy">This file contains architecture metadata only: no repository code, keys, URLs containing credentials, or stored values. It makes no network requests.</p>
+</aside>
+<script>
+(() => {
+"use strict";
+const groups=[
+ {id:"bootstrap",label:"Browser App · Bootstrap & Shared Runtime",x:35,y:35,w:535,h:335},
+ {id:"market",label:"Market View & Overlays",x:600,y:35,w:520,h:420},
+ {id:"signals",label:"Pressure Signal · SSSC · MA Stack",x:1145,y:35,w:560,h:550},
+ {id:"execution",label:"Execution Tools",x:600,y:480,w:520,h:510},
+ {id:"ai",label:"Assessment & AI",x:1145,y:610,w:560,h:380},
+ {id:"external",label:"External Platforms / Infrastructure",x:1740,y:35,w:625,h:455},
+ {id:"agreement",label:"Agreement Lab · Local Archive",x:1740,y:515,w:625,h:475},
+ {id:"vm",label:"Signal Logging · GCP VM",x:35,y:1030,w:1060,h:610},
+ {id:"supabase",label:"Supabase Data Plane",x:1120,y:1030,w:1245,h:610}
+];
+const nodes=[
+ {id:"index",g:"bootstrap",kind:"entry",label:"index.html",sub:"deferred script shell",x:85,y:95,detail:"Loads the UI shell and ordered deferred scripts that compose the browser application.",src:"index.html:229"},
+ {id:"main",g:"bootstrap",kind:"entry",label:"main.js startup",sub:"chart + app orchestration",x:325,y:95,detail:"Restores settings and credentials, starts clocks and title updates, sizes the canvas, loads the chart, and starts trade refresh.",src:"main.js:8659"},
+ {id:"api",g:"bootstrap",kind:"service",label:"API facade",sub:"browser adapters",x:85,y:205,detail:"Installs shared REST, WebSocket, Binance REST, user-stream, exchange-clock, and visibility-recovery adapters.",src:"features/api/api-index.js:1"},
+ {id:"transport",g:"bootstrap",kind:"service",label:"Transport + REST gate",sub:"fetch / WS / ban pacing",x:325,y:205,detail:"Centralizes HTTP and managed WebSocket access while pacing Binance REST calls and respecting retry/ban signals.",src:"services/rest.service.js; services/websocket.service.js; services/binance-rest-gate.service.js"},
+ {id:"browserstore",g:"bootstrap",kind:"store",label:"Browser-local state",sub:"localStorage · IndexedDB",x:205,y:300,detail:"Keeps UI settings and credential slots locally, plus candle cache and durable logging queues in IndexedDB.",src:"main.js:9799; features/pressure-signal/sssc/logging-worker.js"},
+
+ {id:"chart",g:"market",kind:"service",label:"Chart core",sub:"candles · positions · P/L",x:650,y:100,detail:"Fetches and streams futures candles, reconstructs trades and positions, and renders the main canvas with recovery logic.",src:"main.js:5888"},
+ {id:"ma",g:"market",kind:"service",label:"MA overlay",sub:"canonical EMA series",x:875,y:100,detail:"Builds canonical moving-average series, settings, overlay drawing, and tooltip ownership for the chart.",src:"features/ma/ma-index.js"},
+ {id:"smc",g:"market",kind:"service",label:"SMC overlay",sub:"market structure",x:650,y:225,detail:"Calculates and draws smart-money-concept structure overlays and binds their settings into the chart.",src:"features/smc/smc-overlay.module.js:1038"},
+ {id:"waterfall",g:"market",kind:"service",label:"Waterfall",sub:"closed-trade attribution",x:875,y:225,detail:"Builds the closed-position waterfall, crosshair, and parent-chain profit attribution from chart-owned trade state.",src:"features/waterfall/waterfall.js"},
+ {id:"heatmap",g:"market",kind:"service",label:"Liquidation heatmap",sub:"snapshot renderer",x:760,y:350,detail:"Loads the latest stored liquidation-heatmap snapshot and renders it as a chart overlay; it never calls the provider directly.",src:"features/heatmap/README.md:1; features/heatmap/index.js"},
+
+ {id:"pressure",g:"signals",kind:"service",label:"Pressure Signal runtime",sub:"feature coordinator",x:1195,y:100,detail:"Coordinates signal feeds, engine selection, dashboards, target evaluation, and position-management publications.",src:"features/pressure-signal/index.js:1"},
+ {id:"sssc",g:"signals",kind:"service",label:"SSSC live pipeline",sub:"stack · slope · spread · cross",x:1455,y:100,detail:"Maintains multi-timeframe candle buffers and calculates SSSC diagnostics from WebSocket-first market data.",src:"features/pressure-signal/sssc/orchestration.js; features/pressure-signal/sssc/calculation.js"},
+ {id:"engines",g:"signals",kind:"service",label:"Signal engines A / B / C",sub:"registry + selector",x:1195,y:235,detail:"Registers three strategy engines, validates their outputs, and selects the active signal model for each publication.",src:"features/pressure-signal/engines/registry.js; features/pressure-signal/engines/selector.js"},
+ {id:"management",g:"signals",kind:"service",label:"Position management",sub:"targets + action lifecycle",x:1455,y:235,detail:"Evaluates targets and position health, then schedules and publishes lifecycle-aware management actions.",src:"features/pressure-signal/management/position-engine.js; features/pressure-signal/core/targets.js"},
+ {id:"mastack",g:"signals",kind:"service",label:"MA Stack strip",sub:"multi-TF classification UI",x:1195,y:385,detail:"Classifies moving-average alignment, volatility, phase, strength, and events for the browser’s MA Stack strip.",src:"features/ma-stack/ma-stack.js; features/ma-stack/ma-stack-runtime.js"},
+ {id:"scalp",g:"signals",kind:"service",label:"SCALP engine",sub:"V1/V2 detectors + state",x:1455,y:385,detail:"Runs browser-side detector, cascade, tranche, exit, simulator, and lifecycle state for the selected scalper account.",src:"features/scalp/index.js; features/scalp/state-machine.js"},
+
+ {id:"calculator",g:"execution",kind:"service",label:"Calculator",sub:"order sizing + controls",x:650,y:550,detail:"Combines calculator domain rules, UI, persistence, Binance order adapters, and chase orchestration.",src:"features/calculator/index.js"},
+ {id:"chase",g:"execution",kind:"service",label:"OTF chase engine",sub:"GTX amend / cancel / verify",x:875,y:550,detail:"Polls live top-of-book, submits or amends post-only orders, and verifies cancellation or fill state against Binance.",src:"features/calculator/application/chaseEngine.js:153"},
+ {id:"grad",g:"execution",kind:"service",label:"Grad calculator",sub:"laddered entries",x:650,y:705,detail:"Generates graded entry levels and lot distributions and exposes trade controls through its presentation module.",src:"features/grad-calculator/index.js"},
+ {id:"rapid",g:"execution",kind:"service",label:"Rapid Fire",sub:"add · close · reverse · B.E.",x:875,y:705,detail:"Provides fast add, double, partial-close, reverse, and fee-aware breakeven actions through the calculator bridge.",src:"features/rapid-fire/rapidFireModule.js"},
+ {id:"scalpgateway",g:"execution",kind:"service",label:"SCALP secondary gateway",sub:"account-scoped trading",x:760,y:865,detail:"Maintains an account-scoped Binance gateway so SCALP can read hedge-mode positions and submit orders independently of the main chart account.",src:"features/scalp/secondary-gateway.module.js"},
+
+ {id:"strategylab",g:"ai",kind:"service",label:"Legacy Strategy Lab",sub:"collect + prompt + call",x:1195,y:690,detail:"Collects multi-timeframe Binance candles and indicators, builds a prompt, and sends it to OpenAI Chat Completions.",src:"main.js:10670"},
+ {id:"assess",g:"ai",kind:"service",label:"Assess packet",sub:"local clipboard workflow",x:1455,y:690,detail:"Builds a position-and-market assessment packet and copies it locally; the current module makes no GPT API call.",src:"main.js:19601"},
+ {id:"openai",g:"ai",kind:"model/tool",label:"OpenAI Chat Completions",sub:"configured GPT model · no tools",x:1325,y:855,detail:"Executes the legacy GPT market-analysis request; the request has messages only and declares no Binance or other tool access.",src:"main.js:10670-10718"},
+
+ {id:"binance",g:"external",kind:"external",label:"Binance Futures APIs",sub:"REST · market WS · user WS",x:1805,y:110,detail:"Supplies public market data, private account and order events, signed account reads, and trading endpoints.",src:"main.js; features/api/binance-user-stream.module.js"},
+ {id:"gcp",g:"external",kind:"external",label:"GCP VM",sub:"btc-sig-logger",x:2080,y:110,detail:"Hosts the continuously running and scheduled headless logger services under systemd.",src:"deploy/README.md; deploy/systemd/*.service"},
+ {id:"supaproject",g:"external",kind:"external",label:"Supabase project",sub:"Postgres · PostgREST · Storage",x:1805,y:285,detail:"Hosts the remote Postgres tables, REST surface, and liquidation-heatmap object bucket used by browser and VM components.",src:"services/supabase.service.js; headless/supabase-client.js"},
+ {id:"apify",g:"external",kind:"external",label:"Apify CoinAnk Actor",sub:"heatmap provider",x:2080,y:285,detail:"Runs the CoinAnk liquidation-heatmap actor when invoked by the VM’s scheduled pull job.",src:"headless/pull-liquidation-heatmap.js:6"},
+
+ {id:"plotter",g:"agreement",kind:"entry",label:"Plotter app v2",sub:"Agreement Lab",x:1805,y:600,detail:"Loads archived SSSC, SCALP, Signal B, futures, and MA Stack rows for local comparison, plotting, and CSV export.",src:"tools/Plotter app v2.html:323"},
+ {id:"localrest",g:"agreement",kind:"service",label:"Local REST archive API",sub:"127.0.0.1:3001",x:2080,y:600,detail:"Exposes PostgREST-style table queries to the Plotter on a loopback-only HTTP endpoint.",src:"tools/Plotter app v2.html:330,624"},
+ {id:"localpg",g:"agreement",kind:"store",label:"Local PostgreSQL archive",sub:"implementation outside repo",x:1940,y:810,detail:"Persists the locally archived signal and snapshot tables behind the loopback API; its server configuration is not in this codebase.",src:"Inferred from tools/Plotter app v2.html:624-652"},
+
+ {id:"vmsssc",g:"vm",kind:"cron",label:"SSSC logger",sub:"30 s snapshots",x:85,y:1110,detail:"Seeds and streams multi-timeframe Binance candles, computes SSSC snapshots, writes the latest local snapshot file, and logs remote rows.",src:"headless/run-sssc.js"},
+ {id:"vmfutures",g:"vm",kind:"cron",label:"Futures context logger",sub:"30 s funding + OI",x:340,y:1110,detail:"Runs inside the SSSC service and records current funding rate and open interest every thirty seconds.",src:"headless/futures-market-context-logger.js"},
+ {id:"vmsigb",g:"vm",kind:"cron",label:"Signal B logger",sub:"30 s evaluation",x:595,y:1110,detail:"Maintains a dedicated market feed, evaluates Signal B, and records a diagnostic snapshot every thirty seconds.",src:"headless/run-sig-b.js"},
+ {id:"vmscalp",g:"vm",kind:"cron",label:"SCALP V1/V2 logger",sub:"qualified detections",x:850,y:1110,detail:"Runs independent V1 and V2 cross/bounce detectors over a shared feed and logs qualified detections only.",src:"headless/run-scalper-signals.js; headless/README.md:21"},
+ {id:"vmmastack",g:"vm",kind:"cron",label:"MA Stack logger",sub:"provisional + candle close",x:85,y:1285,detail:"Streams multiple timeframes, classifies MA Stack state, and writes provisional and closed-candle snapshots.",src:"headless/run-ma-stack-logger.js; headless/ma-stack-logger/service.js"},
+ {id:"vmheatmap",g:"vm",kind:"cron",label:"Heatmap timer",sub:"5 UTC runs / day",x:340,y:1285,detail:"Starts the Apify actor on a fixed five-times-daily schedule and stores raw output plus metadata in Supabase.",src:"deploy/systemd/liquidation-heatmap.timer; headless/pull-liquidation-heatmap.js"},
+ {id:"vmmonitor",g:"vm",kind:"cron",label:"Logger health monitor",sub:"every minute",x:595,y:1285,detail:"Checks service state and table freshness/frozen payloads, then records de-duplicated monitoring incidents.",src:"headless/monitor-heartbeat.js; deploy/systemd/vm-logger-monitor.timer"},
+ {id:"snapshotfile",g:"vm",kind:"store",label:"Atomic SSSC snapshot file",sub:"VM-local handoff",x:850,y:1285,detail:"Stores the latest SSSC payload atomically on the VM for local service-to-service handoff.",src:"headless/sssc-snapshot-file.js; deploy/README.md:28"},
+
+ {id:"postgrest",g:"supabase",kind:"external",label:"Supabase PostgREST",sub:"/rest/v1",x:1180,y:1110,detail:"Provides authenticated table inserts and selected reads for browser and headless clients.",src:"services/supabase.service.js:99"},
+ {id:"ssscsnap",g:"supabase",kind:"store",label:"sssc_snapshots",sub:"SSSC diagnostic rows",x:1405,y:1110,detail:"Stores periodic multi-timeframe SSSC calculation snapshots.",src:"features/pressure-signal/sssc/core/snapshot-logger.js:88"},
+ {id:"ssscsignals",g:"supabase",kind:"store",label:"sssc_signals",sub:"signal events",x:1630,y:1110,detail:"Archive table consumed by the local Plotter for SSSC signal events; its schema is not included here.",src:"tools/Plotter app v2.html:326"},
+ {id:"sigbsnap",g:"supabase",kind:"store",label:"sig_b_snapshots",sub:"Signal B evaluations",x:1855,y:1110,detail:"Stores timed Signal B outputs, scores, gates, and diagnostic inputs.",src:"deploy/sql/sig_b_snapshots.sql"},
+ {id:"futuressnap",g:"supabase",kind:"store",label:"futures_market_snapshots",sub:"funding + OI",x:2080,y:1110,detail:"Stores periodic futures funding-rate and open-interest context.",src:"deploy/sql/futures_market_snapshots.sql"},
+ {id:"scalpv1",g:"supabase",kind:"store",label:"scalp_v1_signals",sub:"V1 qualified detections",x:1180,y:1280,detail:"Stores qualified V1 cross and bounce detector events from browser or headless logging paths.",src:"features/scalp/core/signal-pipeline.js; headless/run-scalper-signals.js"},
+ {id:"scalpv2",g:"supabase",kind:"store",label:"scalp_v2_signals",sub:"V2 qualified detections",x:1405,y:1280,detail:"Stores qualified V2 detector events with the V2 scoring profile.",src:"deploy/sql/scalp_v2_signals.sql"},
+ {id:"mastacksnap",g:"supabase",kind:"store",label:"ma_stack_snapshots",sub:"MA Stack states",x:1630,y:1280,detail:"Stores multi-timeframe MA Stack classifications and event telemetry.",src:"deploy/sql/ma_stack_snapshots.sql"},
+ {id:"heatmapsnap",g:"supabase",kind:"store",label:"liquidation_heatmap_snapshots",sub:"heatmap metadata",x:1855,y:1280,detail:"Stores provider run metadata and object paths for liquidation heatmaps.",src:"deploy/sql/liquidation_heatmap_snapshots.sql"},
+ {id:"heatmapbucket",g:"supabase",kind:"store",label:"liquidation-heatmaps bucket",sub:"raw JSON objects",x:2080,y:1280,detail:"Stores raw provider heatmap JSON addressed by paths referenced from snapshot rows.",src:"headless/pull-liquidation-heatmap.js:11,81"},
+ {id:"scalpops",g:"supabase",kind:"store",label:"scalp_positions / trades / operational",sub:"browser SCALP activity",x:1285,y:1470,detail:"Stores browser-side SCALP position lifecycle, completed trade sessions, and operational events.",src:"features/scalp/core/logger.js; services/supabase.service.js"},
+ {id:"incidents",g:"supabase",kind:"store",label:"monitoring_incidents",sub:"health alerts",x:1630,y:1470,detail:"Stores de-duplicated VM logger health incidents and unresolved status.",src:"deploy/sql/monitoring_incidents.sql"},
+ {id:"supaworker",g:"supabase",kind:"service",label:"Browser logging worker",sub:"IndexedDB retry queue",x:1970,y:1470,detail:"Queues browser Supabase writes durably and retries them without blocking trading callers.",src:"features/pressure-signal/sssc/logging-worker.js; services/supabase.service.js"}
+];
+const edges=[
+ ["index","main","loads"],["index","api","loads first"],["index","ma","loads"],["index","pressure","loads"],["index","scalp","loads"],["index","calculator","bootstraps"],
+ ["api","transport","uses"],["main","api","calls"],["main","chart","starts loadChart"],["main","browserstore","reads / writes"],["api","binance","REST / WS"],
+ ["chart","binance","candles · account · trades"],["chart","ma","feeds candles"],["chart","smc","draw hook"],["chart","waterfall","trade state"],["chart","pressure","position + price context"],
+ ["heatmap","supaproject","reads latest payload"],["heatmap","heatmapsnap","reads metadata"],["heatmap","heatmapbucket","reads object"],
+ ["pressure","sssc","starts live pipeline"],["sssc","binance","REST seed + market WS"],["sssc","engines","publishes snapshot"],["engines","management","signal output"],["pressure","management","position facts"],["pressure","browserstore","persists settings"],["mastack","chart","reads canonical candles / MA"],["scalp","binance","market + account events"],["scalp","scalpgateway","owns"],
+ ["calculator","chase","starts / cancels"],["chart","chase","top-of-book price"],["chase","binance","submit · amend · query orders"],["grad","binance","places ladder orders"],["rapid","calculator","uses execution bridge"],["rapid","binance","add · close · reverse · SL"],["scalpgateway","binance","signed reads / writes"],
+ ["strategylab","binance","fetches candles first"],["strategylab","openai","sends prompt + data"],["assess","binance","fetches public market data"],["assess","browserstore","reads state / copies packet"],
+ ["gcp","vmsssc","hosts"],["gcp","vmsigb","hosts"],["gcp","vmscalp","hosts"],["gcp","vmmastack","hosts"],["gcp","vmheatmap","schedules"],["gcp","vmmonitor","schedules"],
+ ["binance","vmsssc","market data"],["binance","vmsigb","market data"],["binance","vmscalp","market data"],["binance","vmmastack","market data"],["binance","vmfutures","funding + OI"],
+ ["vmsssc","snapshotfile","writes latest"],["vmsssc","ssscsnap","writes"],["vmsssc","vmfutures","starts embedded collector"],["vmfutures","futuressnap","writes"],["vmsigb","sigbsnap","writes"],["vmscalp","scalpv1","writes V1"],["vmscalp","scalpv2","writes V2"],["vmmastack","mastacksnap","writes"],
+ ["vmheatmap","apify","runs actor / polls dataset"],["vmheatmap","heatmapbucket","uploads raw JSON"],["vmheatmap","heatmapsnap","writes metadata"],["vmmonitor","ssscsnap","reads freshness"],["vmmonitor","sigbsnap","reads freshness"],["vmmonitor","mastacksnap","reads freshness"],["vmmonitor","incidents","writes alerts"],
+ ["supaproject","postgrest","exposes"],["postgrest","ssscsnap","routes"],["postgrest","sigbsnap","routes"],["postgrest","scalpv1","routes"],["postgrest","scalpv2","routes"],["postgrest","mastacksnap","routes"],["postgrest","futuressnap","routes"],["postgrest","incidents","routes"],
+ ["scalp","supaworker","queues logs"],["supaworker","scalpops","writes"],["supaworker","scalpv1","writes"],["supaworker","scalpv2","writes"],
+ ["plotter","localrest","queries tables"],["localrest","localpg","reads archive"],["plotter","binance","backfills 1m candles"],["localpg","ssscsnap","archived copy"],["localpg","sigbsnap","archived copy"],["localpg","scalpv1","archived copy"],["localpg","scalpv2","archived copy"],["localpg","mastacksnap","archived copy"],["localpg","futuressnap","archived copy"]
+].map((e,i)=>({id:"e"+i,from:e[0],to:e[1],label:e[2]}));
+
+const initial=Object.fromEntries(nodes.map(n=>[n.id,{x:n.x,y:n.y}]));
+const byId=new Map(nodes.map(n=>[n.id,n]));
+const svg=document.getElementById("map"),viewport=document.getElementById("viewport"),clustersG=document.getElementById("clusters"),edgesG=document.getElementById("edges"),nodesG=document.getElementById("nodes");
+const NS="http://www.w3.org/2000/svg",nodeW=190,nodeH=72;let transform={x:0,y:0,k:1},drag=null,selected=null;
+function el(name,attrs={}){const e=document.createElementNS(NS,name);Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,v));return e}
+function renderClusters(){groups.forEach(g=>{const wrap=el("g",{class:"cluster"});wrap.append(el("rect",{x:g.x,y:g.y,width:g.w,height:g.h,rx:18}));const t=el("text",{x:g.x+18,y:g.y+31});t.textContent=g.label;wrap.append(t);clustersG.append(wrap)})}
+function shapeFor(n){const x=n.x,y=n.y,w=nodeW,h=nodeH;if(n.kind==="external")return el("polygon",{class:"shape",points:`${x+w/2},${y} ${x+w},${y+h/2} ${x+w/2},${y+h} ${x},${y+h/2}`});if(n.kind==="model/tool")return el("polygon",{class:"shape",points:`${x+24},${y} ${x+w-24},${y} ${x+w},${y+h/2} ${x+w-24},${y+h} ${x+24},${y+h} ${x},${y+h/2}`});if(n.kind==="store"){const p=`M${x},${y+12} C${x},${y-2} ${x+w},${y-2} ${x+w},${y+12} L${x+w},${y+h-12} C${x+w},${y+h+2} ${x},${y+h+2} ${x},${y+h-12} Z`;return el("path",{class:"shape",d:p})}if(n.kind==="entry")return el("polygon",{class:"shape",points:`${x+18},${y} ${x+w-18},${y} ${x+w},${y+h/2} ${x+w-18},${y+h} ${x+18},${y+h} ${x},${y+h/2}`});return el("rect",{class:"shape",x,y,width:w,height:h,rx:n.kind==="cron"?34:12})}
+function renderNodes(){nodesG.replaceChildren();nodes.forEach(n=>{const g=el("g",{class:`node kind-${n.kind.replace("/","-")}`,"data-id":n.id,role:"button","aria-label":`${n.label}, ${n.kind}`});g.append(shapeFor(n));const label=el("text",{class:"label",x:n.x+nodeW/2,y:n.y+31});label.textContent=n.label;const sub=el("text",{class:"sub",x:n.x+nodeW/2,y:n.y+51});sub.textContent=n.sub;g.append(label,sub);nodesG.append(g)})}
+function anchor(a,b){const ax=a.x+nodeW/2,ay=a.y+nodeH/2,bx=b.x+nodeW/2,by=b.y+nodeH/2,dx=bx-ax,dy=by-ay;const t=Math.min(Math.abs((nodeW/2)/(dx||.001)),Math.abs((nodeH/2)/(dy||.001)));return {sx:ax+dx*t,sy:ay+dy*t,tx:bx-dx*t,ty:by-dy*t}}
+function renderEdges(){edgesG.replaceChildren();edges.forEach(edge=>{const a=byId.get(edge.from),b=byId.get(edge.to),p=anchor(a,b),g=el("g",{class:"edge","data-id":edge.id});const bend=Math.min(90,Math.hypot(p.tx-p.sx,p.ty-p.sy)*.18),horizontal=Math.abs(p.tx-p.sx)>Math.abs(p.ty-p.sy);let d,mx,my;if(horizontal){const dir=Math.sign(p.tx-p.sx)||1;d=`M${p.sx},${p.sy} C${p.sx+bend*dir},${p.sy} ${p.tx-bend*dir},${p.ty} ${p.tx},${p.ty}`;mx=(p.sx+p.tx)/2;my=(p.sy+p.ty)/2}else{const dir=Math.sign(p.ty-p.sy)||1;d=`M${p.sx},${p.sy} C${p.sx},${p.sy+bend*dir} ${p.tx},${p.ty-bend*dir} ${p.tx},${p.ty}`;mx=(p.sx+p.tx)/2;my=(p.sy+p.ty)/2}g.append(el("path",{d}));const t=el("text",{x:mx,y:my-5});t.textContent=edge.label;g.append(t);edgesG.append(g)})}
+function applyTransform(){viewport.setAttribute("transform",`translate(${transform.x} ${transform.y}) scale(${transform.k})`);document.getElementById("zoomReadout").textContent=Math.round(transform.k*100)+"%"}
+function fit(){const r=svg.getBoundingClientRect(),pad=35,k=Math.min((r.width-pad*2)/2400,(r.height-pad*2)/1680);transform={k,x:(r.width-2400*k)/2,y:(r.height-1680*k)/2};applyTransform()}
+function zoomAt(factor,cx,cy){const old=transform.k,k=Math.max(.25,Math.min(2.2,old*factor));transform.x=cx-(cx-transform.x)*(k/old);transform.y=cy-(cy-transform.y)*(k/old);transform.k=k;applyTransform()}
+function worldPoint(e){const r=svg.getBoundingClientRect();return {x:(e.clientX-r.left-transform.x)/transform.k,y:(e.clientY-r.top-transform.y)/transform.k}}
+function selectNode(id){selected=id;const n=byId.get(id);document.querySelectorAll(".node").forEach(x=>{const is=x.dataset.id===id;x.classList.toggle("selected",is);x.classList.toggle("dim",!!id&&!is&&!edges.some(e=>(e.from===id&&e.to===x.dataset.id)||(e.to===id&&e.from===x.dataset.id)))});document.querySelectorAll(".edge").forEach(x=>{const e=edges.find(y=>y.id===x.dataset.id),rel=e.from===id||e.to===id;x.classList.toggle("related",rel);x.classList.toggle("dim",!!id&&!rel)});if(!n)return;document.getElementById("detailTitle").textContent=n.label;const kind=document.getElementById("detailKind");kind.textContent=n.kind;kind.className=`kind-${n.kind.replace("/","-")}`;document.getElementById("detailText").textContent=n.detail;document.getElementById("detailSource").innerHTML=`Source: <code>${n.src.replaceAll("&","&amp;").replaceAll("<","&lt;")}</code>`}
+svg.addEventListener("pointerdown",e=>{const ng=e.target.closest&&e.target.closest(".node");if(ng){const n=byId.get(ng.dataset.id),p=worldPoint(e);drag={type:"node",id:n.id,dx:p.x-n.x,dy:p.y-n.y,moved:false};selectNode(n.id)}else{drag={type:"pan",x:e.clientX,y:e.clientY,tx:transform.x,ty:transform.y,moved:false};svg.classList.add("panning")}svg.setPointerCapture(e.pointerId)});
+svg.addEventListener("pointermove",e=>{if(!drag)return;if(drag.type==="pan"){transform.x=drag.tx+e.clientX-drag.x;transform.y=drag.ty+e.clientY-drag.y;drag.moved=true;applyTransform()}else{const n=byId.get(drag.id),p=worldPoint(e);n.x=p.x-drag.dx;n.y=p.y-drag.dy;drag.moved=true;renderEdges();renderNodes();selectNode(n.id)}});
+svg.addEventListener("pointerup",e=>{if(drag&&drag.type==="pan"&&!drag.moved)selectNode(null);drag=null;svg.classList.remove("panning");try{svg.releasePointerCapture(e.pointerId)}catch(_){}});
+svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect();zoomAt(e.deltaY<0?1.12:.89,e.clientX-r.left,e.clientY-r.top)},{passive:false});
+document.getElementById("fitBtn").onclick=fit;document.getElementById("plusBtn").onclick=()=>{const r=svg.getBoundingClientRect();zoomAt(1.2,r.width/2,r.height/2)};document.getElementById("minusBtn").onclick=()=>{const r=svg.getBoundingClientRect();zoomAt(.83,r.width/2,r.height/2)};
+document.getElementById("resetBtn").onclick=()=>{nodes.forEach(n=>Object.assign(n,initial[n.id]));renderEdges();renderNodes();selectNode(null);fit()};
+window.addEventListener("resize",fit);document.getElementById("nodeCount").textContent=nodes.length;document.getElementById("edgeCount").textContent=edges.length;document.getElementById("groupCount").textContent=groups.length;
+renderClusters();renderEdges();renderNodes();fit();
+})();
+</script>
+</body>
+</html>
