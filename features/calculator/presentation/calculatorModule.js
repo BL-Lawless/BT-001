@@ -1175,6 +1175,18 @@
   function freshRapidFireTakeProfitClientId(){
     return ("RF_TP_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,8)).slice(0,36);
   }
+  function rapidFireTakeProfitStateMatches(orderLike,priceValue,quantityValue){
+    if(!orderLike)return false;
+    const currentPrice=normalizeLevelComparable(orderLike.price);
+    const requestedPrice=normalizeLevelComparable(priceValue);
+    const currentQuantity=normalizeQtyComparable(orderLike.quantity);
+    const requestedQuantity=normalizeQtyComparable(quantityValue);
+    return currentPrice!=null&&requestedPrice!=null&&currentPrice===requestedPrice
+      &&currentQuantity!=null&&requestedQuantity!=null&&currentQuantity===requestedQuantity;
+  }
+  function isBinanceNoChangeOrderError(error){
+    return /no need to modify the order/i.test(String(error&&error.message||error||""));
+  }
   function rapidFireTakeProfitIdentityParams(orderLike){
     const source=orderLike||rapidFireTakeProfitOrder||{};
     const send={symbol:String(source.symbol||currentSymbol())};
@@ -1322,13 +1334,27 @@
       if(!normalizedQty.executable)throw new Error("Full open-position quantity is not executable.");
       const orderSide=live.side==="SHORT"?"BUY":"SELL";
       const positionSide=toUpper(live.positionSide||"");
+      const finishNoChange=()=>{
+        rapidFireTakeProfitDraftPrice=null;
+        if(!opts.silent)publishRapidFireStatus({statusCode:"take-profit",message:"TP — No change",tone:"normal"});
+        calculate();
+        return Object.freeze({...rapidFireTakeProfitOrder,amended:false,unchanged:true,orderType:"LIMIT",timeInForce:"GTX",reduceOnly:true});
+      };
       let response;
       let amended=false;
       if(rapidFireTakeProfitOrder){
+        if(rapidFireTakeProfitStateMatches(rapidFireTakeProfitOrder,normalizedPrice,normalizedQty.quantity))return finishNoChange();
         if(typeof gateway.amendOrder!=="function")throw new Error("Binance TP amendment is unavailable.");
         const identity=rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder);
         const originalOrderId=rapidFireTakeProfitOrder.orderId;
-        response=await gateway.amendOrder({...identity,side:orderSide,quantity:normalizedQty.text,price:normalizedPrice});
+        try{
+          response=await gateway.amendOrder({...identity,side:orderSide,quantity:normalizedQty.text,price:normalizedPrice});
+        }catch(error){
+          if(!isBinanceNoChangeOrderError(error))throw error;
+          try{syncRapidFireTakeProfitFromSnapshot(await readOpenOrdersSnapshot({binanceRestGateBypass:true}));}catch(_ignored){}
+          if(!rapidFireTakeProfitStateMatches(rapidFireTakeProfitOrder,normalizedPrice,normalizedQty.quantity))throw error;
+          return finishNoChange();
+        }
         if(!binanceWriteConfirmed(response))throw new Error("Unexpected Binance TP amend response.");
         if(originalOrderId!=null&&response&&response.orderId!=null&&String(response.orderId)!==String(originalOrderId))throw new Error("Binance TP amend changed the order ID.");
         amended=true;
@@ -1355,7 +1381,7 @@
       rapidFireTakeProfitDraftPrice=null;
       if(!opts.silent)publishRapidFireStatus({statusCode:"take-profit",message:"TP "+(amended?"amended":"placed")+" — "+normalizedPrice+" × "+normalizedQty.text,tone:"normal"});
       calculate();
-      return Object.freeze({...rapidFireTakeProfitOrder,amended,orderType:"LIMIT",timeInForce:"GTX",reduceOnly:true});
+      return Object.freeze({...rapidFireTakeProfitOrder,amended,unchanged:false,orderType:"LIMIT",timeInForce:"GTX",reduceOnly:true});
     }catch(error){
       rapidFireTakeProfitDraftPrice=null;
       try{syncRapidFireTakeProfitFromSnapshot(await readOpenOrdersSnapshot());}catch(_ignored){}

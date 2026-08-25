@@ -11,6 +11,8 @@
   let selectedDirection="LONG";
   let doubleArmTimer=null;
   let closeQuantityOverride=null;
+  let pendingTakeProfitValue=null;
+  let takeProfitEditValue=null;
 
   function q(id){return document.getElementById(id);}
   function api(){return window.CALCULATOR_MODULE&&window.CALCULATOR_MODULE.rapidFire;}
@@ -32,6 +34,18 @@
     const size=Math.max(0,number(sizeValue)||0);
     const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
     return {closed,remaining:size-closed};
+  }
+  function takeProfitFieldState(liveOrder,livePriceValue,pendingValue){
+    const hasLive=!!liveOrder;
+    const pending=!hasLive&&pendingValue!=null&&String(pendingValue).trim()!=="";
+    return {
+      hasLive,
+      pending,
+      value:hasLive?(livePriceValue==null?"":String(livePriceValue)):(pending?String(pendingValue):"")
+    };
+  }
+  function takeProfitCommitValue(inputValue,editValue){
+    return editValue!=null?editValue:inputValue;
   }
   function setCloseSliderDisplay(percentValue){
     const slider=q("rapidFireClosePercent");
@@ -168,7 +182,12 @@
     const tpSet=q("rapidFireTakeProfitSet");
     if(tpSet)tpSet.disabled=!position||protectionBusy;
     if(slInput&&document.activeElement!==slInput)slInput.value=snapshot.masterStopPrice==null?"":String(snapshot.masterStopPrice);
-    if(tpInput&&document.activeElement!==tpInput)tpInput.value=snapshot.takeProfitPrice==null?"":String(snapshot.takeProfitPrice);
+    const tpField=takeProfitFieldState(snapshot.takeProfitOrder,snapshot.takeProfitPrice,pendingTakeProfitValue);
+    if(tpField.hasLive)pendingTakeProfitValue=null;
+    if(tpInput&&document.activeElement!==tpInput){
+      tpInput.value=tpField.value;
+    }
+    if(tpInput)tpInput.classList.toggle("is-pending-unsent",tpField.pending);
     const slPreview=q("rapidFireMasterSlPl");
     const tpPreview=q("rapidFireTakeProfitPl");
     if(slPreview){slPreview.textContent=money(snapshot.masterSlPl);slPreview.style.color=moneyColor(snapshot.masterSlPl);}
@@ -205,16 +224,20 @@
     }catch(_error){}
     render();
   }
-  async function commitProtection(kind,input){
+  async function commitProtection(kind,input,valueOverride){
     const bridge=api();
     if(!bridge||!input)return;
-    const price=number(input.value);
+    const price=number(valueOverride!=null?valueOverride:input.value);
     if(!(price>0))return;
     try{
       const pending=kind==="sl"?bridge.setMasterStop(price):bridge.setTakeProfit(price);
       render();
       await pending;
-    }catch(_error){}
+      if(kind==="tp"){
+        pendingTakeProfitValue=null;
+        takeProfitEditValue=null;
+      }
+    }catch(_error){if(kind==="tp")takeProfitEditValue=null;}
     render();
   }
   function previewProtection(kind,input){
@@ -236,8 +259,8 @@
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Open Size</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" value="0.000" readonly aria-label="Remaining open size"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close Size</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Close size"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Total Lot</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" value="0.000" readonly aria-label="Total open lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Exit Lot</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Exit lot"></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
@@ -302,6 +325,15 @@
     closeSize.addEventListener("input",event=>{
       const bridge=api();
       const snapshot=bridge.snapshot();
+      const raw=number(event.target.value);
+      if(raw!=null&&raw>snapshot.size){
+        const precision=Math.max(3,number(event.target.dataset.precision)||3);
+        closeQuantityOverride=snapshot.size;
+        event.target.value=lot(snapshot.size,precision);
+        setCloseSliderDisplay(snapshot.size>0?100:0);
+        render();
+        return;
+      }
       const normalized=bridge.normalizeQuantity(event.target.value);
       closeQuantityOverride=normalized.executable?Math.min(snapshot.size,normalized.quantity):0;
       setCloseSliderDisplay(snapshot.size>0?closeQuantityOverride/snapshot.size*100:0);
@@ -344,11 +376,31 @@
     const slInput=q("rapidFireMasterSl");
     const tpInput=q("rapidFireTakeProfit");
     slInput.addEventListener("input",()=>previewProtection("sl",slInput),false);
-    tpInput.addEventListener("input",()=>previewProtection("tp",tpInput),false);
+    tpInput.addEventListener("input",()=>{
+      const bridge=api();
+      const hasLiveTakeProfit=!!(bridge&&bridge.snapshot().takeProfitOrder);
+      takeProfitEditValue=tpInput.value.trim()===""?null:tpInput.value;
+      pendingTakeProfitValue=hasLiveTakeProfit?null:takeProfitEditValue;
+      previewProtection("tp",tpInput);
+    },false);
     slInput.addEventListener("change",()=>{void commitProtection("sl",slInput);},false);
     slInput.addEventListener("keydown",event=>{if(event.key==="Enter")slInput.blur();},false);
-    tpInput.addEventListener("blur",()=>{const bridge=api();if(bridge&&typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");},false);
-    q("rapidFireTakeProfitSet").addEventListener("click",()=>{void commitProtection("tp",tpInput);},false);
+    const tpSet=q("rapidFireTakeProfitSet");
+    const tpProtectionBox=tpInput.closest(".rapid-fire-protection-box");
+    tpSet.addEventListener("mousedown",event=>event.preventDefault(),false);
+    tpProtectionBox.addEventListener("focusout",()=>{setTimeout(()=>{
+      if(tpProtectionBox.contains(document.activeElement))return;
+      const bridge=api();
+      if(!bridge||!bridge.snapshot().takeProfitOrder)return;
+      pendingTakeProfitValue=null;
+      takeProfitEditValue=null;
+      if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
+      render();
+    },0);},false);
+    tpSet.addEventListener("click",()=>{
+      const typedValue=takeProfitCommitValue(tpInput.value,takeProfitEditValue);
+      void commitProtection("tp",tpInput,typedValue);
+    },false);
     statusUnsubscribe=api().subscribe(detail=>{
       setStatus(detail.message,detail.tone);
       render();

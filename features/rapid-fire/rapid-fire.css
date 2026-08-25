@@ -290,6 +290,10 @@
   font:700 12px Arial,Helvetica,sans-serif;
   text-align:center;
 }
+.rapid-fire-protection-box input.is-pending-unsent{
+  border-color:#86c99a;
+  background:#edf9f0;
+}
 .rapid-fire-protection-set{
   width:30px;
   min-width:30px;
@@ -303,7 +307,6 @@
 }
 .rapid-fire-protection-pl{
   min-width:45px;
-  margin-left:auto;
   color:#111;
   font-weight:700;
   text-align:right;

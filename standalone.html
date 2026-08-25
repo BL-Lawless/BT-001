@@ -4442,6 +4442,10 @@ button:hover{filter:brightness(1.04)}
   font:700 12px Arial,Helvetica,sans-serif;
   text-align:center;
 }
+.rapid-fire-protection-box input.is-pending-unsent{
+  border-color:#86c99a;
+  background:#edf9f0;
+}
 .rapid-fire-protection-set{
   width:30px;
   min-width:30px;
@@ -4455,7 +4459,6 @@ button:hover{filter:brightness(1.04)}
 }
 .rapid-fire-protection-pl{
   min-width:45px;
-  margin-left:auto;
   color:#111;
   font-weight:700;
   text-align:right;
@@ -6423,6 +6426,18 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   function freshRapidFireTakeProfitClientId(){
     return ("RF_TP_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,8)).slice(0,36);
   }
+  function rapidFireTakeProfitStateMatches(orderLike,priceValue,quantityValue){
+    if(!orderLike)return false;
+    const currentPrice=normalizeLevelComparable(orderLike.price);
+    const requestedPrice=normalizeLevelComparable(priceValue);
+    const currentQuantity=normalizeQtyComparable(orderLike.quantity);
+    const requestedQuantity=normalizeQtyComparable(quantityValue);
+    return currentPrice!=null&&requestedPrice!=null&&currentPrice===requestedPrice
+      &&currentQuantity!=null&&requestedQuantity!=null&&currentQuantity===requestedQuantity;
+  }
+  function isBinanceNoChangeOrderError(error){
+    return /no need to modify the order/i.test(String(error&&error.message||error||""));
+  }
   function rapidFireTakeProfitIdentityParams(orderLike){
     const source=orderLike||rapidFireTakeProfitOrder||{};
     const send={symbol:String(source.symbol||currentSymbol())};
@@ -6570,13 +6585,27 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       if(!normalizedQty.executable)throw new Error("Full open-position quantity is not executable.");
       const orderSide=live.side==="SHORT"?"BUY":"SELL";
       const positionSide=toUpper(live.positionSide||"");
+      const finishNoChange=()=>{
+        rapidFireTakeProfitDraftPrice=null;
+        if(!opts.silent)publishRapidFireStatus({statusCode:"take-profit",message:"TP — No change",tone:"normal"});
+        calculate();
+        return Object.freeze({...rapidFireTakeProfitOrder,amended:false,unchanged:true,orderType:"LIMIT",timeInForce:"GTX",reduceOnly:true});
+      };
       let response;
       let amended=false;
       if(rapidFireTakeProfitOrder){
+        if(rapidFireTakeProfitStateMatches(rapidFireTakeProfitOrder,normalizedPrice,normalizedQty.quantity))return finishNoChange();
         if(typeof gateway.amendOrder!=="function")throw new Error("Binance TP amendment is unavailable.");
         const identity=rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder);
         const originalOrderId=rapidFireTakeProfitOrder.orderId;
-        response=await gateway.amendOrder({...identity,side:orderSide,quantity:normalizedQty.text,price:normalizedPrice});
+        try{
+          response=await gateway.amendOrder({...identity,side:orderSide,quantity:normalizedQty.text,price:normalizedPrice});
+        }catch(error){
+          if(!isBinanceNoChangeOrderError(error))throw error;
+          try{syncRapidFireTakeProfitFromSnapshot(await readOpenOrdersSnapshot({binanceRestGateBypass:true}));}catch(_ignored){}
+          if(!rapidFireTakeProfitStateMatches(rapidFireTakeProfitOrder,normalizedPrice,normalizedQty.quantity))throw error;
+          return finishNoChange();
+        }
         if(!binanceWriteConfirmed(response))throw new Error("Unexpected Binance TP amend response.");
         if(originalOrderId!=null&&response&&response.orderId!=null&&String(response.orderId)!==String(originalOrderId))throw new Error("Binance TP amend changed the order ID.");
         amended=true;
@@ -6603,7 +6632,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       rapidFireTakeProfitDraftPrice=null;
       if(!opts.silent)publishRapidFireStatus({statusCode:"take-profit",message:"TP "+(amended?"amended":"placed")+" — "+normalizedPrice+" × "+normalizedQty.text,tone:"normal"});
       calculate();
-      return Object.freeze({...rapidFireTakeProfitOrder,amended,orderType:"LIMIT",timeInForce:"GTX",reduceOnly:true});
+      return Object.freeze({...rapidFireTakeProfitOrder,amended,unchanged:false,orderType:"LIMIT",timeInForce:"GTX",reduceOnly:true});
     }catch(error){
       rapidFireTakeProfitDraftPrice=null;
       try{syncRapidFireTakeProfitFromSnapshot(await readOpenOrdersSnapshot());}catch(_ignored){}
@@ -13826,6 +13855,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   let selectedDirection="LONG";
   let doubleArmTimer=null;
   let closeQuantityOverride=null;
+  let pendingTakeProfitValue=null;
+  let takeProfitEditValue=null;
 
   function q(id){return document.getElementById(id);}
   function api(){return window.CALCULATOR_MODULE&&window.CALCULATOR_MODULE.rapidFire;}
@@ -13847,6 +13878,18 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const size=Math.max(0,number(sizeValue)||0);
     const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
     return {closed,remaining:size-closed};
+  }
+  function takeProfitFieldState(liveOrder,livePriceValue,pendingValue){
+    const hasLive=!!liveOrder;
+    const pending=!hasLive&&pendingValue!=null&&String(pendingValue).trim()!=="";
+    return {
+      hasLive,
+      pending,
+      value:hasLive?(livePriceValue==null?"":String(livePriceValue)):(pending?String(pendingValue):"")
+    };
+  }
+  function takeProfitCommitValue(inputValue,editValue){
+    return editValue!=null?editValue:inputValue;
   }
   function setCloseSliderDisplay(percentValue){
     const slider=q("rapidFireClosePercent");
@@ -13983,7 +14026,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const tpSet=q("rapidFireTakeProfitSet");
     if(tpSet)tpSet.disabled=!position||protectionBusy;
     if(slInput&&document.activeElement!==slInput)slInput.value=snapshot.masterStopPrice==null?"":String(snapshot.masterStopPrice);
-    if(tpInput&&document.activeElement!==tpInput)tpInput.value=snapshot.takeProfitPrice==null?"":String(snapshot.takeProfitPrice);
+    const tpField=takeProfitFieldState(snapshot.takeProfitOrder,snapshot.takeProfitPrice,pendingTakeProfitValue);
+    if(tpField.hasLive)pendingTakeProfitValue=null;
+    if(tpInput&&document.activeElement!==tpInput){
+      tpInput.value=tpField.value;
+    }
+    if(tpInput)tpInput.classList.toggle("is-pending-unsent",tpField.pending);
     const slPreview=q("rapidFireMasterSlPl");
     const tpPreview=q("rapidFireTakeProfitPl");
     if(slPreview){slPreview.textContent=money(snapshot.masterSlPl);slPreview.style.color=moneyColor(snapshot.masterSlPl);}
@@ -14020,16 +14068,20 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }catch(_error){}
     render();
   }
-  async function commitProtection(kind,input){
+  async function commitProtection(kind,input,valueOverride){
     const bridge=api();
     if(!bridge||!input)return;
-    const price=number(input.value);
+    const price=number(valueOverride!=null?valueOverride:input.value);
     if(!(price>0))return;
     try{
       const pending=kind==="sl"?bridge.setMasterStop(price):bridge.setTakeProfit(price);
       render();
       await pending;
-    }catch(_error){}
+      if(kind==="tp"){
+        pendingTakeProfitValue=null;
+        takeProfitEditValue=null;
+      }
+    }catch(_error){if(kind==="tp")takeProfitEditValue=null;}
     render();
   }
   function previewProtection(kind,input){
@@ -14051,8 +14103,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Open Size</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" value="0.000" readonly aria-label="Remaining open size"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close Size</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Close size"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Total Lot</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" value="0.000" readonly aria-label="Total open lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Exit Lot</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Exit lot"></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
@@ -14117,6 +14169,15 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     closeSize.addEventListener("input",event=>{
       const bridge=api();
       const snapshot=bridge.snapshot();
+      const raw=number(event.target.value);
+      if(raw!=null&&raw>snapshot.size){
+        const precision=Math.max(3,number(event.target.dataset.precision)||3);
+        closeQuantityOverride=snapshot.size;
+        event.target.value=lot(snapshot.size,precision);
+        setCloseSliderDisplay(snapshot.size>0?100:0);
+        render();
+        return;
+      }
       const normalized=bridge.normalizeQuantity(event.target.value);
       closeQuantityOverride=normalized.executable?Math.min(snapshot.size,normalized.quantity):0;
       setCloseSliderDisplay(snapshot.size>0?closeQuantityOverride/snapshot.size*100:0);
@@ -14159,11 +14220,31 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const slInput=q("rapidFireMasterSl");
     const tpInput=q("rapidFireTakeProfit");
     slInput.addEventListener("input",()=>previewProtection("sl",slInput),false);
-    tpInput.addEventListener("input",()=>previewProtection("tp",tpInput),false);
+    tpInput.addEventListener("input",()=>{
+      const bridge=api();
+      const hasLiveTakeProfit=!!(bridge&&bridge.snapshot().takeProfitOrder);
+      takeProfitEditValue=tpInput.value.trim()===""?null:tpInput.value;
+      pendingTakeProfitValue=hasLiveTakeProfit?null:takeProfitEditValue;
+      previewProtection("tp",tpInput);
+    },false);
     slInput.addEventListener("change",()=>{void commitProtection("sl",slInput);},false);
     slInput.addEventListener("keydown",event=>{if(event.key==="Enter")slInput.blur();},false);
-    tpInput.addEventListener("blur",()=>{const bridge=api();if(bridge&&typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");},false);
-    q("rapidFireTakeProfitSet").addEventListener("click",()=>{void commitProtection("tp",tpInput);},false);
+    const tpSet=q("rapidFireTakeProfitSet");
+    const tpProtectionBox=tpInput.closest(".rapid-fire-protection-box");
+    tpSet.addEventListener("mousedown",event=>event.preventDefault(),false);
+    tpProtectionBox.addEventListener("focusout",()=>{setTimeout(()=>{
+      if(tpProtectionBox.contains(document.activeElement))return;
+      const bridge=api();
+      if(!bridge||!bridge.snapshot().takeProfitOrder)return;
+      pendingTakeProfitValue=null;
+      takeProfitEditValue=null;
+      if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
+      render();
+    },0);},false);
+    tpSet.addEventListener("click",()=>{
+      const typedValue=takeProfitCommitValue(tpInput.value,takeProfitEditValue);
+      void commitProtection("tp",tpInput,typedValue);
+    },false);
     statusUnsubscribe=api().subscribe(detail=>{
       setStatus(detail.message,detail.tone);
       render();
