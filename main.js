@@ -17171,6 +17171,7 @@ startTradeAuto();
     refreshPosition:async()=>refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true,allowRestAdvance:true,source:"scalp-reconcile"}),
     reconcile:async()=>{const position=await refreshOpenPosition({silent:true,render:false,reconstructOnlyIfChanged:true,allowRestAdvance:true,source:"scalp-reconcile"});const orders=await requestAuthoritativeOrders21({reason:"scalp-reconcile",maxAgeMs:0});return{position,orders,sharedPosition:SHARED_POSITION_OWNER.snapshot()};},
     submitOrder:params=>tradingWrite("/fapi/v1/order","POST",params),
+    amendOrder:params=>tradingWrite("/fapi/v1/order","PUT",params),
     cancelOrder:params=>tradingWrite("/fapi/v1/order","DELETE",params),
     queryOrder:params=>signedBinanceRequest(tradingUrl("/fapi/v1/order"),"GET",params),
     submitAlgoOrder:params=>tradingWrite("/fapi/v1/algoOrder","POST",params),

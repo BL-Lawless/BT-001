@@ -1,14 +1,16 @@
 (() => {
   "use strict";
 
-  const WINDOW_KEY="btc_futures_chart_v13_rapid_fire_window_v2";
-  const CLOSE_PERCENT_STEPS=Object.freeze(Array.from({length:11},(_value,index)=>index*10));
+  const WINDOW_KEY="btc_futures_chart_v13_rapid_fire_window_v3";
+  const CLOSE_PERCENT_STEPS=Object.freeze(Array.from({length:101},(_value,index)=>index));
+  const CLOSE_PERCENT_TICKS=Object.freeze(Array.from({length:11},(_value,index)=>index*10));
   const REVERSE_PERCENT_STEPS=Object.freeze([25,...Array.from({length:28},(_value,index)=>(index+3)*10)]);
   let windowApi=null;
   let statusUnsubscribe=null;
   let refreshTimer=null;
   let selectedDirection="LONG";
   let doubleArmTimer=null;
+  let closeQuantityOverride=null;
 
   function q(id){return document.getElementById(id);}
   function api(){return window.CALCULATOR_MODULE&&window.CALCULATOR_MODULE.rapidFire;}
@@ -30,6 +32,16 @@
     const size=Math.max(0,number(sizeValue)||0);
     const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
     return {closed,remaining:size-closed};
+  }
+  function setCloseSliderDisplay(percentValue){
+    const slider=q("rapidFireClosePercent");
+    const text=q("rapidFireClosePercentText");
+    const value=Math.max(0,Math.min(100,number(percentValue)||0));
+    if(slider){
+      slider.value=String(value);
+      slider.style.setProperty("--rapid-fire-range-progress",value+"%");
+    }
+    if(text)text.textContent=Math.round(value)+"%";
   }
   function isOpen(){const win=q("rapidFireWindow");return !!(win&&!win.classList.contains("hidden"));}
 
@@ -84,15 +96,36 @@
     const bridge=api();
     if(!bridge)return;
     const closeSlider=q("rapidFireClosePercent");
-    const snapshot=bridge.snapshot({closePercent:closeSlider?closeSlider.value:100});
+    const slInput=q("rapidFireMasterSl");
+    const tpInput=q("rapidFireTakeProfit");
+    const slEditing=document.activeElement===slInput;
+    const tpEditing=document.activeElement===tpInput;
+    const snapshot=bridge.snapshot({
+      closePercent:closeSlider?closeSlider.value:100,
+      closeQty:closeQuantityOverride,
+      slPrice:slEditing?slInput.value:null,
+      tpPrice:tpEditing?tpInput.value:null
+    });
     const position=snapshot.position;
     if(position)selectedDirection=position.side;
-    const size=q("rapidFireSize");
+    const openSize=q("rapidFireOpenSize");
+    const closeSize=q("rapidFireCloseSize");
     const floating=q("rapidFirePl");
     const floatingPercent=q("rapidFirePlPercent");
-    if(size){
-      const {closed,remaining}=positionSizeParts(snapshot.size,snapshot.closeQty);
-      size.innerHTML=`<span class="rapid-fire-size-closed">${lot(closed,3)}</span><span class="rapid-fire-size-separator"> / </span><span class="rapid-fire-size-remaining">${lot(remaining,3)}</span>`;
+    const rules=bridge.lotRules();
+    const precision=Math.max(3,number(rules.precision)||3);
+    const {closed,remaining}=positionSizeParts(snapshot.size,snapshot.closeQty);
+    if(openSize)openSize.value=lot(remaining,precision);
+    if(closeSize){
+      closeSize.min="0.000";
+      closeSize.max=lot(snapshot.size,precision);
+      closeSize.step=String(rules.stepSize);
+      closeSize.dataset.precision=String(precision);
+      if(document.activeElement!==closeSize)closeSize.value=lot(closed,precision);
+    }
+    if(closeQuantityOverride!=null){
+      closeQuantityOverride=closed;
+      setCloseSliderDisplay(snapshot.closePercent);
     }
     if(floating){floating.textContent=money(snapshot.floatingPl);floating.style.color=moneyColor(snapshot.floatingPl);}
     if(floatingPercent){floatingPercent.textContent=percent(snapshot.floatingPlPercent);floatingPercent.style.color=moneyColor(snapshot.floatingPlPercent);}
@@ -106,7 +139,6 @@
       dir.setAttribute("aria-disabled",position?"true":"false");
       dir.title=position?"Direction follows the open position":"Click to switch LONG / SHORT";
     }
-    const rules=bridge.lotRules();
     const lotInput=q("rapidFireLot");
     if(lotInput){
       lotInput.min="0.000";
@@ -131,6 +163,16 @@
       q("rapidFireReverse").disabled=true;
       resetDoubleArm();
     }
+    const protectionBusy=!!snapshot.protectionBusy;
+    [slInput,tpInput].forEach(input=>{if(input)input.disabled=!position||protectionBusy;});
+    const tpSet=q("rapidFireTakeProfitSet");
+    if(tpSet)tpSet.disabled=!position||protectionBusy;
+    if(slInput&&document.activeElement!==slInput)slInput.value=snapshot.masterStopPrice==null?"":String(snapshot.masterStopPrice);
+    if(tpInput&&document.activeElement!==tpInput)tpInput.value=snapshot.takeProfitPrice==null?"":String(snapshot.takeProfitPrice);
+    const slPreview=q("rapidFireMasterSlPl");
+    const tpPreview=q("rapidFireTakeProfitPl");
+    if(slPreview){slPreview.textContent=money(snapshot.masterSlPl);slPreview.style.color=moneyColor(snapshot.masterSlPl);}
+    if(tpPreview){tpPreview.textContent=money(snapshot.takeProfitPl);tpPreview.style.color=moneyColor(snapshot.takeProfitPl);}
   }
   async function execute(config){
     const bridge=api();
@@ -163,6 +205,23 @@
     }catch(_error){}
     render();
   }
+  async function commitProtection(kind,input){
+    const bridge=api();
+    if(!bridge||!input)return;
+    const price=number(input.value);
+    if(!(price>0))return;
+    try{
+      const pending=kind==="sl"?bridge.setMasterStop(price):bridge.setTakeProfit(price);
+      render();
+      await pending;
+    }catch(_error){}
+    render();
+  }
+  function previewProtection(kind,input){
+    const bridge=api();
+    if(bridge&&typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft(kind,input.value);
+    render();
+  }
   function ensureWindow(){
     let win=q("rapidFireWindow");
     if(win)return win;
@@ -177,7 +236,8 @@
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Position Size</div><div class="rapid-fire-summary-value" id="rapidFireSize"><span class="rapid-fire-size-closed">0.000</span><span class="rapid-fire-size-separator"> / </span><span class="rapid-fire-size-remaining">0.000</span></div></div>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Open Size</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" value="0.000" readonly aria-label="Remaining open size"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close Size</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Close size"></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
@@ -200,18 +260,31 @@
           <div class="rapid-fire-action-row">
             <button class="rapid-fire-action-title" id="rapidFireClose" type="button">Close</button>
             <span class="rapid-fire-slider-shell">
-              ${sliderTicks(CLOSE_PERCENT_STEPS,0,100)}
+              ${sliderTicks(CLOSE_PERCENT_TICKS,0,100)}
               <input id="rapidFireClosePercent" type="range" min="0" max="100" step="1" value="100" aria-label="Close percentage">
             </span>
             <span class="rapid-fire-slider-value" id="rapidFireClosePercentText">100%</span>
           </div>
         </div>
         <div class="rapid-fire-status" id="rapidFireStatus" aria-live="polite"></div>
+        <div class="rapid-fire-protection-row" aria-label="Rapid Fire protection orders">
+          <label class="rapid-fire-protection-box">
+            <span class="rapid-fire-protection-label">SL</span>
+            <input id="rapidFireMasterSl" type="number" inputmode="decimal" min="0" placeholder="Price" aria-label="Master stop loss price">
+            <span class="rapid-fire-protection-pl" id="rapidFireMasterSlPl">-</span>
+          </label>
+          <label class="rapid-fire-protection-box">
+            <span class="rapid-fire-protection-label">TP</span>
+            <input id="rapidFireTakeProfit" type="number" inputmode="decimal" min="0" placeholder="Price" aria-label="Take profit price">
+            <button class="rapid-fire-protection-set" id="rapidFireTakeProfitSet" type="button">Set</button>
+            <span class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl">-</span>
+          </label>
+        </div>
       </div>`;
     document.body.appendChild(win);
     const floating=window.BT001FloatingWindow;
     if(floating&&typeof floating.install==="function"){
-      windowApi=floating.install(win,{header:q("rapidFireHead"),storageKey:WINDOW_KEY,minWidth:370,minHeight:258,defaultWidth:430,defaultHeight:258});
+      windowApi=floating.install(win,{header:q("rapidFireHead"),storageKey:WINDOW_KEY,minWidth:430,minHeight:272,defaultWidth:500,defaultHeight:284});
     }
     q("rapidFireCloseWindow").addEventListener("click",hide,false);
     q("rapidFireStatus").addEventListener("click",()=>setStatus(""),false);
@@ -224,6 +297,22 @@
       const bridge=api();
       const normalized=bridge.normalizeQuantity(event.target.value);
       event.target.value=lot(normalized.quantity,normalized.precision);
+    },false);
+    const closeSize=q("rapidFireCloseSize");
+    closeSize.addEventListener("input",event=>{
+      const bridge=api();
+      const snapshot=bridge.snapshot();
+      const normalized=bridge.normalizeQuantity(event.target.value);
+      closeQuantityOverride=normalized.executable?Math.min(snapshot.size,normalized.quantity):0;
+      setCloseSliderDisplay(snapshot.size>0?closeQuantityOverride/snapshot.size*100:0);
+      const typed=event.target.value;
+      render();
+      event.target.value=typed;
+    },false);
+    closeSize.addEventListener("change",event=>{
+      const precision=Math.max(3,number(event.target.dataset.precision)||3);
+      event.target.value=lot(closeQuantityOverride,precision);
+      render();
     },false);
     q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",direction:selectedDirection,quantity:q("rapidFireLot").value}),false);
     q("rapidFireDouble").addEventListener("click",()=>{
@@ -247,11 +336,19 @@
     q("rapidFireBreakeven").addEventListener("click",()=>{void lockBreakeven();},false);
     const closeSlider=q("rapidFireClosePercent");
     bindDiscreteSlider(closeSlider,q("rapidFireClosePercentText"),CLOSE_PERCENT_STEPS);
-    closeSlider.addEventListener("input",render,false);
-    q("rapidFireClose").addEventListener("click",()=>executeOrCancel({action:"close",percent:closeSlider.value}),false);
+    closeSlider.addEventListener("input",()=>{closeQuantityOverride=null;render();},false);
+    q("rapidFireClose").addEventListener("click",()=>executeOrCancel({action:"close",percent:closeSlider.value,quantity:closeQuantityOverride}),false);
     const reverseSlider=q("rapidFireReversePercent");
     bindDiscreteSlider(reverseSlider,q("rapidFireReversePercentText"),REVERSE_PERCENT_STEPS);
     q("rapidFireReverse").addEventListener("click",()=>executeOrCancel({action:"reverse",percent:reverseSlider.value}),false);
+    const slInput=q("rapidFireMasterSl");
+    const tpInput=q("rapidFireTakeProfit");
+    slInput.addEventListener("input",()=>previewProtection("sl",slInput),false);
+    tpInput.addEventListener("input",()=>previewProtection("tp",tpInput),false);
+    slInput.addEventListener("change",()=>{void commitProtection("sl",slInput);},false);
+    slInput.addEventListener("keydown",event=>{if(event.key==="Enter")slInput.blur();},false);
+    tpInput.addEventListener("blur",()=>{const bridge=api();if(bridge&&typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");},false);
+    q("rapidFireTakeProfitSet").addEventListener("click",()=>{void commitProtection("tp",tpInput);},false);
     statusUnsubscribe=api().subscribe(detail=>{
       setStatus(detail.message,detail.tone);
       render();

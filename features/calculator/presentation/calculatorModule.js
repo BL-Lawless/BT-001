@@ -97,6 +97,16 @@
   let rapidFireChaseContext = null;
   let rapidFireBreakevenBusy = false;
   let lastRapidFireBreakeven = null;
+  let rapidFireProtectionBusy = false;
+  let rapidFireProtectionAction = null;
+  let rapidFireMasterDraftPrice = null;
+  let rapidFireMasterStopOrder = null;
+  let rapidFireTakeProfitDraftPrice = null;
+  let rapidFireTakeProfitOrder = null;
+  let rapidFireProtectionFees = {symbol:"",takerRate:null,entryCommission:null,entryFeeSource:""};
+  let rapidFireProtectionReconcileTimer = null;
+  let rapidFireProtectionReconciling = false;
+  let rapidFireLiveOrderSyncTimer = null;
   const rapidFireStatusListeners = new Set();
   let rowChaseEngine = null;
   let activeRowChase = null;
@@ -648,7 +658,7 @@
     if(code==="expired") return {message:"Expired",tone:"error"};
     if(code==="no-price") return {message:"No price data",tone:"error"};
     if(code==="stopped"||code==="inactive") return {message:"Stopped",tone:"error"};
-    if(code==="breakeven") return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
+    if(["breakeven","master-sl","take-profit","reverse-protection-cancel"].includes(code))return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
     return {message:"Chasing — "+fillText+"%",tone:value.tone==="error"?"error":"normal"};
   }
   async function submitOpenPositionCloseChsLimit(livePos,quantity,price){
@@ -886,15 +896,36 @@
       margin
     };
   }
+  function rapidFireProtectionPl(entryPrice,exitPrice,quantity,side,options){
+    const entry=num(entryPrice);
+    const exit=num(exitPrice);
+    const qty=Math.max(0,num(quantity)||0);
+    if(!(entry>0&&exit>0&&qty>0)) return null;
+    const raw=(toUpper(side)==="SHORT"?entry-exit:exit-entry)*qty;
+    const opts=options||{};
+    if(!opts.feeAware)return raw;
+    const entryCommission=num(opts.entryCommission);
+    const exitRate=num(opts.exitRate);
+    if(!(entryCommission>=0&&exitRate>=0&&exitRate<1))return null;
+    return raw-entryCommission-exit*qty*exitRate;
+  }
   function rapidFireSnapshot(options){
     const opts=options||{};
     const position=rapidFirePositionSnapshot();
     const fullFloating=position?currentFloatingPl():null;
     const fullMargin=position?currentOpenPositionMargin(position):null;
-    const metrics=rapidFireCloseMetrics(fullFloating,fullMargin,opts.closePercent);
-    const requestedCloseQty=position?position.qty*metrics.closeRatio:0;
-    const normalizedClose=normalizeRapidFireQuantity(requestedCloseQty,{roundDown:true});
+    const directCloseQty=opts.closeQty==null?null:num(opts.closeQty);
+    const requestedCloseQty=position?(directCloseQty==null?position.qty*clamp(num(opts.closePercent)==null?100:num(opts.closePercent),0,100)/100:directCloseQty):0;
+    const normalizedClose=normalizeRapidFireQuantity(requestedCloseQty,directCloseQty==null?{roundDown:true}:{});
     const closeQty=normalizedClose.executable?Math.min(position?position.qty:0,normalizedClose.quantity):0;
+    const effectiveClosePercent=position&&position.qty>0?closeQty/position.qty*100:0;
+    const metrics=rapidFireCloseMetrics(fullFloating,fullMargin,effectiveClosePercent);
+    const typedSl=opts.slPrice==null?null:num(opts.slPrice);
+    const typedTp=opts.tpPrice==null?null:num(opts.tpPrice);
+    const liveMasterStopPrice=num(rapidFireMasterStopOrder&&rapidFireMasterStopOrder.price);
+    const liveTakeProfitPrice=num(rapidFireTakeProfitOrder&&rapidFireTakeProfitOrder.price);
+    const masterStopPrice=opts.slPrice!=null?(typedSl>0?typedSl:null):(liveMasterStopPrice>0?liveMasterStopPrice:null);
+    const takeProfitPrice=opts.tpPrice!=null?(typedTp>0?typedTp:null):(liveTakeProfitPrice>0?liveTakeProfitPrice:null);
     return {
       symbol:String(currentSymbol()),
       position,
@@ -905,9 +936,20 @@
       margin:metrics.margin,
       closePercent:metrics.closePercent,
       closeQty,
+      masterStopPrice,
+      takeProfitPrice,
+      masterSlPl:position?rapidFireProtectionPl(position.entry,masterStopPrice,position.qty,position.side,{
+        feeAware:true,
+        entryCommission:rapidFireProtectionFees.entryCommission,
+        exitRate:rapidFireProtectionFees.takerRate
+      }):null,
+      takeProfitPl:position?rapidFireProtectionPl(position.entry,takeProfitPrice,position.qty,position.side,{feeAware:false}):null,
+      protectionBusy:rapidFireProtectionBusy,
+      protectionAction:rapidFireProtectionAction,
+      takeProfitOrder:rapidFireTakeProfitOrder?{...rapidFireTakeProfitOrder}:null,
       active:!!rapidFireChaseContext,
-      busy:!!rapidFireChaseContext||rapidFireBreakevenBusy,
-      activeAction:rapidFireChaseContext&&rapidFireChaseContext.action||(rapidFireBreakevenBusy?"breakeven":null),
+      busy:!!rapidFireChaseContext||rapidFireBreakevenBusy||rapidFireProtectionBusy,
+      activeAction:rapidFireChaseContext&&rapidFireChaseContext.action||(rapidFireBreakevenBusy?"breakeven":rapidFireProtectionAction),
       lastBreakeven:lastRapidFireBreakeven,
       sharedSettings:{
         distTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0)),
@@ -1047,6 +1089,7 @@
       if(!(takerRate>=0&&takerRate<1)) throw new Error("Binance taker commission rate is unavailable.");
       const tickSize=num(settings&&settings.tickSize)||symbolTickSizeValue();
       const entryFee=rapidFireOpenEntryCommission(live,takerRate);
+      rapidFireProtectionFees={symbol,takerRate,entryCommission:entryFee.amount,entryFeeSource:entryFee.source};
       const breakeven=feeAwareBreakevenStop(live.entry,live.qty,entryFee.amount,live.side,takerRate,tickSize);
       const helper=window.BT001SymbolTradingSettings;
       const normalized=helper&&typeof helper.normalizePrice==="function"
@@ -1082,6 +1125,292 @@
     }finally{
       rapidFireBreakevenBusy=false;
     }
+  }
+  function normalizeRapidFireProtectionPrice(value,settings){
+    const raw=num(value);
+    if(!(raw>0))throw new Error("Price must be greater than zero.");
+    const helper=window.BT001SymbolTradingSettings;
+    const normalized=helper&&typeof helper.normalizePrice==="function"
+      ? helper.normalizePrice(raw,settings||helper.getCached(currentSymbol()))
+      : String(Number(raw.toFixed(8)));
+    if(!(num(normalized)>0))throw new Error("Price normalization failed.");
+    return String(normalized);
+  }
+  function setRapidFireProtectionDraft(kind,value){
+    const price=num(value);
+    if(kind==="sl"){
+      rapidFireMasterDraftPrice=price>0?price:null;
+      const stopInput=q("calcModuleStopLevel");
+      if(stopInput&&price>0){
+        stopInput.value=String(value);
+        masterStopMarkedForDeletion=false;
+        masterStopDraftDirty=true;
+        lastStopEdit="level";
+        syncStopFromLevel(readEntry().avg);
+      }
+    }else if(kind==="tp")rapidFireTakeProfitDraftPrice=price>0?price:null;
+    calculate();
+    return rapidFireSnapshot({slPrice:kind==="sl"?value:null,tpPrice:kind==="tp"?value:null});
+  }
+  function clearRapidFireProtectionDraft(kind){
+    if(kind==="sl")rapidFireMasterDraftPrice=null;
+    else if(kind==="tp")rapidFireTakeProfitDraftPrice=null;
+    calculate();
+    return rapidFireSnapshot();
+  }
+  async function refreshRapidFireProtectionFees(livePos,force){
+    const live=livePos||rapidFirePositionSnapshot();
+    const symbol=String(currentSymbol());
+    if(!live||!(num(live.qty)>0))return rapidFireProtectionFees;
+    if(!force&&rapidFireProtectionFees.symbol===symbol&&num(rapidFireProtectionFees.takerRate)>=0&&num(rapidFireProtectionFees.entryCommission)>=0)return rapidFireProtectionFees;
+    const gateway=window.BT001_BINANCE_TRADING;
+    if(!gateway||typeof gateway.commissionRate!=="function")return rapidFireProtectionFees;
+    const commission=await gateway.commissionRate(symbol);
+    const takerRate=num(commission&&commission.takerCommissionRate);
+    if(!(takerRate>=0&&takerRate<1))throw new Error("Binance taker commission rate is unavailable.");
+    const entryFee=rapidFireOpenEntryCommission(live,takerRate);
+    rapidFireProtectionFees={symbol,takerRate,entryCommission:entryFee.amount,entryFeeSource:entryFee.source};
+    return rapidFireProtectionFees;
+  }
+  function freshRapidFireTakeProfitClientId(){
+    return ("RF_TP_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,8)).slice(0,36);
+  }
+  function rapidFireTakeProfitIdentityParams(orderLike){
+    const source=orderLike||rapidFireTakeProfitOrder||{};
+    const send={symbol:String(source.symbol||currentSymbol())};
+    if(source.orderId!=null&&String(source.orderId).trim()!=="")send.orderId=String(source.orderId);
+    else if(source.clientOrderId)send.origClientOrderId=String(source.clientOrderId);
+    else throw new Error("Rapid Fire TP order identity is unavailable.");
+    return send;
+  }
+  function isRapidFireTakeProfitOrder(order){
+    if(!order||toUpper(order.symbol)!==toUpper(currentSymbol())||!isLiveOrder(order)||toUpper(order.type)!=="LIMIT")return false;
+    const current=rapidFireTakeProfitOrder;
+    if(current&&current.orderId!=null&&order.orderId!=null&&String(current.orderId)===String(order.orderId))return true;
+    if(current&&current.clientOrderId&&String(current.clientOrderId)===String(order.clientOrderId||""))return true;
+    if(/^RF_TP_/.test(String(order.clientOrderId||"")))return true;
+    const tracked=lookupTrackedOrderMeta(order);
+    return !!(tracked&&toUpper(tracked.owner)==="RAPID_FIRE"&&toUpper(tracked.roleType)==="EXIT");
+  }
+  function rapidFireTakeProfitMeta(order){
+    if(!order)return null;
+    return {
+      symbol:String(order.symbol||currentSymbol()),
+      side:toUpper(order.side),
+      positionSide:toUpper(order.positionSide||""),
+      orderId:order.orderId!=null?String(order.orderId):null,
+      clientOrderId:String(order.clientOrderId||""),
+      price:num(order.price),
+      quantity:Math.max(0,num(order.origQty!=null?order.origQty:order.quantity)||0)
+    };
+  }
+  function syncRapidFireMasterStopFromSnapshot(livePos,snapshot){
+    if(!snapshot||snapshot.algoFetchError)return rapidFireMasterStopOrder;
+    const found=livePos?findStopOrderForPosition(livePos,snapshot,true):null;
+    rapidFireMasterStopOrder=found&&found.order?{
+      symbol:String(found.order.symbol||currentSymbol()),
+      price:num(found.price),
+      meta:buildAlgoOrderMeta(found.order)
+    }:null;
+    currentStopAlgoMeta=rapidFireMasterStopOrder?rapidFireMasterStopOrder.meta:null;
+    const rfInput=q("rapidFireMasterSl");
+    const editing=!!(rfInput&&document.activeElement===rfInput);
+    if(rapidFireMasterStopOrder&&!editing){
+      const stopInput=q("calcModuleStopLevel");
+      if(stopInput)stopInput.value=String(rapidFireMasterStopOrder.price);
+      masterStopDraftDirty=false;
+      masterStopMarkedForDeletion=false;
+      rapidFireMasterDraftPrice=null;
+      lastStopEdit="level";
+      syncStopFromLevel(num(livePos&&livePos.entry));
+    }
+    refreshMasterStopDeleteVisualState();
+    return rapidFireMasterStopOrder;
+  }
+  function syncRapidFireTakeProfitFromSnapshot(snapshot){
+    if(!snapshot||snapshot.normalFetchError)return rapidFireTakeProfitOrder;
+    const hadTrackedOrder=!!rapidFireTakeProfitOrder;
+    const found=[].concat(snapshot.normalOrders||[]).find(isRapidFireTakeProfitOrder)||null;
+    rapidFireTakeProfitOrder=found?rapidFireTakeProfitMeta(found):null;
+    if(found)rapidFireTakeProfitDraftPrice=num(found.price);
+    else if(hadTrackedOrder)rapidFireTakeProfitDraftPrice=null;
+    return rapidFireTakeProfitOrder;
+  }
+  async function warmRapidFireProtection(){
+    try{
+      const [live,snapshot]=await Promise.all([signedPosition(),readOpenOrdersSnapshot()]);
+      syncRapidFireMasterStopFromSnapshot(live,snapshot);
+      syncRapidFireTakeProfitFromSnapshot(snapshot);
+      if(live)await refreshRapidFireProtectionFees(live,true);
+      calculate();
+    }catch(_error){}
+  }
+  function scheduleRapidFireLiveOrderSync(){
+    if(rapidFireLiveOrderSyncTimer!=null)clearTimeout(rapidFireLiveOrderSyncTimer);
+    rapidFireLiveOrderSyncTimer=setTimeout(()=>{
+      rapidFireLiveOrderSyncTimer=null;
+      if(window.BT001_RAPID_FIRE_VISIBLE===true)void warmRapidFireProtection();
+    },120);
+  }
+  async function executeRapidFireMasterStop(priceValue){
+    if(rapidFireProtectionBusy)throw new Error("A Rapid Fire protection update is already active.");
+    if(rapidFireChaseContext)throw new Error("A Rapid Fire action is already active.");
+    if(typeof hasKeys!=="function"||!hasKeys())throw new Error("API keys required.");
+    rapidFireProtectionBusy=true;
+    rapidFireProtectionAction="master-sl";
+    publishRapidFireStatus({statusCode:"master-sl",message:"Updating Master SL...",tone:"normal"});
+    try{
+      const symbol=String(currentSymbol());
+      const off=typeof timeOffset==="function"?await timeOffset():0;
+      const settingsApi=window.BT001SymbolTradingSettings;
+      const [live,settings]=await Promise.all([signedPosition({off}),settingsApi&&typeof settingsApi.get==="function"?settingsApi.get(symbol):Promise.resolve(null)]);
+      if(!live||!(num(live.qty)>0))throw new Error("No open position.");
+      await refreshRapidFireProtectionFees(live,true);
+      const normalized=normalizeRapidFireProtectionPrice(priceValue,settings);
+      const level=num(normalized);
+      rapidFireMasterDraftPrice=level;
+      const stopInput=q("calcModuleStopLevel");
+      if(!stopInput)throw new Error("Calculator Master SL field is unavailable.");
+      stopInput.value=normalized;
+      masterStopMarkedForDeletion=false;
+      masterStopDraftDirty=true;
+      lastStopEdit="level";
+      syncStopFromLevel(live.entry);
+      markSendPlanStale("Master SL changed by Rapid Fire.");
+      calculate();
+      const write=await replaceMasterStopAtBreakeven(live,level,off);
+      rapidFireMasterStopOrder={symbol,price:level,meta:currentStopAlgoMeta};
+      rapidFireMasterDraftPrice=null;
+      publishRapidFireStatus({statusCode:"master-sl",message:"Master SL updated — "+normalized,tone:"normal"});
+      try{await readBinance({preserveSendPlan:true,source:"postSendRefresh",off});}catch(_ignored){}
+      return Object.freeze({symbol,price:level,orderType:"STOP_MARKET",replaced:write.replaced,unchanged:write.unchanged});
+    }catch(error){
+      rapidFireMasterDraftPrice=null;
+      try{
+        const [live,snapshot]=await Promise.all([signedPosition(),readOpenOrdersSnapshot()]);
+        syncRapidFireMasterStopFromSnapshot(live,snapshot);
+      }catch(_ignored){}
+      publishRapidFireStatus({statusCode:"master-sl",message:"Master SL failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+      throw error;
+    }finally{
+      rapidFireProtectionBusy=false;
+      rapidFireProtectionAction=null;
+    }
+  }
+  async function executeRapidFireTakeProfit(priceValue,options){
+    const opts=options||{};
+    if(rapidFireProtectionBusy&&!opts.reconcile)throw new Error("A Rapid Fire protection update is already active.");
+    if(rapidFireChaseContext&&!opts.reconcile)throw new Error("A Rapid Fire action is already active.");
+    if(typeof hasKeys!=="function"||!hasKeys())throw new Error("API keys required.");
+    const ownsBusy=!rapidFireProtectionBusy;
+    if(ownsBusy){rapidFireProtectionBusy=true;rapidFireProtectionAction="take-profit";}
+    if(!opts.silent)publishRapidFireStatus({statusCode:"take-profit",message:"Updating TP...",tone:"normal"});
+    try{
+      const gateway=window.BT001_BINANCE_TRADING;
+      if(!gateway)throw new Error("Binance trading gateway is unavailable.");
+      const symbol=String(currentSymbol());
+      const settingsApi=window.BT001SymbolTradingSettings;
+      const [live,settings,snapshot]=await Promise.all([
+        signedPosition(),
+        settingsApi&&typeof settingsApi.get==="function"?settingsApi.get(symbol):Promise.resolve(null),
+        readOpenOrdersSnapshot()
+      ]);
+      if(!live||!(num(live.qty)>0))throw new Error("No open position.");
+      syncRapidFireTakeProfitFromSnapshot(snapshot);
+      const normalizedPrice=normalizeRapidFireProtectionPrice(priceValue,settings);
+      const normalizedQty=normalizeRapidFireQuantity(live.qty);
+      if(!normalizedQty.executable)throw new Error("Full open-position quantity is not executable.");
+      const orderSide=live.side==="SHORT"?"BUY":"SELL";
+      const positionSide=toUpper(live.positionSide||"");
+      let response;
+      let amended=false;
+      if(rapidFireTakeProfitOrder){
+        if(typeof gateway.amendOrder!=="function")throw new Error("Binance TP amendment is unavailable.");
+        const identity=rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder);
+        const originalOrderId=rapidFireTakeProfitOrder.orderId;
+        response=await gateway.amendOrder({...identity,side:orderSide,quantity:normalizedQty.text,price:normalizedPrice});
+        if(!binanceWriteConfirmed(response))throw new Error("Unexpected Binance TP amend response.");
+        if(originalOrderId!=null&&response&&response.orderId!=null&&String(response.orderId)!==String(originalOrderId))throw new Error("Binance TP amend changed the order ID.");
+        amended=true;
+      }else{
+        if(typeof gateway.submitOrder!=="function")throw new Error("Binance TP submission is unavailable.");
+        const clientOrderId=freshRapidFireTakeProfitClientId();
+        const send={symbol,side:orderSide,type:"LIMIT",timeInForce:"GTX",quantity:normalizedQty.text,price:normalizedPrice,newClientOrderId:clientOrderId};
+        if(positionSide==="LONG"||positionSide==="SHORT")send.positionSide=positionSide;
+        else send.reduceOnly="true";
+        response=await gateway.submitOrder(send);
+        if(!binanceWriteConfirmed(response))throw new Error("Unexpected Binance TP placement response.");
+        registerTrackedOrderMeta({
+          symbol,side:orderSide,positionSide:send.positionSide||"",roleCode:"E",roleType:"EXIT",owner:"RAPID_FIRE",
+          orderId:response&&response.orderId!=null?response.orderId:null,
+          clientOrderId:String(response&&response.clientOrderId||clientOrderId)
+        });
+      }
+      rapidFireTakeProfitOrder={
+        symbol,side:orderSide,positionSide,
+        orderId:response&&response.orderId!=null?String(response.orderId):rapidFireTakeProfitOrder&&rapidFireTakeProfitOrder.orderId||null,
+        clientOrderId:String(response&&response.clientOrderId||rapidFireTakeProfitOrder&&rapidFireTakeProfitOrder.clientOrderId||""),
+        price:num(normalizedPrice),quantity:normalizedQty.quantity
+      };
+      rapidFireTakeProfitDraftPrice=null;
+      if(!opts.silent)publishRapidFireStatus({statusCode:"take-profit",message:"TP "+(amended?"amended":"placed")+" — "+normalizedPrice+" × "+normalizedQty.text,tone:"normal"});
+      calculate();
+      return Object.freeze({...rapidFireTakeProfitOrder,amended,orderType:"LIMIT",timeInForce:"GTX",reduceOnly:true});
+    }catch(error){
+      rapidFireTakeProfitDraftPrice=null;
+      try{syncRapidFireTakeProfitFromSnapshot(await readOpenOrdersSnapshot());}catch(_ignored){}
+      if(!opts.silent)publishRapidFireStatus({statusCode:"take-profit",message:"TP failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+      throw error;
+    }finally{
+      if(ownsBusy){rapidFireProtectionBusy=false;rapidFireProtectionAction=null;}
+    }
+  }
+  async function cancelRapidFireProtections(){
+    const gateway=window.BT001_BINANCE_TRADING;
+    const [live,snapshot]=await Promise.all([signedPosition(),readOpenOrdersSnapshot()]);
+    syncRapidFireTakeProfitFromSnapshot(snapshot);
+    const master=live?findStopOrderForPosition(live,snapshot,true):null;
+    const jobs=[];
+    if(master&&master.order){
+      const meta=buildAlgoOrderMeta(master.order);
+      const send={symbol:String(meta.symbol||currentSymbol())};
+      if(meta.algoId!=null)send.algoId=String(meta.algoId);
+      else if(meta.clientAlgoId)send.clientAlgoId=String(meta.clientAlgoId);
+      if(send.algoId||send.clientAlgoId)jobs.push(signedAlgoOrderWrite("DELETE",send));
+    }
+    if(rapidFireTakeProfitOrder){
+      if(!gateway||typeof gateway.cancelOrder!=="function")throw new Error("Binance trading gateway is unavailable.");
+      jobs.push(gateway.cancelOrder(rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder)));
+    }
+    const settled=await Promise.allSettled(jobs);
+    const failed=settled.find(item=>item.status==="rejected"||!binanceWriteConfirmed(item.value));
+    if(failed)throw failed.reason||new Error("Protection cancellation was not confirmed.");
+    currentStopAlgoMeta=null;
+    clearMasterStopBinanceState();
+    rapidFireMasterDraftPrice=null;
+    rapidFireMasterStopOrder=null;
+    rapidFireTakeProfitOrder=null;
+    rapidFireTakeProfitDraftPrice=null;
+    calculate();
+    return {cancelled:jobs.length};
+  }
+  async function reconcileRapidFireTakeProfitQuantity(){
+    if(rapidFireProtectionReconciling||rapidFireProtectionBusy||!rapidFireTakeProfitOrder)return;
+    rapidFireProtectionReconciling=true;
+    try{
+      const live=await signedPosition();
+      if(!live||!(num(live.qty)>0))return;
+      const normalized=normalizeRapidFireQuantity(live.qty);
+      if(!normalized.executable||Math.abs(normalized.quantity-(num(rapidFireTakeProfitOrder.quantity)||0))<=Math.max(1e-12,normalized.stepSize*1e-6))return;
+      await executeRapidFireTakeProfit(rapidFireTakeProfitOrder.price,{reconcile:true,silent:true});
+      publishRapidFireStatus({statusCode:"take-profit",message:"TP quantity amended in place — "+normalized.text,tone:"normal"});
+    }catch(error){
+      publishRapidFireStatus({statusCode:"take-profit",message:"TP quantity amend failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+    }finally{rapidFireProtectionReconciling=false;}
+  }
+  function scheduleRapidFireTakeProfitReconcile(){
+    if(rapidFireProtectionReconcileTimer!=null)clearTimeout(rapidFireProtectionReconcileTimer);
+    rapidFireProtectionReconcileTimer=setTimeout(()=>{rapidFireProtectionReconcileTimer=null;void reconcileRapidFireTakeProfitQuantity();},120);
   }
   function publishRapidFireStatus(state){
     const formatted=formatChaseExecutionStatus(state||{});
@@ -1167,6 +1496,7 @@
         publishRapidFireStatus(state);
         calculate();
         try{await readBinance({preserveSendPlan:true,source:"postSendRefresh"});}catch(_ignored){}
+        scheduleRapidFireTakeProfitReconcile();
       }
     });
     return rapidFireChaseEngine;
@@ -1175,11 +1505,17 @@
     const input=config||{};
     const action=String(input.action||"add").toLowerCase();
     if(rapidFireChaseContext) throw new Error("A Rapid Fire action is already active.");
+    if(rapidFireProtectionBusy||rapidFireBreakevenBusy)throw new Error("A Rapid Fire protection update is already active.");
     if(openPositionCloseChs.active||openPositionCloseUi.sending) throw new Error("OTF execution is active. Cancel it first.");
     if(typeof hasKeys!=="function"||!hasKeys()) throw new Error("API keys required.");
     const startingContext={starting:true,action};
     rapidFireChaseContext=startingContext;
     try{
+      if(action==="reverse"){
+        publishRapidFireStatus({active:true,statusCode:"reverse-protection-cancel",message:"Cancelling Master SL and TP...",tone:"normal"});
+        await cancelRapidFireProtections();
+        if(rapidFireChaseContext!==startingContext)return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
+      }
       const live=await signedPosition();
       if(rapidFireChaseContext!==startingContext) return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
       const hasPosition=!!(live&&num(live.qty)>0);
@@ -1193,7 +1529,7 @@
       let roleType="CHASE_ADD";
       if(action==="double") requested=Math.abs(num(live.qty)||0);
       else if(action==="close"){
-        requested=Math.abs(num(live.qty)||0)*clamp(num(input.percent)||0,0,100)/100;
+        requested=input.quantity!=null?Math.max(0,num(input.quantity)||0):Math.abs(num(live.qty)||0)*clamp(num(input.percent)||0,0,100)/100;
         orderSide=liveSide==="SHORT"?"BUY":"SELL";
         roleType="CHASE_CLOSE";
       }else if(action==="reverse"){
@@ -4388,7 +4724,7 @@
           : "Entry " + (manualEntryNumbers.get(item.row) || 1) + " | " + Number(item.lot).toFixed(3)
       };
     });
-    const exitRows = exits.map((item,index) => {
+    let exitRows = exits.map((item,index) => {
       const needsReview = !!(item.row && item.row.dataset && item.row.dataset.needsReview === "1");
       const meta = item.row && item.row.__binanceLimitOrderMeta ? item.row.__binanceLimitOrderMeta : (item.row && item.row.dataset && item.row.dataset.calcRowId ? binanceLimitRowMetaByRowId.get(item.row.dataset.calcRowId) : null);
       const sourceStyle = needsReview
@@ -4415,6 +4751,31 @@
         text:"Ext " + (index + 1) + " | " + Number(item.lot).toFixed(3) + " | " + fmtChartMoney(pl)
       };
     });
+    const rapidTpPrice=rapidFireTakeProfitDraftPrice>0?rapidFireTakeProfitDraftPrice:num(rapidFireTakeProfitOrder&&rapidFireTakeProfitOrder.price);
+    if(rapidTpPrice>0&&entryAvg!=null&&entryQty>0){
+      const rapidTpKey=orderKeyFromMeta(rapidFireTakeProfitOrder);
+      const rapidTpPl=rapidFireProtectionPl(entryAvg,rapidTpPrice,entryQty,direction,{feeAware:false});
+      const mappedTp=rapidFireTakeProfitDraftPrice>0?null:exitRows.find(item=>rapidTpKey&&item.orderKey===rapidTpKey);
+      if(mappedTp){
+        Object.assign(mappedTp,{sourceStyle:"rapid-fire-tp",rapidFireProtection:true,pl:rapidTpPl,text:"TP | "+Number(entryQty).toFixed(3)+" | "+fmtChartMoney(rapidTpPl)});
+      }else{
+        if(rapidTpKey)exitRows=exitRows.filter(item=>item.orderKey!==rapidTpKey);
+        exitRows.push({
+          type:"exit",
+          level:rapidTpPrice,
+          lot:entryQty,
+          row:null,
+          openPosition:false,
+          binanceBacked:!!rapidFireTakeProfitOrder,
+          pendingSend:rapidFireProtectionAction==="take-profit",
+          orderKey:rapidTpKey,
+          sourceStyle:"rapid-fire-tp",
+          rapidFireProtection:true,
+          pl:rapidTpPl,
+          text:"TP | "+Number(entryQty).toFixed(3)+" | "+fmtChartMoney(rapidTpPl)
+        });
+      }
+    }
     const stopRow = slLevel != null && slLevel > 0 ? {
       type:"master-sl",
       level:slLevel,
@@ -4424,6 +4785,7 @@
       pendingSend:masterStopPendingSend(),
       orderKey:orderKeyFromMeta(currentStopAlgoMeta),
       sourceStyle:masterStopMarkedForDeletion ? "marked-delete" : "sl",
+      rapidFireProtection:rapidFireMasterDraftPrice>0,
       text:(masterStopMarkedForDeletion ? "Master SL Delete | " : "Master SL | ") + fmtLot(stopMath.remainingQty || 0) + " | " + fmtChartMoney(stopMath.total)
     } : null;
     const partialStopRows = visualLevelDistanceSort(stopMath.partialStops,currentPriceReference()).map((item,index) => ({
@@ -4679,7 +5041,7 @@
       overlayRows.partialStops || [],
       overlayRows.newAverage ? [overlayRows.newAverage] : []
     )
-      .filter(item => item && (calculatorOpen ? levelsVisible : ((item.binanceBacked || item.openPosition) && showOrders)))
+      .filter(item => item && (calculatorOpen ? levelsVisible : (((item.binanceBacked || item.openPosition) && showOrders)||(window.BT001_RAPID_FIRE_VISIBLE===true&&item.rapidFireProtection))))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
         const text = item.openPosition
@@ -7697,6 +8059,8 @@
       }
 
       if(snapshot){
+        syncRapidFireMasterStopFromSnapshot(pos,snapshot);
+        syncRapidFireTakeProfitFromSnapshot(snapshot);
         applyRowChaseOrderSuppression(snapshot,opts.suppressNormalOrderIdentity);
         if(opts.preserveSendPlan) detectCalculatorOrderExecutions(snapshot);
         mapped = mapLimitOrdersForCalculator(snapshot,pos ? pos.side : direction);
@@ -8041,6 +8405,7 @@
       await addManualRow("calcModulePartialStopRows");
     },false);
     q("calcModuleStopLevel").addEventListener("input",() => {
+      rapidFireMasterDraftPrice = null;
       if(isMasterStopMarkedForDeletion()) setMasterStopMarkedForDeletion(false,{skipStale:true});
       masterStopDraftDirty = true;
       normalizeLevelInput(q("calcModuleStopLevel"));
@@ -8150,12 +8515,18 @@
         normalizeQuantity:normalizeRapidFireQuantity,
         execute:executeRapidFireChase,
         breakevenLock:executeRapidFireBreakevenLock,
+        setProtectionDraft:setRapidFireProtectionDraft,
+        clearProtectionDraft:clearRapidFireProtectionDraft,
+        setMasterStop:executeRapidFireMasterStop,
+        setTakeProfit:executeRapidFireTakeProfit,
+        cancelProtections:cancelRapidFireProtections,
         cancel:cancelRapidFireChase,
         isActive:()=>!!rapidFireChaseContext,
         setVisible(active){
           setTopOfBookVisibilityConsumer("rapid-fire",active===true);
           setOrdersVisibilityConsumer("rapid-fire",active===true);
-          if(active) warmTopOfBook();
+          if(active){warmTopOfBook();void warmRapidFireProtection();}
+          else{rapidFireMasterDraftPrice=null;rapidFireTakeProfitDraftPrice=null;calculate();}
         },
         subscribe(listener){
           if(typeof listener!=="function") return ()=>{};
@@ -8168,12 +8539,15 @@
       window.__calculatorOpenPositionReconcileBound = true;
       window.addEventListener("v13:open-position-change",event => {
         scheduleOpenPositionReconcile(event && event.detail);
+        scheduleRapidFireLiveOrderSync();
+        scheduleRapidFireTakeProfitReconcile();
       },false);
     }
     if(!window.__calculatorBinanceStateReconcileBound){
       window.__calculatorBinanceStateReconcileBound = true;
       window.addEventListener("v14:binance-state-change",event => {
         scheduleBinanceStateReconcile(event && event.detail);
+        scheduleRapidFireLiveOrderSync();
       },false);
     }
     if(!document.__calculatorAutoSyncVisibilityBound){

@@ -15,10 +15,11 @@ const css=fs.readFileSync(path.join(__dirname,"rapid-fire.css"),"utf8");
 
 assert(html.indexOf('id="rapidFireBtn"')<html.indexOf('id="ssscDashBtn"'),"Rapid Fire trigger must sit immediately left of SSSC");
 assert(bootstrap.includes('await loadScript("features/rapid-fire/rapidFireModule.js")'),"Rapid Fire must load after Calculator exposes its execution bridge");
-for(const id of ["rapidFireWindow","rapidFireSize","rapidFirePl","rapidFirePlPercent","rapidFireDir","rapidFireLot","rapidFireAdd","rapidFireDouble","rapidFireBreakeven","rapidFireClose","rapidFireClosePercent","rapidFireReverse","rapidFireReversePercent","rapidFireStatus"]){
+for(const id of ["rapidFireWindow","rapidFireOpenSize","rapidFireCloseSize","rapidFirePl","rapidFirePlPercent","rapidFireDir","rapidFireLot","rapidFireAdd","rapidFireDouble","rapidFireBreakeven","rapidFireClose","rapidFireClosePercent","rapidFireReverse","rapidFireReversePercent","rapidFireStatus","rapidFireMasterSl","rapidFireMasterSlPl","rapidFireTakeProfit","rapidFireTakeProfitSet","rapidFireTakeProfitPl"]){
   assert(rapid.includes(id),`Rapid Fire must render ${id}`);
 }
 assert(rapid.includes("storageKey:WINDOW_KEY")&&rapid.includes("window.BT001FloatingWindow"),"Rapid Fire must use persisted shared floating-window behavior");
+assert(rapid.includes('WINDOW_KEY="btc_futures_chart_v13_rapid_fire_window_v3"'),"Rapid Fire must bump its persisted geometry key after compacting the window");
 assert(rapid.includes('id="rapidFireDir" type="button">LONG</button>')&&!rapid.includes("rapid-fire-dir-label"),"DIR selector must display only LONG or SHORT without a DIR label");
 assert(css.includes(".rapid-fire-dir.is-long")&&css.includes(".rapid-fire-dir.is-short")&&css.includes("rgba(31,41,55,.42)"),"DIR selector must use pale directional styling with a thin dark edge");
 assert(/\.rapid-fire-dir\.is-locked\{[^}]*font-weight:700/s.test(css)&&css.includes(".rapid-fire-dir.is-locked.is-long{color:#166534}")&&css.includes(".rapid-fire-dir.is-locked.is-short{color:#991b1b}"),"locked DIR text must remain bold and direction-colored without replacing the pale box");
@@ -31,29 +32,42 @@ assert.equal((rapid.match(/id="rapidFireReverse"/g)||[]).length,1,"Reverse must 
 assert(rapid.includes('id="rapidFireClose" type="button">Close</button>')&&rapid.includes('id="rapidFireReverse" type="button">Reverse</button>'),"row titles must be the only Close and Reverse triggers");
 assert(rapid.includes('actionLabels={add:"ADD",double:"DBL",close:"Close",reverse:"Reverse"'),"action buttons must return to their shortened labels when idle");
 assert(rapid.indexOf('id="rapidFireReverse"')<rapid.indexOf('id="rapidFireClose"'),"Reverse row must render above Close");
-assert(rapid.indexOf('id="rapidFireStatus"')>rapid.indexOf('id="rapidFireClosePercentText"'),"status must be the full-width bottom row");
+assert(rapid.indexOf('id="rapidFireStatus"')>rapid.indexOf('id="rapidFireClosePercentText"')&&rapid.indexOf('rapid-fire-protection-row')>rapid.indexOf('id="rapidFireStatus"'),"status must span the width above the new protection row");
 assert(rapid.includes("bridge.breakevenLock()")&&calculator.includes("breakevenLock:executeRapidFireBreakevenLock"),"B.E. must call the Calculator execution bridge");
 assert(calculator.includes('timeInForce:"GTX"')&&calculator.includes('owner:"RAPID_FIRE"'),"Rapid Fire writes must use tracked GTX orders");
+assert(main.includes('amendOrder:params=>tradingWrite("/fapi/v1/order","PUT",params)')&&calculator.includes("gateway.amendOrder")&&calculator.includes("originalOrderId"),"RF TP must amend price and full-position quantity in place through Binance's direct gateway");
+assert(calculator.includes('if(typeof gateway.submitOrder!=="function")throw new Error("Binance TP submission is unavailable.")')&&calculator.includes("response=await gateway.submitOrder(send)"),"new RF TP orders must reach the direct Binance submitOrder gateway");
+assert(calculator.includes('("RF_TP_"+Date.now()')&&calculator.includes("/^RF_TP_/.test"),"RF TP must carry and rediscover its dedicated clientOrderId prefix");
+assert(calculator.includes('else send.reduceOnly="true"')&&calculator.includes('roleType:"EXIT",owner:"RAPID_FIRE"'),"RF TP must be a tracked reduce-only exit independent of Calculator send");
 assert(calculator.includes('gateway.commissionRate(symbol)')&&calculator.includes('type:"STOP_MARKET"'),"B.E. must use the live Binance commission rate and existing STOP_MARKET path");
 assert(calculator.includes('source:"actual-open-fill-commission"')&&calculator.includes("marker.fee"),"B.E. must prefer the actual allocated entry commission already paid");
 assert(calculator.includes('requested=Math.max(0,num(liveQtyValue)||0)*(1+clamp(num(reversePercent)||0,25,300)/100)'),"Reverse quantity must be position size times one plus the selected percentage");
 assert(calculator.includes("openPositionCloseUi.chsDistTicks")&&calculator.includes("openPositionCloseUi.chsValidKey"),"Rapid Fire must consume OTF's shared chase settings");
 assert(calculator.includes('if(action!=="add"&&!hasPosition)')&&calculator.includes('hasPosition?liveSide'),"DIR must follow an open position while flat Add can use the selected direction");
 assert(calculator.includes('if(action==="double") requested=Math.abs(num(live.qty)||0)')&&rapid.includes('quantity:q("rapidFireLot").value'),"Double must use live position size independently of Add's lot input");
-assert(rapid.includes('bridge.snapshot({closePercent:closeSlider?closeSlider.value:100})')&&!rapid.includes('closePercent:reverseSlider'),"only the Close slider may drive Rapid Fire summary P/L");
+assert(rapid.includes("closePercent:closeSlider?closeSlider.value:100")&&rapid.includes("closeQty:closeQuantityOverride")&&!rapid.includes('closePercent:reverseSlider'),"only the Close controls may drive Rapid Fire summary P/L");
 assert(calculator.includes('setOrdersVisibilityConsumer("rapid-fire",active===true)')&&calculator.includes("function effectiveOrdersVisible()"),"Rapid Fire visibility must force the existing Orders overlay mechanism without overwriting manual state");
-assert(css.includes("grid-template-columns:repeat(3,minmax(0,1fr))")&&css.includes("border:1px solid #e6e8ea"),"Rapid Fire summary must match Calculator's white bordered-cell style");
-assert(css.includes("height:258px")&&css.includes("min-height:258px"),"Rapid Fire window must fit its content without the former dead space");
+assert(css.includes("grid-template-columns:repeat(4,minmax(0,1fr))")&&css.includes("border:1px solid #e6e8ea"),"Open Size, Close Size, and P/L summary boxes must share Calculator's bordered-cell style");
+assert(css.includes("height:284px")&&css.includes("min-height:272px")&&rapid.includes("minHeight:272,defaultWidth:500,defaultHeight:284"),"Rapid Fire must open compactly and permit resizing below the default height");
 assert(/\.rapid-fire-lot\{[^}]*width:100%/s.test(css)&&css.includes("grid-template-columns:82px 86px repeat(3,minmax(0,1fr))"),"DIR must match the row-title width while ADD, DBL, and B.E. share the remaining width equally");
-assert(/\.rapid-fire-status\{[^}]*width:100%;[^}]*height:34px/s.test(css),"status must be a full-width single-line bottom row");
+assert(/\.rapid-fire-status\{[^}]*width:100%;[^}]*height:34px/s.test(css),"status must remain a full-width single-line row");
 assert(css.includes(".rapid-fire-slider-ticks i")&&rapid.includes("sliderTicks(REVERSE_PERCENT_STEPS,25,300,100)"),"both sliders must render discrete tick markers");
 assert(css.includes(".rapid-fire-slider-ticks i.is-reference{background:#4b5563}")&&css.includes(".rapid-fire-reverse-slider::-moz-range-progress"),"Reverse must emphasize 100 percent and suppress its progress fill");
 assert(rapid.includes('q("rapidFireStatus").addEventListener("click",()=>setStatus(""),false)'),"clicking RF status must clear its message");
-assert(rapid.includes('rapid-fire-summary-label">Position Size')&&!rapid.includes("Open Position Size"),"position summary must use the shortened label");
-assert(rapid.includes("snapshot.closeQty")&&rapid.includes("rapid-fire-size-closed")&&rapid.includes("rapid-fire-size-remaining"),"position size must always render closed and remaining quantities");
-assert(css.includes(".rapid-fire-size-closed{color:#4b5563}")&&css.includes(".rapid-fire-size-remaining{color:#111}"),"closed quantity must be dark grey and remaining quantity black");
+assert(rapid.includes('rapid-fire-summary-label">Open Size')&&rapid.includes('rapid-fire-summary-label">Close Size'),"the former x/y Position Size display must be replaced by separate Open Size and Close Size boxes");
+assert(rapid.includes('id="rapidFireOpenSize"')&&rapid.includes("readonly")&&rapid.includes('id="rapidFireCloseSize"')&&rapid.includes('closeSize.addEventListener("input"'),"Open Size must be read-only while Close Size is directly editable");
 assert(css.includes("background:#aeb4bc")&&css.includes("background:#6b7280")&&rapid.includes('--rapid-fire-range-progress'),"slider fill must be lighter grey without changing the thumb color");
-assert(calculator.includes("const normalizedClose=normalizeRapidFireQuantity(requestedCloseQty,{roundDown:true})")&&calculator.includes("normalizedClose.executable?")&&rapid.includes("remaining:size-closed"),"Close display must round only the executable close quantity and derive remainder by subtraction");
+assert(calculator.includes('directCloseQty==null?{roundDown:true}:{}')&&calculator.includes("normalizedClose.executable?")&&rapid.includes("remaining:size-closed"),"Close Size must be normalized once and Open Size derived by exact subtraction");
+assert(rapid.includes("const CLOSE_PERCENT_STEPS=Object.freeze(Array.from({length:101},(_value,index)=>index))")&&rapid.includes('step="1"')&&rapid.includes("Math.round(value)+\"%\""),"Close must move in one-percent steps with a whole-number readout");
+assert(calculator.includes("rapidFireProtectionPl")&&calculator.includes("raw-entryCommission-exit*qty*exitRate")&&calculator.includes("takeProfitPl")&&calculator.includes("feeAware:false"),"Master SL preview must include entry/exit fees while TP preview remains raw");
+assert(calculator.includes("await cancelRapidFireProtections()")&&calculator.indexOf("await cancelRapidFireProtections()")<calculator.indexOf("const live=await signedPosition();",calculator.indexOf("async function executeRapidFireChase")),"Reverse must cancel Master SL and TP before reading and submitting the reverse chase");
+assert(calculator.includes('rapidFireProtection:true')&&calculator.includes('text:"TP | "'),"RF SL and TP drafts must feed Calculator's chart-level overlay");
+assert(rapid.includes('rapid-fire-protection-label">SL</span>')&&!rapid.includes('rapid-fire-protection-label">Master SL</span>'),"the RF protection label must be SL");
+assert(/\.rapid-fire-protection-box input\{[^}]*width:82px;[^}]*min-width:82px;[^}]*max-width:82px;/s.test(css),"SL and TP price inputs must share one fixed width");
+assert(rapid.includes('id="rapidFireTakeProfitSet" type="button">Set</button>')&&rapid.includes('q("rapidFireTakeProfitSet").addEventListener("click",()=>{void commitProtection("tp",tpInput);},false)'),'TP Set must be the explicit TP write trigger');
+assert(!rapid.includes('tpInput.addEventListener("change"')&&!rapid.includes('[slInput,tpInput].forEach(input=>input.addEventListener("keydown"'),"TP must not submit on blur/change or Enter");
+assert(calculator.includes("syncRapidFireMasterStopFromSnapshot")&&calculator.includes("findStopOrderForPosition(livePos,snapshot,true)")&&calculator.includes("syncRapidFireTakeProfitFromSnapshot"),"RF fields must sync the live whole-position Master SL and tagged TP from authoritative order snapshots");
+assert(calculator.includes('window.addEventListener("v14:binance-state-change"')&&calculator.includes("scheduleRapidFireLiveOrderSync()"),"live Binance order changes must schedule RF field synchronization");
 assert(main.includes('window.BT001_RAPID_FIRE_VISIBLE===true')&&main.includes("const floatingOn = !cb || cb.checked")&&main.includes("return !cb || cb.checked"),"RF must force only the Expected P/L cursor label while marker visibility follows the manual toggle");
 assert(calculator.includes("handleEffectiveOrdersVisibilityChange"),"RF Orders release must still use the effective visibility transition for OTF shutdown");
 const tradingWriteSource=main.slice(main.indexOf("async function tradingWrite"),main.indexOf("window.BT001_BINANCE_TRADING",main.indexOf("async function tradingWrite")));
@@ -91,12 +105,14 @@ assert.deepEqual({...sizePartsContext.positionSizeParts(1.25,.5)},{closed:.5,rem
 
 const closeMetricsStart=calculator.indexOf("function rapidFireCloseMetrics");
 const closeMetricsEnd=calculator.indexOf("function rapidFireSnapshot",closeMetricsStart);
-const closeMetricsContext={num:value=>Number.isFinite(Number(value))?Number(value):null,clamp:(value,min,max)=>Math.max(min,Math.min(max,value)),Math};
+const closeMetricsContext={num:value=>Number.isFinite(Number(value))?Number(value):null,toUpper:value=>String(value||"").toUpperCase(),clamp:(value,min,max)=>Math.max(min,Math.min(max,value)),Math};
 vm.createContext(closeMetricsContext);
 vm.runInContext(calculator.slice(closeMetricsStart,closeMetricsEnd),closeMetricsContext);
 const halfMetrics=closeMetricsContext.rapidFireCloseMetrics(120,600,50);
 assert.equal(halfMetrics.floatingPl,60,"50 percent Close selection must display half the full-position floating P/L");
 assert.equal(halfMetrics.floatingPlPercent,10,"50 percent Close selection must display the selected P/L contribution against position margin");
+assert.equal(closeMetricsContext.rapidFireProtectionPl(100,110,2,"LONG",{feeAware:false}),20,"TP preview must use raw price movement without fees");
+assert.equal(closeMetricsContext.rapidFireProtectionPl(100,110,2,"LONG",{feeAware:true,entryCommission:.1,exitRate:.001}),19.68,"Master SL preview must subtract entry and STOP_MARKET exit fees");
 
 const reverseStart=calculator.indexOf("function openPositionReverseOrderQuantity");
 const reverseEnd=calculator.indexOf("function normalizedChasePrice",reverseStart);

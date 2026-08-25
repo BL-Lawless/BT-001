@@ -10,10 +10,10 @@
   line-height:24px;
 }
 .rapid-fire-window{
-  width:430px;
-  height:258px;
-  min-width:370px;
-  min-height:258px;
+  width:500px;
+  height:284px;
+  min-width:430px;
+  min-height:272px;
   border-radius:6px;
   background:#fff;
 }
@@ -37,7 +37,7 @@
 }
 .rapid-fire-summary{
   display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-template-columns:repeat(4,minmax(0,1fr));
   gap:5px;
   font-variant-numeric:tabular-nums;
   text-align:center;
@@ -69,6 +69,21 @@
   text-overflow:ellipsis;
   white-space:nowrap;
 }
+.rapid-fire-size-input{
+  width:100%;
+  min-width:0;
+  box-sizing:border-box;
+  margin:0;
+  padding:0;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:#111;
+  font:700 14px/1.2 Arial,Helvetica,sans-serif;
+  text-align:center;
+  font-variant-numeric:tabular-nums;
+}
+.rapid-fire-size-input[readonly]{color:#111;cursor:default}
 .rapid-fire-size-closed{color:#4b5563}
 .rapid-fire-size-separator{color:#6b7280}
 .rapid-fire-size-remaining{color:#111}
@@ -237,5 +252,63 @@
   text-overflow:ellipsis;
 }
 .rapid-fire-status.is-error{border-color:#f6465d;color:#f6465d;font-weight:800}
+.rapid-fire-protection-row{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:7px;
+}
+.rapid-fire-protection-box{
+  min-width:0;
+  display:flex;
+  gap:5px;
+  align-items:center;
+  padding:5px;
+  border:1px solid #d9dce1;
+  border-radius:5px;
+  background:#fff;
+}
+.rapid-fire-protection-label{
+  color:#4b5563;
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:.03em;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+.rapid-fire-protection-box input{
+  width:82px;
+  min-width:82px;
+  max-width:82px;
+  flex:0 0 82px;
+  box-sizing:border-box;
+  margin:0;
+  padding:4px 5px;
+  border:1px solid #d9dce1;
+  border-radius:4px;
+  background:#fff;
+  color:#1e2329;
+  font:700 12px Arial,Helvetica,sans-serif;
+  text-align:center;
+}
+.rapid-fire-protection-set{
+  width:30px;
+  min-width:30px;
+  margin:0;
+  padding:4px 3px;
+  border:1px solid #d9dce1;
+  border-radius:4px;
+  background:#eef0f2;
+  color:#1e2329;
+  font:700 11px Arial,Helvetica,sans-serif;
+}
+.rapid-fire-protection-pl{
+  min-width:45px;
+  margin-left:auto;
+  color:#111;
+  font-weight:700;
+  text-align:right;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
 .rapid-fire-window [aria-disabled="true"]{cursor:not-allowed;opacity:.62}
 .rapid-fire-window button:disabled{cursor:not-allowed;opacity:.55}
