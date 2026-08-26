@@ -3,10 +3,13 @@
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
 
 const root = path.resolve(__dirname,"..","..");
 const source = fs.readFileSync(path.join(root,"main.js"),"utf8");
 const wfSource = fs.readFileSync(path.join(root,"features","waterfall","waterfall.js"),"utf8");
+const wfCss = fs.readFileSync(path.join(root,"features","waterfall","waterfall.css"),"utf8");
+const wfAggregation = require("./waterfall-aggregation.js");
 
 // WF-EXT3-01: the extracted module keeps its IIFE structure, install guard, and exact
 // external export shape - Patch 36 (main.js) calls window.BT001_WATERFALL_WINDOW.render()
@@ -76,6 +79,61 @@ assert(wfSource.includes("displayControlsRevision:snapshot.revision"),"WF load r
 assert(!wfSource.includes("customFromEl")&&!wfSource.includes("customToEl"),"dead custom-range reads must be removed from WF");
 assert(!wfSource.includes("reportWeeksEl"),"WF must have zero direct period-selector reads after display-controls migration");
 assert(wfSource.includes("controls.subscribe(snapshot =>"),"WF period reloads must subscribe to the display-controls owner");
+assert(wfSource.includes('id="wfPeriodSelect"')&&wfSource.includes('id="wfTfSelect"'),"WF must render Period and TF as dropdown selectors");
+assert(wfSource.includes("aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT)"),"WF must split and aggregate the active owner projection");
+assert(wfSource.includes("if(trade && trade.aggregated) drillDownAggregate(trade);"),"aggregated bars must own the drill-down click route");
+assert(wfSource.includes('source:"waterfall-bucket-drilldown"')&&wfSource.includes("resolvedRange:{startMs:bucket.bucketStartMs,endMs:bucket.bucketEndMs}"),"bucket drill-down must reuse the normal period loader with an exact custom range");
+assert(wfSource.includes('liveSegment:"net"')&&!wfSource.includes('liveSegment:"realized"')&&!wfSource.includes('liveSegment:"floating"'),"an open position must render as one distinct net live bar");
+assert(wfSource.includes('trade.liveSegment === "net"')&&wfCss.includes(".wf-bar.is-live-net.is-gain")&&wfCss.includes("background:rgba(22,163,74,.18)"),"the single net Live bar must retain transparent dashed preview styling");
+assert(wfSource.includes("reportPeriod != null && Number.isFinite(Number(reportPeriod.start))"),"WF must reject a null report period before reading its range endpoints");
+const selectedPeriodStart = wfSource.indexOf("function selectedPeriodDates()");
+const selectedPeriodEnd = wfSource.indexOf("function aggregateTradeRows",selectedPeriodStart);
+const selectedPeriodContext = {
+  activeWfReport:() => null,
+  window:{BT001_DISPLAY_CONTROLS:{periodWindow:() => ({startMs:101,endMs:202})}},
+  Number
+};
+vm.createContext(selectedPeriodContext);
+vm.runInContext(wfSource.slice(selectedPeriodStart,selectedPeriodEnd),selectedPeriodContext);
+assert.equal(selectedPeriodContext.selectedPeriodDates().start,101,"a normal pre-report WF render must fall back to the display-control window without throwing");
+assert.equal(selectedPeriodContext.selectedPeriodDates().end,202,"the pre-report fallback must retain the selected period end");
+assert(wfSource.includes("function renderWfLoadingState()")&&wfSource.includes("wfSyncState.loading || wfSyncState.aggregationPending")&&wfSource.includes("Loading..."),"WF must show a visible loading state for report loading and aggregation processing");
+assert(wfSource.includes("const sourceTrades = trades.filter(trade => acceptedSourceTrades.has(trade));")&&wfSource.includes("const summary = wfAggregation().summarizeEntries(sourceTrades);")&&wfSource.includes("const selectedNet = num(aggregation.sourceNet) || 0;"),"WF summary statistics and closed Net must use the exact accepted unaggregated source trades");
+assert(wfSource.includes("const sourceWatermarks = wfSourceWatermarks(sourceTrades);")&&wfSource.includes("const hwm = wfHwmMetrics(sourceWatermarks,headlineNet);"),"WF HWM Delta must use the unaggregated source-trade sequence");
+assert(wfSource.includes("const returnPct = returnMetrics;")&&!wfSource.includes("wfReturnMetrics(headlineNet)"),"closed-period Return % must remain independent of TF grouping and Live P/L");
+assert(wfSource.includes("const bucketTradeCount = bucketSourceTrades.length;")&&wfSource.includes("const bucketNet = bucketSourceTrades.reduce")&&wfSource.includes('"Closed trades: " + bucketTradeCount'),"aggregate tooltips must derive count and net from the bucket's real source trades");
+const resultTemplateStart = wfSource.indexOf('result.innerHTML = `${wfControlsHtml()}');
+const resultTemplateNet = wfSource.indexOf('<div class="wf-result-label">Net P/L</div>',resultTemplateStart);
+assert(resultTemplateStart >= 0 && resultTemplateNet > resultTemplateStart,"WF Period/TF controls must render at the top of the right column above Net P/L");
+assert(wfSource.includes("const rawBoundaryIndex = chartTrades.findIndex")&&wfSource.includes('class="wf-section-separator"'),"WF must render a separator at the aggregate/raw boundary");
+assert(wfCss.includes(".wf-section-separator{")&&wfCss.includes("background:#aeb7c2")&&wfCss.includes("top:0;")&&wfCss.includes("bottom:0;"),"the aggregate/raw separator must span the full chart height in medium light grey");
+assert(wfSource.includes("aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,Date.now())")&&wfSource.includes("? '<span class=\"wf-bar-bucket-flag\">A</span>'")&&wfSource.includes('cls.push("is-current-bucket")')&&wfCss.includes(".wf-bar.is-current-bucket{overflow:visible}"),"only the current in-progress aggregate bucket must receive a visible A marker");
+for(const label of ["One Hour","Four Hours","Six Hours","One Day","One Week"]){
+  assert(wfSource.includes(label),"WF must provide the natural TF label " + label);
+}
+assert(wfSource.includes('class="wf-section-label is-trades">Trades</span>')&&!wfSource.includes("wfTfLabel(trade.bucketTf)"),"the grouped bottom label row must replace repeated per-bucket TF labels");
+assert(wfSource.includes('const WF_SELECTION_STORAGE_KEY = "btc_futures_chart_v13_wf_period_tf_v1"')&&wfSource.includes("localStorage.getItem(WF_SELECTION_STORAGE_KEY)")&&wfSource.includes("localStorage.setItem(WF_SELECTION_STORAGE_KEY"),"WF Period/TF must use versioned browser persistence");
+assert(wfSource.includes('source:"waterfall-selection-restore"')&&wfSource.includes("if(!restoreWfSelection()) syncSelectedTf(currentPeriodValue());"),"restored WF Period must flow through the shared display-controls owner");
+const selectionFunctionsStart = wfSource.indexOf("function readWfSelection()");
+const selectionFunctionsEnd = wfSource.indexOf("function requestWfFrame",selectionFunctionsStart);
+const persisted = new Map([["btc_futures_chart_v13_wf_period_tf_v1",JSON.stringify({version:1,period:"1w",tf:"1d"})]]);
+let ownerPeriod = "1d";
+const selectionContext = {
+  WF_SELECTION_STORAGE_KEY:"btc_futures_chart_v13_wf_period_tf_v1",
+  wfAggregation:() => wfAggregation,
+  wfSyncState:{selectedPeriod:"1d",selectedTf:"1h",drilldown:null},
+  currentPeriodValue:() => ownerPeriod,
+  localStorage:{getItem:key => persisted.get(key) || null,setItem:(key,value) => persisted.set(key,value)},
+  window:{BT001_DISPLAY_CONTROLS:{setPeriod:period => { ownerPeriod=period; }}},
+  JSON,String
+};
+vm.createContext(selectionContext);
+vm.runInContext(wfSource.slice(selectionFunctionsStart,selectionFunctionsEnd),selectionContext);
+assert.equal(selectionContext.restoreWfSelection(),true,"a stored WF selection must restore successfully");
+assert.equal(selectionContext.wfSyncState.selectedTf,"1d","restoring WF must retain the stored valid TF");
+assert.equal(ownerPeriod,"1w","restoring WF must synchronize its Period through the main display-controls owner");
+selectionContext.persistWfSelection("1m","6h");
+assert.deepStrictEqual(JSON.parse(persisted.get("btc_futures_chart_v13_wf_period_tf_v1")),{version:1,period:"1m",tf:"6h"},"WF must persist the last selected Period/TF pair");
 assert(!wfSource.includes('__bt001WfFastReloadBound'),"WF's old DOM period-change binding must be removed");
 assert(!wfSource.includes("CLOSED_TRADES_STATE."),"WF cannot reference the raw CLOSED_TRADES_STATE global at all after extraction - it isn't exported and is out of scope");
 assert(wfSource.includes("const acceptResult = () =>")&&wfSource.includes("{silent:true,acceptResult}"),"WF's own stale-period veto must still be constructed and passed as an additional guard");

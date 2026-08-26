@@ -65,6 +65,90 @@ function harness(overrides={}){
     assert(h.updates.some(item=>item.tone==="error"&&/price crossed/.test(item.message)),"crossing recovery must be visibly distinct");
   }
   {
+    let releaseAmend;
+    let releaseReplacement;
+    let nextOrderId=1;
+    const amendPending=new Promise(resolve=>{releaseAmend=resolve;});
+    const h=harness({
+      submit:async payload=>{
+        h.calls.submit.push(payload);
+        nextOrderId+=1;
+        h.order={...h.order,orderId:nextOrderId,clientOrderId:"c"+nextOrderId,status:"NEW",price:payload.price};
+        if(nextOrderId===2) return h.order;
+        return new Promise(resolve=>{releaseReplacement=()=>resolve(h.order);});
+      },
+      amend:async payload=>{h.calls.amend.push(payload);return amendPending;}
+    });
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    const amendedOrder={...h.order};
+    h.book={...h.book,ask:102};
+    const pollTick=h.engine.tick();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(h.calls.amend.length,1,"the test must have an amend in flight");
+    const reactiveRecovery=h.engine.handleOrderUpdate({s:"BTCUSDT",i:amendedOrder.orderId,c:amendedOrder.clientOrderId,X:"CANCELED",z:"0",p:"101"});
+    await new Promise(resolve=>setImmediate(resolve));
+    const queriesBeforeRecoveryTick=h.calls.query.length;
+    await h.engine.tick();
+    assert.equal(h.calls.query.length,queriesBeforeRecoveryTick,"poll ticks must stay idle while a reactive replacement submit is in flight");
+    releaseReplacement();
+    const reacted=await reactiveRecovery;
+    assert.equal(reacted,true,"a matching private cancellation must be handled reactively");
+    assert.equal(h.calls.submit.length,2,"the private cancellation must resubmit without another poll tick");
+    assert.equal(h.engine.state().orderId,3,"reactive recovery must advance to the replacement order identity");
+    releaseAmend({...amendedOrder,status:"CANCELED",price:"102"});
+    await pollTick;
+    assert.equal(h.calls.submit.length,2,"the stale amend response must not duplicate reactive recovery");
+  }
+  {
+    const h=harness();
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.book={...h.book,ask:102};
+    await h.engine.tick();
+    h.order={...h.order,status:"CANCELED"};
+    await h.engine.tick();
+    assert.equal(h.calls.submit.length,2,"polling must remain a crossing-cancellation recovery backstop when no private event arrives");
+  }
+  {
+    let releaseQuery;
+    let queryCount=0;
+    let nextOrderId=1;
+    const h=harness({
+      submit:async payload=>{
+        h.calls.submit.push(payload);
+        nextOrderId+=1;
+        h.order={...h.order,orderId:nextOrderId,clientOrderId:"q"+nextOrderId,status:"NEW",price:payload.price};
+        return h.order;
+      },
+      query:async identity=>{
+        h.calls.query.push(identity);
+        queryCount+=1;
+        if(queryCount===1) return h.order;
+        return new Promise(resolve=>{releaseQuery=resolve;});
+      }
+    });
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.book={...h.book,ask:102};
+    await h.engine.tick();
+    const canceledOrder={...h.order};
+    const pollTick=h.engine.tick();
+    await new Promise(resolve=>setImmediate(resolve));
+    const reacted=await h.engine.handleOrderUpdate({s:"BTCUSDT",i:canceledOrder.orderId,c:canceledOrder.clientOrderId,X:"CANCELED",z:"0",p:"102"});
+    assert.equal(reacted,true,"a private cancellation must recover while a status query is in flight");
+    releaseQuery({...canceledOrder,status:"NEW"});
+    await pollTick;
+    assert.equal(h.engine.state().orderId,3,"a stale query response must not overwrite the reactive replacement identity");
+    assert.equal(h.calls.submit.length,2,"a stale query response must not trigger duplicate recovery");
+  }
+  {
+    const h=harness();
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.book={...h.book,ask:102};
+    await h.engine.tick();
+    const reacted=await h.engine.handleOrderUpdate({s:"BTCUSDT",i:999,c:"other",X:"CANCELED",z:"0",p:"101"});
+    assert.equal(reacted,false,"a private cancellation for another order must be ignored");
+    assert.equal(h.calls.submit.length,1,"an unrelated order event must not resubmit the chase");
+  }
+  {
     const h=harness();
     h.book={...h.book,fresh:false,hasData:true,state:"stale",ageMs:3000};
     await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});

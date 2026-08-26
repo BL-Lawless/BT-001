@@ -1063,6 +1063,8 @@ function selectedReportPresetMs(){
     case "1m": return 31 * 24 * 60 * 60 * 1000;
     case "2m": return 62 * 24 * 60 * 60 * 1000;
     case "3m": return 93 * 24 * 60 * 60 * 1000;
+    case "6m": return 186 * 24 * 60 * 60 * 1000;
+    case "1y": return 366 * 24 * 60 * 60 * 1000;
     case "1w":
     default: return WEEK_MS;
   }
@@ -1081,6 +1083,8 @@ function weeks(){
     case "1m": return 4;
     case "2m": return 8;
     case "3m": return 12;
+    case "6m": return 26;
+    case "1y": return 52;
     default: return 1;
   }
 }
@@ -1093,6 +1097,8 @@ function reportLabel(){
     case "1m": return "1M";
     case "2m": return "2M";
     case "3m": return "3M";
+    case "6m": return "6M";
+    case "1y": return "1Y";
     case "1w":
     default: return "1W";
   }
@@ -1742,6 +1748,8 @@ function selectedClosedTradePeriod(period){
   if(raw === "1m") return {value:"1m",weeks:4,label:"1M"};
   if(raw === "2m") return {value:"2m",weeks:8,label:"2M"};
   if(raw === "3m") return {value:"3m",weeks:12,label:"3M"};
+  if(raw === "6m") return {value:"6m",weeks:26,label:"6M"};
+  if(raw === "1y") return {value:"1y",weeks:52,label:"1Y"};
   return {value:"1w",weeks:1,label:"1W"};
 }
 
@@ -1826,8 +1834,8 @@ function closedTradeSessionWindowMs(period,endMs = Date.now()){
       period:selected.value
     };
   }
-  if(selected.value === "1m" || selected.value === "2m" || selected.value === "3m"){
-    const monthsBack = selected.value === "1m" ? 0 : selected.value === "2m" ? 1 : 2;
+  if(selected.value === "1m" || selected.value === "2m" || selected.value === "3m" || selected.value === "6m" || selected.value === "1y"){
+    const monthsBack = selected.value === "1m" ? 0 : selected.value === "2m" ? 1 : selected.value === "3m" ? 2 : selected.value === "6m" ? 5 : 11;
     return {
       start:closedTradeCalendarMonthStartMs(end,monthsBack),
       end,
@@ -13995,7 +14003,7 @@ startTradeAuto();
     const sel = document.getElementById('reportWeeks');
     if(!sel) return;
     const specs = [
-      ['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['1m','1M'],['2m','2M'],['3m','3M']
+      ['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['1m','1M'],['2m','2M'],['3m','3M'],['6m','6M'],['1y','1Y']
     ];
     const cur = sel.value || '1d';
     sel.innerHTML = '';
@@ -14017,6 +14025,8 @@ startTradeAuto();
       case '1m': return 31 * 24 * 60 * 60 * 1000;
       case '2m': return 62 * 24 * 60 * 60 * 1000;
       case '3m': return 93 * 24 * 60 * 60 * 1000;
+      case '6m': return 186 * 24 * 60 * 60 * 1000;
+      case '1y': return 366 * 24 * 60 * 60 * 1000;
       case '1w':
       default: return WEEK_MS;
     }
@@ -14030,6 +14040,8 @@ startTradeAuto();
       case '1m': return 4;
       case '2m': return 8;
       case '3m': return 12;
+      case '6m': return 26;
+      case '1y': return 52;
       default: return 1;
     }
   };
@@ -14042,6 +14054,8 @@ startTradeAuto();
       case '1m': return '1M';
       case '2m': return '2M';
       case '3m': return '3M';
+      case '6m': return '6M';
+      case '1y': return '1Y';
       case '1w':
       default: return '1W';
     }
@@ -19682,7 +19696,7 @@ If there is NO open position, use this Section 2 instead:
 
   function installReportOptions(){
     const sel=$id('reportWeeks'); if(!sel) return;
-    const specs=[['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['1m','1M'],['2m','2M'],['3m','3M']];
+    const specs=[['1d','1D'],['1w','1W'],['2w','2W'],['3w','3W'],['1m','1M'],['2m','2M'],['3m','3M'],['6m','6M'],['1y','1Y']];
     const saved=localStorage.getItem(K('reportPeriod'));
     const current=(sel.value&&specs.some(x=>x[0]===sel.value))?sel.value:(saved||'1d');
     sel.innerHTML='';
@@ -19709,12 +19723,14 @@ If there is NO open position, use this Section 2 instead:
       case '1m': return 31*24*60*60*1000;
       case '2m': return 62*24*60*60*1000;
       case '3m': return 93*24*60*60*1000;
+      case '6m': return 186*24*60*60*1000;
+      case '1y': return 366*24*60*60*1000;
       case '1w': default: return WEEK_MS;
     }
   };
   reportRangeMs=function(){
     const now=Date.now();
-    if(reportWeeksEl && ['1d','1w','2w','3w','1m','2m','3m'].includes(reportWeeksEl.value)){
+    if(reportWeeksEl && ['1d','1w','2w','3w','1m','2m','3m','6m','1y'].includes(reportWeeksEl.value)){
       const win = closedTradeSessionWindowMs(reportWeeksEl.value,now);
       return {start:win.start,end:win.end};
     }
@@ -19728,10 +19744,12 @@ If there is NO open position, use this Section 2 instead:
       case '1m': return '1M';
       case '2m': return '2M';
       case '3m': return '3M';
+      case '6m': return '6M';
+      case '1y': return '1Y';
       case '1w': default: return '1W';
     }
   };
-  weeks=function(){ switch(reportWeeksEl.value){ case '1d': return 1/7; case '2w': return 2; case '3w': return 3; case '1m': return 4; case '2m': return 8; case '3m': return 12; default: return 1; } };
+  weeks=function(){ switch(reportWeeksEl.value){ case '1d': return 1/7; case '2w': return 2; case '3w': return 3; case '1m': return 4; case '2m': return 8; case '3m': return 12; case '6m': return 26; case '1y': return 52; default: return 1; } };
   const prevFilter=typeof filterReconstructionForReport==='function'?filterReconstructionForReport:null;
   if(prevFilter&&!window.__v32r1FilterWrapped){
     window.__v32r1FilterWrapped=true;

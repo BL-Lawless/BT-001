@@ -9,13 +9,33 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
   function upper(value){ return String(value == null ? "" : value).toUpperCase(); }
-  function identity(order){
+  function normalizeOrder(order){
     if(!order) return null;
+    return Object.assign({},order,{
+      symbol:order.symbol != null ? order.symbol : order.s,
+      orderId:order.orderId != null ? order.orderId : order.i,
+      clientOrderId:order.clientOrderId != null ? order.clientOrderId : order.c,
+      status:order.status != null ? order.status : order.orderStatus != null ? order.orderStatus : order.X,
+      price:order.price != null ? order.price : order.p,
+      executedQty:order.executedQty != null ? order.executedQty : order.z
+    });
+  }
+  function identity(order){
+    const value = normalizeOrder(order);
+    if(!value) return null;
     return {
-      symbol:String(order.symbol || ""),
-      orderId:order.orderId != null ? order.orderId : null,
-      clientOrderId:String(order.clientOrderId || order.origClientOrderId || "")
+      symbol:String(value.symbol || ""),
+      orderId:value.orderId != null ? value.orderId : null,
+      clientOrderId:String(value.clientOrderId || value.origClientOrderId || "")
     };
+  }
+  function sameIdentity(left,right){
+    const a = identity(left);
+    const b = identity(right);
+    if(!a || !b) return false;
+    if(a.symbol && b.symbol && upper(a.symbol) !== upper(b.symbol)) return false;
+    if(a.orderId != null && b.orderId != null) return String(a.orderId) === String(b.orderId);
+    return !!(a.clientOrderId && b.clientOrderId && a.clientOrderId === b.clientOrderId);
   }
 
   function create(options){
@@ -67,14 +87,15 @@
     function book(){ return usableBook(bookState()); }
     function applyOrder(order){
       if(!run || !order) return;
-      const nextIdentity = identity(order);
+      const normalized = normalizeOrder(order);
+      const nextIdentity = identity(normalized);
       if(nextIdentity){
         run.orderId = nextIdentity.orderId;
         run.clientOrderId = nextIdentity.clientOrderId;
       }
-      const executed = Math.max(0,number(order.executedQty) || 0);
+      const executed = Math.max(0,number(normalized.executedQty) || 0);
       run.currentExecuted = Math.max(run.currentExecuted,executed);
-      if(number(order.price) > 0) run.price = String(order.price);
+      if(number(normalized.price) > 0) run.price = String(normalized.price);
     }
     function carryCurrentFill(){
       if(!run) return;
@@ -151,7 +172,7 @@
       return opts.query({symbol:run.symbol,orderId:run.orderId,clientOrderId:run.clientOrderId},snapshot());
     }
     async function tick(){
-      if(!run || busy || run.canceling) return;
+      if(!run || busy || run.canceling || run.reactiveRecovery) return;
       busy = true;
       clearTimer();
       try{
@@ -201,13 +222,15 @@
           return;
         }
         let order;
+        const queriedIdentity = identity(run);
         try{
           order = await queryCurrent();
         }catch(error){
+          if(!run || !sameIdentity(queriedIdentity,run)) return;
           update(run.label + " status check failed — chase paused: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
           return;
         }
-        if(!run) return;
+        if(!run || !sameIdentity(queriedIdentity,run)) return;
         if(order) applyOrder(order);
         const status = upper(order && order.status);
         if(status === "FILLED" || !(remaining() > 0)){
@@ -242,6 +265,7 @@
           return;
         }
         run.pendingAmend = true;
+        const amendIdentity = identity(run);
         const amendQty = Math.max(0,run.requestedQty - run.carriedFilled);
         try{
           const response = await opts.amend({
@@ -250,7 +274,7 @@
             price,
             state:snapshot()
           });
-          if(!run) return;
+          if(!run || !sameIdentity(amendIdentity,run)) return;
           applyOrder(response || {});
           const amendStatus = upper(response && response.status);
           if(CANCELED.has(amendStatus)){
@@ -260,9 +284,10 @@
           run.price = String((response && response.price) || price);
           update(run.label + " chasing","normal",{statusCode:"chasing"});
         }catch(error){
-          if(!run) return;
+          if(!run || !sameIdentity(amendIdentity,run)) return;
           let checked = null;
           try{ checked = await queryCurrent(); }catch(_ignored){}
+          if(!run || !sameIdentity(amendIdentity,run)) return;
           if(!checked || CANCELED.has(upper(checked && checked.status))){
             await recoverCrossing(top,checked);
             return;
@@ -275,6 +300,19 @@
         busy = false;
         if(run && !run.canceling && timer == null) schedule();
       }
+    }
+    async function handleOrderUpdate(rawOrder){
+      const order = normalizeOrder(rawOrder);
+      if(!run || run.canceling || run.reactiveRecovery || !sameIdentity(order,run)) return false;
+      if(!CANCELED.has(upper(order && order.status)) || !run.pendingAmend) return false;
+      clearTimer();
+      run.reactiveRecovery = true;
+      try{
+        await recoverCrossing(book(),order);
+      }finally{
+        if(run) run.reactiveRecovery = false;
+      }
+      return true;
     }
     async function start(config){
       if(run) throw new Error("A chase is already active in this chase group.");
@@ -298,6 +336,7 @@
         recovering:false,
         firstBookWaitCompleted:false,
         everReceivedBook:false,
+        reactiveRecovery:false,
         canceling:false,
         cancelIntent:null,
         meta:input.meta || null
@@ -337,7 +376,7 @@
       }
     }
 
-    return Object.freeze({start,cancel,tick,state:() => snapshot(),isActive:() => !!run});
+    return Object.freeze({start,cancel,tick,handleOrderUpdate,state:() => snapshot(),isActive:() => !!run});
   }
 
   window.CalculatorChaseEngine = Object.freeze({create});

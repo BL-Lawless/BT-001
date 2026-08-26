@@ -74,6 +74,8 @@ assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"cancelled"}).
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"expired"}).message,"Expired");
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"no-price"}).message,"No price data");
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"stopped"}).message,"Stopped");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"stopped",message:"Rapid Fire amend rejected — chase paused: invalid book"}).message,"Rapid Fire amend rejected — chase paused: invalid book","Rapid Fire must surface the chase engine's stopped reason");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"inactive",message:"OTF Close inactive — remaining qty not chased"}).message,"OTF Close inactive — remaining qty not chased","OTF Close must surface the chase engine's inactive reason");
 
 const subscriptionStart=calculator.indexOf("function stopOpenPositionCloseLivePriceSubscription");
 const subscriptionEnd=calculator.indexOf("function renderOpenPositionClosePanel",subscriptionStart);

@@ -83,8 +83,8 @@ assert(!wfSource.slice(wfSource.indexOf("function wfCurrentCampaignClosedPartial
 assert(wfSource.includes("const currentCampaignClosedPartials=wfCurrentCampaignClosedPartialPL(lastModel&&lastModel.closedSelectedNet,arguments.length?liveTrade:livePreviewTrade());"),"renderWfCrosshair must use the model's cumulative closedSelectedNet and the current live position");
 assert(wfSource.includes("closedPartials=wfCurrentCampaignClosedPartialPL();"),"_diagnostics must read the same self-sufficient baseline, with no separate fallback branch to keep in sync");
 
-// Both data modes must feed the same cumulative closed-trade total used by the sidebar.
-assert(wfSource.includes('mode === "fast"')&&wfSource.includes('(num(fastSummary && fastSummary.netTotal) || 0)')&&wfSource.includes('trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0)'),"selected closed net must retain the sidebar's exact fast/detail computations");
+// Both data modes must feed the same full-resolution source-trade total used by the sidebar.
+assert(wfSource.includes("const selectedNet = num(aggregation.sourceNet) || 0;"),"selected closed net must use the TF-independent source projection in both Fast and Detail modes");
 assert(!wfSource.includes("wfMostRecentClosedTradeNet"),"the isolated last-trade fallback must be removed entirely");
 
 const closedTrades=[{net:-150},{net:220},{net:35},{net:-5}];

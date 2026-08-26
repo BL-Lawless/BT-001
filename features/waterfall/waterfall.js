@@ -68,6 +68,9 @@
   const WF_GREEN = "#047857";
   const WF_RED = "#7f1d1d";
   const WF_BLACK = "#1e2329";
+  const WF_RAW_TRADE_LIMIT = 10;
+  const WF_SELECTION_STORAGE_KEY = "btc_futures_chart_v13_wf_period_tf_v1";
+  const wfAggregation = () => window.BT001_WATERFALL_AGGREGATION;
   const wfEscape = value => String(value == null ? "" : value)
     .replace(/&/g,"&amp;")
     .replace(/</g,"&lt;")
@@ -109,6 +112,13 @@
     hoverInsideChart:false,
     suppressResizeRender:false,
     expandedRect:null,
+    selectedTf:"1h",
+    selectedPeriod:"1d",
+    drilldown:null,
+    drilldownBusy:false,
+    loading:false,
+    aggregationPending:false,
+    aggregationFrame:null,
     crosshair:{active:false,clientX:null,clientY:null,selectedLevel:null,scale:null,listenerBindings:0,updates:0,closedPartialKey:""}
   };
   function activeWfTradeKey(){
@@ -136,6 +146,94 @@
     }catch(_e){
       return "1d";
     }
+  }
+  function wfTfLabel(tf){
+    return String(tf || "").toUpperCase();
+  }
+  function wfTfWords(tf){
+    return ({"1h":"One Hour","4h":"Four Hours","6h":"Six Hours","1d":"One Day","1w":"One Week"})[String(tf || "").toLowerCase()] || wfTfLabel(tf);
+  }
+  function wfRangeText(startMs,endMs){
+    const format = value => new Date(value).toLocaleString("en-GB",{
+      day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"UTC"
+    });
+    return format(startMs) + " - " + format(endMs) + " UTC";
+  }
+  function syncSelectedTf(period,{resetDrilldown=false}={}){
+    const aggregation = wfAggregation();
+    if(!aggregation) return;
+    if(resetDrilldown) wfSyncState.drilldown = null;
+    const normalizedPeriod = String(period || currentPeriodValue()).toLowerCase();
+    wfSyncState.selectedPeriod = normalizedPeriod;
+    if(!wfSyncState.drilldown){
+      wfSyncState.selectedTf = aggregation.validTfForPeriod(normalizedPeriod,wfSyncState.selectedTf);
+    }
+  }
+  function readWfSelection(){
+    const aggregation = wfAggregation();
+    if(!aggregation) return null;
+    try{
+      const value = JSON.parse(localStorage.getItem(WF_SELECTION_STORAGE_KEY) || "null");
+      const period = String(value && value.period || "").toLowerCase();
+      if(!aggregation.PERIOD_OPTIONS.some(option => option.value === period)) return null;
+      return {period,tf:aggregation.validTfForPeriod(period,value && value.tf)};
+    }catch(_e){
+      return null;
+    }
+  }
+  function persistWfSelection(period=currentPeriodValue(),tf=wfSyncState.selectedTf){
+    const aggregation = wfAggregation();
+    if(!aggregation || wfSyncState.drilldown) return;
+    const normalizedPeriod = String(period || "").toLowerCase();
+    if(!aggregation.PERIOD_OPTIONS.some(option => option.value === normalizedPeriod)) return;
+    const normalizedTf = aggregation.validTfForPeriod(normalizedPeriod,tf);
+    try{
+      localStorage.setItem(WF_SELECTION_STORAGE_KEY,JSON.stringify({version:1,period:normalizedPeriod,tf:normalizedTf}));
+    }catch(_e){}
+  }
+  function restoreWfSelection(){
+    const stored = readWfSelection();
+    if(!stored) return false;
+    wfSyncState.selectedPeriod = stored.period;
+    wfSyncState.selectedTf = stored.tf;
+    const controls = window.BT001_DISPLAY_CONTROLS;
+    if(currentPeriodValue() !== stored.period && controls && typeof controls.setPeriod === "function"){
+      controls.setPeriod(stored.period,{source:"waterfall-selection-restore"});
+    }
+    persistWfSelection(stored.period,stored.tf);
+    return true;
+  }
+  function requestWfFrame(callback){
+    return typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : setTimeout(callback,0);
+  }
+  function cancelWfFrame(handle){
+    if(handle == null) return;
+    if(typeof cancelAnimationFrame === "function") cancelAnimationFrame(handle);
+    else clearTimeout(handle);
+  }
+  function beginWfLoading(){
+    cancelWfFrame(wfSyncState.aggregationFrame);
+    wfSyncState.aggregationFrame = null;
+    wfSyncState.loading = true;
+    wfSyncState.aggregationPending = false;
+    if(visible) render();
+  }
+  function queueWfAggregationRender(){
+    cancelWfFrame(wfSyncState.aggregationFrame);
+    wfSyncState.loading = false;
+    wfSyncState.aggregationPending = true;
+    if(visible) render();
+    wfSyncState.aggregationFrame = requestWfFrame(() => {
+      wfSyncState.aggregationFrame = null;
+      wfSyncState.aggregationPending = false;
+      if(visible) render();
+    });
+  }
+  function stopWfLoading(){
+    cancelWfFrame(wfSyncState.aggregationFrame);
+    wfSyncState.aggregationFrame = null;
+    wfSyncState.loading = false;
+    wfSyncState.aggregationPending = false;
   }
   function currentLivePrice(){
     // WF-EXT3-06: the previous typeof appCurrentPrice === "function" guard here was
@@ -250,7 +348,11 @@
     if(snapshot && period && String(period).toLowerCase() !== snapshot.period.value && typeof controls.setPeriod === "function"){
       snapshot = controls.setPeriod(period,{source:"waterfall-reload"});
     }
-    const range = snapshot && typeof controls.periodWindow === "function" ? controls.periodWindow() : null;
+    const ownerRange = snapshot && typeof controls.periodWindow === "function" ? controls.periodWindow() : null;
+    const explicitRange = opt && opt.resolvedRange;
+    const hasExplicitRange = Number.isFinite(Number(explicitRange && explicitRange.startMs)) &&
+      Number.isFinite(Number(explicitRange && explicitRange.endMs)) && Number(explicitRange.endMs) > Number(explicitRange.startMs);
+    const range = hasExplicitRange ? explicitRange : ownerRange;
     return snapshot ? {
       ...opt,
       displayControlsRevision:snapshot.revision,
@@ -259,7 +361,11 @@
     } : opt;
   }
   async function reloadCurrentWfData(period,opt={}){
-    const request = displayControlsLoadRequest(period,opt);
+    const drill = wfSyncState.drilldown;
+    const scopedOpt = drill && !(opt && opt.resolvedRange)
+      ? {...opt,resolvedRange:{startMs:drill.startMs,endMs:drill.endMs}}
+      : opt;
+    const request = displayControlsLoadRequest(period,scopedOpt);
     if(wfDataMode() === "detail") return window.loadClosedTradesForPeriod(period,request);
     return window.loadClosedTradesFastForPeriod(period,request);
   }
@@ -357,43 +463,15 @@
   function wfLivePreviewBars(liveTrade,trades){
     if(!liveTrade) return [];
     const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
-    const realized = num(liveTrade.realizedPartials);
-    const floating = num(liveTrade.floatingPL);
-    const bars = [];
-    let cursor = cumulative;
-    if(realized != null && Math.abs(realized) > 1e-12){
-      bars.push({
-        ...liveTrade,
-        id:liveTrade.id + "_realized",
-        liveSegment:"realized",
-        net:realized,
-        start:cursor,
-        end:cursor + realized
-      });
-      cursor += realized;
-    }
-    if(floating != null && Math.abs(floating) > 1e-12){
-      bars.push({
-        ...liveTrade,
-        id:liveTrade.id + "_floating",
-        liveSegment:"floating",
-        net:floating,
-        start:cursor,
-        end:cursor + floating
-      });
-      cursor += floating;
-    }
-    if(!bars.length){
-      bars.push({
-        ...liveTrade,
-        id:liveTrade.id + "_flat",
-        liveSegment:"net",
-        net:num(liveTrade.net) || 0,
-        start:cumulative,
-        end:cumulative + (num(liveTrade.net) || 0)
-      });
-    }
-    return bars;
+    const net = num(liveTrade.net) || 0;
+    return [{
+      ...liveTrade,
+      id:liveTrade.id + "_net",
+      liveSegment:"net",
+      net,
+      start:cumulative,
+      end:cumulative + net
+    }];
   }
   function markClosedTradesLoaded(loaded){
     wfSyncState.loaded = !!loaded;
@@ -953,14 +1031,18 @@
     }
     return "Return source: unavailable";
   }
-  function wfWatermarks(trades){
+  function wfSourceWatermarks(trades){
     const rows = Array.isArray(trades) ? trades : [];
-    let high = {index:null,value:0};
-    rows.forEach((trade,index) => {
-      const top = Math.max(num(trade && trade.start) || 0,num(trade && trade.end) || 0);
-      if(top > high.value) high = {index,value:top};
-    });
-    return {high};
+    const high = wfAggregation().highWaterMark(rows);
+    return {high:{index:high.index,value:high.value,trade:high.index == null ? null : rows[high.index]}};
+  }
+  function wfDisplayWatermarks(sourceWatermarks,displayTrades){
+    const rows = Array.isArray(displayTrades) ? displayTrades : [];
+    const sourceHigh = sourceWatermarks && sourceWatermarks.high || {index:null,value:0,trade:null};
+    const peakTrade = sourceHigh.trade;
+    const index = peakTrade == null ? null : rows.findIndex(entry => entry === peakTrade ||
+      !!(entry && entry.aggregated && Array.isArray(entry.sourceTrades) && entry.sourceTrades.includes(peakTrade)));
+    return {high:{index:index >= 0 ? index : null,value:sourceHigh.value,trade:peakTrade}};
   }
   function wfHwmMetrics(watermarks,currentDisplayedNet){
     const peak = Math.max(0,num(watermarks && watermarks.high && watermarks.high.value) || 0);
@@ -1172,7 +1254,8 @@
         const next = Number(bar.dataset.tradeIndex);
         if(next < 0) return;
         const trade = lastModel && Array.isArray(lastModel.trades) ? lastModel.trades[next] : null;
-        if(trade) bridgeTradeIsolate(trade);
+        if(trade && trade.aggregated) drillDownAggregate(trade);
+        else if(trade) bridgeTradeIsolate(trade);
       },false);
     }
     if(collapseBtn && !collapseBtn.__wfBound){
@@ -1340,9 +1423,144 @@
   }
 
   function selectedPeriodDates(){
+    const report = activeWfReport();
+    const reportPeriod = report && report.period;
+    if(reportPeriod != null && Number.isFinite(Number(reportPeriod.start)) && Number.isFinite(Number(reportPeriod.end))){
+      return {start:Number(reportPeriod.start),end:Number(reportPeriod.end)};
+    }
     const controls = window.BT001_DISPLAY_CONTROLS;
     const win = controls && typeof controls.periodWindow === "function" ? controls.periodWindow() : null;
     return {start:win && win.startMs,end:win && win.endMs};
+  }
+
+  function aggregateTradeRows(sourceTrades){
+    const aggregation = wfAggregation();
+    if(!aggregation) return {display:sourceTrades.slice(),recentFirst:sourceTrades.slice().reverse(),rawRecent:sourceTrades.slice(-WF_RAW_TRADE_LIMIT),aggregated:[],sourceCount:sourceTrades.length,displayedTradeCount:Math.min(sourceTrades.length,WF_RAW_TRADE_LIMIT),aggregatedTradeCount:0,sourceNet:0,displayNet:0};
+    const result = aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT);
+    result.aggregated.forEach((bucket,index) => {
+      const bucketSourceTrades = Array.isArray(bucket.sourceTrades) ? bucket.sourceTrades : [];
+      const bucketTradeCount = bucketSourceTrades.length;
+      const bucketNet = bucketSourceTrades.reduce((sum,trade) => sum + (num(trade && trade.net) || 0),0);
+      bucket.tradeCount = bucketTradeCount;
+      bucket.net = bucketNet;
+      bucket.inProgress = index === result.aggregated.length - 1 && aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,Date.now());
+      bucket.when = shortDate(bucket.bucketStartMs);
+      bucket.tooltipLines = [
+        "Aggregated " + wfTfLabel(bucket.bucketTf) + " bucket",
+        wfRangeText(bucket.bucketStartMs,bucket.bucketEndMs),
+        "Closed trades: " + bucketTradeCount,
+        "",
+        [{text:"Net P/L | ",color:WF_BLACK,bold:true,large:true},{text:window.fm(bucketNet),color:wfPnlColor(bucketNet),bold:true,large:true}],
+        "Click to drill down to " + wfTfLabel(aggregation.nextFinerTf(bucket.bucketTf))
+      ];
+    });
+    return result;
+  }
+
+  function wfPeriodOptionsHtml(){
+    const aggregation = wfAggregation();
+    if(!aggregation) return "";
+    const current = currentPeriodValue();
+    const options = aggregation.PERIOD_OPTIONS.slice();
+    if(!options.some(option => option.value === current)){
+      options.push({value:current,label:current.toUpperCase(),legacy:true});
+    }
+    return options.map(option => `<option value="${wfAttr(option.value)}"${option.value === current ? " selected" : ""}${option.legacy ? ' data-legacy="true"' : ""}>${wfEscape(option.label)}</option>`).join("");
+  }
+
+  function wfTfOptionsHtml(){
+    const aggregation = wfAggregation();
+    if(!aggregation) return "";
+    const period = currentPeriodValue();
+    const options = aggregation.optionsForPeriod(period);
+    if(wfSyncState.drilldown && !options.includes(wfSyncState.selectedTf)) options.unshift(wfSyncState.selectedTf);
+    return options.map(tf => `<option value="${wfAttr(tf)}"${tf === wfSyncState.selectedTf ? " selected" : ""}>${wfEscape(wfTfLabel(tf))}</option>`).join("");
+  }
+
+  function wfControlsHtml(){
+    const drill = wfSyncState.drilldown;
+    const rangeTitle = drill ? ` title="${wfAttr("Drill-down: " + wfRangeText(drill.startMs,drill.endMs))}"` : "";
+    return `<div class="wf-controls-box"${rangeTitle}>
+        <label class="wf-select-field"><span>Period</span><select id="wfPeriodSelect" aria-label="WF Period">${wfPeriodOptionsHtml()}</select></label>
+        <label class="wf-select-field"><span>TF</span><select id="wfTfSelect" aria-label="WF timeframe">${wfTfOptionsHtml()}</select></label>
+        ${drill ? '<button class="wf-drill-reset" id="wfDrillReset" type="button">Back</button>' : ""}
+      </div>`;
+  }
+
+  function bindWfControls(){
+    const periodSelect = q("wfPeriodSelect");
+    const tfSelect = q("wfTfSelect");
+    const reset = q("wfDrillReset");
+    if(periodSelect && !periodSelect.__wfBound){
+      periodSelect.__wfBound = true;
+      periodSelect.addEventListener("change",() => {
+        const controls = window.BT001_DISPLAY_CONTROLS;
+        syncSelectedTf(periodSelect.value,{resetDrilldown:true});
+        persistWfSelection(periodSelect.value,wfSyncState.selectedTf);
+        beginWfLoading();
+        if(controls && typeof controls.setPeriod === "function") controls.setPeriod(periodSelect.value,{source:"waterfall-period-select"});
+        periodSelect.blur();
+      },false);
+    }
+    if(tfSelect && !tfSelect.__wfBound){
+      tfSelect.__wfBound = true;
+      tfSelect.addEventListener("change",() => {
+        const aggregation = wfAggregation();
+        const options = aggregation ? aggregation.optionsForPeriod(currentPeriodValue()) : [];
+        wfSyncState.selectedTf = options.includes(tfSelect.value) || wfSyncState.drilldown ? tfSelect.value : (options[0] || "1h");
+        persistWfSelection(currentPeriodValue(),wfSyncState.selectedTf);
+        tfSelect.blur();
+        queueWfAggregationRender();
+      },false);
+    }
+    if(reset && !reset.__wfBound){
+      reset.__wfBound = true;
+      reset.addEventListener("click",() => {
+        wfSyncState.drilldown = null;
+        syncSelectedTf(currentPeriodValue());
+        beginWfLoading();
+        reloadCurrentWfData(currentPeriodValue(),{silent:true,source:"waterfall-drill-reset"}).then(outcome => {
+          if(outcome) return;
+          stopWfLoading();
+          if(visible) render();
+        }).catch(error => {
+          stopWfLoading();
+          if(visible) render();
+          console.warn(MODULE + " drill reset failed",error);
+        });
+      },false);
+    }
+  }
+
+  async function drillDownAggregate(bucket){
+    const aggregation = wfAggregation();
+    if(!aggregation || !bucket || !bucket.aggregated || wfSyncState.drilldownBusy) return;
+    const previousTf = wfSyncState.selectedTf;
+    const previousDrilldown = wfSyncState.drilldown;
+    const nextTf = aggregation.nextFinerTf(bucket.bucketTf);
+    wfSyncState.drilldown = {startMs:bucket.bucketStartMs,endMs:bucket.bucketEndMs,sourceTf:bucket.bucketTf};
+    wfSyncState.selectedTf = nextTf;
+    wfSyncState.drilldownBusy = true;
+    beginWfLoading();
+    showWfTradesStatus("Loading " + wfTfLabel(nextTf) + " drill-down");
+    try{
+      const outcome = await reloadCurrentWfData(currentPeriodValue(),{
+        silent:true,
+        source:"waterfall-bucket-drilldown",
+        resolvedRange:{startMs:bucket.bucketStartMs,endMs:bucket.bucketEndMs}
+      });
+      if(!outcome) throw new Error("Drill-down load did not commit");
+      showWfTradesStatus("Showing " + wfTfLabel(nextTf) + " drill-down");
+    }catch(error){
+      wfSyncState.selectedTf = previousTf;
+      wfSyncState.drilldown = previousDrilldown;
+      stopWfLoading();
+      showWfTradesStatus("Drill-down unavailable");
+      console.warn(MODULE + " bucket drill-down failed",error);
+    }finally{
+      wfSyncState.drilldownBusy = false;
+      if(visible && !wfSyncState.loading && !wfSyncState.aggregationPending) render();
+    }
   }
 
   function buildViewModel(){
@@ -1350,32 +1568,24 @@
     const wfReport = activeWfReport();
     const hasValidReport = !!wfReport;
     const trades = buildTradeRows();
+    const aggregation = aggregateTradeRows(trades);
+    const acceptedSourceTrades = new Set(aggregation.recentFirst);
+    const sourceTrades = trades.filter(trade => acceptedSourceTrades.has(trade));
+    const displayTrades = aggregation.display;
     const liveTrade = livePreviewTrade();
-    const fastSummary = mode === "fast" && wfReport && wfReport.summary ? wfReport.summary : null;
-    const selectedNetBase = mode === "fast"
-      ? (num(fastSummary && fastSummary.netTotal) || 0)
-      : trades.reduce((sum,trade) => sum + (num(trade.net) || 0),0);
-    const selectedNet = selectedNetBase;
-    const watermarks = wfWatermarks(trades);
+    const summary = wfAggregation().summarizeEntries(sourceTrades);
+    const selectedNet = num(aggregation.sourceNet) || 0;
+    const sourceWatermarks = wfSourceWatermarks(sourceTrades);
+    const watermarks = wfDisplayWatermarks(sourceWatermarks,displayTrades);
     const liveNet = num(liveTrade && liveTrade.net) || 0;
     const returnMetrics = wfReturnMetrics(hasValidReport ? selectedNet : null);
-    const wins = trades.filter(trade => trade.net > 0);
-    const losses = trades.filter(trade => trade.net < 0);
-    const totalWin = wins.reduce((sum,trade) => sum + trade.net,0);
-    const totalLoss = losses.reduce((sum,trade) => sum + trade.net,0);
-    const largestWin = wins.length ? Math.max(...wins.map(trade => trade.net)) : null;
-    const largestLoss = losses.length ? Math.min(...losses.map(trade => trade.net)) : null;
-    const grossWins = wins.reduce((sum,trade) => sum + Math.max(0,num(trade.net) || 0),0);
-    const grossLosses = losses.reduce((sum,trade) => sum + Math.abs(Math.min(0,num(trade.net) || 0)),0);
     const headlineNet = selectedNet + liveNet;
-    const hwm = wfHwmMetrics(watermarks,headlineNet);
-    const headlineGrossWins = grossWins + Math.max(0,liveNet);
-    const headlineGrossLosses = grossLosses + Math.abs(Math.min(0,liveNet));
-    const headlineProfitRatio = headlineGrossLosses > 0 ? headlineGrossWins / headlineGrossLosses : null;
-    const returnPct = liveTrade && hasValidReport ? wfReturnMetrics(headlineNet) : returnMetrics;
-    const livePreviewBars = wfLivePreviewBars(liveTrade,trades);
-    const chartTrades = livePreviewBars.length ? trades.concat(livePreviewBars) : trades.slice();
-    const values = [0].concat(chartTrades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
+    const hwm = wfHwmMetrics(sourceWatermarks,headlineNet);
+    const returnPct = returnMetrics;
+    const livePreviewBars = wfLivePreviewBars(liveTrade,displayTrades);
+    const chartTrades = livePreviewBars.length ? displayTrades.concat(livePreviewBars) : displayTrades.slice();
+    const headlineProfitRatio = summary.grossLosses > 0 ? summary.grossWins / summary.grossLosses : null;
+    const values = [0,sourceWatermarks.high.value].concat(chartTrades.flatMap(trade => [trade.start,trade.end])).filter(v => Number.isFinite(v));
     const minCumulative = values.length ? Math.min(...values) : 0;
     const maxCumulative = values.length ? Math.max(...values) : 0;
     const span = Math.max(1,maxCumulative - minCumulative);
@@ -1384,19 +1594,22 @@
     const domainMax = Math.max(WF_AXIS_MIN_ABS,maxCumulative + pad,0);
     const period = selectedPeriodDates();
     return {
-      trades,
+      trades:displayTrades,
+      sourceTrades,
+      aggregation,
       chartTrades,
       watermarks,
+      sourceWatermarks,
       liveTrade,
       livePreviewBars,
-      wins:wins.length,
-      losses:losses.length,
-      averageWin:wins.length ? totalWin / wins.length : null,
-      averageLoss:losses.length ? totalLoss / losses.length : null,
-      largestWin,
-      largestLoss,
-      totalWin,
-      totalLoss,
+      wins:summary.wins,
+      losses:summary.losses,
+      averageWin:summary.averageWin,
+      averageLoss:summary.averageLoss,
+      largestWin:summary.largestWin,
+      largestLoss:summary.largestLoss,
+      totalWin:summary.totalWin,
+      totalLoss:summary.totalLoss,
       profitRatio:headlineProfitRatio,
       selectedNet:headlineNet,
       closedSelectedNet:selectedNet,
@@ -1461,7 +1674,7 @@
     const result = q("wfResult");
     const title = q("wfWindowTitle");
     if(!chart) return;
-    if(title && model.period) title.textContent = "Closed positions | From : " + wfTitleDayText(model.period.start) + " To : " + wfTitleDayText(model.period.end) + " | " + wfHeaderModeText(model.mode);
+    if(title && model.period) title.textContent = "Closed positions | From : " + wfTitleDayText(model.period.start) + " To : " + wfTitleDayText(model.period.end) + " | " + wfHeaderModeText(model.mode) + (wfSyncState.drilldown ? " | Drill-down" : "");
     const watermarks = model.watermarks;
     const netValue = num(model.selectedNet) || 0;
     const resultClass = netValue < 0
@@ -1469,7 +1682,8 @@
       : Math.abs(netValue) < 1e-12
         ? "is-neutral"
         : "is-gain";
-    if(result){
+    const resultSelectFocused = !!(result && document.activeElement && document.activeElement.closest && document.activeElement.closest("#wfResult select"));
+    if(result && !resultSelectFocused){
       const hwm = model.hwm;
       const hwmClass = hwm.delta < 0 ? "is-loss" : hwm.delta > 0 ? "is-gain" : "is-neutral";
       const netExact = fmtBigResult(model.selectedNet);
@@ -1484,7 +1698,9 @@
         `Current Net P/L: ${money(hwm.current)}`,
         `Distance from closed HWM: ${money(hwm.delta)}`
       ].join("\n");
-      result.innerHTML = `<div class="wf-result-metric">
+      result.innerHTML = `${wfControlsHtml()}
+        <div class="wf-result-separator" aria-hidden="true"></div>
+        <div class="wf-result-metric">
           <div class="wf-result-label">Net P/L</div>
           <div class="wf-result-value ${resultClass}" data-result-kind="net" title="${wfAttr(netTitle)}">${wfEscape(netExact)}</div>
         </div>
@@ -1504,6 +1720,7 @@
         hwmNode.dataset.compactText = wfCompactMoney(hwm.delta);
       }
       fitWfResultValues(result);
+      bindWfControls();
     }
     if(!model.trades.length && !model.liveTrade){
       wfSyncState.crosshair.scale=null;
@@ -1514,7 +1731,7 @@
     const plotTop = 10;
     const plotLeft = 48;
     const plotRight = 10;
-    const plotBottom = 18;
+    const plotBottom = 34;
     const plotHeight = Math.max(1,chart.clientHeight - plotTop - plotBottom);
     let domainMin = num(model.domainMin) != null ? num(model.domainMin) : -WF_AXIS_MIN_ABS;
     let domainMax = num(model.domainMax) != null ? num(model.domainMax) : WF_AXIS_MIN_ABS;
@@ -1580,6 +1797,8 @@
     const chartTrades = Array.isArray(model.chartTrades) ? model.chartTrades : model.trades;
     const tradeCount = Math.max(1,chartTrades.length);
     const gapPx = tradeCount > 90 ? 0 : 1;
+    const rawBoundaryIndex = chartTrades.findIndex(trade => trade && !trade.aggregated && !trade.live);
+    const hasSectionBoundary = rawBoundaryIndex > 0 && !!(chartTrades[rawBoundaryIndex - 1] && chartTrades[rawBoundaryIndex - 1].aggregated);
     const activeKey = activeWfTradeKey();
     const barsHtml = chartTrades.map((trade,index) => {
       const topValue = Math.max(trade.start,trade.end);
@@ -1591,28 +1810,34 @@
         ? Math.max(0,topY - 12)
         : Math.max(0,Math.min(plotHeight + 2,bottomY + 3));
       const cls = [trade.net >= 0 ? "is-gain" : "is-loss"];
+      if(trade.aggregated) cls.push("is-aggregated");
+      if(trade.aggregated && trade.inProgress) cls.push("is-current-bucket");
       if(trade.live) cls.push("is-live");
-      if(trade.live && trade.liveSegment === "realized") cls.push("is-live-realized");
-      if(trade.live && trade.liveSegment === "floating") cls.push("is-live-floating");
+      if(trade.live && trade.liveSegment === "net") cls.push("is-live-net");
       if(activeKey && tradeKey(trade) === activeKey) cls.push("is-selected");
       const connector = index < chartTrades.length - 1
         ? `<div class="wf-connector" style="top:${Math.max(0,Math.min(plotHeight,valueToY(trade.end)))}px;width:${Math.max(1,gapPx + 1)}px"></div>`
         : "";
-      const barInner = trade.live ? `<span class="wf-bar-live-flag">Live</span>` : "";
+      const barInner = trade.live
+        ? `<span class="wf-bar-live-flag">Live</span>`
+        : trade.aggregated && trade.inProgress
+          ? '<span class="wf-bar-bucket-flag">A</span>'
+          : "";
       // WF-COS05: no sign class - watermarks.high.value is always >= 0 by construction
-      // (wfWatermarks() only ever moves it upward from its 0 starting point), so the
+      // (wfSourceWatermarks() only ever moves it upward from its 0 starting point), so the
       // conditional gain/loss/neutral tint from WF-COS03-FIX-02 was dead weight. Uses
       // moneyPlain() (no leading "+") instead of money() for the same reason - the value
       // is never negative in practice, so a signed prefix only added visual noise.
+      const watermarkY = Math.max(0,Math.min(plotHeight,valueToY(watermarks.high && watermarks.high.value)));
       const mark = watermarks.high && watermarks.high.index === index && !trade.live
-        ? `<div class="wf-watermark is-high" style="top:${topY}px">
+        ? `<div class="wf-watermark is-high" style="top:${watermarkY}px">
             <span class="wf-watermark-label">${moneyPlain(watermarks.high.value)}</span>
             <span class="wf-watermark-line"></span>
           </div>`
         : "";
-      return `<div class="wf-bar-col">
-          <div class="wf-bar ${cls.join(" ")}" data-trade-index="${trade.live ? -1 : index}" style="top:${topY}px;height:${heightPx}px">${barInner}</div>
-          <span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>
+      return `<div class="wf-bar-col" data-chart-index="${index}">
+          <div class="wf-bar ${cls.join(" ")}" data-trade-index="${trade.live ? -1 : index}"${trade.aggregated ? ' data-aggregated="true"' : ""} style="top:${topY}px;height:${heightPx}px">${barInner}</div>
+          ${trade.aggregated ? "" : `<span class="wf-bar-dir" style="top:${dirTop}px">${trade.dir}</span>`}
           ${connector}
           ${mark}
         </div>`;
@@ -1628,16 +1853,38 @@
     // bottom edge (and therefore with .wf-chart-shell's border-bottom immediately
     // below it). Only the bottom moved - top stays at plotTop, unchanged.
     const axisMarginLineHeight = Math.max(1,chart.clientHeight - plotTop);
+    const sectionChrome = hasSectionBoundary
+      ? `<div class="wf-section-separator" aria-hidden="true"></div>
+        <div class="wf-section-labels">
+          <span class="wf-section-label is-aggregated">${wfEscape(wfTfWords(wfSyncState.selectedTf))}</span>
+          <span class="wf-section-label is-trades">Trades</span>
+        </div>`
+      : "";
     chart.innerHTML = `<div class="wf-plot">
         <div class="wf-axis-band">${minorLines}${majorLines}<div class="wf-gridline is-zero" style="top:${zeroY}px"></div>${axisLabels}</div>
         <div class="wf-axis-margin-line" style="left:${plotLeft}px;top:${plotTop}px;height:${axisMarginLineHeight}px"></div>
         <div class="wf-bars" style="left:${plotLeft}px;right:${plotRight}px;top:${plotTop}px;bottom:${plotBottom}px;grid-template-columns:repeat(${tradeCount},minmax(2px,${WF_MAX_BAR_WIDTH_PX}px));gap:${gapPx}px">${barsHtml}</div>
+        ${sectionChrome}
         <div class="wf-crosshair hidden" id="wfCrosshair" aria-hidden="true">
           <div class="wf-crosshair-v"></div><div class="wf-crosshair-h"></div>
           <div class="wf-crosshair-label wf-crosshair-selected wf-crosshair-axis-value"></div>
           <div class="wf-crosshair-label wf-crosshair-amount wf-crosshair-axis-value wf-crosshair-right-value"></div>
         </div>
       </div>`;
+    if(hasSectionBoundary){
+      const rawColumn = chart.querySelector(`.wf-bar-col[data-chart-index="${rawBoundaryIndex}"]`);
+      const separator = chart.querySelector(".wf-section-separator");
+      const labels = chart.querySelector(".wf-section-labels");
+      if(rawColumn && separator && labels){
+        const chartRect = chart.getBoundingClientRect();
+        const rawRect = rawColumn.getBoundingClientRect();
+        const boundaryX = Math.max(plotLeft,rawRect.left - chartRect.left - gapPx / 2);
+        separator.style.left = `${boundaryX}px`;
+        labels.style.left = `${plotLeft}px`;
+        labels.style.right = `${plotRight}px`;
+        labels.style.gridTemplateColumns = `${Math.max(1,boundaryX - plotLeft)}px minmax(0,1fr)`;
+      }
+    }
     fitWfDirectionLabels(chart);
     renderWfCrosshair();
   }
@@ -1770,9 +2017,31 @@
     tip.style.top = top + "px";
   }
 
+  function renderWfLoadingState(){
+    const chart = q("wfChart");
+    const result = q("wfResult");
+    const table = q("wfSummaryTable");
+    const title = q("wfWindowTitle");
+    hideWfCrosshair();
+    if(title) title.textContent = "Closed positions | Loading...";
+    if(chart) chart.innerHTML = '<div class="wf-loading" role="status" aria-live="polite"><span class="wf-loading-spinner" aria-hidden="true"></span><span>Loading...</span></div>';
+    if(result){
+      result.innerHTML = `${wfControlsHtml()}
+        <div class="wf-result-separator" aria-hidden="true"></div>
+        <div class="wf-result-loading">Loading...</div>`;
+      bindWfControls();
+    }
+    if(table) table.innerHTML = '<tbody><tr><td class="wf-summary-loading">Loading...</td></tr></tbody>';
+  }
+
   function render(){
     const win = ensureWindow();
     if(!win || !visible) return;
+    if(wfSyncState.loading || wfSyncState.aggregationPending){
+      renderWfLoadingState();
+      updateWfSideWidth(win,q("wfResult"));
+      return;
+    }
     const model = buildViewModel();
     lastModel = model;
     renderSummary(model);
@@ -1789,14 +2058,25 @@
     startLiveRefreshLoop();
     startClosedTradesSafetyLoop();
     applyExpandedRect(win);
-    render();
-    if(wfDataMode() === "detail" && wfHasCurrentDetailReport()) return;
-    ensureFastWfData({silent:false}).catch(error => {
+    if(wfDataMode() === "detail" && wfHasCurrentDetailReport()){
+      queueWfAggregationRender();
+      return;
+    }
+    if(wfHasFreshCurrentFastReport()) queueWfAggregationRender();
+    else beginWfLoading();
+    ensureFastWfData({silent:false}).then(outcome => {
+      if(outcome) return;
+      stopWfLoading();
+      if(visible) render();
+    }).catch(error => {
+      stopWfLoading();
+      if(visible) render();
       console.warn(MODULE + " fast WF auto-load failed",error);
     });
   }
 
   function hide(){
+    persistWfSelection();
     visible = false;
     stopLiveRefreshLoop();
     stopClosedTradesSafetyLoop();
@@ -1808,6 +2088,7 @@
   function install(){
     ensureToggle();
     ensureWindow();
+    if(!restoreWfSelection()) syncSelectedTf(currentPeriodValue());
     const controls = window.BT001_DISPLAY_CONTROLS;
     if(controls && typeof controls.subscribe === "function" && !window.__bt001WfDisplayControlsBound){
       window.__bt001WfDisplayControlsBound = true;
@@ -1816,11 +2097,20 @@
         const nextPeriod = String((snapshot && snapshot.period && snapshot.period.value) || "1d").toLowerCase();
         if(nextPeriod === subscribedPeriod) return;
         subscribedPeriod = nextPeriod;
+        syncSelectedTf(nextPeriod,{resetDrilldown:true});
+        persistWfSelection(nextPeriod,wfSyncState.selectedTf);
         hideWfCrosshair();
+        beginWfLoading();
         Promise.resolve().then(() => {
           if(currentPeriodValue() !== nextPeriod) return;
-          ensureFastWfData({force:true,silent:true,period:nextPeriod}).catch(error => {
-            console.warn(MODULE + " fast WF period reload failed",error);
+          reloadCurrentWfData(nextPeriod,{force:true,silent:true,source:"waterfall-period-sync"}).then(outcome => {
+            if(outcome) return;
+            stopWfLoading();
+            if(visible) render();
+          }).catch(error => {
+            stopWfLoading();
+            if(visible) render();
+            console.warn(MODULE + " WF period reload failed",error);
           });
         });
       });
@@ -1848,10 +2138,12 @@
       if(detail.status === "unavailable"){
         clearAutoCloseSync();
         markClosedTradesLoaded(false);
+        stopWfLoading();
+        if(visible) render();
       }else{
         markClosedTradesLoaded(true);
+        queueWfAggregationRender();
       }
-      if(visible) render();
     },false);
   }
 
@@ -1896,6 +2188,7 @@ window.BT001_WATERFALL_WINDOW = {
   _diagnostics:() => {
     const crosshair=wfSyncState.crosshair,scale=crosshair.scale,overlay=q("wfCrosshair"),closedPartials=wfCurrentCampaignClosedPartialPL();
     const liveTrade=lastModel&&lastModel.liveTrade;
+    const chartNode=q("wfChart"),sectionSeparator=chartNode&&chartNode.querySelector(".wf-section-separator"),sectionSeparatorRect=sectionSeparator&&sectionSeparator.getBoundingClientRect();
     // WF-COS06: Value 2 (amount) now lives inside the same chart overlay as Value 1, so
     // its own box is the meaningful rect here instead of a separate values container.
     const amountNode=overlay && overlay.querySelector(".wf-crosshair-amount");
@@ -1905,6 +2198,45 @@ window.BT001_WATERFALL_WINDOW = {
       liveIdentity:liveTrade&&liveTrade.parentTradeId||null,
       liveDirection:liveTrade&&liveTrade.dir||null,
       livePlaceholder:!!(liveTrade&&liveTrade.placeholderIdentity),
+      period:currentPeriodValue(),
+      tf:wfSyncState.selectedTf,
+      drilldown:wfSyncState.drilldown ? {...wfSyncState.drilldown} : null,
+      drilldownBusy:wfSyncState.drilldownBusy,
+      loading:wfSyncState.loading,
+      aggregationPending:wfSyncState.aggregationPending,
+      storedSelection:readWfSelection(),
+      sections:chartNode ? {
+        aggregatedBars:chartNode.querySelectorAll(".wf-bar.is-aggregated").length,
+        rawTradeBars:chartNode.querySelectorAll(".wf-bar:not(.is-aggregated):not(.is-live)").length,
+        currentBucketMarkers:Array.from(chartNode.querySelectorAll(".wf-bar-bucket-flag")).filter(node => node.textContent === "A").length,
+        labels:Array.from(chartNode.querySelectorAll(".wf-section-label")).map(node => node.textContent),
+        separatorRect:sectionSeparatorRect ? {left:sectionSeparatorRect.left,top:sectionSeparatorRect.top,bottom:sectionSeparatorRect.bottom,height:sectionSeparatorRect.height,width:sectionSeparatorRect.width} : null
+      } : null,
+      aggregation:lastModel&&lastModel.aggregation ? {
+        sourceCount:lastModel.aggregation.sourceCount,
+        rawCount:lastModel.aggregation.displayedTradeCount,
+        aggregatedTradeCount:lastModel.aggregation.aggregatedTradeCount,
+        bucketCount:lastModel.aggregation.aggregated.length,
+        sourceNet:lastModel.aggregation.sourceNet,
+        displayNet:lastModel.aggregation.displayNet,
+        bucketNets:lastModel.aggregation.aggregated.map(bucket => ({startMs:bucket.bucketStartMs,endMs:bucket.bucketEndMs,count:bucket.tradeCount,net:bucket.net}))
+      } : null,
+      chart:lastModel ? {
+        closedBars:lastModel.trades.length,
+        liveBars:lastModel.livePreviewBars.length,
+        liveRightmost:!!(lastModel.chartTrades.length && lastModel.chartTrades[lastModel.chartTrades.length-1].live)
+      } : null,
+      summary:lastModel ? {
+        wins:lastModel.wins,
+        losses:lastModel.losses,
+        totalWin:lastModel.totalWin,
+        totalLoss:lastModel.totalLoss,
+        closedNet:lastModel.closedSelectedNet,
+        headlineNet:lastModel.selectedNet,
+        hwmPeak:lastModel.hwm.peak,
+        hwmDelta:lastModel.hwm.delta,
+        sourceTradeCount:lastModel.sourceTrades.length
+      } : null,
       fastReportAgeMs:wfHasCurrentFastReport()?wfFastReportAgeMs():null,
       fastReportMaxAgeMs:WF_FAST_REPORT_MAX_AGE_MS,
       safetyPoll:{

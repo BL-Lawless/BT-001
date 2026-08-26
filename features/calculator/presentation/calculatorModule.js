@@ -23,7 +23,7 @@
   const FLAT_CLEANUP_CONFIRM_MS = 700;
   const ROW_CHASE_TERMINAL_SUPPRESSION_MS = 5000;
   const ROW_CHASE_ORIGINAL_POLL_MS = 500;
-  const OPEN_POSITION_CLOSE_CHS_POLL_MS = 250;
+  const OPEN_POSITION_CLOSE_CHS_POLL_MS = 100;
   const OPEN_POSITION_CLOSE_CHS_DIST_OPTIONS = [0,1,2,5];
   const OPEN_POSITION_CLOSE_CHS_VALID_OPTIONS = [
     {key:"10s",label:"10s",ms:10000},
@@ -657,7 +657,7 @@
     if(code==="cancelled") return {message:"Cancelled",tone:"normal"};
     if(code==="expired") return {message:"Expired",tone:"error"};
     if(code==="no-price") return {message:"No price data",tone:"error"};
-    if(code==="stopped"||code==="inactive") return {message:"Stopped",tone:"error"};
+    if(code==="stopped"||code==="inactive") return {message:String(value.message||"").trim()||"Stopped",tone:"error"};
     if(["breakeven","master-sl","take-profit","reverse-protection-cancel"].includes(code))return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
     return {message:"Chasing — "+fillText+"%",tone:value.tone==="error"?"error":"normal"};
   }
@@ -3486,6 +3486,14 @@
       }
     });
     return rowChaseEngine;
+  }
+  function forwardPrivateOrderUpdateToChases(detail){
+    const order = detail && (detail.order || detail.event && detail.event.o || detail);
+    if(!order) return;
+    [openPositionCloseChaseEngine,rapidFireChaseEngine,rowChaseEngine].forEach(engine => {
+      if(!engine || typeof engine.handleOrderUpdate !== "function") return;
+      Promise.resolve(engine.handleOrderUpdate(order)).catch(error => console.warn(MODULE + " reactive chase update failed",error));
+    });
   }
   async function toggleRowChase(row,rowType){
     if(activeRowChase){
@@ -8574,6 +8582,12 @@
       window.addEventListener("v14:binance-state-change",event => {
         scheduleBinanceStateReconcile(event && event.detail);
         scheduleRapidFireLiveOrderSync();
+      },false);
+    }
+    if(!window.__calculatorChaseOrderUpdateBound){
+      window.__calculatorChaseOrderUpdateBound = true;
+      window.addEventListener("bt001:binance-order-update",event => {
+        forwardPrivateOrderUpdateToChases(event && event.detail);
       },false);
     }
     if(!document.__calculatorAutoSyncVisibilityBound){
