@@ -41,5 +41,8 @@ assert(source.includes('const commitStep=')&&source.includes('const nudgeStep=de
 assert.equal((source.match(/resetGridToLinearFromCurrent\(/g)||[]).length,2,"linear rebuilding must occur only in its helper and the Step commit path");
 const dragBlock=source.match(/function dragGridPivot[\s\S]*?function resetGridToLinearFromCurrent/)[0];
 assert(!/signedWrite\(|executeSection\(|executeSectionDirect\(|redistributeLotsOnly\(/.test(dragBlock),"dragging must change prices only and remain preview-only");
+const overlayHook=source.match(/function drawTopLayerLabels[\s\S]*?function hit/)[0];
+assert(overlayHook.includes("drawLabels();")&&source.includes("drawTopLayerLabels();return result;"),"GR levels must repaint inside the shared draw wrapper");
+assert(!overlayHook.includes("requestAnimationFrame"),"GR levels must not defer repaint to a second animation frame");
 
 console.log("grad calculator tests: PASS",result.cases);

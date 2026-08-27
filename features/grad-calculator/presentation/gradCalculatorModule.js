@@ -36,7 +36,6 @@
     preflight:null,
     reconcile:null,
     expressMode:false,
-    labelFrame:0,
     lastSettingsRequestedSymbol:""
   };
 
@@ -1352,18 +1351,11 @@
     });
     ctx.restore();
   }
-  function scheduleTopLayerLabels(){
-    if(state.labelFrame){
-      try{ cancelAnimationFrame(state.labelFrame); }catch(_e){}
-      state.labelFrame = 0;
-    }
-    state.labelFrame = requestAnimationFrame(() => {
-      state.labelFrame = 0;
-      try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}
-      try{window.CANDLE_CLOSE_COUNTDOWN?.draw?.();}catch(_e){}
-    });
+  function drawTopLayerLabels(){
+    try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}
+    try{window.CANDLE_CLOSE_COUNTDOWN?.draw?.();}catch(_e){}
   }
-  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);scheduleTopLayerLabels();return result;};}
+  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);drawTopLayerLabels();return result;};}
   function hit(clientX,clientY){if(typeof canvas==="undefined"||!canvas)return null;const rect=canvas.getBoundingClientRect(),x=clientX-rect.left,y=clientY-rect.top;return state.overlayBoxes.find(box=>x>=box.x1&&x<=box.x2&&y>=box.y1&&y<=box.y2)||null;}
   function dragSnapshot(box,pointerId){
     const list=gridRows(box.section);

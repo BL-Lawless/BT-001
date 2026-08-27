@@ -3654,9 +3654,9 @@ button:hover{filter:brightness(1.04)}
   left:50%;
   top:50%;
   transform:translate(-50%,-50%);
-  color:#475569;
-  background:rgba(255,255,255,.9);
-  border:1px solid rgba(148,163,184,.72);
+  color:#fff;
+  background:rgba(15,23,42,.42);
+  border:1px solid rgba(255,255,255,.58);
   padding:1px 2px;
   font-size:10px;
   font-weight:700;
@@ -3763,9 +3763,9 @@ button:hover{filter:brightness(1.04)}
 .wf-watermark-line{
   position:absolute;
   right:50%;
-  top:-10px;
+  top:0;
   width:calc(50% + 4px);
-  height:10px;
+  min-height:1px;
   border-top:1px solid #64748b;
   border-right:1px solid #64748b;
   opacity:.9;
@@ -14637,7 +14637,6 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     preflight:null,
     reconcile:null,
     expressMode:false,
-    labelFrame:0,
     lastSettingsRequestedSymbol:""
   };
 
@@ -15953,18 +15952,11 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     });
     ctx.restore();
   }
-  function scheduleTopLayerLabels(){
-    if(state.labelFrame){
-      try{ cancelAnimationFrame(state.labelFrame); }catch(_e){}
-      state.labelFrame = 0;
-    }
-    state.labelFrame = requestAnimationFrame(() => {
-      state.labelFrame = 0;
-      try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}
-      try{window.CANDLE_CLOSE_COUNTDOWN?.draw?.();}catch(_e){}
-    });
+  function drawTopLayerLabels(){
+    try{drawLabels();}catch(error){console.warn(MODULE+" overlay failed",error);}
+    try{window.CANDLE_CLOSE_COUNTDOWN?.draw?.();}catch(_e){}
   }
-  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);scheduleTopLayerLabels();return result;};}
+  function installDrawHook(){if(window.__gradDrawWrapped||typeof draw!=="function")return;window.__gradDrawWrapped=true;const previous=draw;window.draw=draw=function(){const result=previous.apply(this,arguments);drawTopLayerLabels();return result;};}
   function hit(clientX,clientY){if(typeof canvas==="undefined"||!canvas)return null;const rect=canvas.getBoundingClientRect(),x=clientX-rect.left,y=clientY-rect.top;return state.overlayBoxes.find(box=>x>=box.x1&&x<=box.x2&&y>=box.y1&&y<=box.y2)||null;}
   function dragSnapshot(box,pointerId){
     const list=gridRows(box.section);
@@ -19945,6 +19937,7 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
   const TFs = root.TFs;
   const {unavailable,eventIdentity,buildStackRank,clamp100,bounceSetupClassification,freshMaPairEventText} = root.core;
   const {lastEventKeyByTf,lastBlinkEventByTf} = root.runtime;
+  const volatility = root.volatility;
   const runtimeAdapter = () => window.MA_STACK_RUNTIME || {};
   const $id = id => { const fn=runtimeAdapter().getById; return typeof fn==="function" ? fn(id) : document.getElementById(id); };
   const Event = function(type,options){ const fn=runtimeAdapter().createEvent; return typeof fn==="function" ? fn(type,options) : new window.Event(type,options); };
@@ -20139,6 +20132,35 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
       const tip = document.getElementById("v33MAStackTooltip");
       if(tip) tip.style.display = "none";
     }
+    function tradabilityModel(rows){
+      const source = Array.isArray(rows) ? rows : [];
+      const unavailableMetric = () => ({value:null,tradeable:false,tone:"grey"});
+      if(!volatility || typeof volatility.atrSeries !== "function" || typeof volatility.adxSeries !== "function"){
+        return {available:false,timeframe:"15m",atr:unavailableMetric(),adx:unavailableMetric()};
+      }
+      const atrValues = volatility.atrSeries(source,14);
+      const adxValues = volatility.adxSeries(source,14);
+      const last = source.length - 1;
+      const atr = Number(atrValues[last]);
+      const adx = Number(adxValues[last]);
+      const atrWindow = atrValues.slice(-20).map(Number).filter(Number.isFinite);
+      if(!Number.isFinite(atr) || !Number.isFinite(adx) || atrWindow.length !== 20){
+        return {available:false,timeframe:"15m",atr:unavailableMetric(),adx:unavailableMetric()};
+      }
+      const atrAverage = atrWindow.reduce((sum,value) => sum + value,0) / atrWindow.length;
+      const atrThreshold = atrAverage * 0.5;
+      const atrTradeable = atr >= atrThreshold;
+      const adxTradeable = adx > 25;
+      const agreement = atrTradeable && adxTradeable;
+      const tone = tradeable => tradeable ? (agreement ? "green-strong" : "green-muted") : "grey";
+      return {
+        available:true,
+        timeframe:"15m",
+        agreement,
+        atr:{value:atr,average:atrAverage,threshold:atrThreshold,tradeable:atrTradeable,tone:tone(atrTradeable)},
+        adx:{value:adx,threshold:25,tradeable:adxTradeable,tone:tone(adxTradeable)}
+      };
+    }
     function renderEnhanced(results){
       ensureDom(); const strip=$id("v33MAStackStrip"); if(!strip) return;
       const summaryTooltipHtmlByTf = new Map();
@@ -20212,7 +20234,8 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
     hubRowToKline:root.runtime.hubRowToKline,
     stackPeriods:root.runtime.stackPeriods,
     stackSlots:root.runtime.stackSlots,
-    classifyTimeframe:root.runtime.classifyTimeframe
+    classifyTimeframe:root.runtime.classifyTimeframe,
+    tradabilityModel
   };
   window.MA_STACK_STRIP = api;
 })();
@@ -24728,13 +24751,103 @@ function closedTradeIncomeValue(row){
 function closedTradeFastContextBounds(period){
   const DAY_MS = 24 * 60 * 60 * 1000;
   const value = selectedClosedTradePeriod(period).value;
-  if(value === "1d") return {initial:3 * DAY_MS,max:21 * DAY_MS,step:3 * DAY_MS};
-  if(value === "1w") return {initial:10 * DAY_MS,max:35 * DAY_MS,step:7 * DAY_MS};
-  if(value === "2w") return {initial:14 * DAY_MS,max:42 * DAY_MS,step:7 * DAY_MS};
-  if(value === "3w") return {initial:21 * DAY_MS,max:56 * DAY_MS,step:7 * DAY_MS};
-  if(value === "1m") return {initial:21 * DAY_MS,max:56 * DAY_MS,step:7 * DAY_MS};
-  if(value === "2m") return {initial:28 * DAY_MS,max:70 * DAY_MS,step:7 * DAY_MS};
-  return {initial:35 * DAY_MS,max:84 * DAY_MS,step:7 * DAY_MS};
+  if(value === "1d") return {initial:3 * DAY_MS,step:3 * DAY_MS};
+  if(value === "1w") return {initial:10 * DAY_MS,step:7 * DAY_MS};
+  if(value === "2w") return {initial:14 * DAY_MS,step:7 * DAY_MS};
+  if(value === "3w") return {initial:21 * DAY_MS,step:7 * DAY_MS};
+  if(value === "1m") return {initial:21 * DAY_MS,step:7 * DAY_MS};
+  if(value === "2m") return {initial:28 * DAY_MS,step:7 * DAY_MS};
+  return {initial:35 * DAY_MS,step:7 * DAY_MS};
+}
+
+function closedTradePositionAnchor(risk,symbol,fallbackTime){
+  const target = String(symbol || "").toUpperCase();
+  const rows = (Array.isArray(risk) ? risk : []).filter(row =>
+    row && String(row.symbol || "").toUpperCase() === target
+  );
+  const row = rows.find(item => String(item.positionSide || "BOTH").toUpperCase() === "BOTH");
+  if(!row) return {supported:false,reason:"one-way-position-anchor-unavailable"};
+  const positionAmt = Number(row.positionAmt);
+  const rawUpdateTime = Number(row.updateTime);
+  const updateTime = Number.isFinite(rawUpdateTime) && rawUpdateTime > 0
+    ? rawUpdateTime
+    : (Math.abs(positionAmt) <= 1e-9 ? Number(fallbackTime) : NaN);
+  if(!Number.isFinite(positionAmt) || !Number.isFinite(updateTime) || updateTime <= 0){
+    return {supported:false,reason:"position-anchor-time-unavailable"};
+  }
+  return {supported:true,positionAmt,updateTime,row};
+}
+
+function closedTradeBoundaryExecutionGroups(rows){
+  const sorted = (Array.isArray(rows) ? rows : []).slice().sort((a,b) =>
+    closedTradeNumber(a && a.time) - closedTradeNumber(b && b.time) ||
+    closedTradeNumber(a && a.orderId) - closedTradeNumber(b && b.orderId) ||
+    closedTradeNumber(a && a.id) - closedTradeNumber(b && b.id)
+  );
+  const groups = [];
+  let current = null;
+  sorted.forEach((row,index) => {
+    const qty = closedTradeNumber(row && row.qty);
+    const time = closedTradeNumber(row && row.time);
+    const side = String(row && row.side || "").toUpperCase();
+    if(!(qty > 0) || !(time > 0) || (side !== "BUY" && side !== "SELL")) return;
+    const key = [
+      row && row.orderId != null ? String(row.orderId) : String(row && row.id || ""),
+      side,
+      String(row && row.positionSide || "BOTH").toUpperCase()
+    ].join("|");
+    if(!current || current.key !== key){
+      current = {key,side,qty:0,lastTime:time,endIndex:index};
+      groups.push(current);
+    }
+    current.qty += qty;
+    current.lastTime = Math.max(current.lastTime,time);
+    current.endIndex = index;
+  });
+  return {sorted,groups};
+}
+
+function closedTradeVerifiedFlatContext(rows,rangeStart,reportStart,anchor){
+  if(!anchor || !anchor.supported){
+    return {verified:false,reason:anchor && anchor.reason || "position-anchor-unavailable",rows:[]};
+  }
+  const {sorted,groups} = closedTradeBoundaryExecutionGroups(rows);
+  const anchorTime = closedTradeNumber(anchor.updateTime);
+  const eligible = groups.filter(group => group.lastTime <= anchorTime);
+  const signedDelta = eligible.reduce((sum,group) =>
+    sum + (group.side === "BUY" ? 1 : -1) * group.qty
+  ,0);
+  const tolerance = 1e-9;
+  const startingPosition = closedTradeNumber(anchor.positionAmt) - signedDelta;
+  let position = startingPosition;
+  let checkpoint = Math.abs(position) <= tolerance
+    ? {nextRowIndex:0,verifiedAt:Math.max(0,closedTradeNumber(rangeStart))}
+    : null;
+
+  for(const group of eligible){
+    position += (group.side === "BUY" ? 1 : -1) * group.qty;
+    if(group.lastTime <= closedTradeNumber(reportStart) && Math.abs(position) <= tolerance){
+      checkpoint = {nextRowIndex:group.endIndex + 1,verifiedAt:group.lastTime};
+    }
+  }
+
+  if(!checkpoint){
+    return {
+      verified:false,
+      reason:"no-verified-flat-before-period",
+      rows:[],
+      startingPosition,
+      anchorTime
+    };
+  }
+  return {
+    verified:true,
+    reason:"verified-flat",
+    rows:sorted.slice(checkpoint.nextRowIndex),
+    startingPosition,
+    verifiedAt:checkpoint.verifiedAt,
+    anchorTime
+  };
 }
 
 function closedTradeFastSummarySideFromRaw(rawSide){
@@ -24769,6 +24882,7 @@ function buildClosedTradeFastResolvedSummaries(rec,win){
     const fees = links.length
       ? links.reduce((sum,link) => sum + closedTradeSignedFeeValue(link && (link.fees ?? link.fee)),0)
       : exits.reduce((sum,marker) => sum + closedTradeSignedFeeValue(marker && marker.fee),0);
+    const funding = closedTradeNumber(trade && trade.netTotal) - realized - fees;
     const side = String(entries[0] && entries[0].side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
     const closeMarker = trade && trade.finalExit ? trade.finalExit : (exits.length ? exits[exits.length - 1] : null);
     return {
@@ -24784,7 +24898,8 @@ function buildClosedTradeFastResolvedSummaries(rec,win){
       qty,
       realized,
       fees,
-      net:realized + fees,
+      funding,
+      net:realized + fees + funding,
       avgOpenPrice:closedTradeFastWeightedPrice(entries),
       avgClosePrice:closedTradeFastWeightedPrice(exits),
       limited:false,
@@ -24849,6 +24964,7 @@ function buildClosedTradeFastLimitedSummaries(rec,win){
       qty,
       realized,
       fees,
+      funding:0,
       net:realized + fees,
       avgOpenPrice:null,
       avgClosePrice:closedTradeFastWeightedPrice(markers),
@@ -24886,6 +25002,7 @@ function buildClosedTradeFastReport(rec,win,symbol,contextLimited){
       grossLosses:Math.abs(loss),
       realizedTotal:summaries.reduce((sum,item) => sum + closedTradeNumber(item && item.realized),0),
       commissionTotal:summaries.reduce((sum,item) => sum + closedTradeNumber(item && item.fees),0),
+      fundingTotal:summaries.reduce((sum,item) => sum + closedTradeNumber(item && item.funding),0),
       netTotal:summaries.reduce((sum,item) => sum + closedTradeNumber(item && item.net),0),
       limitedCount:summaries.filter(item => item && item.limited).length
     }
@@ -24972,19 +25089,36 @@ async function loadFast(period,options={}){
     const off = opt.off != null ? opt.off : await timeOffset();
     const symbol = String(cfg().symbol || "").toUpperCase();
     const bounds = closedTradeFastContextBounds(win.period);
-    const maxContextStart = Math.max(0,win.start - bounds.max);
     let start = Math.max(0,win.start - bounds.initial);
     const requestBudget = createBinanceReconstructionBudget();
-    let rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
-    let rec = reconstruct(rows,symbol);
-    while(!requestBudget.limited && hasPeriodUnresolvedClose(rec,win) && start > maxContextStart){
+    const positionAnchor = closedTradePositionAnchor(await getPositions(key,sec,off),symbol,Date.now() + off);
+    if(!positionAnchor.supported) throw new Error("WF reconstruction requires a verified position anchor: " + positionAnchor.reason);
+    const contextEnd = Math.max(win.end,positionAnchor.updateTime);
+    let rows = await getUserTradesRange(key,sec,off,start,contextEnd,requestBudget);
+    let context = requestBudget.limited
+      ? {verified:false,reason:"request-budget-limited",rows:[]}
+      : closedTradeVerifiedFlatContext(rows,start,win.start,positionAnchor);
+    let rec = reconstruct(context.verified ? context.rows : [],symbol);
+    while(!requestBudget.limited && (!context.verified || hasPeriodUnresolvedClose(rec,win)) && start > 0){
       if(onProgress) onProgress("Resolving WF context...");
-      start = Math.max(maxContextStart,start - bounds.step);
-      rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
-      rec = reconstruct(rows,symbol);
+      start = Math.max(0,start - bounds.step);
+      rows = await getUserTradesRange(key,sec,off,start,contextEnd,requestBudget);
+      context = requestBudget.limited
+        ? {verified:false,reason:"request-budget-limited",rows:[]}
+        : closedTradeVerifiedFlatContext(rows,start,win.start,positionAnchor);
+      rec = reconstruct(context.verified ? context.rows : [],symbol);
     }
-    const contextLimited = requestBudget.limited || hasPeriodUnresolvedClose(rec,win);
+    const fundingRows = await getFundingIncomeRange(key,sec,off,start,win.end,undefined,undefined,requestBudget);
+    fundingIncomeRows = fundingRows;
+    const contextLimited = requestBudget.limited || !context.verified || hasPeriodUnresolvedClose(rec,win);
     const fastReport = buildClosedTradeFastReport(rec,win,symbol,contextLimited);
+    fastReport.contextProof = {
+      verifiedFlat:!!context.verified,
+      reason:context.reason || "",
+      verifiedAt:context.verifiedAt || null,
+      rangeStart:start,
+      anchorTime:positionAnchor.updateTime
+    };
 
     // WF-EXT-CT02/CT06: intrinsic stale-result rejection. The owner now rejects a result
     // whose requested symbol/period no longer matches the current selection by the time
@@ -25001,6 +25135,8 @@ async function loadFast(period,options={}){
 
     const snapshot = commitClosedTrades({
       fastReport,
+      fundingIncomeRows,
+      fundingIncomeFetchStats,
       reportDetailLevel:"fast"
     },{
       status:"ready",
@@ -25051,16 +25187,25 @@ async function loadDetail(period,options={}){
     if(onProgress) onProgress("Fetching fills...");
     let start = Math.max(0,win.start - RECON_LOOKBACK_WEEKS * WEEK_MS);
     const requestBudget = createBinanceReconstructionBudget();
-    let rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
+    const symbol = String(cfg().symbol || "").toUpperCase();
+    const positionAnchor = closedTradePositionAnchor(await getPositions(key,sec,off),symbol,Date.now() + off);
+    if(!positionAnchor.supported) throw new Error("WF reconstruction requires a verified position anchor: " + positionAnchor.reason);
+    const contextEnd = Math.max(win.end,positionAnchor.updateTime);
+    let rows = await getUserTradesRange(key,sec,off,start,contextEnd,requestBudget);
+    let context = requestBudget.limited
+      ? {verified:false,reason:"request-budget-limited",rows:[]}
+      : closedTradeVerifiedFlatContext(rows,start,win.start,positionAnchor);
     if(onProgress) onProgress("Reconstructing trades...");
-    let full = reconstruct(rows,cfg().symbol);
-    const maxBackfillStart = Math.max(0,win.start - Math.max(RECON_LOOKBACK_WEEKS,52) * WEEK_MS);
-    while(!requestBudget.limited && hasPeriodUnresolvedClose(full,win) && start > maxBackfillStart){
+    let full = reconstruct(context.verified ? context.rows : [],symbol);
+    while(!requestBudget.limited && (!context.verified || hasPeriodUnresolvedClose(full,win)) && start > 0){
       if(onProgress) onProgress("Fetching fills...");
-      start = Math.max(maxBackfillStart,start - TRADE_CHUNK_MS);
-      rows = await getUserTradesRange(key,sec,off,start,win.end,requestBudget);
+      start = Math.max(0,start - TRADE_CHUNK_MS);
+      rows = await getUserTradesRange(key,sec,off,start,contextEnd,requestBudget);
+      context = requestBudget.limited
+        ? {verified:false,reason:"request-budget-limited",rows:[]}
+        : closedTradeVerifiedFlatContext(rows,start,win.start,positionAnchor);
       if(onProgress) onProgress("Reconstructing trades...");
-      full = reconstruct(rows,cfg().symbol);
+      full = reconstruct(context.verified ? context.rows : [],symbol);
     }
     const fundingRows = await getFundingIncomeRange(key,sec,off,start,win.end,undefined,undefined,requestBudget).catch(e => {
       console.warn("Funding income fetch failed",e);
@@ -25071,7 +25216,15 @@ async function loadDetail(period,options={}){
 
     const rec = filterClosedReconstructionForPeriod(full,win);
     rec.period = win;
-    rec.symbol = String(cfg().symbol || "").toUpperCase();
+    rec.symbol = symbol;
+    rec.contextProof = {
+      verifiedFlat:!!context.verified,
+      reason:context.reason || "",
+      verifiedAt:context.verifiedAt || null,
+      rangeStart:start,
+      anchorTime:positionAnchor.updateTime,
+      limited:requestBudget.limited || !context.verified
+    };
 
     // See loadFast() above for the intrinsic stale-rejection rationale.
     const stillCurrent = requestSymbol === String(cfg().symbol || "").toUpperCase() &&
@@ -45003,6 +45156,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   const DAY_SEC = 86400;
   const DAILY_TF = "1d";
   const DAILY_HISTORY_KEEP = 32;
+  const TRADABILITY_TF = "15m";
   const PRESSURE_MODE_KEY = "bt001_pressure_meter_mode";
   const PRESSURE_LB_KEY = "bt001_pressure_meter_lookback";
   const TF_LOOKBACKS = [5,10,20,50];
@@ -45034,7 +45188,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
         return 20;
       }
     })(),
-    hoverToggle:false
+    hoverToggle:false,
+    redrawFrame:null,
+    tradabilityRect:null,
+    tradabilityModel:null
   };
   function currentSymbol(){
     try{
@@ -45045,7 +45202,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function requestRedraw(){
     try{
-      requestAnimationFrame(() => {
+      if(meterState.redrawFrame != null) return;
+      meterState.redrawFrame = requestAnimationFrame(() => {
+        meterState.redrawFrame = null;
         if(typeof draw === "function") draw();
       });
     }catch(_error){}
@@ -45355,6 +45514,39 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     ctx.fillText(out,x,y);
     ctx.restore();
   }
+  function computeTradabilityModel(){
+    const strip = window.MA_STACK_STRIP || null;
+    if(!strip || typeof strip.tradabilityModel !== "function") return null;
+    return strip.tradabilityModel(rowsForTf(TRADABILITY_TF));
+  }
+  function tradabilityMetricColor(metric){
+    if(metric && metric.tone === "green-strong") return "#15803d";
+    if(metric && metric.tone === "green-muted") return "rgba(22,163,74,.74)";
+    return "#647083";
+  }
+  function drawTradabilityMetricLine(label,value,metric,centerX,y){
+    const labelText = label + ": ";
+    const valueText = value;
+    const labelWidth = ctx.measureText(labelText).width;
+    const valueWidth = ctx.measureText(valueText).width;
+    const startX = centerX - (labelWidth + valueWidth) / 2;
+    ctx.fillStyle = "#111827";
+    ctx.fillText(labelText,startX,y);
+    ctx.fillStyle = tradabilityMetricColor(metric);
+    ctx.fillText(valueText,startX + labelWidth,y);
+  }
+  function drawTradabilityGauge(model,rect){
+    if(!ctx || !rect || !(rect.w >= 58) || !(rect.h >= 26)) return;
+    ctx.save();
+    ctx.font = "bold 11px Arial";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    const atr = model && model.atr && Number.isFinite(Number(model.atr.value)) ? Number(model.atr.value).toFixed(1) : "n/a";
+    const adx = model && model.adx && Number.isFinite(Number(model.adx.value)) ? Number(model.adx.value).toFixed(1) : "n/a";
+    drawTradabilityMetricLine("ATR",atr,model && model.atr,rect.x + rect.w / 2,rect.y);
+    drawTradabilityMetricLine("ADX",adx,model && model.adx,rect.x + rect.w / 2,rect.y + 14);
+    ctx.restore();
+  }
   function computePressureModel(mode){
     const useDaily = mode !== "tf";
     const tf = useDaily ? DAILY_TF : currentTf();
@@ -45523,6 +45715,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     meterState.toggleTfRect = null;
     meterState.lbRects = [];
     meterState.meterRect = null;
+    meterState.tradabilityRect = null;
+    meterState.tradabilityModel = null;
     const volume = window.__bt001VolumePanelBounds || null;
     if(!volume) return;
     const reserveLeft = n(volume.reserveLeft);
@@ -45533,6 +45727,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const reserveWidth = reserveRight - reserveLeft;
     if(!(volumeHeight >= 52) || !(reserveWidth >= 110)) return;
     const model = computePressureModel(meterState.mode);
+    const tradability = computeTradabilityModel();
+    meterState.tradabilityModel = tradability;
     const pad = 6;
     const meterX = Math.round(reserveLeft + pad);
     const meterW = Math.max(96,reserveWidth - pad * 2);
@@ -45628,6 +45824,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const strapBottom = volumeText + " | " + model.rating;
     drawCenteredClippedText(strapTop,meterX + meterW / 2,strapY,meterW,"bold 12px Arial","#0f172a");
     drawCenteredClippedText(strapBottom,meterX + meterW / 2,strapY + strapLineGap,meterW,"bold 11px Arial","#334155");
+    const tradabilityY = strapY + strapLineGap + 20;
+    if(tradabilityY + 25 <= volumeTop + volumeHeight - 3){
+      const tradabilityRect = {x:meterX,y:tradabilityY,w:meterW,h:28};
+      drawTradabilityGauge(tradability,tradabilityRect);
+      meterState.tradabilityRect = tradabilityRect;
+    }
     if(axisW >= 46){
       ctx.fillStyle = "rgba(255,255,255,.58)";
       ctx.fillRect(axisLeft - 2,Math.round(volumeTop + 1),axisW + 4,Math.round(volumeHeight - 2));
@@ -45702,6 +45904,19 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     },false);
   }
 
+  const tradabilityHub = window.PUBLIC_MARKET_DATA_HUB || null;
+  if(tradabilityHub && typeof tradabilityHub.subscribe === "function" && !window.__bt001TradabilityGaugeSubscribed){
+    window.__bt001TradabilityGaugeSubscribed = true;
+    window.__bt001TradabilityGaugeUnsubscribe = tradabilityHub.subscribe(event => {
+      if(event && event.type === "kline" && String(event.tf || "").toLowerCase() === TRADABILITY_TF) requestRedraw();
+    });
+  }
+  window.BT001_TRADABILITY_GAUGE = Object.freeze({
+    timeframe:TRADABILITY_TF,
+    snapshot:() => meterState.tradabilityModel,
+    rect:() => meterState.tradabilityRect && {...meterState.tradabilityRect}
+  });
+
   const prevDraw = draw;
   draw = window.draw = function(){
     const result = prevDraw.apply(this,arguments);
@@ -45769,17 +45984,15 @@ if(typeof window !== "undefined"){
     Object.freeze({value:"1m",label:"1M"}),
     Object.freeze({value:"2m",label:"2M"}),
     Object.freeze({value:"3m",label:"3M"}),
-    Object.freeze({value:"6m",label:"6M"}),
-    Object.freeze({value:"1y",label:"1Y"})
+    Object.freeze({value:"6m",label:"6M"})
   ]);
   const TF_OPTIONS = Object.freeze({
-    "1d":Object.freeze(["1h","4h","6h"]),
-    "1w":Object.freeze(["4h","6h","1d"]),
-    "1m":Object.freeze(["4h","6h","1d","1w"]),
-    "2m":Object.freeze(["4h","6h","1d","1w"]),
-    "3m":Object.freeze(["4h","6h","1d","1w"]),
-    "6m":Object.freeze(["4h","6h","1d","1w"]),
-    "1y":Object.freeze(["4h","6h","1d","1w"])
+    "1d":Object.freeze(["6h","4h","1h","trades"]),
+    "1w":Object.freeze(["1d","6h","4h"]),
+    "1m":Object.freeze(["1w","1d","6h","4h"]),
+    "2m":Object.freeze(["1w","1d","6h","4h"]),
+    "3m":Object.freeze(["1w","1d","6h","4h"]),
+    "6m":Object.freeze(["1w","1d","6h","4h"])
   });
   const TF_MS = Object.freeze({
     "1h":60 * 60 * 1000,
@@ -45797,7 +46010,7 @@ if(typeof window !== "undefined"){
     return n > 1e12 ? n : n * 1000;
   };
   const optionsForPeriod = period => (TF_OPTIONS[normalize(period)] || TF_OPTIONS["1m"]).slice();
-  const defaultTfForPeriod = period => optionsForPeriod(period)[0];
+  const defaultTfForPeriod = period => optionsForPeriod(period).find(tf => tf !== "trades") || "trades";
   const validTfForPeriod = (period,tf) => {
     const normalized = normalize(tf);
     return optionsForPeriod(period).includes(normalized) ? normalized : defaultTfForPeriod(period);
@@ -45826,23 +46039,56 @@ if(typeof window !== "undefined"){
       bucketStart === start && now >= bucketStart && now < bucketEnd;
   }
 
-  function aggregateTrades(trades,tf,rawLimit=10){
+  function aggregateTrades(trades,tf,rawLimit=10,nowMs=Date.now(),periodStartMs=null){
     const normalizedTf = normalize(tf);
     const stepMs = TF_MS[normalizedTf];
-    if(!stepMs) throw new Error("Unsupported WF aggregation TF: " + tf);
+    const tradesMode = normalizedTf === "trades";
+    if(!stepMs && !tradesMode) throw new Error("Unsupported WF aggregation TF: " + tf);
     const recentFirst = (Array.isArray(trades) ? trades : [])
       .map((trade,sourceIndex) => ({trade,sourceIndex,closeMs:toMs(trade && trade.finalExitTime)}))
       .filter(item => item.closeMs != null)
       .sort((a,b) => (b.closeMs - a.closeMs) || (a.sourceIndex - b.sourceIndex));
+    if(tradesMode){
+      const rawChronological = recentFirst.slice().reverse().map(item => item.trade);
+      let cumulative = 0;
+      rawChronological.forEach(item => {
+        item.start = cumulative;
+        cumulative += Number(item && item.net) || 0;
+        item.end = cumulative;
+      });
+      return {
+        recentFirst:recentFirst.map(item => item.trade),
+        rawRecent:recentFirst.map(item => item.trade),
+        aggregated:[],
+        display:rawChronological,
+        sourceCount:recentFirst.length,
+        displayedTradeCount:recentFirst.length,
+        aggregatedTradeCount:0,
+        sourceNet:cumulative,
+        displayNet:cumulative
+      };
+    }
     const limit = Math.max(0,Math.floor(Number(rawLimit) || 0));
-    const rawRecent = recentFirst.slice(0,limit);
-    const older = recentFirst.slice(limit);
+    const currentBucketStartMs = bucketStartMs(nowMs,normalizedTf);
+    const selectedPeriodStartMs = toMs(periodStartMs);
+    const rawRecent = [];
+    const older = [];
+    recentFirst.forEach(item => {
+      const belongsToCurrentBucket = bucketStartMs(item.closeMs,normalizedTf) === currentBucketStartMs;
+      if(belongsToCurrentBucket && rawRecent.length < limit) rawRecent.push(item);
+      else older.push(item);
+    });
     const buckets = new Map();
     older.forEach(item => {
       const startMs = bucketStartMs(item.closeMs,normalizedTf);
       let bucket = buckets.get(startMs);
       if(!bucket){
-        bucket = {startMs,endMs:startMs + stepMs,trades:[],net:0};
+        bucket = {
+          startMs:selectedPeriodStartMs == null ? startMs : Math.max(startMs,selectedPeriodStartMs),
+          endMs:startMs + stepMs,
+          trades:[],
+          net:0
+        };
         buckets.set(startMs,bucket);
       }
       bucket.trades.push(item.trade);
@@ -46063,13 +46309,15 @@ if(typeof window !== "undefined"){
     hoverInsideChart:false,
     suppressResizeRender:false,
     expandedRect:null,
-    selectedTf:"1h",
+    selectedTf:"",
     selectedPeriod:"1d",
     drilldown:null,
     drilldownBusy:false,
     loading:false,
     aggregationPending:false,
     aggregationFrame:null,
+    periodLoadGeneration:0,
+    periodLoadTimer:null,
     crosshair:{active:false,clientX:null,clientY:null,selectedLevel:null,scale:null,listenerBindings:0,updates:0,closedPartialKey:""}
   };
   function activeWfTradeKey(){
@@ -46099,10 +46347,10 @@ if(typeof window !== "undefined"){
     }
   }
   function wfTfLabel(tf){
-    return String(tf || "").toUpperCase();
+    return String(tf || "").toLowerCase() === "trades" ? "Trades" : String(tf || "").toUpperCase();
   }
   function wfTfWords(tf){
-    return ({"1h":"One Hour","4h":"Four Hours","6h":"Six Hours","1d":"One Day","1w":"One Week"})[String(tf || "").toLowerCase()] || wfTfLabel(tf);
+    return ({"trades":"Trades","1h":"One Hour","4h":"Four Hours","6h":"Six Hours","1d":"One Day","1w":"One Week"})[String(tf || "").toLowerCase()] || wfTfLabel(tf);
   }
   function wfRangeText(startMs,endMs){
     const format = value => new Date(value).toLocaleString("en-GB",{
@@ -46110,14 +46358,19 @@ if(typeof window !== "undefined"){
     });
     return format(startMs) + " - " + format(endMs) + " UTC";
   }
-  function syncSelectedTf(period,{resetDrilldown=false}={}){
+  function syncSelectedTf(period,{resetDrilldown=false,useDefault=false}={}){
     const aggregation = wfAggregation();
     if(!aggregation) return;
     if(resetDrilldown) wfSyncState.drilldown = null;
-    const normalizedPeriod = String(period || currentPeriodValue()).toLowerCase();
+    const requestedPeriod = String(period || currentPeriodValue()).toLowerCase();
+    const normalizedPeriod = aggregation.PERIOD_OPTIONS.some(option => option.value === requestedPeriod)
+      ? requestedPeriod
+      : aggregation.PERIOD_OPTIONS[0].value;
     wfSyncState.selectedPeriod = normalizedPeriod;
     if(!wfSyncState.drilldown){
-      wfSyncState.selectedTf = aggregation.validTfForPeriod(normalizedPeriod,wfSyncState.selectedTf);
+      wfSyncState.selectedTf = useDefault
+        ? aggregation.defaultTfForPeriod(normalizedPeriod)
+        : aggregation.validTfForPeriod(normalizedPeriod,wfSyncState.selectedTf);
     }
   }
   function readWfSelection(){
@@ -46319,6 +46572,59 @@ if(typeof window !== "undefined"){
     const request = displayControlsLoadRequest(period,scopedOpt);
     if(wfDataMode() === "detail") return window.loadClosedTradesForPeriod(period,request);
     return window.loadClosedTradesFastForPeriod(period,request);
+  }
+  function clearLatestPeriodLoadTimer(){
+    if(wfSyncState.periodLoadTimer != null){
+      clearTimeout(wfSyncState.periodLoadTimer);
+      wfSyncState.periodLoadTimer = null;
+    }
+  }
+  async function runLatestPeriodLoad(period,generation){
+    if(generation !== wfSyncState.periodLoadGeneration || currentPeriodValue() !== period) return;
+    wfSyncState.periodLoadTimer = null;
+    const owner = window.BT001_CLOSED_TRADES;
+    const request = displayControlsLoadRequest(period,{force:true,silent:true,source:"waterfall-period-sync"});
+    let result;
+    if(owner && typeof owner.loadFast === "function" && typeof owner.loadDetail === "function"){
+      result = wfDataMode() === "detail"
+        ? await owner.loadDetail(period,request)
+        : await owner.loadFast(period,request);
+    }else{
+      const legacy = await reloadCurrentWfData(period,{force:true,silent:true,source:"waterfall-period-sync"});
+      result = legacy ? {outcome:"committed",report:legacy} : {outcome:"error"};
+    }
+    if(generation !== wfSyncState.periodLoadGeneration || currentPeriodValue() !== period) return;
+    const outcome = String(result && result.outcome || "error");
+    if(outcome === "busy" || outcome === "stale"){
+      wfSyncState.periodLoadTimer = setTimeout(() => {
+        runLatestPeriodLoad(period,generation).catch(error => {
+          if(generation !== wfSyncState.periodLoadGeneration) return;
+          stopWfLoading();
+          if(visible) render();
+          console.warn(MODULE + " latest WF period retry failed",error);
+        });
+      },outcome === "busy" ? 40 : 0);
+      return;
+    }
+    if(outcome === "committed") return;
+    stopWfLoading();
+    if(visible) render();
+    if(outcome === "error" && result && result.error) console.warn(MODULE + " WF period reload failed",result.error);
+  }
+  function scheduleLatestPeriodLoad(period){
+    const normalizedPeriod = String(period || currentPeriodValue()).toLowerCase();
+    wfSyncState.periodLoadGeneration += 1;
+    const generation = wfSyncState.periodLoadGeneration;
+    clearLatestPeriodLoadTimer();
+    beginWfLoading();
+    wfSyncState.periodLoadTimer = setTimeout(() => {
+      runLatestPeriodLoad(normalizedPeriod,generation).catch(error => {
+        if(generation !== wfSyncState.periodLoadGeneration) return;
+        stopWfLoading();
+        if(visible) render();
+        console.warn(MODULE + " latest WF period load failed",error);
+      });
+    },40);
   }
   async function ensureFastWfData(opt={}){
     if(typeof window.hasKeys !== "function" || !window.hasKeys()) return null;
@@ -47247,8 +47553,9 @@ if(typeof window !== "undefined"){
     let cumulative = 0;
     return rows.map((row,index) => {
       const net = num(row && row.net) || 0;
-      const realized = net;
+      const realized = num(row && row.realized) || 0;
       const fees = num(row && row.fees);
+      const fundingDelta = num(row && row.funding);
       const qty = num(row && row.qty);
       const openTime = num(row && row.openTime);
       const closeTime = num(row && row.closeTime);
@@ -47260,6 +47567,7 @@ if(typeof window !== "undefined"){
       if(qty != null) tooltipLines.push("Closed Volume: " + window.fq(qty));
       tooltipLines.push([{text:"Realized P/L: ",color:WF_BLACK},{text:window.fm(realized),color:wfPnlColor(realized),bold:true}]);
       if(fees != null) tooltipLines.push([{text:"Commission / Fees: ",color:WF_BLACK},{text:window.fm(fees),color:wfPnlColor(fees),bold:true}]);
+      if(fundingDelta != null) tooltipLines.push([{text:"Funding Fee: ",color:WF_BLACK},{text:window.fm(fundingDelta),color:wfPnlColor(fundingDelta),bold:true}]);
       if(row && row.limited) tooltipLines.push("Limited detail: partial context");
       const trade = {
         id:row && row.id ? row.id : ("wf_fast_" + index),
@@ -47270,7 +47578,7 @@ if(typeof window !== "undefined"){
         net,
         realized,
         fees,
-        fundingDelta:null,
+        fundingDelta,
         dir:String(row && row.dir || window.closedTradeFastSummaryDirection(side)),
         tooltipLines,
         finalExit:null,
@@ -47387,14 +47695,16 @@ if(typeof window !== "undefined"){
   function aggregateTradeRows(sourceTrades){
     const aggregation = wfAggregation();
     if(!aggregation) return {display:sourceTrades.slice(),recentFirst:sourceTrades.slice().reverse(),rawRecent:sourceTrades.slice(-WF_RAW_TRADE_LIMIT),aggregated:[],sourceCount:sourceTrades.length,displayedTradeCount:Math.min(sourceTrades.length,WF_RAW_TRADE_LIMIT),aggregatedTradeCount:0,sourceNet:0,displayNet:0};
-    const result = aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT);
+    const period = selectedPeriodDates();
+    const aggregationNowMs = Date.now();
+    const result = aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT,aggregationNowMs,period && period.start);
     result.aggregated.forEach((bucket,index) => {
       const bucketSourceTrades = Array.isArray(bucket.sourceTrades) ? bucket.sourceTrades : [];
       const bucketTradeCount = bucketSourceTrades.length;
       const bucketNet = bucketSourceTrades.reduce((sum,trade) => sum + (num(trade && trade.net) || 0),0);
       bucket.tradeCount = bucketTradeCount;
       bucket.net = bucketNet;
-      bucket.inProgress = index === result.aggregated.length - 1 && aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,Date.now());
+      bucket.inProgress = index === result.aggregated.length - 1 && aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,aggregationNowMs);
       bucket.when = shortDate(bucket.bucketStartMs);
       bucket.tooltipLines = [
         "Aggregated " + wfTfLabel(bucket.bucketTf) + " bucket",
@@ -47412,11 +47722,7 @@ if(typeof window !== "undefined"){
     const aggregation = wfAggregation();
     if(!aggregation) return "";
     const current = currentPeriodValue();
-    const options = aggregation.PERIOD_OPTIONS.slice();
-    if(!options.some(option => option.value === current)){
-      options.push({value:current,label:current.toUpperCase(),legacy:true});
-    }
-    return options.map(option => `<option value="${wfAttr(option.value)}"${option.value === current ? " selected" : ""}${option.legacy ? ' data-legacy="true"' : ""}>${wfEscape(option.label)}</option>`).join("");
+    return aggregation.PERIOD_OPTIONS.map(option => `<option value="${wfAttr(option.value)}"${option.value === current ? " selected" : ""}>${wfEscape(option.label)}</option>`).join("");
   }
 
   function wfTfOptionsHtml(){
@@ -47446,9 +47752,8 @@ if(typeof window !== "undefined"){
       periodSelect.__wfBound = true;
       periodSelect.addEventListener("change",() => {
         const controls = window.BT001_DISPLAY_CONTROLS;
-        syncSelectedTf(periodSelect.value,{resetDrilldown:true});
+        syncSelectedTf(periodSelect.value,{resetDrilldown:true,useDefault:true});
         persistWfSelection(periodSelect.value,wfSyncState.selectedTf);
-        beginWfLoading();
         if(controls && typeof controls.setPeriod === "function") controls.setPeriod(periodSelect.value,{source:"waterfall-period-select"});
         periodSelect.blur();
       },false);
@@ -47780,10 +48085,11 @@ if(typeof window !== "undefined"){
       // moneyPlain() (no leading "+") instead of money() for the same reason - the value
       // is never negative in practice, so a signed prefix only added visual noise.
       const watermarkY = Math.max(0,Math.min(plotHeight,valueToY(watermarks.high && watermarks.high.value)));
+      const watermarkConnectorHeight = Math.max(1,topY - watermarkY + 1);
       const mark = watermarks.high && watermarks.high.index === index && !trade.live
         ? `<div class="wf-watermark is-high" style="top:${watermarkY}px">
             <span class="wf-watermark-label">${moneyPlain(watermarks.high.value)}</span>
-            <span class="wf-watermark-line"></span>
+            <span class="wf-watermark-line" style="height:${watermarkConnectorHeight}px"></span>
           </div>`
         : "";
       return `<div class="wf-bar-col" data-chart-index="${index}">
@@ -48005,10 +48311,14 @@ if(typeof window !== "undefined"){
     visible = true;
     const win = ensureWindow();
     if(!win) return;
+    const periodBeforeRestore = currentPeriodValue();
+    const restoredSelection = restoreWfSelection();
+    const restoredPeriodChanged = restoredSelection && currentPeriodValue() !== periodBeforeRestore;
     win.classList.remove("hidden");
     startLiveRefreshLoop();
     startClosedTradesSafetyLoop();
     applyExpandedRect(win);
+    if(restoredPeriodChanged) return;
     if(wfDataMode() === "detail" && wfHasCurrentDetailReport()){
       queueWfAggregationRender();
       return;
@@ -48039,31 +48349,28 @@ if(typeof window !== "undefined"){
   function install(){
     ensureToggle();
     ensureWindow();
-    if(!restoreWfSelection()) syncSelectedTf(currentPeriodValue());
+    if(!restoreWfSelection()){
+      const requestedPeriod = currentPeriodValue();
+      syncSelectedTf(requestedPeriod,{useDefault:true});
+      const controls = window.BT001_DISPLAY_CONTROLS;
+      if(wfSyncState.selectedPeriod !== requestedPeriod && controls && typeof controls.setPeriod === "function"){
+        controls.setPeriod(wfSyncState.selectedPeriod,{source:"waterfall-unsupported-period"});
+      }
+    }
     const controls = window.BT001_DISPLAY_CONTROLS;
     if(controls && typeof controls.subscribe === "function" && !window.__bt001WfDisplayControlsBound){
       window.__bt001WfDisplayControlsBound = true;
       let subscribedPeriod = currentPeriodValue();
-      controls.subscribe(snapshot => {
+      controls.subscribe((snapshot,meta={}) => {
         const nextPeriod = String((snapshot && snapshot.period && snapshot.period.value) || "1d").toLowerCase();
         if(nextPeriod === subscribedPeriod) return;
         subscribedPeriod = nextPeriod;
-        syncSelectedTf(nextPeriod,{resetDrilldown:true});
+        const source = String(meta && meta.source || "");
+        if(!visible && !source.startsWith("waterfall-")) return;
+        syncSelectedTf(nextPeriod,{resetDrilldown:true,useDefault:source !== "waterfall-selection-restore"});
         persistWfSelection(nextPeriod,wfSyncState.selectedTf);
         hideWfCrosshair();
-        beginWfLoading();
-        Promise.resolve().then(() => {
-          if(currentPeriodValue() !== nextPeriod) return;
-          reloadCurrentWfData(nextPeriod,{force:true,silent:true,source:"waterfall-period-sync"}).then(outcome => {
-            if(outcome) return;
-            stopWfLoading();
-            if(visible) render();
-          }).catch(error => {
-            stopWfLoading();
-            if(visible) render();
-            console.warn(MODULE + " WF period reload failed",error);
-          });
-        });
+        scheduleLatestPeriodLoad(nextPeriod);
       });
     }
     if(typeof window.hasKeys === "function" && window.hasKeys()){

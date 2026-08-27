@@ -78,9 +78,13 @@ assert(wfSource.includes("window.BT001_DISPLAY_CONTROLS"),"WF fast/detail loads 
 assert(wfSource.includes("displayControlsRevision:snapshot.revision"),"WF load requests must carry the controls revision");
 assert(!wfSource.includes("customFromEl")&&!wfSource.includes("customToEl"),"dead custom-range reads must be removed from WF");
 assert(!wfSource.includes("reportWeeksEl"),"WF must have zero direct period-selector reads after display-controls migration");
-assert(wfSource.includes("controls.subscribe(snapshot =>"),"WF period reloads must subscribe to the display-controls owner");
+assert(wfSource.includes("controls.subscribe((snapshot,meta={}) =>"),"WF period reloads must subscribe to display-control changes with source metadata");
 assert(wfSource.includes('id="wfPeriodSelect"')&&wfSource.includes('id="wfTfSelect"'),"WF must render Period and TF as dropdown selectors");
-assert(wfSource.includes("aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT)"),"WF must split and aggregate the active owner projection");
+assert(wfSource.includes("aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT,aggregationNowMs,period && period.start)"),"WF must aggregate the owner projection against one current time and the selected period boundary");
+assert.deepStrictEqual(wfAggregation.PERIOD_OPTIONS.map(option=>option.value),["1d","1w","1m","2m","3m","6m"],"WF periods must run low-to-high with 1Y removed");
+assert.deepStrictEqual(wfAggregation.optionsForPeriod("1d"),["6h","4h","1h","trades"],"1D TFs must run coarsest-to-finest and expose Trades last");
+assert(!wfAggregation.optionsForPeriod("1w").includes("trades"),"Trades must be exclusive to the 1D period");
+assert.equal(wfAggregation.defaultTfForPeriod("1m"),"1w","fresh period selections must default to their coarsest TF");
 assert(wfSource.includes("if(trade && trade.aggregated) drillDownAggregate(trade);"),"aggregated bars must own the drill-down click route");
 assert(wfSource.includes('source:"waterfall-bucket-drilldown"')&&wfSource.includes("resolvedRange:{startMs:bucket.bucketStartMs,endMs:bucket.bucketEndMs}"),"bucket drill-down must reuse the normal period loader with an exact custom range");
 assert(wfSource.includes('liveSegment:"net"')&&!wfSource.includes('liveSegment:"realized"')&&!wfSource.includes('liveSegment:"floating"'),"an open position must render as one distinct net live bar");
@@ -107,13 +111,17 @@ const resultTemplateNet = wfSource.indexOf('<div class="wf-result-label">Net P/L
 assert(resultTemplateStart >= 0 && resultTemplateNet > resultTemplateStart,"WF Period/TF controls must render at the top of the right column above Net P/L");
 assert(wfSource.includes("const rawBoundaryIndex = chartTrades.findIndex")&&wfSource.includes('class="wf-section-separator"'),"WF must render a separator at the aggregate/raw boundary");
 assert(wfCss.includes(".wf-section-separator{")&&wfCss.includes("background:#aeb7c2")&&wfCss.includes("top:0;")&&wfCss.includes("bottom:0;"),"the aggregate/raw separator must span the full chart height in medium light grey");
-assert(wfSource.includes("aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,Date.now())")&&wfSource.includes("? '<span class=\"wf-bar-bucket-flag\">A</span>'")&&wfSource.includes('cls.push("is-current-bucket")')&&wfCss.includes(".wf-bar.is-current-bucket{overflow:visible}"),"only the current in-progress aggregate bucket must receive a visible A marker");
+assert(wfSource.includes("aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,aggregationNowMs)")&&wfSource.includes("? '<span class=\"wf-bar-bucket-flag\">A</span>'")&&wfSource.includes('cls.push("is-current-bucket")')&&wfCss.includes(".wf-bar.is-current-bucket{overflow:visible}"),"only the current in-progress aggregate bucket must receive a visible A marker");
+assert(/\.wf-bar-bucket-flag\{[\s\S]*?color:#fff;/.test(wfCss),"the current-bucket A marker must use white text");
+assert(wfSource.includes('style="height:${watermarkConnectorHeight}px"')&&wfCss.includes("top:0;")&&wfCss.includes("min-height:1px;"),"the HWM connector must extend from the true HWM level through the marked bar's upper edge");
 for(const label of ["One Hour","Four Hours","Six Hours","One Day","One Week"]){
   assert(wfSource.includes(label),"WF must provide the natural TF label " + label);
 }
 assert(wfSource.includes('class="wf-section-label is-trades">Trades</span>')&&!wfSource.includes("wfTfLabel(trade.bucketTf)"),"the grouped bottom label row must replace repeated per-bucket TF labels");
 assert(wfSource.includes('const WF_SELECTION_STORAGE_KEY = "btc_futures_chart_v13_wf_period_tf_v1"')&&wfSource.includes("localStorage.getItem(WF_SELECTION_STORAGE_KEY)")&&wfSource.includes("localStorage.setItem(WF_SELECTION_STORAGE_KEY"),"WF Period/TF must use versioned browser persistence");
-assert(wfSource.includes('source:"waterfall-selection-restore"')&&wfSource.includes("if(!restoreWfSelection()) syncSelectedTf(currentPeriodValue());"),"restored WF Period must flow through the shared display-controls owner");
+assert(wfSource.includes('source:"waterfall-selection-restore"')&&wfSource.includes("if(!restoreWfSelection()){"),"restored WF Period must flow through the shared display-controls owner");
+assert(wfSource.includes("const restoredSelection = restoreWfSelection();")&&wfSource.includes("if(restoredPeriodChanged) return;"),"WF reopen must restore its saved Period/TF before loading");
+assert(wfSource.includes('if(!visible && !source.startsWith("waterfall-")) return;'),"hidden WF must not let unrelated display-period changes overwrite its saved selection");
 const selectionFunctionsStart = wfSource.indexOf("function readWfSelection()");
 const selectionFunctionsEnd = wfSource.indexOf("function requestWfFrame",selectionFunctionsStart);
 const persisted = new Map([["btc_futures_chart_v13_wf_period_tf_v1",JSON.stringify({version:1,period:"1w",tf:"1d"})]]);

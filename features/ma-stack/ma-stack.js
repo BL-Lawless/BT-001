@@ -5,6 +5,7 @@
   const TFs = root.TFs;
   const {unavailable,eventIdentity,buildStackRank,clamp100,bounceSetupClassification,freshMaPairEventText} = root.core;
   const {lastEventKeyByTf,lastBlinkEventByTf} = root.runtime;
+  const volatility = root.volatility;
   const runtimeAdapter = () => window.MA_STACK_RUNTIME || {};
   const $id = id => { const fn=runtimeAdapter().getById; return typeof fn==="function" ? fn(id) : document.getElementById(id); };
   const Event = function(type,options){ const fn=runtimeAdapter().createEvent; return typeof fn==="function" ? fn(type,options) : new window.Event(type,options); };
@@ -199,6 +200,35 @@
       const tip = document.getElementById("v33MAStackTooltip");
       if(tip) tip.style.display = "none";
     }
+    function tradabilityModel(rows){
+      const source = Array.isArray(rows) ? rows : [];
+      const unavailableMetric = () => ({value:null,tradeable:false,tone:"grey"});
+      if(!volatility || typeof volatility.atrSeries !== "function" || typeof volatility.adxSeries !== "function"){
+        return {available:false,timeframe:"15m",atr:unavailableMetric(),adx:unavailableMetric()};
+      }
+      const atrValues = volatility.atrSeries(source,14);
+      const adxValues = volatility.adxSeries(source,14);
+      const last = source.length - 1;
+      const atr = Number(atrValues[last]);
+      const adx = Number(adxValues[last]);
+      const atrWindow = atrValues.slice(-20).map(Number).filter(Number.isFinite);
+      if(!Number.isFinite(atr) || !Number.isFinite(adx) || atrWindow.length !== 20){
+        return {available:false,timeframe:"15m",atr:unavailableMetric(),adx:unavailableMetric()};
+      }
+      const atrAverage = atrWindow.reduce((sum,value) => sum + value,0) / atrWindow.length;
+      const atrThreshold = atrAverage * 0.5;
+      const atrTradeable = atr >= atrThreshold;
+      const adxTradeable = adx > 25;
+      const agreement = atrTradeable && adxTradeable;
+      const tone = tradeable => tradeable ? (agreement ? "green-strong" : "green-muted") : "grey";
+      return {
+        available:true,
+        timeframe:"15m",
+        agreement,
+        atr:{value:atr,average:atrAverage,threshold:atrThreshold,tradeable:atrTradeable,tone:tone(atrTradeable)},
+        adx:{value:adx,threshold:25,tradeable:adxTradeable,tone:tone(adxTradeable)}
+      };
+    }
     function renderEnhanced(results){
       ensureDom(); const strip=$id("v33MAStackStrip"); if(!strip) return;
       const summaryTooltipHtmlByTf = new Map();
@@ -272,7 +302,8 @@
     hubRowToKline:root.runtime.hubRowToKline,
     stackPeriods:root.runtime.stackPeriods,
     stackSlots:root.runtime.stackSlots,
-    classifyTimeframe:root.runtime.classifyTimeframe
+    classifyTimeframe:root.runtime.classifyTimeframe,
+    tradabilityModel
   };
   window.MA_STACK_STRIP = api;
 })();

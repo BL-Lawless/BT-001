@@ -112,13 +112,15 @@
     hoverInsideChart:false,
     suppressResizeRender:false,
     expandedRect:null,
-    selectedTf:"1h",
+    selectedTf:"",
     selectedPeriod:"1d",
     drilldown:null,
     drilldownBusy:false,
     loading:false,
     aggregationPending:false,
     aggregationFrame:null,
+    periodLoadGeneration:0,
+    periodLoadTimer:null,
     crosshair:{active:false,clientX:null,clientY:null,selectedLevel:null,scale:null,listenerBindings:0,updates:0,closedPartialKey:""}
   };
   function activeWfTradeKey(){
@@ -148,10 +150,10 @@
     }
   }
   function wfTfLabel(tf){
-    return String(tf || "").toUpperCase();
+    return String(tf || "").toLowerCase() === "trades" ? "Trades" : String(tf || "").toUpperCase();
   }
   function wfTfWords(tf){
-    return ({"1h":"One Hour","4h":"Four Hours","6h":"Six Hours","1d":"One Day","1w":"One Week"})[String(tf || "").toLowerCase()] || wfTfLabel(tf);
+    return ({"trades":"Trades","1h":"One Hour","4h":"Four Hours","6h":"Six Hours","1d":"One Day","1w":"One Week"})[String(tf || "").toLowerCase()] || wfTfLabel(tf);
   }
   function wfRangeText(startMs,endMs){
     const format = value => new Date(value).toLocaleString("en-GB",{
@@ -159,14 +161,19 @@
     });
     return format(startMs) + " - " + format(endMs) + " UTC";
   }
-  function syncSelectedTf(period,{resetDrilldown=false}={}){
+  function syncSelectedTf(period,{resetDrilldown=false,useDefault=false}={}){
     const aggregation = wfAggregation();
     if(!aggregation) return;
     if(resetDrilldown) wfSyncState.drilldown = null;
-    const normalizedPeriod = String(period || currentPeriodValue()).toLowerCase();
+    const requestedPeriod = String(period || currentPeriodValue()).toLowerCase();
+    const normalizedPeriod = aggregation.PERIOD_OPTIONS.some(option => option.value === requestedPeriod)
+      ? requestedPeriod
+      : aggregation.PERIOD_OPTIONS[0].value;
     wfSyncState.selectedPeriod = normalizedPeriod;
     if(!wfSyncState.drilldown){
-      wfSyncState.selectedTf = aggregation.validTfForPeriod(normalizedPeriod,wfSyncState.selectedTf);
+      wfSyncState.selectedTf = useDefault
+        ? aggregation.defaultTfForPeriod(normalizedPeriod)
+        : aggregation.validTfForPeriod(normalizedPeriod,wfSyncState.selectedTf);
     }
   }
   function readWfSelection(){
@@ -368,6 +375,59 @@
     const request = displayControlsLoadRequest(period,scopedOpt);
     if(wfDataMode() === "detail") return window.loadClosedTradesForPeriod(period,request);
     return window.loadClosedTradesFastForPeriod(period,request);
+  }
+  function clearLatestPeriodLoadTimer(){
+    if(wfSyncState.periodLoadTimer != null){
+      clearTimeout(wfSyncState.periodLoadTimer);
+      wfSyncState.periodLoadTimer = null;
+    }
+  }
+  async function runLatestPeriodLoad(period,generation){
+    if(generation !== wfSyncState.periodLoadGeneration || currentPeriodValue() !== period) return;
+    wfSyncState.periodLoadTimer = null;
+    const owner = window.BT001_CLOSED_TRADES;
+    const request = displayControlsLoadRequest(period,{force:true,silent:true,source:"waterfall-period-sync"});
+    let result;
+    if(owner && typeof owner.loadFast === "function" && typeof owner.loadDetail === "function"){
+      result = wfDataMode() === "detail"
+        ? await owner.loadDetail(period,request)
+        : await owner.loadFast(period,request);
+    }else{
+      const legacy = await reloadCurrentWfData(period,{force:true,silent:true,source:"waterfall-period-sync"});
+      result = legacy ? {outcome:"committed",report:legacy} : {outcome:"error"};
+    }
+    if(generation !== wfSyncState.periodLoadGeneration || currentPeriodValue() !== period) return;
+    const outcome = String(result && result.outcome || "error");
+    if(outcome === "busy" || outcome === "stale"){
+      wfSyncState.periodLoadTimer = setTimeout(() => {
+        runLatestPeriodLoad(period,generation).catch(error => {
+          if(generation !== wfSyncState.periodLoadGeneration) return;
+          stopWfLoading();
+          if(visible) render();
+          console.warn(MODULE + " latest WF period retry failed",error);
+        });
+      },outcome === "busy" ? 40 : 0);
+      return;
+    }
+    if(outcome === "committed") return;
+    stopWfLoading();
+    if(visible) render();
+    if(outcome === "error" && result && result.error) console.warn(MODULE + " WF period reload failed",result.error);
+  }
+  function scheduleLatestPeriodLoad(period){
+    const normalizedPeriod = String(period || currentPeriodValue()).toLowerCase();
+    wfSyncState.periodLoadGeneration += 1;
+    const generation = wfSyncState.periodLoadGeneration;
+    clearLatestPeriodLoadTimer();
+    beginWfLoading();
+    wfSyncState.periodLoadTimer = setTimeout(() => {
+      runLatestPeriodLoad(normalizedPeriod,generation).catch(error => {
+        if(generation !== wfSyncState.periodLoadGeneration) return;
+        stopWfLoading();
+        if(visible) render();
+        console.warn(MODULE + " latest WF period load failed",error);
+      });
+    },40);
   }
   async function ensureFastWfData(opt={}){
     if(typeof window.hasKeys !== "function" || !window.hasKeys()) return null;
@@ -1296,8 +1356,9 @@
     let cumulative = 0;
     return rows.map((row,index) => {
       const net = num(row && row.net) || 0;
-      const realized = net;
+      const realized = num(row && row.realized) || 0;
       const fees = num(row && row.fees);
+      const fundingDelta = num(row && row.funding);
       const qty = num(row && row.qty);
       const openTime = num(row && row.openTime);
       const closeTime = num(row && row.closeTime);
@@ -1309,6 +1370,7 @@
       if(qty != null) tooltipLines.push("Closed Volume: " + window.fq(qty));
       tooltipLines.push([{text:"Realized P/L: ",color:WF_BLACK},{text:window.fm(realized),color:wfPnlColor(realized),bold:true}]);
       if(fees != null) tooltipLines.push([{text:"Commission / Fees: ",color:WF_BLACK},{text:window.fm(fees),color:wfPnlColor(fees),bold:true}]);
+      if(fundingDelta != null) tooltipLines.push([{text:"Funding Fee: ",color:WF_BLACK},{text:window.fm(fundingDelta),color:wfPnlColor(fundingDelta),bold:true}]);
       if(row && row.limited) tooltipLines.push("Limited detail: partial context");
       const trade = {
         id:row && row.id ? row.id : ("wf_fast_" + index),
@@ -1319,7 +1381,7 @@
         net,
         realized,
         fees,
-        fundingDelta:null,
+        fundingDelta,
         dir:String(row && row.dir || window.closedTradeFastSummaryDirection(side)),
         tooltipLines,
         finalExit:null,
@@ -1436,14 +1498,16 @@
   function aggregateTradeRows(sourceTrades){
     const aggregation = wfAggregation();
     if(!aggregation) return {display:sourceTrades.slice(),recentFirst:sourceTrades.slice().reverse(),rawRecent:sourceTrades.slice(-WF_RAW_TRADE_LIMIT),aggregated:[],sourceCount:sourceTrades.length,displayedTradeCount:Math.min(sourceTrades.length,WF_RAW_TRADE_LIMIT),aggregatedTradeCount:0,sourceNet:0,displayNet:0};
-    const result = aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT);
+    const period = selectedPeriodDates();
+    const aggregationNowMs = Date.now();
+    const result = aggregation.aggregateTrades(sourceTrades,wfSyncState.selectedTf,WF_RAW_TRADE_LIMIT,aggregationNowMs,period && period.start);
     result.aggregated.forEach((bucket,index) => {
       const bucketSourceTrades = Array.isArray(bucket.sourceTrades) ? bucket.sourceTrades : [];
       const bucketTradeCount = bucketSourceTrades.length;
       const bucketNet = bucketSourceTrades.reduce((sum,trade) => sum + (num(trade && trade.net) || 0),0);
       bucket.tradeCount = bucketTradeCount;
       bucket.net = bucketNet;
-      bucket.inProgress = index === result.aggregated.length - 1 && aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,Date.now());
+      bucket.inProgress = index === result.aggregated.length - 1 && aggregation.isCurrentBucket(bucket,wfSyncState.selectedTf,aggregationNowMs);
       bucket.when = shortDate(bucket.bucketStartMs);
       bucket.tooltipLines = [
         "Aggregated " + wfTfLabel(bucket.bucketTf) + " bucket",
@@ -1461,11 +1525,7 @@
     const aggregation = wfAggregation();
     if(!aggregation) return "";
     const current = currentPeriodValue();
-    const options = aggregation.PERIOD_OPTIONS.slice();
-    if(!options.some(option => option.value === current)){
-      options.push({value:current,label:current.toUpperCase(),legacy:true});
-    }
-    return options.map(option => `<option value="${wfAttr(option.value)}"${option.value === current ? " selected" : ""}${option.legacy ? ' data-legacy="true"' : ""}>${wfEscape(option.label)}</option>`).join("");
+    return aggregation.PERIOD_OPTIONS.map(option => `<option value="${wfAttr(option.value)}"${option.value === current ? " selected" : ""}>${wfEscape(option.label)}</option>`).join("");
   }
 
   function wfTfOptionsHtml(){
@@ -1495,9 +1555,8 @@
       periodSelect.__wfBound = true;
       periodSelect.addEventListener("change",() => {
         const controls = window.BT001_DISPLAY_CONTROLS;
-        syncSelectedTf(periodSelect.value,{resetDrilldown:true});
+        syncSelectedTf(periodSelect.value,{resetDrilldown:true,useDefault:true});
         persistWfSelection(periodSelect.value,wfSyncState.selectedTf);
-        beginWfLoading();
         if(controls && typeof controls.setPeriod === "function") controls.setPeriod(periodSelect.value,{source:"waterfall-period-select"});
         periodSelect.blur();
       },false);
@@ -1829,10 +1888,11 @@
       // moneyPlain() (no leading "+") instead of money() for the same reason - the value
       // is never negative in practice, so a signed prefix only added visual noise.
       const watermarkY = Math.max(0,Math.min(plotHeight,valueToY(watermarks.high && watermarks.high.value)));
+      const watermarkConnectorHeight = Math.max(1,topY - watermarkY + 1);
       const mark = watermarks.high && watermarks.high.index === index && !trade.live
         ? `<div class="wf-watermark is-high" style="top:${watermarkY}px">
             <span class="wf-watermark-label">${moneyPlain(watermarks.high.value)}</span>
-            <span class="wf-watermark-line"></span>
+            <span class="wf-watermark-line" style="height:${watermarkConnectorHeight}px"></span>
           </div>`
         : "";
       return `<div class="wf-bar-col" data-chart-index="${index}">
@@ -2054,10 +2114,14 @@
     visible = true;
     const win = ensureWindow();
     if(!win) return;
+    const periodBeforeRestore = currentPeriodValue();
+    const restoredSelection = restoreWfSelection();
+    const restoredPeriodChanged = restoredSelection && currentPeriodValue() !== periodBeforeRestore;
     win.classList.remove("hidden");
     startLiveRefreshLoop();
     startClosedTradesSafetyLoop();
     applyExpandedRect(win);
+    if(restoredPeriodChanged) return;
     if(wfDataMode() === "detail" && wfHasCurrentDetailReport()){
       queueWfAggregationRender();
       return;
@@ -2088,31 +2152,28 @@
   function install(){
     ensureToggle();
     ensureWindow();
-    if(!restoreWfSelection()) syncSelectedTf(currentPeriodValue());
+    if(!restoreWfSelection()){
+      const requestedPeriod = currentPeriodValue();
+      syncSelectedTf(requestedPeriod,{useDefault:true});
+      const controls = window.BT001_DISPLAY_CONTROLS;
+      if(wfSyncState.selectedPeriod !== requestedPeriod && controls && typeof controls.setPeriod === "function"){
+        controls.setPeriod(wfSyncState.selectedPeriod,{source:"waterfall-unsupported-period"});
+      }
+    }
     const controls = window.BT001_DISPLAY_CONTROLS;
     if(controls && typeof controls.subscribe === "function" && !window.__bt001WfDisplayControlsBound){
       window.__bt001WfDisplayControlsBound = true;
       let subscribedPeriod = currentPeriodValue();
-      controls.subscribe(snapshot => {
+      controls.subscribe((snapshot,meta={}) => {
         const nextPeriod = String((snapshot && snapshot.period && snapshot.period.value) || "1d").toLowerCase();
         if(nextPeriod === subscribedPeriod) return;
         subscribedPeriod = nextPeriod;
-        syncSelectedTf(nextPeriod,{resetDrilldown:true});
+        const source = String(meta && meta.source || "");
+        if(!visible && !source.startsWith("waterfall-")) return;
+        syncSelectedTf(nextPeriod,{resetDrilldown:true,useDefault:source !== "waterfall-selection-restore"});
         persistWfSelection(nextPeriod,wfSyncState.selectedTf);
         hideWfCrosshair();
-        beginWfLoading();
-        Promise.resolve().then(() => {
-          if(currentPeriodValue() !== nextPeriod) return;
-          reloadCurrentWfData(nextPeriod,{force:true,silent:true,source:"waterfall-period-sync"}).then(outcome => {
-            if(outcome) return;
-            stopWfLoading();
-            if(visible) render();
-          }).catch(error => {
-            stopWfLoading();
-            if(visible) render();
-            console.warn(MODULE + " WF period reload failed",error);
-          });
-        });
+        scheduleLatestPeriodLoad(nextPeriod);
       });
     }
     if(typeof window.hasKeys === "function" && window.hasKeys()){

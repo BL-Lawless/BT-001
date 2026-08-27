@@ -10,17 +10,15 @@
     Object.freeze({value:"1m",label:"1M"}),
     Object.freeze({value:"2m",label:"2M"}),
     Object.freeze({value:"3m",label:"3M"}),
-    Object.freeze({value:"6m",label:"6M"}),
-    Object.freeze({value:"1y",label:"1Y"})
+    Object.freeze({value:"6m",label:"6M"})
   ]);
   const TF_OPTIONS = Object.freeze({
-    "1d":Object.freeze(["1h","4h","6h"]),
-    "1w":Object.freeze(["4h","6h","1d"]),
-    "1m":Object.freeze(["4h","6h","1d","1w"]),
-    "2m":Object.freeze(["4h","6h","1d","1w"]),
-    "3m":Object.freeze(["4h","6h","1d","1w"]),
-    "6m":Object.freeze(["4h","6h","1d","1w"]),
-    "1y":Object.freeze(["4h","6h","1d","1w"])
+    "1d":Object.freeze(["6h","4h","1h","trades"]),
+    "1w":Object.freeze(["1d","6h","4h"]),
+    "1m":Object.freeze(["1w","1d","6h","4h"]),
+    "2m":Object.freeze(["1w","1d","6h","4h"]),
+    "3m":Object.freeze(["1w","1d","6h","4h"]),
+    "6m":Object.freeze(["1w","1d","6h","4h"])
   });
   const TF_MS = Object.freeze({
     "1h":60 * 60 * 1000,
@@ -38,7 +36,7 @@
     return n > 1e12 ? n : n * 1000;
   };
   const optionsForPeriod = period => (TF_OPTIONS[normalize(period)] || TF_OPTIONS["1m"]).slice();
-  const defaultTfForPeriod = period => optionsForPeriod(period)[0];
+  const defaultTfForPeriod = period => optionsForPeriod(period).find(tf => tf !== "trades") || "trades";
   const validTfForPeriod = (period,tf) => {
     const normalized = normalize(tf);
     return optionsForPeriod(period).includes(normalized) ? normalized : defaultTfForPeriod(period);
@@ -67,23 +65,56 @@
       bucketStart === start && now >= bucketStart && now < bucketEnd;
   }
 
-  function aggregateTrades(trades,tf,rawLimit=10){
+  function aggregateTrades(trades,tf,rawLimit=10,nowMs=Date.now(),periodStartMs=null){
     const normalizedTf = normalize(tf);
     const stepMs = TF_MS[normalizedTf];
-    if(!stepMs) throw new Error("Unsupported WF aggregation TF: " + tf);
+    const tradesMode = normalizedTf === "trades";
+    if(!stepMs && !tradesMode) throw new Error("Unsupported WF aggregation TF: " + tf);
     const recentFirst = (Array.isArray(trades) ? trades : [])
       .map((trade,sourceIndex) => ({trade,sourceIndex,closeMs:toMs(trade && trade.finalExitTime)}))
       .filter(item => item.closeMs != null)
       .sort((a,b) => (b.closeMs - a.closeMs) || (a.sourceIndex - b.sourceIndex));
+    if(tradesMode){
+      const rawChronological = recentFirst.slice().reverse().map(item => item.trade);
+      let cumulative = 0;
+      rawChronological.forEach(item => {
+        item.start = cumulative;
+        cumulative += Number(item && item.net) || 0;
+        item.end = cumulative;
+      });
+      return {
+        recentFirst:recentFirst.map(item => item.trade),
+        rawRecent:recentFirst.map(item => item.trade),
+        aggregated:[],
+        display:rawChronological,
+        sourceCount:recentFirst.length,
+        displayedTradeCount:recentFirst.length,
+        aggregatedTradeCount:0,
+        sourceNet:cumulative,
+        displayNet:cumulative
+      };
+    }
     const limit = Math.max(0,Math.floor(Number(rawLimit) || 0));
-    const rawRecent = recentFirst.slice(0,limit);
-    const older = recentFirst.slice(limit);
+    const currentBucketStartMs = bucketStartMs(nowMs,normalizedTf);
+    const selectedPeriodStartMs = toMs(periodStartMs);
+    const rawRecent = [];
+    const older = [];
+    recentFirst.forEach(item => {
+      const belongsToCurrentBucket = bucketStartMs(item.closeMs,normalizedTf) === currentBucketStartMs;
+      if(belongsToCurrentBucket && rawRecent.length < limit) rawRecent.push(item);
+      else older.push(item);
+    });
     const buckets = new Map();
     older.forEach(item => {
       const startMs = bucketStartMs(item.closeMs,normalizedTf);
       let bucket = buckets.get(startMs);
       if(!bucket){
-        bucket = {startMs,endMs:startMs + stepMs,trades:[],net:0};
+        bucket = {
+          startMs:selectedPeriodStartMs == null ? startMs : Math.max(startMs,selectedPeriodStartMs),
+          endMs:startMs + stepMs,
+          trades:[],
+          net:0
+        };
         buckets.set(startMs,bucket);
       }
       bucket.trades.push(item.trade);

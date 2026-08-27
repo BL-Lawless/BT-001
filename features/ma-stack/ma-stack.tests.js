@@ -181,7 +181,7 @@ function scaledCompressionSnapshot(targetAtr, slots) {
 (async () => {
   const runtime = createRuntime();
   const api = runtime.api;
-  const signatures = { start: 0, stop: 0, refresh: 0, refreshSoon: 0, markerEvents: 2, hubRowToKline: 1, stackPeriods: 0, stackSlots: 0, classifyTimeframe: 1 };
+  const signatures = { start: 0, stop: 0, refresh: 0, refreshSoon: 0, markerEvents: 2, hubRowToKline: 1, stackPeriods: 0, stackSlots: 0, classifyTimeframe: 1, tradabilityModel: 1 };
   assert.deepStrictEqual(Object.keys(api).sort(), Object.keys(signatures).sort());
   Object.entries(signatures).forEach(([name, length]) => {
     assert.equal(typeof api[name], "function", `${name} is not callable`);
@@ -208,6 +208,38 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   assert.equal(hourlyDefault.source.includeForming, false, "hourly timeframe included forming data by default");
   assert.equal(runtime.snapshotRequests.at(-2).options.includeForming, true);
   assert.equal(runtime.snapshotRequests.at(-1).options.includeForming, false);
+
+  const volatility = runtime.context.__BT001_MA_STACK_BUILD__.volatility;
+  const originalAtrSeries = volatility.atrSeries;
+  const originalAdxSeries = volatility.adxSeries;
+  let atrCalls=0,adxCalls=0;
+  const tradabilityRows = Array.from({length:40},(_,index)=>[index,1,2,0,1]);
+  const tradabilityCase = (atrWindow,adxValue) => {
+    volatility.atrSeries = (_rows,period) => { atrCalls+=1;assert.equal(period,14);return Array(20).fill(NaN).concat(atrWindow); };
+    volatility.adxSeries = (_rows,period) => { adxCalls+=1;assert.equal(period,14);return Array(39).fill(NaN).concat(adxValue); };
+    return api.tradabilityModel(tradabilityRows);
+  };
+  const bothGreen = tradabilityCase(Array(20).fill(100),30);
+  assert.equal(bothGreen.timeframe,"15m");
+  assert.equal(bothGreen.atr.tone,"green-strong");
+  assert.equal(bothGreen.adx.tone,"green-strong");
+  const adxNeutralBoundary = tradabilityCase(Array(20).fill(100),25);
+  assert.equal(adxNeutralBoundary.atr.tone,"green-muted","ATR green must mute when ADX is grey");
+  assert.equal(adxNeutralBoundary.adx.tone,"grey","ADX 25 belongs to the neutral grey zone");
+  const adxOnly = tradabilityCase(Array(19).fill(100).concat(40),25.1);
+  assert.equal(adxOnly.atr.tone,"grey","ATR below half its 20-period average must be grey");
+  assert.equal(adxOnly.adx.tone,"green-muted","ADX green must mute when ATR is grey");
+  const exactHalfAtr = 1900 / 39;
+  const atrBoundary = tradabilityCase(Array(19).fill(100).concat(exactHalfAtr),20);
+  assert(Math.abs(atrBoundary.atr.value-atrBoundary.atr.threshold)<1e-9,"ATR boundary fixture must be exactly 50% of its 20-period average");
+  assert.equal(atrBoundary.atr.tradeable,true,"ATR at or above half its own 20-period average must be green");
+  assert.equal(atrBoundary.atr.tone,"green-muted");
+  assert.equal(atrBoundary.adx.tone,"grey","ADX 20 must remain in the constant-grey neutral zone");
+  assert.equal(adxOnly.atr.tone,adxNeutralBoundary.adx.tone,"all non-tradeable metrics must use one constant grey tone");
+  assert.equal(atrCalls,4,"tradability must call the existing ATR series exactly once per evaluation");
+  assert.equal(adxCalls,4,"tradability must call the existing ADX series exactly once per evaluation");
+  volatility.atrSeries = originalAtrSeries;
+  volatility.adxSeries = originalAdxSeries;
 
   const timeframePolicies = [
     ["1m", true], ["3m", true], ["5m", true], ["15m", true], ["30m", true],
@@ -522,8 +554,35 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   assert(coreSource.includes("root.core ="), "core build slice missing");
   assert(runtimeSource.includes("root.runtime ="), "runtime build slice missing");
   assert(moduleSource.includes("root.presentation ="), "presentation build slice missing");
+  assert(moduleSource.includes("volatility.atrSeries(source,14)") && moduleSource.includes("volatility.adxSeries(source,14)"),"tradability must reuse the existing MA Stack ATR/ADX series functions");
+  assert(mainSource.includes('const TRADABILITY_TF = "15m";') && mainSource.includes("strip.tradabilityModel(rowsForTf(TRADABILITY_TF))"),"tradability gauge must consume the live 15m MA Stack candle buffer");
+  const tradabilityDrawStart=mainSource.indexOf("function drawTradabilityMetricLine");
+  const tradabilityDrawEnd=mainSource.indexOf("function computePressureModel",tradabilityDrawStart);
+  const tradabilityDrawSource=mainSource.slice(tradabilityDrawStart,tradabilityDrawEnd);
+  assert(tradabilityDrawSource.includes('drawTradabilityMetricLine("ATR"') && tradabilityDrawSource.includes('drawTradabilityMetricLine("ADX"'),"tradability gauge must render independent ATR and ADX lines");
+  assert(tradabilityDrawSource.includes('ctx.fillStyle = "#111827"') && tradabilityDrawSource.includes("ctx.fillText(labelText"),"ATR/ADX labels must always render black independently from their values");
+  assert(!tradabilityDrawSource.includes("fillRect") && !tradabilityDrawSource.includes("strokeRect"),"tradability text must not retain a surrounding box or border");
+  assert(mainSource.includes('return "#15803d"') && mainSource.includes('return "rgba(22,163,74,.74)"') && mainSource.includes('return "#647083"'),"tradability strong, muted, and readable constant-grey colors are missing");
+  assert(mainSource.includes("const tradabilityY = strapY + strapLineGap + 20") && mainSource.includes("x:meterX,y:tradabilityY,w:meterW"),"tradability text must retain visible spacing below the pressure meter's volume/rating text");
+  assert(mainSource.includes('event.type === "kline"') && mainSource.includes("TRADABILITY_TF) requestRedraw()"),"15m forming-candle updates must redraw the tradability gauge");
+  const tradabilityRendererStart=mainSource.indexOf("function tradabilityMetricColor");
+  const tradabilityRendererSource=mainSource.slice(tradabilityRendererStart,tradabilityDrawEnd);
+  const drawnTradabilityText=[];
+  const gaugeContext={
+    ctx:{
+      fillStyle:"",font:"",textAlign:"",textBaseline:"",
+      save(){},restore(){},measureText:text=>({width:String(text).length*6}),
+      fillText(text,x,y){drawnTradabilityText.push({text,fill:this.fillStyle,x,y});}
+    },
+    Number,String
+  };
+  vm.createContext(gaugeContext);
+  vm.runInContext(tradabilityRendererSource,gaugeContext);
+  gaugeContext.drawTradabilityGauge({atr:{value:12.3,tone:"grey"},adx:{value:28.4,tone:"green-muted"}},{x:10,y:20,w:100,h:28});
+  assert.deepEqual(drawnTradabilityText.map(item=>item.text),["ATR: ","12.3","ADX: ","28.4"],"labels and numeric values must be painted as separate text segments");
+  assert.deepEqual(drawnTradabilityText.map(item=>item.fill),["#111827","#647083","#111827","rgba(22,163,74,.74)"],"only numeric values may receive threshold colors");
 
-  console.log("MA Stack extraction tests: PASS", { apiMethods: 9, volatilityIndependent: true, atrWilder: true, adxWilder: true, adxShadow: 5, atrNormalizedEvents: true, microscopicBounceRejected: true, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, eventAging: true, bounceAging: true, newerEventHandoff: true, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
+  console.log("MA Stack extraction tests: PASS", { apiMethods: 10, volatilityIndependent: true, atrWilder: true, adxWilder: true, adxShadow: 5, atrNormalizedEvents: true, microscopicBounceRejected: true, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, tradabilityGauge: true, eventAging: true, bounceAging: true, newerEventHandoff: true, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
