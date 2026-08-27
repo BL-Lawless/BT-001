@@ -523,15 +523,43 @@
   function wfLivePreviewBars(liveTrade,trades){
     if(!liveTrade) return [];
     const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
-    const net = num(liveTrade.net) || 0;
-    return [{
-      ...liveTrade,
-      id:liveTrade.id + "_net",
-      liveSegment:"net",
-      net,
-      start:cumulative,
-      end:cumulative + net
-    }];
+    const realized = num(liveTrade.realizedPartials);
+    const floating = num(liveTrade.floatingPL);
+    const bars = [];
+    let cursor = cumulative;
+    if(realized != null && Math.abs(realized) > 1e-12){
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_realized",
+        liveSegment:"realized",
+        net:realized,
+        start:cursor,
+        end:cursor + realized
+      });
+      cursor += realized;
+    }
+    if(floating != null && Math.abs(floating) > 1e-12){
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_floating",
+        liveSegment:"floating",
+        net:floating,
+        start:cursor,
+        end:cursor + floating
+      });
+    }
+    if(!bars.length){
+      const net = num(liveTrade.net) || 0;
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_net",
+        liveSegment:"net",
+        net,
+        start:cumulative,
+        end:cumulative + net
+      });
+    }
+    return bars;
   }
   function markClosedTradesLoaded(loaded){
     wfSyncState.loaded = !!loaded;
@@ -1872,6 +1900,8 @@
       if(trade.aggregated) cls.push("is-aggregated");
       if(trade.aggregated && trade.inProgress) cls.push("is-current-bucket");
       if(trade.live) cls.push("is-live");
+      if(trade.live && trade.liveSegment === "realized") cls.push("is-live-realized");
+      if(trade.live && trade.liveSegment === "floating") cls.push("is-live-floating");
       if(trade.live && trade.liveSegment === "net") cls.push("is-live-net");
       if(activeKey && tradeKey(trade) === activeKey) cls.push("is-selected");
       const connector = index < chartTrades.length - 1
