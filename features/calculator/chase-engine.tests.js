@@ -55,6 +55,9 @@ function harness(overrides={}){
     assert.equal(h.calls.amend.length,1,"a moved top-of-book price must amend once");
     assert.equal(h.calls.amend[0].price,"102");
     assert.equal(h.calls.amend[0].quantity,1,"the amend must always include quantity");
+    const chasingUpdates=h.updates.filter(item=>item.statusCode==="chasing");
+    assert(chasingUpdates.some(item=>item.price==="101"),"the chase status must publish the initial resting order price");
+    assert.equal(chasingUpdates[chasingUpdates.length-1].price,"102","the chase status must publish each newly repriced resting order price");
   }
   {
     const h=harness({amend:async payload=>{h.calls.amend.push(payload);return {...h.order,price:payload.price,status:"CANCELED"};}});

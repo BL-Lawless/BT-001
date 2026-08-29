@@ -63,15 +63,40 @@
     const source=Array.isArray(rows)?rows:[];
     const p=Math.max(1,Math.round(Number(period)||DEFAULT_PERIOD));
     const atr=atrSeries(source,p),dm=directionalSeries(source,p);
-    const dx=Array(source.length).fill(NaN);
+    const dx=Array(source.length).fill(NaN),plusDi=Array(source.length).fill(NaN),minusDi=Array(source.length).fill(NaN);
     for(let i=0;i<source.length;i++){
       if(!finite(atr[i])||Number(atr[i])<=0||!finite(dm.plus[i])||!finite(dm.minus[i])) continue;
-      const plusDi=100*Number(dm.plus[i])/Number(atr[i]);
-      const minusDi=100*Number(dm.minus[i])/Number(atr[i]);
-      const total=plusDi+minusDi;
-      dx[i]=total>0?100*Math.abs(plusDi-minusDi)/total:0;
+      plusDi[i]=100*Number(dm.plus[i])/Number(atr[i]);
+      minusDi[i]=100*Number(dm.minus[i])/Number(atr[i]);
+      const total=plusDi[i]+minusDi[i];
+      dx[i]=total>0?100*Math.abs(plusDi[i]-minusDi[i])/total:0;
     }
-    return wilderAverageSeries(dx,p,p);
+    const adx=wilderAverageSeries(dx,p,p);
+    const direction=Array(source.length).fill(null),crossed=Array(source.length).fill(false);
+    let previousDirection=null;
+    for(let i=0;i<source.length;i++){
+      if(!finite(plusDi[i])||!finite(minusDi[i])) continue;
+      const plus=Number(plusDi[i]),minus=Number(minusDi[i]);
+      const currentDirection=plus>minus?"bullish":minus>plus?"bearish":previousDirection;
+      if(currentDirection==null)continue;
+      direction[i]=currentDirection;
+      crossed[i]=previousDirection!=null&&currentDirection!==previousDirection;
+      previousDirection=currentDirection;
+    }
+    Object.defineProperties(adx,{
+      plusDi:{value:plusDi,enumerable:false},
+      minusDi:{value:minusDi,enumerable:false},
+      direction:{value:direction,enumerable:false},
+      crossed:{value:crossed,enumerable:false}
+    });
+    return adx;
+  }
+  function adxDirectionTag(adxValue,direction,crossed,threshold=25){
+    const adx=Number(adxValue),cutoff=Number(threshold);
+    if(!finite(adx)||adx<=cutoff)return {glyph:"−",tone:"grey",direction:null,crossed:false};
+    const side=direction==="bearish"?"bearish":"bullish";
+    if(crossed===true)return {glyph:"X",tone:side==="bullish"?"cross-bullish":"cross-bearish",direction:side,crossed:true};
+    return {glyph:side==="bullish"?"▲":"▼",tone:side,direction:side,crossed:false};
   }
   function snapshot(rows,period=DEFAULT_PERIOD,shadowBars=5){
     const atr=atrSeries(rows,period),adx=adxSeries(rows,period);
@@ -80,13 +105,22 @@
       period:Math.max(1,Math.round(Number(period)||DEFAULT_PERIOD)),
       atrSeries:atr,
       adxSeries:adx,
+      plusDiSeries:adx.plusDi,
+      minusDiSeries:adx.minusDi,
+      adxDirectionSeries:adx.direction,
+      adxCrossSeries:adx.crossed,
       atr:finite(atr[last])?Number(atr[last]):null,
       adx:finite(adx[last])?Number(adx[last]):null,
+      plusDi:finite(adx.plusDi[last])?Number(adx.plusDi[last]):null,
+      minusDi:finite(adx.minusDi[last])?Number(adx.minusDi[last]):null,
+      adxDirection:adx.direction[last]||null,
+      adxCrossed:adx.crossed[last]===true,
+      adxTag:adxDirectionTag(adx[last],adx.direction[last],adx.crossed[last]),
       adxShadow:finite(adx[shadow])?Number(adx[shadow]):null,
       shadowBars:Math.max(0,Math.round(Number(shadowBars)||0))
     };
   }
-  const api = {DEFAULT_PERIOD,trueRange,trueRangeSeries,wilderAverageSeries,atrSeries,adxSeries,snapshot};
+  const api = {DEFAULT_PERIOD,trueRange,trueRangeSeries,wilderAverageSeries,atrSeries,adxSeries,adxDirectionTag,snapshot};
   root.volatility = api;
   if(typeof module!=="undefined"&&module.exports) module.exports=api;
 })();

@@ -756,6 +756,30 @@ button:hover{filter:brightness(1.04)}
   padding:4px 6px;
   pointer-events:auto;
 }
+.chart-volatility-readout{
+  display:inline-flex;
+  align-items:center;
+  min-height:20px;
+  padding:1px 7px;
+  border-left:1px solid rgba(148,163,184,.55);
+  color:#1f2937;
+  font:700 11px/1 Arial,sans-serif;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+.adx-direction-tag{
+  display:inline-block;
+  margin:0 .28em;
+  font-size:1em;
+  font-weight:800;
+  line-height:inherit;
+  vertical-align:baseline;
+}
+.adx-direction-tag.is-grey{color:#4b5563}
+.adx-direction-tag.is-bullish{color:#16a34a}
+.adx-direction-tag.is-bearish{color:#dc2626}
+.adx-direction-tag.is-cross-bullish{color:rgba(22,163,74,.50)}
+.adx-direction-tag.is-cross-bearish{color:rgba(220,38,38,.50)}
 
 .chart-overlay-control-group{position:absolute;top:8px;right:92px;z-index:18;display:flex;align-items:center;gap:6px;visibility:hidden;pointer-events:auto}
 .chart-overlay-control-group.is-aligned{visibility:visible}

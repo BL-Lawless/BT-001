@@ -44,5 +44,11 @@ assert(!/signedWrite\(|executeSection\(|executeSectionDirect\(|redistributeLotsO
 const overlayHook=source.match(/function drawTopLayerLabels[\s\S]*?function hit/)[0];
 assert(overlayHook.includes("drawLabels();")&&source.includes("drawTopLayerLabels();return result;"),"GR levels must repaint inside the shared draw wrapper");
 assert(!overlayHook.includes("requestAnimationFrame"),"GR levels must not defer repaint to a second animation frame");
+const executeSectionBlock=source.match(/async function executeSection[\s\S]*?async function confirmPreflight/)[0];
+const exitRecreateBlock=executeSectionBlock.slice(executeSectionBlock.indexOf('if(section==="exit"&&context.exitFullRecreate)'),executeSectionBlock.indexOf("for(let index=0;index<list.length;index++)"));
+assert(exitRecreateBlock.includes('Promise.allSettled(exitOrders.map(order=>signedWrite(ORDER_URL,"DELETE"'),"GR full exit recreation must cancel its tracked LIMIT exits concurrently and wait for every result");
+assert(!/for\(const order of context\.liveExitOrders\|\|\[\]\)[\s\S]*?await signedWrite\(ORDER_URL,"DELETE"/.test(exitRecreateBlock),"GR full exit recreation must not cancel tracked exits sequentially");
+assert(exitRecreateBlock.includes('throw new Error("GR Exit recreate cancelled "')&&exitRecreateBlock.includes("New exit orders were not placed."),"partial GR exit cancellation failures must abort replacement placement with a clear status error");
+assert(!exitRecreateBlock.includes("ALGO_URL"),"GR exit recreation must not touch STOP_MARKET protection orders");
 
 console.log("grad calculator tests: PASS",result.cases);

@@ -35,6 +35,16 @@
     const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
     return {closed,remaining:size-closed};
   }
+  function editedPositionSizeParts(sizeValue,editedValue,editedKind,normalizeQuantity){
+    const total=Math.max(0,number(sizeValue)||0);
+    const raw=number(editedValue);
+    const clamped=raw==null?0:Math.max(0,Math.min(total,raw));
+    const normalized=normalizeQuantity(clamped);
+    const active=normalized&&normalized.executable?Math.min(total,normalized.quantity):0;
+    return editedKind==="remaining"
+      ? {active,closed:total-active,remaining:active,total}
+      : {active,closed:active,remaining:total-active,total};
+  }
   function takeProfitFieldState(liveOrder,livePriceValue,pendingValue){
     const hasLive=!!liveOrder;
     const pending=!hasLive&&pendingValue!=null&&String(pendingValue).trim()!=="";
@@ -129,7 +139,13 @@
     const rules=bridge.lotRules();
     const precision=Math.max(3,number(rules.precision)||3);
     const {closed,remaining}=positionSizeParts(snapshot.size,snapshot.closeQty);
-    if(openSize)openSize.value=lot(remaining,precision);
+    if(openSize){
+      openSize.min="0.000";
+      openSize.max=lot(snapshot.size,precision);
+      openSize.step=String(rules.stepSize);
+      openSize.dataset.precision=String(precision);
+      if(document.activeElement!==openSize)openSize.value=lot(remaining,precision);
+    }
     if(closeSize){
       closeSize.min="0.000";
       closeSize.max=lot(snapshot.size,precision);
@@ -227,7 +243,23 @@
   async function commitProtection(kind,input,valueOverride){
     const bridge=api();
     if(!bridge||!input)return;
-    const price=number(valueOverride!=null?valueOverride:input.value);
+    const rawValue=valueOverride!=null?valueOverride:input.value;
+    if(kind==="tp"&&String(rawValue==null?"":rawValue).trim()===""){
+      try{
+        const snapshot=bridge.snapshot();
+        if(snapshot.takeProfitOrder&&typeof bridge.cancelTakeProfit==="function"){
+          const pending=bridge.cancelTakeProfit();
+          render();
+          await pending;
+        }
+        pendingTakeProfitValue=null;
+        takeProfitEditValue=null;
+        if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
+      }catch(_error){takeProfitEditValue=null;}
+      render();
+      return;
+    }
+    const price=number(rawValue);
     if(!(price>0))return;
     try{
       const pending=kind==="sl"?bridge.setMasterStop(price):bridge.setTakeProfit(price);
@@ -259,8 +291,8 @@
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Total Lot</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" value="0.000" readonly aria-label="Total open lot"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Exit Lot</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Exit lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Remaining lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Close lot"></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
@@ -321,30 +353,27 @@
       const normalized=bridge.normalizeQuantity(event.target.value);
       event.target.value=lot(normalized.quantity,normalized.precision);
     },false);
+    const openSize=q("rapidFireOpenSize");
     const closeSize=q("rapidFireCloseSize");
-    closeSize.addEventListener("input",event=>{
+    const syncEditedSize=(editedKind,event,finalize=false)=>{
       const bridge=api();
       const snapshot=bridge.snapshot();
-      const raw=number(event.target.value);
-      if(raw!=null&&raw>snapshot.size){
-        const precision=Math.max(3,number(event.target.dataset.precision)||3);
-        closeQuantityOverride=snapshot.size;
-        event.target.value=lot(snapshot.size,precision);
-        setCloseSliderDisplay(snapshot.size>0?100:0);
-        render();
-        return;
-      }
-      const normalized=bridge.normalizeQuantity(event.target.value);
-      closeQuantityOverride=normalized.executable?Math.min(snapshot.size,normalized.quantity):0;
-      setCloseSliderDisplay(snapshot.size>0?closeQuantityOverride/snapshot.size*100:0);
+      const precision=Math.max(3,number(event.target.dataset.precision)||3);
+      const parts=editedPositionSizeParts(snapshot.size,event.target.value,editedKind,value=>bridge.normalizeQuantity(value));
+      const edited=parts.active;
+      closeQuantityOverride=parts.closed;
       const typed=event.target.value;
+      setCloseSliderDisplay(parts.total>0?closeQuantityOverride/parts.total*100:0);
       render();
-      event.target.value=typed;
+      event.target.value=finalize?lot(edited,precision):typed;
+    };
+    openSize.addEventListener("input",event=>syncEditedSize("remaining",event),false);
+    openSize.addEventListener("change",event=>syncEditedSize("remaining",event,true),false);
+    closeSize.addEventListener("input",event=>{
+      syncEditedSize("close",event);
     },false);
     closeSize.addEventListener("change",event=>{
-      const precision=Math.max(3,number(event.target.dataset.precision)||3);
-      event.target.value=lot(closeQuantityOverride,precision);
-      render();
+      syncEditedSize("close",event,true);
     },false);
     q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",direction:selectedDirection,quantity:q("rapidFireLot").value}),false);
     q("rapidFireDouble").addEventListener("click",()=>{

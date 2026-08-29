@@ -1055,8 +1055,12 @@
   }
   async function executeSection(section,list,context={}){
     if(section==="exit"&&context.exitFullRecreate){
-      for(const order of context.liveExitOrders||[]){
-        if(order&&order.orderId!=null)await signedWrite(ORDER_URL,"DELETE",{symbol:currentSymbol(),orderId:String(order.orderId)});
+      const exitOrders=(context.liveExitOrders||[]).filter(order=>order&&order.orderId!=null);
+      const cancelResults=await Promise.allSettled(exitOrders.map(order=>signedWrite(ORDER_URL,"DELETE",{symbol:currentSymbol(),orderId:String(order.orderId)})));
+      const cancelFailures=cancelResults.map((result,index)=>({result,order:exitOrders[index]})).filter(item=>item.result.status==="rejected");
+      if(cancelFailures.length){
+        const details=cancelFailures.map(item=>"order "+String(item.order.orderId)+": "+(item.result.reason&&item.result.reason.message?item.result.reason.message:String(item.result.reason||"cancel failed"))).join(" | ");
+        throw new Error("GR Exit recreate cancelled "+(exitOrders.length-cancelFailures.length)+" of "+exitOrders.length+" existing orders; "+cancelFailures.length+" failed. New exit orders were not placed. "+details);
       }
       list.forEach(row=>{row.binanceOrderId=null;row.clientOrderId=null;row.status="local";});
     }

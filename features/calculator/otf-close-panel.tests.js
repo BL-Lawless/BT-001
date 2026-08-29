@@ -69,6 +69,8 @@ vm.createContext(statusContext);
 vm.runInContext(calculator.slice(statusStart,statusEnd),statusContext);
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"waiting"}).message,"Waiting for price...");
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"chasing",filledQty:.002,remainingQty:.003}).message,"Chasing — 40%");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"chasing",filledQty:.002,remainingQty:.003,price:"62123.4"}).message,"Chasing — 40% @ price: 62123.4","OTF and Rapid Fire must show the shared engine's current resting price");
+assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"chasing",requestedQty:1,filledQty:0,price:"62123.400"}).message,"Chasing — 0% @ price: 62123.400","the status must preserve the live order price representation");
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"filled",requestedQty:.01,filledQty:.007}).message,"Filled — 70%");
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"cancelled"}).message,"Cancelled");
 assert.equal(statusContext.formatChaseExecutionStatus({statusCode:"expired"}).message,"Expired");

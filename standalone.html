@@ -772,6 +772,30 @@ button:hover{filter:brightness(1.04)}
   padding:4px 6px;
   pointer-events:auto;
 }
+.chart-volatility-readout{
+  display:inline-flex;
+  align-items:center;
+  min-height:20px;
+  padding:1px 7px;
+  border-left:1px solid rgba(148,163,184,.55);
+  color:#1f2937;
+  font:700 11px/1 Arial,sans-serif;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+.adx-direction-tag{
+  display:inline-block;
+  margin:0 .28em;
+  font-size:1em;
+  font-weight:800;
+  line-height:inherit;
+  vertical-align:baseline;
+}
+.adx-direction-tag.is-grey{color:#4b5563}
+.adx-direction-tag.is-bullish{color:#16a34a}
+.adx-direction-tag.is-bearish{color:#dc2626}
+.adx-direction-tag.is-cross-bullish{color:rgba(22,163,74,.50)}
+.adx-direction-tag.is-cross-bearish{color:rgba(220,38,38,.50)}
 
 .chart-overlay-control-group{position:absolute;top:8px;right:92px;z-index:18;display:flex;align-items:center;gap:6px;visibility:hidden;pointer-events:auto}
 .chart-overlay-control-group.is-aligned{visibility:visible}
@@ -6086,6 +6110,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const fillBase=requested>0?requested:filled+remaining;
     const fillPercent=fillBase>0?clamp(filled/fillBase*100,0,100):0;
     const fillText=Number(fillPercent.toFixed(2));
+    const chasePrice=num(value.price)>0?String(value.price).trim():"";
     if(code==="waiting") return {message:"Waiting for price...",tone:"normal"};
     if(code==="stale") return {message:"Price feed stale",tone:"error"};
     if(code==="repricing") return {message:"Repricing...",tone:"error"};
@@ -6097,7 +6122,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     if(code==="no-price") return {message:"No price data",tone:"error"};
     if(code==="stopped"||code==="inactive") return {message:String(value.message||"").trim()||"Stopped",tone:"error"};
     if(["breakeven","master-sl","take-profit","reverse-protection-cancel"].includes(code))return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
-    return {message:"Chasing — "+fillText+"%",tone:value.tone==="error"?"error":"normal"};
+    return {message:"Chasing — "+fillText+"%"+(chasePrice?" @ price: "+chasePrice:""),tone:value.tone==="error"?"error":"normal"};
   }
   async function submitOpenPositionCloseChsLimit(livePos,quantity,price){
     const clientId = freshOpenPositionCloseClientId();
@@ -6354,8 +6379,10 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const fullMargin=position?currentOpenPositionMargin(position):null;
     const directCloseQty=opts.closeQty==null?null:num(opts.closeQty);
     const requestedCloseQty=position?(directCloseQty==null?position.qty*clamp(num(opts.closePercent)==null?100:num(opts.closePercent),0,100)/100:directCloseQty):0;
-    const normalizedClose=normalizeRapidFireQuantity(requestedCloseQty,directCloseQty==null?{roundDown:true}:{});
-    const closeQty=normalizedClose.executable?Math.min(position?position.qty:0,normalizedClose.quantity):0;
+    const normalizedClose=directCloseQty==null?normalizeRapidFireQuantity(requestedCloseQty,{roundDown:true}):null;
+    const closeQty=directCloseQty==null
+      ? (normalizedClose.executable?Math.min(position?position.qty:0,normalizedClose.quantity):0)
+      : Math.min(position?position.qty:0,Math.max(0,directCloseQty||0));
     const effectiveClosePercent=position&&position.qty>0?closeQty/position.qty*100:0;
     const metrics=rapidFireCloseMetrics(fullFloating,fullMargin,effectiveClosePercent);
     const typedSl=opts.slPrice==null?null:num(opts.slPrice);
@@ -6827,6 +6854,40 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       throw error;
     }finally{
       if(ownsBusy){rapidFireProtectionBusy=false;rapidFireProtectionAction=null;}
+    }
+  }
+  async function cancelRapidFireTakeProfit(){
+    if(rapidFireProtectionBusy)throw new Error("A Rapid Fire protection update is already active.");
+    if(rapidFireChaseContext)throw new Error("A Rapid Fire action is already active.");
+    if(typeof hasKeys!=="function"||!hasKeys())throw new Error("API keys required.");
+    rapidFireProtectionBusy=true;
+    rapidFireProtectionAction="take-profit";
+    publishRapidFireStatus({statusCode:"take-profit",message:"Cancelling TP...",tone:"normal"});
+    try{
+      const gateway=window.BT001_BINANCE_TRADING;
+      const snapshot=await readOpenOrdersSnapshot();
+      syncRapidFireTakeProfitFromSnapshot(snapshot);
+      if(!rapidFireTakeProfitOrder){
+        rapidFireTakeProfitDraftPrice=null;
+        publishRapidFireStatus({statusCode:"take-profit",message:"TP — Nothing to cancel",tone:"normal"});
+        calculate();
+        return Object.freeze({cancelled:false,noOrder:true});
+      }
+      if(!gateway||typeof gateway.cancelOrder!=="function")throw new Error("Binance trading gateway is unavailable.");
+      const response=await gateway.cancelOrder(rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder));
+      if(!binanceWriteConfirmed(response))throw new Error("Binance TP cancellation was not confirmed.");
+      rapidFireTakeProfitOrder=null;
+      rapidFireTakeProfitDraftPrice=null;
+      publishRapidFireStatus({statusCode:"take-profit",message:"TP cancelled",tone:"normal"});
+      calculate();
+      return Object.freeze({cancelled:true});
+    }catch(error){
+      try{syncRapidFireTakeProfitFromSnapshot(await readOpenOrdersSnapshot());}catch(_ignored){}
+      publishRapidFireStatus({statusCode:"take-profit",message:"TP cancel failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+      throw error;
+    }finally{
+      rapidFireProtectionBusy=false;
+      rapidFireProtectionAction=null;
     }
   }
   async function cancelRapidFireProtections(){
@@ -13991,6 +14052,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         clearProtectionDraft:clearRapidFireProtectionDraft,
         setMasterStop:executeRapidFireMasterStop,
         setTakeProfit:executeRapidFireTakeProfit,
+        cancelTakeProfit:cancelRapidFireTakeProfit,
         cancelProtections:cancelRapidFireProtections,
         cancel:cancelRapidFireChase,
         isActive:()=>!!rapidFireChaseContext,
@@ -14079,6 +14141,16 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const size=Math.max(0,number(sizeValue)||0);
     const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
     return {closed,remaining:size-closed};
+  }
+  function editedPositionSizeParts(sizeValue,editedValue,editedKind,normalizeQuantity){
+    const total=Math.max(0,number(sizeValue)||0);
+    const raw=number(editedValue);
+    const clamped=raw==null?0:Math.max(0,Math.min(total,raw));
+    const normalized=normalizeQuantity(clamped);
+    const active=normalized&&normalized.executable?Math.min(total,normalized.quantity):0;
+    return editedKind==="remaining"
+      ? {active,closed:total-active,remaining:active,total}
+      : {active,closed:active,remaining:total-active,total};
   }
   function takeProfitFieldState(liveOrder,livePriceValue,pendingValue){
     const hasLive=!!liveOrder;
@@ -14174,7 +14246,13 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const rules=bridge.lotRules();
     const precision=Math.max(3,number(rules.precision)||3);
     const {closed,remaining}=positionSizeParts(snapshot.size,snapshot.closeQty);
-    if(openSize)openSize.value=lot(remaining,precision);
+    if(openSize){
+      openSize.min="0.000";
+      openSize.max=lot(snapshot.size,precision);
+      openSize.step=String(rules.stepSize);
+      openSize.dataset.precision=String(precision);
+      if(document.activeElement!==openSize)openSize.value=lot(remaining,precision);
+    }
     if(closeSize){
       closeSize.min="0.000";
       closeSize.max=lot(snapshot.size,precision);
@@ -14272,7 +14350,23 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   async function commitProtection(kind,input,valueOverride){
     const bridge=api();
     if(!bridge||!input)return;
-    const price=number(valueOverride!=null?valueOverride:input.value);
+    const rawValue=valueOverride!=null?valueOverride:input.value;
+    if(kind==="tp"&&String(rawValue==null?"":rawValue).trim()===""){
+      try{
+        const snapshot=bridge.snapshot();
+        if(snapshot.takeProfitOrder&&typeof bridge.cancelTakeProfit==="function"){
+          const pending=bridge.cancelTakeProfit();
+          render();
+          await pending;
+        }
+        pendingTakeProfitValue=null;
+        takeProfitEditValue=null;
+        if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
+      }catch(_error){takeProfitEditValue=null;}
+      render();
+      return;
+    }
+    const price=number(rawValue);
     if(!(price>0))return;
     try{
       const pending=kind==="sl"?bridge.setMasterStop(price):bridge.setTakeProfit(price);
@@ -14304,8 +14398,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Total Lot</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" value="0.000" readonly aria-label="Total open lot"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Exit Lot</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Exit lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Remaining lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Close lot"></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
@@ -14366,30 +14460,27 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       const normalized=bridge.normalizeQuantity(event.target.value);
       event.target.value=lot(normalized.quantity,normalized.precision);
     },false);
+    const openSize=q("rapidFireOpenSize");
     const closeSize=q("rapidFireCloseSize");
-    closeSize.addEventListener("input",event=>{
+    const syncEditedSize=(editedKind,event,finalize=false)=>{
       const bridge=api();
       const snapshot=bridge.snapshot();
-      const raw=number(event.target.value);
-      if(raw!=null&&raw>snapshot.size){
-        const precision=Math.max(3,number(event.target.dataset.precision)||3);
-        closeQuantityOverride=snapshot.size;
-        event.target.value=lot(snapshot.size,precision);
-        setCloseSliderDisplay(snapshot.size>0?100:0);
-        render();
-        return;
-      }
-      const normalized=bridge.normalizeQuantity(event.target.value);
-      closeQuantityOverride=normalized.executable?Math.min(snapshot.size,normalized.quantity):0;
-      setCloseSliderDisplay(snapshot.size>0?closeQuantityOverride/snapshot.size*100:0);
+      const precision=Math.max(3,number(event.target.dataset.precision)||3);
+      const parts=editedPositionSizeParts(snapshot.size,event.target.value,editedKind,value=>bridge.normalizeQuantity(value));
+      const edited=parts.active;
+      closeQuantityOverride=parts.closed;
       const typed=event.target.value;
+      setCloseSliderDisplay(parts.total>0?closeQuantityOverride/parts.total*100:0);
       render();
-      event.target.value=typed;
+      event.target.value=finalize?lot(edited,precision):typed;
+    };
+    openSize.addEventListener("input",event=>syncEditedSize("remaining",event),false);
+    openSize.addEventListener("change",event=>syncEditedSize("remaining",event,true),false);
+    closeSize.addEventListener("input",event=>{
+      syncEditedSize("close",event);
     },false);
     closeSize.addEventListener("change",event=>{
-      const precision=Math.max(3,number(event.target.dataset.precision)||3);
-      event.target.value=lot(closeQuantityOverride,precision);
-      render();
+      syncEditedSize("close",event,true);
     },false);
     q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",direction:selectedDirection,quantity:q("rapidFireLot").value}),false);
     q("rapidFireDouble").addEventListener("click",()=>{
@@ -15656,8 +15747,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   }
   async function executeSection(section,list,context={}){
     if(section==="exit"&&context.exitFullRecreate){
-      for(const order of context.liveExitOrders||[]){
-        if(order&&order.orderId!=null)await signedWrite(ORDER_URL,"DELETE",{symbol:currentSymbol(),orderId:String(order.orderId)});
+      const exitOrders=(context.liveExitOrders||[]).filter(order=>order&&order.orderId!=null);
+      const cancelResults=await Promise.allSettled(exitOrders.map(order=>signedWrite(ORDER_URL,"DELETE",{symbol:currentSymbol(),orderId:String(order.orderId)})));
+      const cancelFailures=cancelResults.map((result,index)=>({result,order:exitOrders[index]})).filter(item=>item.result.status==="rejected");
+      if(cancelFailures.length){
+        const details=cancelFailures.map(item=>"order "+String(item.order.orderId)+": "+(item.result.reason&&item.result.reason.message?item.result.reason.message:String(item.result.reason||"cancel failed"))).join(" | ");
+        throw new Error("GR Exit recreate cancelled "+(exitOrders.length-cancelFailures.length)+" of "+exitOrders.length+" existing orders; "+cancelFailures.length+" failed. New exit orders were not placed. "+details);
       }
       list.forEach(row=>{row.binanceOrderId=null;row.clientOrderId=null;row.status="local";});
     }
@@ -18870,15 +18965,40 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
     const source=Array.isArray(rows)?rows:[];
     const p=Math.max(1,Math.round(Number(period)||DEFAULT_PERIOD));
     const atr=atrSeries(source,p),dm=directionalSeries(source,p);
-    const dx=Array(source.length).fill(NaN);
+    const dx=Array(source.length).fill(NaN),plusDi=Array(source.length).fill(NaN),minusDi=Array(source.length).fill(NaN);
     for(let i=0;i<source.length;i++){
       if(!finite(atr[i])||Number(atr[i])<=0||!finite(dm.plus[i])||!finite(dm.minus[i])) continue;
-      const plusDi=100*Number(dm.plus[i])/Number(atr[i]);
-      const minusDi=100*Number(dm.minus[i])/Number(atr[i]);
-      const total=plusDi+minusDi;
-      dx[i]=total>0?100*Math.abs(plusDi-minusDi)/total:0;
+      plusDi[i]=100*Number(dm.plus[i])/Number(atr[i]);
+      minusDi[i]=100*Number(dm.minus[i])/Number(atr[i]);
+      const total=plusDi[i]+minusDi[i];
+      dx[i]=total>0?100*Math.abs(plusDi[i]-minusDi[i])/total:0;
     }
-    return wilderAverageSeries(dx,p,p);
+    const adx=wilderAverageSeries(dx,p,p);
+    const direction=Array(source.length).fill(null),crossed=Array(source.length).fill(false);
+    let previousDirection=null;
+    for(let i=0;i<source.length;i++){
+      if(!finite(plusDi[i])||!finite(minusDi[i])) continue;
+      const plus=Number(plusDi[i]),minus=Number(minusDi[i]);
+      const currentDirection=plus>minus?"bullish":minus>plus?"bearish":previousDirection;
+      if(currentDirection==null)continue;
+      direction[i]=currentDirection;
+      crossed[i]=previousDirection!=null&&currentDirection!==previousDirection;
+      previousDirection=currentDirection;
+    }
+    Object.defineProperties(adx,{
+      plusDi:{value:plusDi,enumerable:false},
+      minusDi:{value:minusDi,enumerable:false},
+      direction:{value:direction,enumerable:false},
+      crossed:{value:crossed,enumerable:false}
+    });
+    return adx;
+  }
+  function adxDirectionTag(adxValue,direction,crossed,threshold=25){
+    const adx=Number(adxValue),cutoff=Number(threshold);
+    if(!finite(adx)||adx<=cutoff)return {glyph:"−",tone:"grey",direction:null,crossed:false};
+    const side=direction==="bearish"?"bearish":"bullish";
+    if(crossed===true)return {glyph:"X",tone:side==="bullish"?"cross-bullish":"cross-bearish",direction:side,crossed:true};
+    return {glyph:side==="bullish"?"▲":"▼",tone:side,direction:side,crossed:false};
   }
   function snapshot(rows,period=DEFAULT_PERIOD,shadowBars=5){
     const atr=atrSeries(rows,period),adx=adxSeries(rows,period);
@@ -18887,13 +19007,22 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
       period:Math.max(1,Math.round(Number(period)||DEFAULT_PERIOD)),
       atrSeries:atr,
       adxSeries:adx,
+      plusDiSeries:adx.plusDi,
+      minusDiSeries:adx.minusDi,
+      adxDirectionSeries:adx.direction,
+      adxCrossSeries:adx.crossed,
       atr:finite(atr[last])?Number(atr[last]):null,
       adx:finite(adx[last])?Number(adx[last]):null,
+      plusDi:finite(adx.plusDi[last])?Number(adx.plusDi[last]):null,
+      minusDi:finite(adx.minusDi[last])?Number(adx.minusDi[last]):null,
+      adxDirection:adx.direction[last]||null,
+      adxCrossed:adx.crossed[last]===true,
+      adxTag:adxDirectionTag(adx[last],adx.direction[last],adx.crossed[last]),
       adxShadow:finite(adx[shadow])?Number(adx[shadow]):null,
       shadowBars:Math.max(0,Math.round(Number(shadowBars)||0))
     };
   }
-  const api = {DEFAULT_PERIOD,trueRange,trueRangeSeries,wilderAverageSeries,atrSeries,adxSeries,snapshot};
+  const api = {DEFAULT_PERIOD,trueRange,trueRangeSeries,wilderAverageSeries,atrSeries,adxSeries,adxDirectionTag,snapshot};
   root.volatility = api;
   if(typeof module!=="undefined"&&module.exports) module.exports=api;
 })();
@@ -19200,7 +19329,7 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
     }
     function unavailable(reason,provisional=false){
       const unavailableReason=reason || "Unavailable";
-      return {available:false,unavailableReason,state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,adx:null,adxPrevious:null,spreadPct:null,spreadAtr:null,spreadScore:null,spreadLabel:"Unavailable",spreadCondition:"unavailable",maPair:"No fresh event",maEvent:null,priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${unavailableReason}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
+      return {available:false,unavailableReason,state:"mixed",icon:"~",strength:0,alignment:0,quality:0,setup:0,provisional:!!provisional,atr:null,adx:null,adxPrevious:null,plusDi:null,minusDi:null,adxDirection:null,adxCrossed:false,adxTag:{glyph:"−",tone:"grey",direction:null,crossed:false},spreadPct:null,spreadAtr:null,spreadScore:null,spreadLabel:"Unavailable",spreadCondition:"unavailable",maPair:"No fresh event",maEvent:null,priceEvent:"None",maPairAge:null,priceEventAge:null,blinkIntent:"none",blinkReason:"Unavailable",title:`State: Unavailable\nStack direction: mixed\nStack Alignment: 0%\nStrength: 0%\nQuality: 0%\nHigher TF agreement: mixed / unavailable\nSpread: Unavailable\nSlope agreement: unavailable\nPhase: ${unavailableReason}\nMA Pair: No fresh event\nPrice-MA: None\nMA-pair age: -\nPrice-MA age: -\nBlink intent: none\nBlink reason: Unavailable`};
     }
     function classify(rows,debugCtx,snapshot){
       const provisional = !!(debugCtx && debugCtx.includeForming);
@@ -19372,7 +19501,7 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
       const title = `State: ${stateLabel}\nStack direction: ${setup>0?"bullish":setup<0?"bearish":"mixed"}\nStack Alignment: ${alignment}%\nStrength: ${strength}%\nQuality: ${quality}%\nHigher TF agreement: pending\nSpread: ${spreadDisplay(spreadPct)}\nSpread condition: ${spreadCondition}\nSlope agreement: ${slopeAgree}/5\nPhase: ${phase}\nMA Pair: ${maPair}\nPrice-MA: ${priceMa}\nMA-pair age: ${maEvent?maEvent.age:"-"}\nPrice-MA age: ${priceEvent?priceEvent.age:"-"}\nBlink intent: ${blink.intent}\nBlink reason: ${blink.reason}`;
       rank.state = state;
       rank.summaryState = phase;
-      return {available:true,unavailableReason:null,state,icon,strength,alignment,quality,title,phase,setup,provisional,adx:volatilitySnapshot.adx,adxPrevious:volatilitySnapshot.adxShadow,spreadPct,spreadAtr,spreadScore:structuredSpreadScore,spreadLabel,spreadCondition,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
+      return {available:true,unavailableReason:null,state,icon,strength,alignment,quality,title,phase,setup,provisional,atr:currentAtr,adx:volatilitySnapshot.adx,adxPrevious:volatilitySnapshot.adxShadow,plusDi:volatilitySnapshot.plusDi,minusDi:volatilitySnapshot.minusDi,adxDirection:volatilitySnapshot.adxDirection,adxCrossed:volatilitySnapshot.adxCrossed,adxTag:volatilitySnapshot.adxTag,spreadPct,spreadAtr,spreadScore:structuredSpreadScore,spreadLabel,spreadCondition,maPair,maEvent,priceEvent:priceMa,maPairAge:maEvent?maEvent.age:null,priceEventAge:priceEvent?priceEvent.age:null,blinkIntent:blink.intent,blinkReason:blink.reason,blinkEvent,eventDisplay:blink.display,rank};
     }
     function stackComparison(vals){
       const base = Math.max(Math.abs(Number(vals && vals[3])),Math.abs(Number(vals && vals[4])),1);
@@ -20013,6 +20142,15 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
       ];
     }
     function escHtml(v){ return String(v == null ? "" : v).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch])); }
+    function adxTagMeta(adx,direction,crossed,provided){
+      if(provided&&provided.glyph&&provided.tone)return provided;
+      if(volatility&&typeof volatility.adxDirectionTag==="function")return volatility.adxDirectionTag(adx,direction,crossed,25);
+      return {glyph:"−",tone:"grey"};
+    }
+    function adxTagHtml(tag){
+      const meta=tag||{glyph:"−",tone:"grey"};
+      return `<span class="adx-direction-tag is-${escHtml(meta.tone||"grey")}" aria-label="ADX direction ${escHtml(meta.tone||"grey")}">${escHtml(meta.glyph||"−")}</span>`;
+    }
     function compactTooltipHtml(tf,r){
       const alignment = Math.max(0,Math.min(5,Math.round((Number(r.alignment)||0)/20)));
       const rowsBeforeAdx = [
@@ -20023,14 +20161,18 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
       ];
       const adxCurrent = Number.isFinite(Number(r.adx)) ? Math.round(Number(r.adx)) : null;
       const adxPrevious = Number.isFinite(Number(r.adxPrevious)) ? Math.round(Number(r.adxPrevious)) : null;
-      const adxActionable = Number.isFinite(Number(r.adx)) && Number(r.adx)>=25;
+      const adxActionable = Number.isFinite(Number(r.adx)) && Number(r.adx)>25;
       const adxText = `ADX: ${adxCurrent==null?"-":adxCurrent} (from ${adxPrevious==null?"-":adxPrevious})`;
+      const adxTag = adxTagMeta(r.adx,r.adxDirection,r.adxCrossed,r.adxTag);
+      const atrCurrent = Number.isFinite(Number(r.atr)) ? Number(r.atr).toFixed(1) : "-";
+      const atrText = `ATR: ${atrCurrent}`;
       const rowsAfterAdx = [
         `Spread: ${titleLine(r.title,"Spread")}`
       ];
       return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)}</div>`+
         rowsBeforeAdx.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
-        `<div class="v33-ma-stack-tip-row v33-ma-stack-tip-adx${adxActionable?' is-actionable':''}">${escHtml(adxText)}</div>`+
+        `<div class="v33-ma-stack-tip-row v33-ma-stack-tip-adx${adxActionable?' is-actionable':''}">${escHtml(adxText)}${adxTagHtml(adxTag)}</div>`+
+        `<div class="v33-ma-stack-tip-row v33-ma-stack-tip-atr">${escHtml(atrText)}</div>`+
         rowsAfterAdx.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
         `<div class="v33-ma-stack-tip-spacer"></div>`+
         `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipSummary(r && r.maEvent,r))}</div>`;
@@ -20143,6 +20285,8 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
       const last = source.length - 1;
       const atr = Number(atrValues[last]);
       const adx = Number(adxValues[last]);
+      const adxDirection = adxValues.direction&&adxValues.direction[last]||null;
+      const adxCrossed = !!(adxValues.crossed&&adxValues.crossed[last]);
       const atrWindow = atrValues.slice(-20).map(Number).filter(Number.isFinite);
       if(!Number.isFinite(atr) || !Number.isFinite(adx) || atrWindow.length !== 20){
         return {available:false,timeframe:"15m",atr:unavailableMetric(),adx:unavailableMetric()};
@@ -20158,7 +20302,7 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
         timeframe:"15m",
         agreement,
         atr:{value:atr,average:atrAverage,threshold:atrThreshold,tradeable:atrTradeable,tone:tone(atrTradeable)},
-        adx:{value:adx,threshold:25,tradeable:adxTradeable,tone:tone(adxTradeable)}
+        adx:{value:adx,threshold:25,tradeable:adxTradeable,tone:tone(adxTradeable),plusDi:adxValues.plusDi&&Number(adxValues.plusDi[last]),minusDi:adxValues.minusDi&&Number(adxValues.minusDi[last]),direction:adxDirection,crossed:adxCrossed,directionTag:adxTagMeta(adx,adxDirection,adxCrossed)}
       };
     }
     function renderEnhanced(results){
@@ -20223,7 +20367,7 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
         btn.addEventListener("blur",hideMaStackTooltip,false);
       });
     }
-  root.presentation = {ensureDom,renderEnhanced,compactTooltipHtml};
+  root.presentation = {ensureDom,renderEnhanced,compactTooltipHtml,adxTagMeta,adxTagHtml};
   function markerEvents(tf,rows){ return root.core.markerEvents(tf,rows,{slots:root.runtime.stackSlots()}); }
   const api = {
     start:root.runtime.start,
@@ -45487,7 +45631,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function pressureAbbrev(value){
     switch(String(value || "").toUpperCase()){
-      case "BALANCED": return "BAL";
+      case "BALANCED": return "BALANCED";
       case "BUY LEAN": return "BUY LEAN";
       case "SELL LEAN": return "SELL LEAN";
       case "BUY EDGE": return "BUY EDG";
@@ -45520,32 +45664,85 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     return strip.tradabilityModel(rowsForTf(TRADABILITY_TF));
   }
   function tradabilityMetricColor(metric){
-    if(metric && metric.tone === "green-strong") return "#15803d";
-    if(metric && metric.tone === "green-muted") return "rgba(22,163,74,.74)";
+    if(metric && metric.tone === "green-strong") return "#00a83d";
+    if(metric && metric.tone === "green-muted") return "rgba(22,163,74,.60)";
     return "#647083";
   }
-  function drawTradabilityMetricLine(label,value,metric,centerX,y){
+  function adxDirectionTagColor(tag){
+    if(tag&&tag.tone==="bullish")return "#16a34a";
+    if(tag&&tag.tone==="bearish")return "#dc2626";
+    if(tag&&tag.tone==="cross-bullish")return "rgba(22,163,74,.50)";
+    if(tag&&tag.tone==="cross-bearish")return "rgba(220,38,38,.50)";
+    return "#4b5563";
+  }
+  function drawTradabilityMetricLine(label,value,metric,centerX,y,directionTag=null){
     const labelText = label + ": ";
     const valueText = value;
     const labelWidth = ctx.measureText(labelText).width;
     const valueWidth = ctx.measureText(valueText).width;
-    const startX = centerX - (labelWidth + valueWidth) / 2;
+    const metricFont=ctx.font;
+    let tagText="",tagWidth=0;
+    if(directionTag&&directionTag.glyph){
+      tagText=" "+directionTag.glyph+" ";
+      ctx.font=metricFont;
+      tagWidth=ctx.measureText(tagText).width;
+    }
+    const startX = centerX - (labelWidth + valueWidth + tagWidth) / 2;
     ctx.fillStyle = "#111827";
     ctx.fillText(labelText,startX,y);
     ctx.fillStyle = tradabilityMetricColor(metric);
     ctx.fillText(valueText,startX + labelWidth,y);
+    if(tagText){
+      ctx.font=metricFont;
+      ctx.fillStyle=adxDirectionTagColor(directionTag);
+      ctx.fillText(tagText,startX + labelWidth + valueWidth,y);
+      ctx.font=metricFont;
+    }
   }
   function drawTradabilityGauge(model,rect){
-    if(!ctx || !rect || !(rect.w >= 58) || !(rect.h >= 26)) return;
+    if(!ctx || !rect || !(rect.w >= 58) || !(rect.h >= 32)) return;
     ctx.save();
-    ctx.font = "bold 11px Arial";
+    ctx.font = "bold 13px Arial";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     const atr = model && model.atr && Number.isFinite(Number(model.atr.value)) ? Number(model.atr.value).toFixed(1) : "n/a";
     const adx = model && model.adx && Number.isFinite(Number(model.adx.value)) ? Number(model.adx.value).toFixed(1) : "n/a";
     drawTradabilityMetricLine("ATR",atr,model && model.atr,rect.x + rect.w / 2,rect.y);
-    drawTradabilityMetricLine("ADX",adx,model && model.adx,rect.x + rect.w / 2,rect.y + 14);
+    drawTradabilityMetricLine("ADX",adx,model && model.adx,rect.x + rect.w / 2,rect.y + 17,model && model.adx && model.adx.directionTag);
     ctx.restore();
+  }
+  function computeChartVolatilityModel(){
+    const volatility = window.__BT001_MA_STACK_BUILD__ && window.__BT001_MA_STACK_BUILD__.volatility;
+    const source = rowsForTf(currentTf());
+    if(!volatility || typeof volatility.atrSeries !== "function" || typeof volatility.adxSeries !== "function" || !source.length){
+      return {atr:null,adx:null,adxTag:{glyph:"−",tone:"grey"}};
+    }
+    const atrValues = volatility.atrSeries(source,14);
+    const adxValues = volatility.adxSeries(source,14);
+    const last = source.length - 1;
+    const atr = Number(atrValues[last]);
+    const adx = Number(adxValues[last]);
+    const adxDirection=adxValues.direction&&adxValues.direction[last]||null;
+    const adxCrossed=!!(adxValues.crossed&&adxValues.crossed[last]);
+    const adxTag=typeof volatility.adxDirectionTag==="function"?volatility.adxDirectionTag(adx,adxDirection,adxCrossed,25):{glyph:"−",tone:"grey"};
+    return {atr:Number.isFinite(atr)?atr:null,adx:Number.isFinite(adx)?adx:null,plusDi:adxValues.plusDi&&Number(adxValues.plusDi[last]),minusDi:adxValues.minusDi&&Number(adxValues.minusDi[last]),adxDirection,adxCrossed,adxTag};
+  }
+  function updateChartVolatilityReadout(){
+    const row = document.querySelector(".chart-indicator-toggles");
+    if(!row) return;
+    let node = document.getElementById("chartVolatilityReadout");
+    if(!node){
+      node = document.createElement("span");
+      node.id = "chartVolatilityReadout";
+      node.className = "chart-volatility-readout";
+      row.appendChild(node);
+    }
+    const model = computeChartVolatilityModel();
+    const adx = model.adx==null?"n/a":model.adx.toFixed(1);
+    const atr = model.atr==null?"n/a":model.atr.toFixed(1);
+    const tag=model.adxTag||{glyph:"−",tone:"grey"};
+    node.innerHTML = "ADX : " + adx + '<span class="adx-direction-tag is-' + String(tag.tone||"grey") + '" aria-label="ADX direction ' + String(tag.tone||"grey") + '">' + String(tag.glyph||"−") + "</span>| ATR : " + atr;
+    node.title = tfLabel(currentTf()) + " chart volatility";
   }
   function computePressureModel(mode){
     const useDaily = mode !== "tf";
@@ -45822,11 +46019,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const volumeText = model.volumeState === "N/A" ? "n/a" : model.volumeState + " " + model.relText;
     const strapTop = String(model.pressureState || "N/A");
     const strapBottom = volumeText + " | " + model.rating;
-    drawCenteredClippedText(strapTop,meterX + meterW / 2,strapY,meterW,"bold 12px Arial","#0f172a");
-    drawCenteredClippedText(strapBottom,meterX + meterW / 2,strapY + strapLineGap,meterW,"bold 11px Arial","#334155");
-    const tradabilityY = strapY + strapLineGap + 20;
-    if(tradabilityY + 25 <= volumeTop + volumeHeight - 3){
-      const tradabilityRect = {x:meterX,y:tradabilityY,w:meterW,h:28};
+    const pressureY = strapY + strapLineGap;
+    drawCenteredClippedText(strapTop,meterX + meterW / 2,pressureY,meterW,"bold 12px Arial","#0f172a");
+    drawCenteredClippedText(strapBottom,meterX + meterW / 2,pressureY + strapLineGap,meterW,"bold 11px Arial","#334155");
+    const tradabilityY = pressureY + strapLineGap + 20;
+    if(tradabilityY + 32 <= volumeTop + volumeHeight - 3){
+      const tradabilityRect = {x:meterX,y:tradabilityY,w:meterW,h:34};
       drawTradabilityGauge(tradability,tradabilityRect);
       meterState.tradabilityRect = tradabilityRect;
     }
@@ -45923,6 +46121,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     try{
       drawAxisDayRangeVisual();
       drawDailyVolumeSplitVisual();
+      updateChartVolatilityReadout();
     }catch(error){
       console.warn(MODULE + " draw failed",error);
     }
@@ -46720,15 +46919,43 @@ if(typeof window !== "undefined"){
   function wfLivePreviewBars(liveTrade,trades){
     if(!liveTrade) return [];
     const cumulative = trades.length ? num(trades[trades.length - 1].end) || 0 : 0;
-    const net = num(liveTrade.net) || 0;
-    return [{
-      ...liveTrade,
-      id:liveTrade.id + "_net",
-      liveSegment:"net",
-      net,
-      start:cumulative,
-      end:cumulative + net
-    }];
+    const realized = num(liveTrade.realizedPartials);
+    const floating = num(liveTrade.floatingPL);
+    const bars = [];
+    let cursor = cumulative;
+    if(realized != null && Math.abs(realized) > 1e-12){
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_realized",
+        liveSegment:"realized",
+        net:realized,
+        start:cursor,
+        end:cursor + realized
+      });
+      cursor += realized;
+    }
+    if(floating != null && Math.abs(floating) > 1e-12){
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_floating",
+        liveSegment:"floating",
+        net:floating,
+        start:cursor,
+        end:cursor + floating
+      });
+    }
+    if(!bars.length){
+      const net = num(liveTrade.net) || 0;
+      bars.push({
+        ...liveTrade,
+        id:liveTrade.id + "_net",
+        liveSegment:"net",
+        net,
+        start:cumulative,
+        end:cumulative + net
+      });
+    }
+    return bars;
   }
   function markClosedTradesLoaded(loaded){
     wfSyncState.loaded = !!loaded;
@@ -48069,6 +48296,8 @@ if(typeof window !== "undefined"){
       if(trade.aggregated) cls.push("is-aggregated");
       if(trade.aggregated && trade.inProgress) cls.push("is-current-bucket");
       if(trade.live) cls.push("is-live");
+      if(trade.live && trade.liveSegment === "realized") cls.push("is-live-realized");
+      if(trade.live && trade.liveSegment === "floating") cls.push("is-live-floating");
       if(trade.live && trade.liveSegment === "net") cls.push("is-live-net");
       if(activeKey && tradeKey(trade) === activeKey) cls.push("is-selected");
       const connector = index < chartTrades.length - 1

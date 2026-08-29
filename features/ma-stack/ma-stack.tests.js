@@ -13,6 +13,7 @@ const moduleSource = fs.readFileSync(path.join(__dirname, "ma-stack.js"), "utf8"
 const mainSource = fs.readFileSync(path.join(root, "main.js"), "utf8");
 const htmlSource = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const cssSource = fs.readFileSync(path.join(__dirname, "ma-stack.css"), "utf8");
+const appCssSource = fs.readFileSync(path.join(root, "style.css"), "utf8");
 
 class FakeElement {
   constructor(tagName, document) {
@@ -196,6 +197,7 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   assert(classified && classified.slots.length === 5, "authoritative classification failed");
   assert.equal(classified.source.type, "fixture");
   assert(Number.isFinite(classified.adx) && Number.isFinite(classified.adxPrevious), "classification did not expose current and five-candle-shadow ADX");
+  assert(Number.isFinite(classified.plusDi)&&Number.isFinite(classified.minusDi)&&["bullish","bearish"].includes(classified.adxDirection),"classification did not expose the existing DI calculation and direction");
   assert(runtime.snapshotCalls >= 1, "authoritative snapshot was not requested");
   assert(["up", "down", "mixed", "transition", "compression"].includes(classified.state));
   assert.equal(classified.provisional, false, "explicit closed-only result was not labeled final");
@@ -226,6 +228,7 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   const adxNeutralBoundary = tradabilityCase(Array(20).fill(100),25);
   assert.equal(adxNeutralBoundary.atr.tone,"green-muted","ATR green must mute when ADX is grey");
   assert.equal(adxNeutralBoundary.adx.tone,"grey","ADX 25 belongs to the neutral grey zone");
+  assert.equal(adxNeutralBoundary.adx.directionTag.glyph,"−","non-tradeable ADX must use the grey minus tag");
   const adxOnly = tradabilityCase(Array(19).fill(100).concat(40),25.1);
   assert.equal(adxOnly.atr.tone,"grey","ATR below half its 20-period average must be grey");
   assert.equal(adxOnly.adx.tone,"green-muted","ADX green must mute when ATR is grey");
@@ -374,6 +377,23 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   const monotonicRows = Array.from({length:45},(_value,index)=>[index,100+index,102+index,99+index,101+index]);
   const adxSnapshot = isolatedVolatility.snapshot(monotonicRows,14,5);
   assert(Math.abs(adxSnapshot.adx-100)<1e-9,"monotonic-trend ADX should converge to 100");
+  assert(Array.isArray(adxSnapshot.adxSeries.plusDi)&&Array.isArray(adxSnapshot.adxSeries.minusDi),"adxSeries must expose its already-computed DI series without changing its array return type");
+  assert.strictEqual(adxSnapshot.plusDiSeries,adxSnapshot.adxSeries.plusDi,"snapshot must reuse adxSeries plusDi rather than recalculate it");
+  assert.strictEqual(adxSnapshot.minusDiSeries,adxSnapshot.adxSeries.minusDi,"snapshot must reuse adxSeries minusDi rather than recalculate it");
+  assert(adxSnapshot.plusDi>adxSnapshot.minusDi&&adxSnapshot.adxDirection==="bullish","monotonic uptrend must expose DI+ dominance");
+  assert.deepEqual({...isolatedVolatility.adxDirectionTag(30,"bullish",false)},{glyph:"▲",tone:"bullish",direction:"bullish",crossed:false});
+  assert.deepEqual({...isolatedVolatility.adxDirectionTag(30,"bearish",false)},{glyph:"▼",tone:"bearish",direction:"bearish",crossed:false});
+  assert.deepEqual({...isolatedVolatility.adxDirectionTag(30,"bullish",true)},{glyph:"X",tone:"cross-bullish",direction:"bullish",crossed:true});
+  assert.deepEqual({...isolatedVolatility.adxDirectionTag(30,"bearish",true)},{glyph:"X",tone:"cross-bearish",direction:"bearish",crossed:true});
+  assert.deepEqual({...isolatedVolatility.adxDirectionTag(25,"bullish",true)},{glyph:"−",tone:"grey",direction:null,crossed:false},"below/non-tradeable ADX must override a simultaneous fresh cross");
+  const diReversalRows=[];
+  let diReversalPrice=100;
+  for(let index=0;index<45;index++){const open=diReversalPrice;diReversalPrice+=2;diReversalRows.push([index,open,diReversalPrice+1,open-1,diReversalPrice]);}
+  for(let index=45;index<90;index++){const open=diReversalPrice;diReversalPrice-=3;diReversalRows.push([index,open,open+1,diReversalPrice-1,diReversalPrice]);}
+  const diReversalAdx=isolatedVolatility.adxSeries(diReversalRows,14);
+  const diCrossIndexes=diReversalAdx.crossed.map((crossed,index)=>crossed?index:null).filter(index=>index!=null);
+  assert.deepEqual(diCrossIndexes,[52],"adxSeries must flag only the reading where DI dominance actually flips");
+  assert.equal(diReversalAdx.direction[52],"bearish","DI- crossing above DI+ must record a bearish cross direction");
   assert.equal(adxSnapshot.adxShadow,adxSnapshot.adxSeries[monotonicRows.length-6],"ADX shadow did not use exactly five candles ago");
   const closedVolatility = isolatedVolatility.snapshot(monotonicRows.slice(0,-1),14,5);
   const formingRows = monotonicRows.concat([[45,145,175,80,146]]);
@@ -514,11 +534,15 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   assert.equal((stripHtml.match(/v33-ma-live-badge/g) || []).length, 5, "LIVE badge did not render on exactly five timeframes");
   ["1m","3m","5m","15m","30m"].forEach(tf => assert(stripHtml.includes(`data-tf="${tf}"`) && stripHtml.includes(`data-interval="${tf}"`), `${tf} DOM anchor missing`));
   assert(cssSource.includes(".v33-ma-stack-box .v33-ma-live-badge"), "LIVE badge styling missing");
-  const tooltipBelow = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"1m"},{...isolated,adx:24.9,adxPrevious:20});
-  const tooltipBoundary = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"1m"},{...isolated,adx:25,adxPrevious:20});
-  assert(tooltipBelow.indexOf("Quality:") < tooltipBelow.indexOf("ADX:") && tooltipBelow.indexOf("ADX:") < tooltipBelow.indexOf("Spread:"),"ADX tooltip row is not immediately below Quality");
+  const tooltipBelow = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"1m"},{...isolated,atr:123.45,adx:24.9,adxPrevious:20,adxDirection:"bullish",adxCrossed:true,adxTag:null});
+  const tooltipBoundary = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"1m"},{...isolated,atr:123.45,adx:25,adxPrevious:20,adxDirection:"bearish",adxCrossed:true,adxTag:null});
+  assert(tooltipBelow.indexOf("Quality:") < tooltipBelow.indexOf("ADX:") && tooltipBelow.indexOf("ADX:") < tooltipBelow.indexOf("ATR: 123.5") && tooltipBelow.indexOf("ATR: 123.5") < tooltipBelow.indexOf("Spread:"),"ATR tooltip row is not immediately below ADX");
   assert(!tooltipBelow.includes("v33-ma-stack-tip-adx is-actionable"),"ADX below 25 rendered bold");
-  assert(tooltipBoundary.includes("v33-ma-stack-tip-adx is-actionable") && tooltipBoundary.includes("ADX: 25 (from 20)"),"ADX 25 boundary did not render bold with shadow value");
+  assert(!tooltipBoundary.includes("v33-ma-stack-tip-adx is-actionable")&&tooltipBoundary.includes("ADX: 25 (from 20)")&&tooltipBoundary.includes("is-grey")&&tooltipBoundary.includes("−"),"ADX 25 boundary must remain grey even when a fresh cross exists");
+  const tooltip15m = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"15m"},{...isolated,atr:91.24,adx:26,adxPrevious:24,adxDirection:"bullish",adxCrossed:false,adxTag:null});
+  const tooltip4h = runtime.context.__BT001_MA_STACK_BUILD__.presentation.compactTooltipHtml({key:"4H"},{...isolated,atr:812.76,adx:31,adxPrevious:28,adxDirection:"bearish",adxCrossed:true,adxTag:null});
+  assert(tooltip15m.includes("ATR: 91.2")&&tooltip4h.includes("ATR: 812.8"),"MA Stack tooltips must retain their own timeframe-specific ATR values");
+  assert(tooltip15m.includes("is-bullish")&&tooltip15m.includes("▲")&&tooltip4h.includes("is-cross-bearish")&&tooltip4h.includes("X"),"MA Stack tooltips must render directional and fresh-cross ADX tags");
 
   api.start();
   assert.equal(runtime.visible, true);
@@ -562,8 +586,11 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   assert(tradabilityDrawSource.includes('drawTradabilityMetricLine("ATR"') && tradabilityDrawSource.includes('drawTradabilityMetricLine("ADX"'),"tradability gauge must render independent ATR and ADX lines");
   assert(tradabilityDrawSource.includes('ctx.fillStyle = "#111827"') && tradabilityDrawSource.includes("ctx.fillText(labelText"),"ATR/ADX labels must always render black independently from their values");
   assert(!tradabilityDrawSource.includes("fillRect") && !tradabilityDrawSource.includes("strokeRect"),"tradability text must not retain a surrounding box or border");
-  assert(mainSource.includes('return "#15803d"') && mainSource.includes('return "rgba(22,163,74,.74)"') && mainSource.includes('return "#647083"'),"tradability strong, muted, and readable constant-grey colors are missing");
-  assert(mainSource.includes("const tradabilityY = strapY + strapLineGap + 20") && mainSource.includes("x:meterX,y:tradabilityY,w:meterW"),"tradability text must retain visible spacing below the pressure meter's volume/rating text");
+  assert(mainSource.includes('return "#00a83d"') && mainSource.includes('return "rgba(22,163,74,.60)"') && mainSource.includes('return "#647083"'),"tradability strong, muted, and readable constant-grey colors are missing");
+  assert(mainSource.includes('ctx.font = "bold 13px Arial"') && mainSource.includes('rect.y + 17'),"standalone ATR/ADX labels and values must use the enlarged font and line spacing");
+  assert(mainSource.includes("const pressureY = strapY + strapLineGap")&&!mainSource.includes('model.pressureState === "BALANCED" ? strapLineGap : 0'),"the pressure state row must always reserve one empty display line regardless of its label");
+  assert(mainSource.includes("const tradabilityY = pressureY + strapLineGap + 20") && mainSource.includes("x:meterX,y:tradabilityY,w:meterW"),"tradability text must retain visible spacing below the pressure meter's volume/rating text");
+  assert(mainSource.includes('node.innerHTML = "ADX : " + adx')&&mainSource.includes("volatility.atrSeries(source,14)")&&mainSource.includes("volatility.adxSeries(source,14)"),"the selected chart timeframe overlay must show compact ADX/ATR from the shared series functions");
   assert(mainSource.includes('event.type === "kline"') && mainSource.includes("TRADABILITY_TF) requestRedraw()"),"15m forming-candle updates must redraw the tradability gauge");
   const tradabilityRendererStart=mainSource.indexOf("function tradabilityMetricColor");
   const tradabilityRendererSource=mainSource.slice(tradabilityRendererStart,tradabilityDrawEnd);
@@ -578,9 +605,35 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   };
   vm.createContext(gaugeContext);
   vm.runInContext(tradabilityRendererSource,gaugeContext);
-  gaugeContext.drawTradabilityGauge({atr:{value:12.3,tone:"grey"},adx:{value:28.4,tone:"green-muted"}},{x:10,y:20,w:100,h:28});
-  assert.deepEqual(drawnTradabilityText.map(item=>item.text),["ATR: ","12.3","ADX: ","28.4"],"labels and numeric values must be painted as separate text segments");
-  assert.deepEqual(drawnTradabilityText.map(item=>item.fill),["#111827","#647083","#111827","rgba(22,163,74,.74)"],"only numeric values may receive threshold colors");
+  gaugeContext.drawTradabilityGauge({atr:{value:12.3,tone:"grey"},adx:{value:28.4,tone:"green-muted",directionTag:{glyph:"▲",tone:"bullish"}}},{x:10,y:20,w:100,h:34});
+  assert.deepEqual(drawnTradabilityText.map(item=>item.text),["ATR: ","12.3","ADX: ","28.4"," ▲ "],"labels, numeric values, and the ADX direction tag with surrounding spacing must be painted separately");
+  assert.deepEqual(drawnTradabilityText.map(item=>item.fill),["#111827","#647083","#111827","rgba(22,163,74,.60)","#16a34a"],"ADX glyph color must be independent from the metric threshold color");
+
+  const chartVolatilityStart=mainSource.indexOf("function computeChartVolatilityModel");
+  const chartVolatilityEnd=mainSource.indexOf("function computePressureModel",chartVolatilityStart);
+  let requestedChartTf=null;
+  const chartVolatilityRow={appendChild(node){this.child=node;}};
+  const chartVolatilityContext={
+    window:{__BT001_MA_STACK_BUILD__:{volatility:{
+      atrSeries:source=>source.map((_row,index)=>index===1?456.78:NaN),
+      adxSeries:source=>{const values=source.map((_row,index)=>index===1?29.34:NaN);Object.defineProperties(values,{direction:{value:[null,"bearish"]},crossed:{value:[false,true]}});return values;},
+      adxDirectionTag:isolatedVolatility.adxDirectionTag
+    }}},
+    currentTf:()=>"4h",tfLabel:tf=>String(tf).toUpperCase(),
+    rowsForTf:tf=>{requestedChartTf=tf;return [{},{}];},
+    document:{
+      getElementById:()=>chartVolatilityRow.child||null,
+      querySelector:selector=>selector===".chart-indicator-toggles"?chartVolatilityRow:null,
+      createElement:()=>({id:"",className:"",innerHTML:"",title:""})
+    },
+    Number,String
+  };
+  vm.createContext(chartVolatilityContext);
+  vm.runInContext(mainSource.slice(chartVolatilityStart,chartVolatilityEnd),chartVolatilityContext);
+  chartVolatilityContext.updateChartVolatilityReadout();
+  assert.equal(requestedChartTf,"4h","chart volatility overlay must request the currently selected chart timeframe");
+  assert(chartVolatilityRow.child.innerHTML.includes("ADX : 29.3")&&chartVolatilityRow.child.innerHTML.includes("is-cross-bearish")&&chartVolatilityRow.child.innerHTML.includes(">X</span>| ATR : 456.8"),"chart volatility overlay must render the compact selected-timeframe readout and fresh-cross tag");
+  assert(/\.adx-direction-tag\{[^}]*margin:0 \.28em;[^}]*font-size:1em;[^}]*line-height:inherit;[^}]*vertical-align:baseline;/s.test(appCssSource),"HTML ADX glyphs must match surrounding text height, use symmetric spacing, and align to the text baseline");
 
   console.log("MA Stack extraction tests: PASS", { apiMethods: 10, volatilityIndependent: true, atrWilder: true, adxWilder: true, adxShadow: 5, atrNormalizedEvents: true, microscopicBounceRejected: true, canonicalPeriods: true, provisionalDefaults: true, liveBadges: 5, tradabilityGauge: true, eventAging: true, bounceAging: true, newerEventHandoff: true, fullStackOrdering: true, adjacentPairFailedCross: true, deepAndWidePairFailedCross: 3, authoritativeSnapshot: true, lifecycle: true, throttle: true, domIdentity: true, eventLabContracts: 4 });
 })().catch(error => {

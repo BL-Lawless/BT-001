@@ -22956,7 +22956,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   }
   function pressureAbbrev(value){
     switch(String(value || "").toUpperCase()){
-      case "BALANCED": return "BAL";
+      case "BALANCED": return "BALANCED";
       case "BUY LEAN": return "BUY LEAN";
       case "SELL LEAN": return "SELL LEAN";
       case "BUY EDGE": return "BUY EDG";
@@ -22989,32 +22989,85 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     return strip.tradabilityModel(rowsForTf(TRADABILITY_TF));
   }
   function tradabilityMetricColor(metric){
-    if(metric && metric.tone === "green-strong") return "#15803d";
-    if(metric && metric.tone === "green-muted") return "rgba(22,163,74,.74)";
+    if(metric && metric.tone === "green-strong") return "#00a83d";
+    if(metric && metric.tone === "green-muted") return "rgba(22,163,74,.60)";
     return "#647083";
   }
-  function drawTradabilityMetricLine(label,value,metric,centerX,y){
+  function adxDirectionTagColor(tag){
+    if(tag&&tag.tone==="bullish")return "#16a34a";
+    if(tag&&tag.tone==="bearish")return "#dc2626";
+    if(tag&&tag.tone==="cross-bullish")return "rgba(22,163,74,.50)";
+    if(tag&&tag.tone==="cross-bearish")return "rgba(220,38,38,.50)";
+    return "#4b5563";
+  }
+  function drawTradabilityMetricLine(label,value,metric,centerX,y,directionTag=null){
     const labelText = label + ": ";
     const valueText = value;
     const labelWidth = ctx.measureText(labelText).width;
     const valueWidth = ctx.measureText(valueText).width;
-    const startX = centerX - (labelWidth + valueWidth) / 2;
+    const metricFont=ctx.font;
+    let tagText="",tagWidth=0;
+    if(directionTag&&directionTag.glyph){
+      tagText=" "+directionTag.glyph+" ";
+      ctx.font=metricFont;
+      tagWidth=ctx.measureText(tagText).width;
+    }
+    const startX = centerX - (labelWidth + valueWidth + tagWidth) / 2;
     ctx.fillStyle = "#111827";
     ctx.fillText(labelText,startX,y);
     ctx.fillStyle = tradabilityMetricColor(metric);
     ctx.fillText(valueText,startX + labelWidth,y);
+    if(tagText){
+      ctx.font=metricFont;
+      ctx.fillStyle=adxDirectionTagColor(directionTag);
+      ctx.fillText(tagText,startX + labelWidth + valueWidth,y);
+      ctx.font=metricFont;
+    }
   }
   function drawTradabilityGauge(model,rect){
-    if(!ctx || !rect || !(rect.w >= 58) || !(rect.h >= 26)) return;
+    if(!ctx || !rect || !(rect.w >= 58) || !(rect.h >= 32)) return;
     ctx.save();
-    ctx.font = "bold 11px Arial";
+    ctx.font = "bold 13px Arial";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     const atr = model && model.atr && Number.isFinite(Number(model.atr.value)) ? Number(model.atr.value).toFixed(1) : "n/a";
     const adx = model && model.adx && Number.isFinite(Number(model.adx.value)) ? Number(model.adx.value).toFixed(1) : "n/a";
     drawTradabilityMetricLine("ATR",atr,model && model.atr,rect.x + rect.w / 2,rect.y);
-    drawTradabilityMetricLine("ADX",adx,model && model.adx,rect.x + rect.w / 2,rect.y + 14);
+    drawTradabilityMetricLine("ADX",adx,model && model.adx,rect.x + rect.w / 2,rect.y + 17,model && model.adx && model.adx.directionTag);
     ctx.restore();
+  }
+  function computeChartVolatilityModel(){
+    const volatility = window.__BT001_MA_STACK_BUILD__ && window.__BT001_MA_STACK_BUILD__.volatility;
+    const source = rowsForTf(currentTf());
+    if(!volatility || typeof volatility.atrSeries !== "function" || typeof volatility.adxSeries !== "function" || !source.length){
+      return {atr:null,adx:null,adxTag:{glyph:"−",tone:"grey"}};
+    }
+    const atrValues = volatility.atrSeries(source,14);
+    const adxValues = volatility.adxSeries(source,14);
+    const last = source.length - 1;
+    const atr = Number(atrValues[last]);
+    const adx = Number(adxValues[last]);
+    const adxDirection=adxValues.direction&&adxValues.direction[last]||null;
+    const adxCrossed=!!(adxValues.crossed&&adxValues.crossed[last]);
+    const adxTag=typeof volatility.adxDirectionTag==="function"?volatility.adxDirectionTag(adx,adxDirection,adxCrossed,25):{glyph:"−",tone:"grey"};
+    return {atr:Number.isFinite(atr)?atr:null,adx:Number.isFinite(adx)?adx:null,plusDi:adxValues.plusDi&&Number(adxValues.plusDi[last]),minusDi:adxValues.minusDi&&Number(adxValues.minusDi[last]),adxDirection,adxCrossed,adxTag};
+  }
+  function updateChartVolatilityReadout(){
+    const row = document.querySelector(".chart-indicator-toggles");
+    if(!row) return;
+    let node = document.getElementById("chartVolatilityReadout");
+    if(!node){
+      node = document.createElement("span");
+      node.id = "chartVolatilityReadout";
+      node.className = "chart-volatility-readout";
+      row.appendChild(node);
+    }
+    const model = computeChartVolatilityModel();
+    const adx = model.adx==null?"n/a":model.adx.toFixed(1);
+    const atr = model.atr==null?"n/a":model.atr.toFixed(1);
+    const tag=model.adxTag||{glyph:"−",tone:"grey"};
+    node.innerHTML = "ADX : " + adx + '<span class="adx-direction-tag is-' + String(tag.tone||"grey") + '" aria-label="ADX direction ' + String(tag.tone||"grey") + '">' + String(tag.glyph||"−") + "</span>| ATR : " + atr;
+    node.title = tfLabel(currentTf()) + " chart volatility";
   }
   function computePressureModel(mode){
     const useDaily = mode !== "tf";
@@ -23291,11 +23344,12 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const volumeText = model.volumeState === "N/A" ? "n/a" : model.volumeState + " " + model.relText;
     const strapTop = String(model.pressureState || "N/A");
     const strapBottom = volumeText + " | " + model.rating;
-    drawCenteredClippedText(strapTop,meterX + meterW / 2,strapY,meterW,"bold 12px Arial","#0f172a");
-    drawCenteredClippedText(strapBottom,meterX + meterW / 2,strapY + strapLineGap,meterW,"bold 11px Arial","#334155");
-    const tradabilityY = strapY + strapLineGap + 20;
-    if(tradabilityY + 25 <= volumeTop + volumeHeight - 3){
-      const tradabilityRect = {x:meterX,y:tradabilityY,w:meterW,h:28};
+    const pressureY = strapY + strapLineGap;
+    drawCenteredClippedText(strapTop,meterX + meterW / 2,pressureY,meterW,"bold 12px Arial","#0f172a");
+    drawCenteredClippedText(strapBottom,meterX + meterW / 2,pressureY + strapLineGap,meterW,"bold 11px Arial","#334155");
+    const tradabilityY = pressureY + strapLineGap + 20;
+    if(tradabilityY + 32 <= volumeTop + volumeHeight - 3){
+      const tradabilityRect = {x:meterX,y:tradabilityY,w:meterW,h:34};
       drawTradabilityGauge(tradability,tradabilityRect);
       meterState.tradabilityRect = tradabilityRect;
     }
@@ -23392,6 +23446,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     try{
       drawAxisDayRangeVisual();
       drawDailyVolumeSplitVisual();
+      updateChartVolatilityReadout();
     }catch(error){
       console.warn(MODULE + " draw failed",error);
     }

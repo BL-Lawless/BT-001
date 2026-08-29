@@ -648,6 +648,7 @@
     const fillBase=requested>0?requested:filled+remaining;
     const fillPercent=fillBase>0?clamp(filled/fillBase*100,0,100):0;
     const fillText=Number(fillPercent.toFixed(2));
+    const chasePrice=num(value.price)>0?String(value.price).trim():"";
     if(code==="waiting") return {message:"Waiting for price...",tone:"normal"};
     if(code==="stale") return {message:"Price feed stale",tone:"error"};
     if(code==="repricing") return {message:"Repricing...",tone:"error"};
@@ -659,7 +660,7 @@
     if(code==="no-price") return {message:"No price data",tone:"error"};
     if(code==="stopped"||code==="inactive") return {message:String(value.message||"").trim()||"Stopped",tone:"error"};
     if(["breakeven","master-sl","take-profit","reverse-protection-cancel"].includes(code))return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
-    return {message:"Chasing — "+fillText+"%",tone:value.tone==="error"?"error":"normal"};
+    return {message:"Chasing — "+fillText+"%"+(chasePrice?" @ price: "+chasePrice:""),tone:value.tone==="error"?"error":"normal"};
   }
   async function submitOpenPositionCloseChsLimit(livePos,quantity,price){
     const clientId = freshOpenPositionCloseClientId();
@@ -916,8 +917,10 @@
     const fullMargin=position?currentOpenPositionMargin(position):null;
     const directCloseQty=opts.closeQty==null?null:num(opts.closeQty);
     const requestedCloseQty=position?(directCloseQty==null?position.qty*clamp(num(opts.closePercent)==null?100:num(opts.closePercent),0,100)/100:directCloseQty):0;
-    const normalizedClose=normalizeRapidFireQuantity(requestedCloseQty,directCloseQty==null?{roundDown:true}:{});
-    const closeQty=normalizedClose.executable?Math.min(position?position.qty:0,normalizedClose.quantity):0;
+    const normalizedClose=directCloseQty==null?normalizeRapidFireQuantity(requestedCloseQty,{roundDown:true}):null;
+    const closeQty=directCloseQty==null
+      ? (normalizedClose.executable?Math.min(position?position.qty:0,normalizedClose.quantity):0)
+      : Math.min(position?position.qty:0,Math.max(0,directCloseQty||0));
     const effectiveClosePercent=position&&position.qty>0?closeQty/position.qty*100:0;
     const metrics=rapidFireCloseMetrics(fullFloating,fullMargin,effectiveClosePercent);
     const typedSl=opts.slPrice==null?null:num(opts.slPrice);
@@ -1389,6 +1392,40 @@
       throw error;
     }finally{
       if(ownsBusy){rapidFireProtectionBusy=false;rapidFireProtectionAction=null;}
+    }
+  }
+  async function cancelRapidFireTakeProfit(){
+    if(rapidFireProtectionBusy)throw new Error("A Rapid Fire protection update is already active.");
+    if(rapidFireChaseContext)throw new Error("A Rapid Fire action is already active.");
+    if(typeof hasKeys!=="function"||!hasKeys())throw new Error("API keys required.");
+    rapidFireProtectionBusy=true;
+    rapidFireProtectionAction="take-profit";
+    publishRapidFireStatus({statusCode:"take-profit",message:"Cancelling TP...",tone:"normal"});
+    try{
+      const gateway=window.BT001_BINANCE_TRADING;
+      const snapshot=await readOpenOrdersSnapshot();
+      syncRapidFireTakeProfitFromSnapshot(snapshot);
+      if(!rapidFireTakeProfitOrder){
+        rapidFireTakeProfitDraftPrice=null;
+        publishRapidFireStatus({statusCode:"take-profit",message:"TP — Nothing to cancel",tone:"normal"});
+        calculate();
+        return Object.freeze({cancelled:false,noOrder:true});
+      }
+      if(!gateway||typeof gateway.cancelOrder!=="function")throw new Error("Binance trading gateway is unavailable.");
+      const response=await gateway.cancelOrder(rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder));
+      if(!binanceWriteConfirmed(response))throw new Error("Binance TP cancellation was not confirmed.");
+      rapidFireTakeProfitOrder=null;
+      rapidFireTakeProfitDraftPrice=null;
+      publishRapidFireStatus({statusCode:"take-profit",message:"TP cancelled",tone:"normal"});
+      calculate();
+      return Object.freeze({cancelled:true});
+    }catch(error){
+      try{syncRapidFireTakeProfitFromSnapshot(await readOpenOrdersSnapshot());}catch(_ignored){}
+      publishRapidFireStatus({statusCode:"take-profit",message:"TP cancel failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+      throw error;
+    }finally{
+      rapidFireProtectionBusy=false;
+      rapidFireProtectionAction=null;
     }
   }
   async function cancelRapidFireProtections(){
@@ -8553,6 +8590,7 @@
         clearProtectionDraft:clearRapidFireProtectionDraft,
         setMasterStop:executeRapidFireMasterStop,
         setTakeProfit:executeRapidFireTakeProfit,
+        cancelTakeProfit:cancelRapidFireTakeProfit,
         cancelProtections:cancelRapidFireProtections,
         cancel:cancelRapidFireChase,
         isActive:()=>!!rapidFireChaseContext,

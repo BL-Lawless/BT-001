@@ -49,18 +49,19 @@ assert(calculator.includes('if(action!=="add"&&!hasPosition)')&&calculator.inclu
 assert(calculator.includes('if(action==="double") requested=Math.abs(num(live.qty)||0)')&&rapid.includes('quantity:q("rapidFireLot").value'),"Double must use live position size independently of Add's lot input");
 assert(rapid.includes("closePercent:closeSlider?closeSlider.value:100")&&rapid.includes("closeQty:closeQuantityOverride")&&!rapid.includes('closePercent:reverseSlider'),"only the Close controls may drive Rapid Fire summary P/L");
 assert(calculator.includes('setOrdersVisibilityConsumer("rapid-fire",active===true)')&&calculator.includes("function effectiveOrdersVisible()"),"Rapid Fire visibility must force the existing Orders overlay mechanism without overwriting manual state");
-assert(css.includes("grid-template-columns:repeat(4,minmax(0,1fr))")&&css.includes("border:1px solid #e6e8ea"),"Total Lot, Exit Lot, and P/L summary boxes must share Calculator's bordered-cell style");
+assert(css.includes("grid-template-columns:repeat(4,minmax(0,1fr))")&&css.includes("border:1px solid #e6e8ea"),"Remaining, Close, and P/L summary boxes must share Calculator's bordered-cell style");
 assert(css.includes("height:284px")&&css.includes("min-height:272px")&&rapid.includes("minHeight:272,defaultWidth:500,defaultHeight:284"),"Rapid Fire must open compactly and permit resizing below the default height");
 assert(/\.rapid-fire-lot\{[^}]*width:100%/s.test(css)&&css.includes("grid-template-columns:82px 86px repeat(3,minmax(0,1fr))"),"DIR must match the row-title width while ADD, DBL, and B.E. share the remaining width equally");
 assert(/\.rapid-fire-status\{[^}]*width:100%;[^}]*height:34px/s.test(css),"status must remain a full-width single-line row");
 assert(css.includes(".rapid-fire-slider-ticks i")&&rapid.includes("sliderTicks(REVERSE_PERCENT_STEPS,25,300,100)"),"both sliders must render discrete tick markers");
 assert(css.includes(".rapid-fire-slider-ticks i.is-reference{background:#4b5563}")&&css.includes(".rapid-fire-reverse-slider::-moz-range-progress"),"Reverse must emphasize 100 percent and suppress its progress fill");
 assert(rapid.includes('q("rapidFireStatus").addEventListener("click",()=>setStatus(""),false)'),"clicking RF status must clear its message");
-assert(rapid.includes('rapid-fire-summary-label">Total Lot')&&rapid.includes('rapid-fire-summary-label">Exit Lot'),"the size boxes must use the Total Lot and Exit Lot labels");
-assert(rapid.includes('id="rapidFireOpenSize"')&&rapid.includes("readonly")&&rapid.includes('id="rapidFireCloseSize"')&&rapid.includes('closeSize.addEventListener("input"'),"Total Lot must be read-only while Exit Lot is directly editable");
-assert(rapid.includes("raw!=null&&raw>snapshot.size")&&rapid.includes("closeQuantityOverride=snapshot.size"),"Exit Lot must clamp typed quantities to the total open position size");
+assert(rapid.includes('rapid-fire-summary-label">Remaining')&&rapid.includes('rapid-fire-summary-label">Close'),"the size boxes must use the Remaining and Close labels");
+assert(rapid.includes('id="rapidFireOpenSize"')&&!/id="rapidFireOpenSize"[^>]*readonly/.test(rapid)&&rapid.includes('openSize.addEventListener("input"')&&rapid.includes('closeSize.addEventListener("input"'),"Remaining and Close must both be directly editable");
+assert(rapid.includes('editedKind==="remaining"')&&rapid.includes("closed:total-active")&&rapid.includes("remaining:total-active"),"only the actively edited RF size may be normalized; its counterpart must use plain subtraction from the true total");
+assert(calculator.includes("normalizedClose=directCloseQty==null?normalizeRapidFireQuantity")&&calculator.includes("Math.max(0,directCloseQty||0)"),"RF summary must preserve the already-derived counterpart exactly instead of independently normalizing it again");
 assert(css.includes("background:#aeb4bc")&&css.includes("background:#6b7280")&&rapid.includes('--rapid-fire-range-progress'),"slider fill must be lighter grey without changing the thumb color");
-assert(calculator.includes('directCloseQty==null?{roundDown:true}:{}')&&calculator.includes("normalizedClose.executable?")&&rapid.includes("remaining:size-closed"),"Close Size must be normalized once and Open Size derived by exact subtraction");
+assert(calculator.includes('normalizedClose=directCloseQty==null?normalizeRapidFireQuantity(requestedCloseQty,{roundDown:true}):null')&&rapid.includes("remaining:size-closed"),"slider Close must normalize once while direct size edits preserve their exact subtraction-derived counterpart");
 assert(rapid.includes("const CLOSE_PERCENT_STEPS=Object.freeze(Array.from({length:101},(_value,index)=>index))")&&rapid.includes('step="1"')&&rapid.includes("Math.round(value)+\"%\""),"Close must move in one-percent steps with a whole-number readout");
 assert(calculator.includes("rapidFireProtectionPl")&&calculator.includes("raw-entryCommission-exit*qty*exitRate")&&calculator.includes("takeProfitPl")&&calculator.includes("feeAware:false"),"Master SL preview must include entry/exit fees while TP preview remains raw");
 assert(calculator.includes("await cancelRapidFireProtections()")&&calculator.indexOf("await cancelRapidFireProtections()")<calculator.indexOf("const live=await signedPosition();",calculator.indexOf("async function executeRapidFireChase")),"Reverse must cancel Master SL and TP before reading and submitting the reverse chase");
@@ -68,6 +69,8 @@ assert(calculator.includes('rapidFireProtection:true')&&calculator.includes('tex
 assert(rapid.includes('rapid-fire-protection-label">SL</span>')&&!rapid.includes('rapid-fire-protection-label">Master SL</span>'),"the RF protection label must be SL");
 assert(/\.rapid-fire-protection-box input\{[^}]*width:82px;[^}]*min-width:82px;[^}]*max-width:82px;/s.test(css),"SL and TP price inputs must share one fixed width");
 assert(rapid.includes('id="rapidFireTakeProfitSet" type="button">Set</button>')&&rapid.includes("const typedValue=takeProfitCommitValue(tpInput.value,takeProfitEditValue)")&&rapid.includes('commitProtection("tp",tpInput,typedValue)'),'TP Set must commit the captured edit rather than a blur-reverted field value');
+assert(rapid.includes('String(rawValue==null?"":rawValue).trim()===""')&&rapid.includes("bridge.cancelTakeProfit()")&&calculator.includes("cancelTakeProfit:cancelRapidFireTakeProfit"),"empty TP plus Set must route through the dedicated Binance TP cancellation bridge");
+assert(calculator.includes("syncRapidFireTakeProfitFromSnapshot(snapshot)")&&calculator.includes("gateway.cancelOrder(rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder))")&&calculator.includes("cancelled:false,noOrder:true"),"TP cancellation must refresh authoritative orders, cancel the tracked Binance order, and no-op when none exists");
 assert(!rapid.includes('tpInput.addEventListener("blur"')&&!rapid.includes('tpInput.addEventListener("change"')&&!rapid.includes('[slInput,tpInput].forEach(input=>input.addEventListener("keydown"'),"TP must not use a field-only blur submit/revert or submit on change/Enter");
 assert(rapid.includes("pendingTakeProfitValue=hasLiveTakeProfit?null")&&rapid.includes('if(!bridge||!bridge.snapshot().takeProfitOrder)return;'),"an unsent TP draft must persist only when no live Binance TP exists");
 assert(rapid.includes("pendingTakeProfitValue=null;")&&rapid.includes("takeProfitEditValue=null;")&&css.includes("input.is-pending-unsent")&&css.includes("background:#edf9f0"),"a no-live-TP draft must be pale green until Set succeeds");
@@ -109,6 +112,9 @@ vm.runInContext(rapid.slice(sizePartsStart,sizePartsEnd),sizePartsContext);
 assert.deepEqual({...sizePartsContext.positionSizeParts(1.25,0)},{closed:0,remaining:1.25},"0 percent Close must leave the full position open");
 assert.deepEqual({...sizePartsContext.positionSizeParts(1.25,1.25)},{closed:1.25,remaining:0},"100 percent Close must show the full position as closed and zero remaining");
 assert.deepEqual({...sizePartsContext.positionSizeParts(1.25,.5)},{closed:.5,remaining:.75},"position-size split must reflect the Close slider quantity");
+const normalizeStep=value=>{const quantity=Math.floor((Number(value)+1e-12)/.001)*.001;return {quantity,executable:quantity>0};};
+assert.deepEqual({...sizePartsContext.editedPositionSizeParts(.017,.0067,"remaining",normalizeStep)},{active:.006,closed:.011000000000000001,remaining:.006,total:.017},"editing Remaining must normalize only Remaining and derive Close by subtraction");
+assert.deepEqual({...sizePartsContext.editedPositionSizeParts(.017,.0067,"close",normalizeStep)},{active:.006,closed:.006,remaining:.011000000000000001,total:.017},"editing Close must normalize only Close and derive Remaining by subtraction");
 
 const tpFieldStart=rapid.indexOf("function takeProfitFieldState");
 const tpFieldEnd=rapid.indexOf("function setCloseSliderDisplay",tpFieldStart);
@@ -138,6 +144,34 @@ vm.runInContext(calculator.slice(tpMatchStart,tpMatchEnd),tpMatchContext);
 assert.equal(tpMatchContext.rapidFireTakeProfitStateMatches({price:"65000.000",quantity:"0.250"},65000,.25),true,"same normalized TP price and quantity must be treated as unchanged");
 assert.equal(tpMatchContext.rapidFireTakeProfitStateMatches({price:"65000.000",quantity:"0.250"},65001,.25),false,"a genuinely different normalized TP price must remain amendable");
 assert.equal(tpMatchContext.rapidFireTakeProfitStateMatches({price:"65000.000",quantity:"0.250"},65000,.3),false,"a changed full-position quantity must remain amendable");
+
+const tpCancelStart=calculator.indexOf("async function cancelRapidFireTakeProfit");
+const tpCancelEnd=calculator.indexOf("async function cancelRapidFireProtections",tpCancelStart);
+let cancelCalls=0;
+const tpCancelContext={
+  rapidFireProtectionBusy:false,rapidFireChaseContext:null,rapidFireProtectionAction:null,rapidFireTakeProfitOrder:null,rapidFireTakeProfitDraftPrice:null,
+  hasKeys:()=>true,publishRapidFireStatus:()=>{},calculate:()=>{},
+  readOpenOrdersSnapshot:async()=>({normalOrders:[]}),
+  syncRapidFireTakeProfitFromSnapshot:snapshot=>{tpCancelContext.rapidFireTakeProfitOrder=snapshot.normalOrders[0]||null;},
+  rapidFireTakeProfitIdentityParams:order=>({symbol:order.symbol,orderId:order.orderId}),
+  binanceWriteConfirmed:()=>true,
+  window:{BT001_BINANCE_TRADING:{cancelOrder:async()=>{cancelCalls+=1;return {status:"CANCELED"};}}},
+  Object,String,Error
+};
+vm.createContext(tpCancelContext);
+vm.runInContext(calculator.slice(tpCancelStart,tpCancelEnd),tpCancelContext);
+void tpCancelContext.cancelRapidFireTakeProfit().then(noTpCancel=>{
+  assert.equal(noTpCancel.noOrder,true,"empty TP Set must no-op when the authoritative snapshot has no tracked TP");
+  assert.equal(cancelCalls,0,"empty TP Set must not send a Binance cancel when no TP exists");
+  tpCancelContext.readOpenOrdersSnapshot=async()=>({normalOrders:[{symbol:"BTCUSDT",orderId:"77"}]});
+  return tpCancelContext.cancelRapidFireTakeProfit();
+}).then(liveTpCancel=>{
+  assert.equal(liveTpCancel.cancelled,true,"empty TP Set must report a confirmed live TP cancellation");
+  assert.equal(cancelCalls,1,"empty TP Set must send exactly one Binance cancel for the tracked TP");
+}).catch(error=>{
+  console.error(error);
+  process.exitCode=1;
+});
 
 const closeMetricsStart=calculator.indexOf("function rapidFireCloseMetrics");
 const closeMetricsEnd=calculator.indexOf("function rapidFireSnapshot",closeMetricsStart);

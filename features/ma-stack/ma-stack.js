@@ -81,6 +81,15 @@
       ];
     }
     function escHtml(v){ return String(v == null ? "" : v).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch])); }
+    function adxTagMeta(adx,direction,crossed,provided){
+      if(provided&&provided.glyph&&provided.tone)return provided;
+      if(volatility&&typeof volatility.adxDirectionTag==="function")return volatility.adxDirectionTag(adx,direction,crossed,25);
+      return {glyph:"−",tone:"grey"};
+    }
+    function adxTagHtml(tag){
+      const meta=tag||{glyph:"−",tone:"grey"};
+      return `<span class="adx-direction-tag is-${escHtml(meta.tone||"grey")}" aria-label="ADX direction ${escHtml(meta.tone||"grey")}">${escHtml(meta.glyph||"−")}</span>`;
+    }
     function compactTooltipHtml(tf,r){
       const alignment = Math.max(0,Math.min(5,Math.round((Number(r.alignment)||0)/20)));
       const rowsBeforeAdx = [
@@ -91,14 +100,18 @@
       ];
       const adxCurrent = Number.isFinite(Number(r.adx)) ? Math.round(Number(r.adx)) : null;
       const adxPrevious = Number.isFinite(Number(r.adxPrevious)) ? Math.round(Number(r.adxPrevious)) : null;
-      const adxActionable = Number.isFinite(Number(r.adx)) && Number(r.adx)>=25;
+      const adxActionable = Number.isFinite(Number(r.adx)) && Number(r.adx)>25;
       const adxText = `ADX: ${adxCurrent==null?"-":adxCurrent} (from ${adxPrevious==null?"-":adxPrevious})`;
+      const adxTag = adxTagMeta(r.adx,r.adxDirection,r.adxCrossed,r.adxTag);
+      const atrCurrent = Number.isFinite(Number(r.atr)) ? Number(r.atr).toFixed(1) : "-";
+      const atrText = `ATR: ${atrCurrent}`;
       const rowsAfterAdx = [
         `Spread: ${titleLine(r.title,"Spread")}`
       ];
       return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)}</div>`+
         rowsBeforeAdx.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
-        `<div class="v33-ma-stack-tip-row v33-ma-stack-tip-adx${adxActionable?' is-actionable':''}">${escHtml(adxText)}</div>`+
+        `<div class="v33-ma-stack-tip-row v33-ma-stack-tip-adx${adxActionable?' is-actionable':''}">${escHtml(adxText)}${adxTagHtml(adxTag)}</div>`+
+        `<div class="v33-ma-stack-tip-row v33-ma-stack-tip-atr">${escHtml(atrText)}</div>`+
         rowsAfterAdx.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
         `<div class="v33-ma-stack-tip-spacer"></div>`+
         `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipSummary(r && r.maEvent,r))}</div>`;
@@ -211,6 +224,8 @@
       const last = source.length - 1;
       const atr = Number(atrValues[last]);
       const adx = Number(adxValues[last]);
+      const adxDirection = adxValues.direction&&adxValues.direction[last]||null;
+      const adxCrossed = !!(adxValues.crossed&&adxValues.crossed[last]);
       const atrWindow = atrValues.slice(-20).map(Number).filter(Number.isFinite);
       if(!Number.isFinite(atr) || !Number.isFinite(adx) || atrWindow.length !== 20){
         return {available:false,timeframe:"15m",atr:unavailableMetric(),adx:unavailableMetric()};
@@ -226,7 +241,7 @@
         timeframe:"15m",
         agreement,
         atr:{value:atr,average:atrAverage,threshold:atrThreshold,tradeable:atrTradeable,tone:tone(atrTradeable)},
-        adx:{value:adx,threshold:25,tradeable:adxTradeable,tone:tone(adxTradeable)}
+        adx:{value:adx,threshold:25,tradeable:adxTradeable,tone:tone(adxTradeable),plusDi:adxValues.plusDi&&Number(adxValues.plusDi[last]),minusDi:adxValues.minusDi&&Number(adxValues.minusDi[last]),direction:adxDirection,crossed:adxCrossed,directionTag:adxTagMeta(adx,adxDirection,adxCrossed)}
       };
     }
     function renderEnhanced(results){
@@ -291,7 +306,7 @@
         btn.addEventListener("blur",hideMaStackTooltip,false);
       });
     }
-  root.presentation = {ensureDom,renderEnhanced,compactTooltipHtml};
+  root.presentation = {ensureDom,renderEnhanced,compactTooltipHtml,adxTagMeta,adxTagHtml};
   function markerEvents(tf,rows){ return root.core.markerEvents(tf,rows,{slots:root.runtime.stackSlots()}); }
   const api = {
     start:root.runtime.start,
