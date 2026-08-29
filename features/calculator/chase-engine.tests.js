@@ -60,6 +60,60 @@ function harness(overrides={}){
     assert.equal(chasingUpdates[chasingUpdates.length-1].price,"102","the chase status must publish each newly repriced resting order price");
   }
   {
+    const h=harness();
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.setNow(100);
+    const applied=await h.engine.handleOrderUpdate({s:"BTCUSDT",i:1,c:"c1",X:"NEW",z:"0",p:"101"});
+    await h.engine.tick();
+    assert.equal(applied,true,"a matching NEW private update must become the current order state");
+    assert.equal(h.calls.query.length,0,"a fresh private order update must skip the routine REST query");
+  }
+  {
+    const h=harness();
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.setNow(100);
+    const applied=await h.engine.handleOrderUpdate({s:"BTCUSDT",i:999,c:"other",X:"NEW",z:"0.8",p:"99"});
+    await h.engine.tick();
+    assert.equal(applied,false,"a NEW private update for another identity must be ignored");
+    assert.equal(h.calls.query.length,1,"an unrelated private update must not suppress the REST backstop");
+    assert.equal(h.engine.state().filledQty,0);
+    assert.equal(h.engine.state().price,"101");
+  }
+  {
+    const h=harness();
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.setNow(100);
+    await h.engine.handleOrderUpdate({s:"BTCUSDT",i:1,c:"c1",X:"NEW",z:"0",p:"101"});
+    h.setNow(351);
+    await h.engine.tick();
+    assert.equal(h.calls.query.length,1,"a private order update older than 250ms must fall back to REST");
+  }
+  {
+    const h=harness();
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.setNow(100);
+    await h.engine.handleOrderUpdate({s:"BTCUSDT",i:1,c:"c1",X:"PARTIALLY_FILLED",z:"0.4",p:"101"});
+    h.book={...h.book,ask:102};
+    await h.engine.tick();
+    assert.equal(h.calls.query.length,0,"a WS-backed amendment tick must not query REST");
+    assert.equal(h.calls.amend.length,1,"a moved target must still amend from fresh WS-derived state");
+    assert.equal(h.calls.amend[0].price,"102");
+    assert.equal(h.calls.amend[0].quantity,1,"WS-derived partial fills must not change the existing amendQty calculation");
+    assert.equal(h.engine.state().filledQty,0.4);
+    assert.equal(h.engine.state().remainingQty,0.6);
+  }
+  {
+    const h=harness();
+    await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
+    h.setNow(100);
+    const applied=await h.engine.handleOrderUpdate({s:"BTCUSDT",i:1,c:"c1",X:"FILLED",z:"1",p:"101"});
+    assert.equal(applied,true,"a matching FILLED private update must be applied immediately");
+    assert.equal(h.calls.query.length,0,"a WebSocket fill must not require REST confirmation");
+    assert.equal(h.finishes.length,1);
+    assert.equal(h.finishes[0].result,"filled");
+    assert.equal(h.finishes[0].filledQty,1);
+  }
+  {
     const h=harness({amend:async payload=>{h.calls.amend.push(payload);return {...h.order,price:payload.price,status:"CANCELED"};}});
     await h.engine.start({symbol:"BTCUSDT",quantity:1,meta:{side:"SELL"}});
     h.book={...h.book,ask:102};

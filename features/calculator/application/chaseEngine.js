@@ -41,6 +41,7 @@
   function create(options){
     const opts = options || {};
     const pollMs = Math.max(100,number(opts.pollMs) || 1000);
+    const wsStateFreshMs = Math.max(100,number(opts.wsStateFreshMs) || 250);
     let timer = null;
     let busy = false;
     let run = null;
@@ -85,7 +86,7 @@
       return valid ? value : null;
     }
     function book(){ return usableBook(bookState()); }
-    function applyOrder(order){
+    function applyOrder(order,source){
       if(!run || !order) return;
       const normalized = normalizeOrder(order);
       const nextIdentity = identity(normalized);
@@ -96,6 +97,8 @@
       const executed = Math.max(0,number(normalized.executedQty) || 0);
       run.currentExecuted = Math.max(run.currentExecuted,executed);
       if(number(normalized.price) > 0) run.price = String(normalized.price);
+      if(normalized.status != null) run.status = upper(normalized.status);
+      if(source === "ws") run.lastWsOrderUpdateAt = Date.now();
     }
     function carryCurrentFill(){
       if(!run) return;
@@ -104,6 +107,8 @@
       run.orderId = null;
       run.clientOrderId = "";
       run.price = "";
+      run.status = "";
+      run.lastWsOrderUpdateAt = null;
     }
     function desiredPrice(top){
       const value = typeof opts.priceFor === "function" ? opts.priceFor(top,snapshot()) : "";
@@ -171,6 +176,10 @@
       if(!run || (run.orderId == null && !run.clientOrderId)) return null;
       return opts.query({symbol:run.symbol,orderId:run.orderId,clientOrderId:run.clientOrderId},snapshot());
     }
+    function hasFreshWsOrderState(){
+      if(!run || run.lastWsOrderUpdateAt == null) return false;
+      return Math.max(0,Date.now() - run.lastWsOrderUpdateAt) <= wsStateFreshMs;
+    }
     async function tick(){
       if(!run || busy || run.canceling || run.reactiveRecovery) return;
       busy = true;
@@ -221,23 +230,26 @@
           run.recovering = false;
           return;
         }
-        let order;
-        const queriedIdentity = identity(run);
-        try{
-          order = await queryCurrent();
-        }catch(error){
+        let order = null;
+        const wsStateFresh = hasFreshWsOrderState();
+        if(!wsStateFresh){
+          const queriedIdentity = identity(run);
+          try{
+            order = await queryCurrent();
+          }catch(error){
+            if(!run || !sameIdentity(queriedIdentity,run)) return;
+            update(run.label + " status check failed — chase paused: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
+            return;
+          }
           if(!run || !sameIdentity(queriedIdentity,run)) return;
-          update(run.label + " status check failed — chase paused: " + (error && error.message ? error.message : String(error)),"error",{statusCode:"stopped"});
-          return;
+          if(order) applyOrder(order);
         }
-        if(!run || !sameIdentity(queriedIdentity,run)) return;
-        if(order) applyOrder(order);
-        const status = upper(order && order.status);
+        const status = wsStateFresh ? upper(run.status) : upper(order && order.status);
         if(status === "FILLED" || !(remaining() > 0)){
           await finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
           return;
         }
-        if(!order || CANCELED.has(status)){
+        if((!wsStateFresh && !order) || CANCELED.has(status)){
           if(run.pendingAmend){
             await recoverCrossing(top,order);
             return;
@@ -304,13 +316,21 @@
     async function handleOrderUpdate(rawOrder){
       const order = normalizeOrder(rawOrder);
       if(!run || run.canceling || run.reactiveRecovery || !sameIdentity(order,run)) return false;
-      if(!CANCELED.has(upper(order && order.status)) || !run.pendingAmend) return false;
-      clearTimer();
-      run.reactiveRecovery = true;
-      try{
-        await recoverCrossing(book(),order);
-      }finally{
-        if(run) run.reactiveRecovery = false;
+      const status = upper(order && order.status);
+      if(CANCELED.has(status) && run.pendingAmend){
+        clearTimer();
+        run.reactiveRecovery = true;
+        try{
+          await recoverCrossing(book(),order);
+        }finally{
+          if(run) run.reactiveRecovery = false;
+        }
+        return true;
+      }
+      if(!ACTIVE.has(status) && status !== "FILLED") return false;
+      applyOrder(order,"ws");
+      if(status === "FILLED" || !(remaining() > 0)){
+        await finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
       }
       return true;
     }
@@ -329,6 +349,8 @@
         orderId:null,
         clientOrderId:"",
         price:"",
+        status:"",
+        lastWsOrderUpdateAt:null,
         startedAt,
         expiresAt:number(input.expiresAt) || (number(input.maxDurationMs) ? startedAt + Number(input.maxDurationMs) : 0),
         pendingAmend:false,
