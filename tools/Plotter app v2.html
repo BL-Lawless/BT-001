@@ -10,7 +10,7 @@
       --border:#e6e8ea;--grid:#edf0f2;--text:#1e2329;--muted:#707a8a;
       --bull:#0ecb81;--bear:#f6465d;--blue:#1e88e5;--amber:#f59e0b;
       --mixed:#8a8f98;--purple:#4b5563;--cyan:#1e88e5;
-      --candle-up-body:rgb(255,255,255);--candle-down-body:rgb(145,145,145);--candle-stroke:rgb(133,133,133);
+      --candle-up-body:#ffffff;--candle-down-body:#969696;--candle-stroke:#969696;
       --accent:#f0b90b;--radius:5px;--sidebar-width:260px;
     }
     *{box-sizing:border-box}
@@ -39,6 +39,13 @@
     .dot.ok{background:var(--bull)}.dot.busy{background:var(--amber)}.dot.bad{background:var(--bear)}
     .panel{border:1px solid var(--border);border-radius:var(--radius);background:var(--panel)}
     .top-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+    .settings-button{min-width:30px;padding:3px 7px;background:#eef0f2;border:1px solid var(--border);color:var(--text);font-size:17px;line-height:1}
+    .settings-overlay{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-start;justify-content:flex-end;padding:54px 18px 18px;background:rgba(15,23,42,.22)}
+    .settings-overlay[hidden]{display:none}
+    .settings-dialog{width:min(620px,calc(100vw - 36px));max-height:calc(100vh - 72px);overflow:auto;padding:12px;border:1px solid #d9dce1;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(15,23,42,.22)}
+    .settings-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+    .settings-dialog-head h2{font-size:13px}.settings-close{min-height:25px;padding:2px 8px;background:#eef0f2;border:1px solid var(--border);color:var(--text)}
+    .settings-card{padding:10px;border:1px solid var(--border);border-radius:6px;background:#fff}
     .money-distance{display:flex;align-items:center;gap:5px}.money-distance input{min-width:0;flex:1}.money-distance output{min-width:56px;text-align:right;color:var(--text);font-weight:700}
     .field{display:grid;gap:3px}.field span{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
     .workspace{display:grid;grid-template-columns:var(--sidebar-width) 8px minmax(0,1fr);gap:0;align-items:start}
@@ -63,6 +70,15 @@
     .checks{display:grid;gap:5px}
     .checks label,.inline-checks label{display:flex;gap:6px;align-items:center;color:var(--text)}
     .inline-checks{display:flex;flex-wrap:wrap;gap:5px 10px}
+    .indicator-settings-copy{margin-bottom:7px;color:var(--muted);font-size:9px;line-height:1.35}
+    .indicator-settings-grid{display:grid;grid-template-columns:minmax(76px,1fr) 72px 50px minmax(90px,1fr) minmax(90px,1fr);gap:7px 8px;align-items:center}
+    .indicator-settings-grid .indicator-head{font-size:8px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);text-align:center}
+    .indicator-settings-grid .indicator-name{display:flex;align-items:center;gap:3px;color:var(--text);font-size:9px;font-weight:700;white-space:nowrap}
+    .indicator-settings-grid input{width:100%;min-width:0;min-height:24px;padding:2px 3px}
+    .indicator-settings-grid input[type=checkbox]{width:auto;min-height:auto;padding:0}
+    .indicator-settings-grid input[type=color]{padding:1px}
+    .indicator-settings-grid input[type=range]{padding:0}
+    .indicator-period-na{text-align:center;color:var(--muted)}
     .main{min-width:0;display:grid;gap:9px;margin-left:9px}
     .chart-card{overflow:hidden}
     .chart-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-bottom:1px solid var(--border)}
@@ -116,6 +132,8 @@
     @media(max-width:650px){
       body{padding:6px}.sidebar{grid-template-columns:1fr}.summary{grid-template-columns:repeat(2,1fr)}
       #priceChart{height:350px}.topbar{align-items:flex-start;flex-direction:column}
+      .settings-overlay{padding:44px 8px 8px}.settings-dialog{width:100%;max-height:calc(100vh - 52px)}
+      .indicator-settings-grid{grid-template-columns:minmax(64px,1fr) 55px 38px 65px 65px;gap:6px 4px}
     }
   </style>
 </head>
@@ -126,7 +144,8 @@
       <h1>Scalp Signal Plotter <span class="muted">/ standalone prototype</span></h1>
     </div>
     <div class="top-actions">
-      <button id="loadButton" class="primary">Load Local DB + Binance</button>
+      <button id="settingsButton" class="settings-button" type="button" aria-label="Open settings" aria-expanded="false" title="Settings">&#9881;</button>
+      <button id="loadButton" class="primary">Load Scalp Signals</button>
       <div class="badge"><i id="statusDot" class="dot"></i><span id="statusBadge">Idle</span></div>
     </div>
   </header>
@@ -159,13 +178,13 @@
           <label class="field wide"><span>Minimum rank (0 disables)</span><input id="scalperMinimumRank" type="number" min="0" step="1" value="0"></label>
 
           <div class="control-subsection"><h3>Trade Values</h3></div>
-          <label class="field wide"><span>Lot size (BTC)</span><input id="scalperLot" type="number" min="0" step="0.0001" value="0.000"></label>
-          <label class="field"><span>TP driver</span><select id="scalperTpDriver"><option>NET_TARGET</option><option>TP_DELTA</option></select></label>
+          <label class="field wide"><span>Lot size (BTC)</span><input id="scalperLot" type="number" min="0" step="0.0001" value="0.01"></label>
+          <label class="field"><span>TP driver</span><select id="scalperTpDriver"><option>NET_TARGET</option><option selected>TP_DELTA</option></select></label>
           <label class="field" id="targetField"><span>Net target ($)</span><input id="scalperTarget" type="number" min="0" step="0.1" value="5.0"></label>
-          <label class="field" id="tpDeltaField"><span>TP delta (price points)</span><input id="scalperTpDelta" type="number" min="0" step="0.1" value="0"></label>
-          <label class="field"><span>SL driver</span><select id="scalperSlDriver"><option>NET_SL</option><option>SL_DELTA</option></select></label>
+          <label class="field" id="tpDeltaField"><span>TP delta (price points)</span><input id="scalperTpDelta" type="number" min="0" step="0.1" value="250"></label>
+          <label class="field"><span>SL driver</span><select id="scalperSlDriver"><option>NET_SL</option><option selected>SL_DELTA</option></select></label>
           <label class="field" id="stopField"><span>Net SL ($)</span><input id="scalperStop" type="number" min="0" step="0.1" value="3.0"></label>
-          <label class="field" id="slDeltaField"><span>SL delta (price points)</span><input id="scalperSlDelta" type="number" min="0" step="0.1" value="0"></label>
+          <label class="field" id="slDeltaField"><span>SL delta (price points)</span><input id="scalperSlDelta" type="number" min="0" step="0.1" value="700"></label>
 
           <div class="control-subsection"><h3>Execution costs</h3></div>
           <label class="field"><span>Fee / slippage units</span><select id="costUnit"><option value="bps">basis points</option><option value="percent">percent</option></select></label>
@@ -197,7 +216,8 @@
           <div><b>BTCUSDT</b> <span id="rangeLabel" class="muted">—</span></div>
           <div id="timeframeButtons" class="segments">
             <button data-interval="1m" class="active">1m</button><button data-interval="3m">3m</button>
-            <button data-interval="5m">5m</button><button data-interval="15m">15m</button><button data-interval="1h">1h</button>
+            <button data-interval="5m">5m</button><button data-interval="15m">15m</button><button data-interval="30m">30m</button>
+            <button data-interval="1h">1h</button><button data-interval="4h">4h</button><button data-interval="1d">1d</button><button data-interval="1w">1w</button><button data-interval="1M">1M</button>
           </div>
         </div>
         <div class="chart-wrap">
@@ -223,6 +243,24 @@
     </section>
   </div>
 </main>
+<div id="settingsOverlay" class="settings-overlay" hidden>
+  <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="settings-dialog-head"><h2 id="settingsTitle">Settings</h2><button id="settingsClose" class="settings-close" type="button">Close</button></div>
+    <section class="settings-card" id="indicatorSettingsPanel">
+      <h3>EMA + VWAP overlays</h3>
+      <div class="indicator-settings-copy">Period, color, transparency, and width per line</div>
+      <div class="indicator-settings-grid">
+        <div class="indicator-head">Line</div><div class="indicator-head">Period</div><div class="indicator-head">Color</div><div class="indicator-head">Transparency</div><div class="indicator-head">Width</div>
+        <label class="indicator-name"><input id="ema1Enabled" class="indicator-setting" type="checkbox"> <span id="ema1Label">EMA9</span></label><input id="ema1Period" class="indicator-setting" type="number" min="1" max="999" step="1"><input id="ema1Color" class="indicator-setting" type="color"><input id="ema1Alpha" class="indicator-setting" type="range" min="0" max="100" step="1"><input id="ema1Width" class="indicator-setting" type="range" min="1" max="10" step="0.5">
+        <label class="indicator-name"><input id="ema2Enabled" class="indicator-setting" type="checkbox"> <span id="ema2Label">EMA21</span></label><input id="ema2Period" class="indicator-setting" type="number" min="1" max="999" step="1"><input id="ema2Color" class="indicator-setting" type="color"><input id="ema2Alpha" class="indicator-setting" type="range" min="0" max="100" step="1"><input id="ema2Width" class="indicator-setting" type="range" min="1" max="10" step="0.5">
+        <label class="indicator-name"><input id="ema3Enabled" class="indicator-setting" type="checkbox"> <span id="ema3Label">EMA55</span></label><input id="ema3Period" class="indicator-setting" type="number" min="1" max="999" step="1"><input id="ema3Color" class="indicator-setting" type="color"><input id="ema3Alpha" class="indicator-setting" type="range" min="0" max="100" step="1"><input id="ema3Width" class="indicator-setting" type="range" min="1" max="10" step="0.5">
+        <label class="indicator-name"><input id="ema4Enabled" class="indicator-setting" type="checkbox"> <span id="ema4Label">EMA100</span></label><input id="ema4Period" class="indicator-setting" type="number" min="1" max="999" step="1"><input id="ema4Color" class="indicator-setting" type="color"><input id="ema4Alpha" class="indicator-setting" type="range" min="0" max="100" step="1"><input id="ema4Width" class="indicator-setting" type="range" min="1" max="10" step="0.5">
+        <label class="indicator-name"><input id="ema5Enabled" class="indicator-setting" type="checkbox"> <span id="ema5Label">EMA200</span></label><input id="ema5Period" class="indicator-setting" type="number" min="1" max="999" step="1"><input id="ema5Color" class="indicator-setting" type="color"><input id="ema5Alpha" class="indicator-setting" type="range" min="0" max="100" step="1"><input id="ema5Width" class="indicator-setting" type="range" min="1" max="10" step="0.5">
+        <label class="indicator-name"><input id="vwapEnabled" class="indicator-setting" type="checkbox"> VWAP</label><div class="indicator-period-na">—</div><input id="vwapColor" class="indicator-setting" type="color"><input id="vwapAlpha" class="indicator-setting" type="range" min="0" max="100" step="1"><input id="vwapWidth" class="indicator-setting" type="range" min="1" max="10" step="0.5">
+      </div>
+    </section>
+  </div>
+</div>
 <div id="tooltip" class="tooltip"></div>
 
 <script>
@@ -252,6 +290,20 @@
   const RESULT_COLUMN_ORDER_SLOT="bt001_scalp_plotter_result_columns_v1";
   const RESULT_COLUMN_VISIBILITY_SLOT="bt001_scalp_plotter_result_column_visibility_v1";
   const SIDEBAR_CARD_STATE_SLOT="bt001_scalp_plotter_sidebar_cards_v1";
+  const PRICE_INTERVAL_SLOT="bt001_scalp_plotter_price_interval_v1";
+  const INDICATOR_SETTINGS_SLOT="bt001_scalp_plotter_indicator_settings_v1";
+  const PRICE_INTERVALS=Object.freeze(["1m","3m","5m","15m","30m","1h","4h","1d","1w","1M"]);
+  const DEFAULT_VOLUME_FRACTION=.22,VOLUME_FRACTION_MIN=.10,VOLUME_FRACTION_MAX=.45;
+  const DEFAULT_INDICATOR_SETTINGS=Object.freeze({
+    emas:Object.freeze([
+      Object.freeze({enabled:false,period:9,color:"#ff7900",alpha:100,width:2}),
+      Object.freeze({enabled:false,period:21,color:"#0000ff",alpha:100,width:2}),
+      Object.freeze({enabled:false,period:55,color:"#d600a9",alpha:100,width:2}),
+      Object.freeze({enabled:false,period:100,color:"#0b7a00",alpha:100,width:2}),
+      Object.freeze({enabled:false,period:200,color:"#008c7a",alpha:100,width:2})
+    ]),
+    vwap:Object.freeze({enabled:false,color:"#6f6658",alpha:100,width:2})
+  });
   const SIDEBAR_MIN=220,SIDEBAR_MAX=520;
   const RESULT_COLUMNS=Object.freeze([
     ["time","Dubai time*"],["source","Source"],["signal","Action / event"],["eligibility","Eligibility"],["basis","Result basis"],
@@ -261,7 +313,8 @@
   const COLORS={
     bg:"#ffffff",panel:"#ffffff",grid:"#edf0f2",verticalGrid:"#f4f5f7",axis:"#707a8a",text:"#1e2329",
     bull:"#0ecb81",bear:"#f6465d",mixed:"#8a8f98",blue:"#1e88e5",
-    amber:"#f59e0b",purple:"#4b5563",cyan:"#1e88e5",candleUp:"rgb(255,255,255)",candleDown:"rgb(145,145,145)",candleStroke:"rgb(133,133,133)"
+    amber:"#f59e0b",purple:"#4b5563",cyan:"#1e88e5",candleUp:"#ffffff",candleDown:"#969696",candleStroke:"#969696",
+    volumeBull:"rgba(95,95,95,.42)",volumeBear:"rgba(122,122,122,.58)"
   };
   const $=id=>document.getElementById(id);
   const finite=value=>{
@@ -290,9 +343,11 @@
     scalpSignals:[],scalpEvents:[],selectedScalpEvents:[],filteredScalpEvents:[],resultScalpEvents:[],scalpTrades:[],scalpErrors:[],
     scalpV2Signals:[],resultColumnsVisible:null,
     viewStart:null,viewEnd:null,fullStart:null,fullEnd:null,crosshairTime:null,pricePointerY:null,drag:null,
+    manualPriceRange:null,yAxisDrag:null,priceAxisRange:null,
     displayInterval:"1m",highlightId:null,markerHits:[],loading:false,marketStarted:false,marketLoading:false,
     marketRequestGeneration:0,marketAbortController:null,marketSocket:null,marketSocketGeneration:0,
-    marketReconnectTimer:null,marketDesiredLive:false,binanceRestPausedUntil:0
+    marketReconnectTimer:null,marketDesiredLive:false,binanceRestPausedUntil:0,volumeFraction:DEFAULT_VOLUME_FRACTION,
+    indicatorSettings:null,indicatorSeriesCache:null
   };
   let resultColumnOrder=RESULT_COLUMNS.map(([key])=>key);
 
@@ -308,6 +363,52 @@
     }catch(_error){return fallback;}
   }
   function writeJsonSlot(slot,value){try{localStorage.setItem(slot,JSON.stringify(value));return true;}catch(_error){return false;}}
+  function normalizedIndicatorLine(raw,defaults,withPeriod=true){
+    const color=/^#[0-9a-f]{6}$/i.test(String(raw?.color||""))?String(raw.color).toLowerCase():defaults.color;
+    const line={enabled:raw?.enabled===true,color,alpha:clamp(finite(raw?.alpha)??defaults.alpha,0,100),width:clamp(finite(raw?.width)??defaults.width,1,10)};
+    if(withPeriod)line.period=clamp(Math.round(finite(raw?.period)??defaults.period),1,999);
+    return line;
+  }
+  function normalizeIndicatorSettings(raw){
+    return {
+      emas:DEFAULT_INDICATOR_SETTINGS.emas.map((defaults,index)=>normalizedIndicatorLine(raw?.emas?.[index],defaults,true)),
+      vwap:normalizedIndicatorLine(raw?.vwap,DEFAULT_INDICATOR_SETTINGS.vwap,false)
+    };
+  }
+  function indicatorSettingsFromControls(){
+    return normalizeIndicatorSettings({
+      emas:DEFAULT_INDICATOR_SETTINGS.emas.map((_defaults,index)=>{const n=index+1;return {enabled:$("ema"+n+"Enabled").checked,period:$("ema"+n+"Period").value,color:$("ema"+n+"Color").value,alpha:$("ema"+n+"Alpha").value,width:$("ema"+n+"Width").value};}),
+      vwap:{enabled:$("vwapEnabled").checked,color:$("vwapColor").value,alpha:$("vwapAlpha").value,width:$("vwapWidth").value}
+    });
+  }
+  function applyIndicatorSettingsToControls(settings){
+    settings.emas.forEach((line,index)=>{const n=index+1;$("ema"+n+"Enabled").checked=line.enabled;$("ema"+n+"Period").value=String(line.period);$("ema"+n+"Color").value=line.color;$("ema"+n+"Alpha").value=String(line.alpha);$("ema"+n+"Width").value=String(line.width);$("ema"+n+"Label").textContent=`EMA${line.period}`;});
+    $("vwapEnabled").checked=settings.vwap.enabled;$("vwapColor").value=settings.vwap.color;$("vwapAlpha").value=String(settings.vwap.alpha);$("vwapWidth").value=String(settings.vwap.width);
+  }
+  function restoreIndicatorSettings(){
+    state.indicatorSettings=normalizeIndicatorSettings(readJsonSlot(INDICATOR_SETTINGS_SLOT,{}));
+    state.indicatorSeriesCache=null;applyIndicatorSettingsToControls(state.indicatorSettings);return state.indicatorSettings;
+  }
+  function saveIndicatorSettings(){
+    state.indicatorSettings=indicatorSettingsFromControls();state.indicatorSeriesCache=null;
+    applyIndicatorSettingsToControls(state.indicatorSettings);writeJsonSlot(INDICATOR_SETTINGS_SLOT,state.indicatorSettings);requestRedraw();return state.indicatorSettings;
+  }
+  function bindIndicatorSettings(){
+    $("indicatorSettingsPanel").querySelectorAll(".indicator-setting").forEach(control=>{
+      control.addEventListener("input",saveIndicatorSettings);
+      control.addEventListener("change",saveIndicatorSettings);
+    });
+  }
+  function setSettingsOpen(open){
+    const overlay=$("settingsOverlay"),button=$("settingsButton");overlay.hidden=!open;button.setAttribute("aria-expanded",String(!!open));
+    if(open)$("settingsClose").focus();else button.focus();
+  }
+  function bindSettingsPanel(){
+    $("settingsButton").addEventListener("click",()=>setSettingsOpen(true));
+    $("settingsClose").addEventListener("click",()=>setSettingsOpen(false));
+    $("settingsOverlay").addEventListener("click",event=>{if(event.target===$("settingsOverlay"))setSettingsOpen(false);});
+    document.addEventListener("keydown",event=>{if(event.key==="Escape"&&!$("settingsOverlay").hidden)setSettingsOpen(false);});
+  }
   function resolvedPanelHeight(value,minHeight,maxHeight){
     return clamp(finite(value)??minHeight,minHeight,maxHeight);
   }
@@ -416,6 +517,11 @@
     let stored=null;try{stored=finite(localStorage.getItem(SIDEBAR_WIDTH_SLOT));}catch(_error){}
     applySidebarWidth(stored??260,false);
   }
+  function restorePriceTimeframe(){
+    let stored="";try{stored=String(localStorage.getItem(PRICE_INTERVAL_SLOT)||"");}catch(_error){}
+    state.displayInterval=PRICE_INTERVALS.includes(stored)?stored:"1m";
+    $("timeframeButtons").querySelectorAll("button").forEach(button=>button.classList.toggle("active",button.dataset.interval===state.displayInterval));
+  }
   function bindSidebarResizer(){
     const handle=$("sidebarResizer");let drag=null;
     handle.addEventListener("pointerdown",event=>{
@@ -519,7 +625,7 @@
     }).filter(trade=>Number.isFinite(trade.time));
   }
 
-  function timeframeMs(interval){return ({"1m":MINUTE,"3m":3*MINUTE,"5m":5*MINUTE,"15m":15*MINUTE,"1h":60*MINUTE})[interval]||MINUTE;}
+  function timeframeMs(interval){return ({"1m":MINUTE,"3m":3*MINUTE,"5m":5*MINUTE,"15m":15*MINUTE,"30m":30*MINUTE,"1h":60*MINUTE,"4h":240*MINUTE,"1d":1440*MINUTE,"1w":10080*MINUTE,"1M":43200*MINUTE})[interval]||MINUTE;}
   function binanceKlinesUrl(interval,endTime=Date.now(),limit=BINANCE_LIMIT){
     const params=new URLSearchParams({symbol:SYMBOL,interval,limit:String(Math.min(BINANCE_LIMIT,Math.max(1,Math.floor(limit)))),endTime:String(Math.floor(endTime))});
     return `${BINANCE_KLINES_URL}?${params}`;
@@ -616,8 +722,40 @@
     socket.onerror=()=>{if(state.marketSocket===socket)scheduleMarketReconnect(interval,generation);};
     socket.onclose=()=>{if(state.marketSocket===socket){state.marketSocket=null;scheduleMarketReconnect(interval,generation);}};
   }
-  async function activateTimeframe(interval,{force=false}={}){
+  function preservedViewRange(view,rows){
+    if(!Number.isFinite(view?.start)||!Number.isFinite(view?.end)||view.end<=view.start||!rows?.length)return null;
+    const first=rows[0].openTime,last=rows.at(-1).closeTime,coverage=last-first,span=view.end-view.start;
+    if(!Number.isFinite(first)||!Number.isFinite(last)||coverage<=0)return null;
+    if(span>=coverage)return {start:first,end:last,exact:view.start===first&&view.end===last};
+    let start=view.start,end=view.end;
+    if(start<first){start=first;end=first+span;}
+    if(end>last){end=last;start=last-span;}
+    return {start,end,exact:start===view.start&&end===view.end};
+  }
+  function captureTimeframeFocus(g){
+    if(!Number.isFinite(state.viewStart)||!Number.isFinite(state.viewEnd)||state.viewEnd<=state.viewStart)return null;
+    const span=state.viewEnd-state.viewStart,crosshairActive=Number.isFinite(state.crosshairTime)&&state.crosshairTime>=state.viewStart&&state.crosshairTime<=state.viewEnd;
+    const anchorTime=crosshairActive?state.crosshairTime:state.viewStart+span/2;
+    return {anchorTime,anchorRatio:clamp((anchorTime-state.viewStart)/span,0,1),timePerPixel:span/Math.max(1,g.plotW),plotWidth:g.plotW,source:crosshairActive?"crosshair":"center"};
+  }
+  function focusedViewRange(focus,rows,interval,plotWidth=focus?.plotWidth){
+    if(!focus||!rows?.length||!Number.isFinite(focus.anchorTime)||!Number.isFinite(focus.timePerPixel))return null;
+    const first=rows[0].openTime,last=rows.at(-1).closeTime,coverage=last-first;
+    if(!Number.isFinite(first)||!Number.isFinite(last)||coverage<=0)return null;
+    const span=Math.min(coverage,Math.max(focus.timePerPixel*Math.max(1,plotWidth),timeframeMs(interval)*2)),ratio=clamp(focus.anchorRatio,0,1);
+    return preservedViewRange({start:focus.anchorTime-ratio*span,end:focus.anchorTime+(1-ratio)*span},rows);
+  }
+  function applyActivatedTimeframeView(rows,focus,interval){
+    const plotWidth=plotGeometry($("priceChart")).plotW,preserved=focusedViewRange(focus,rows,interval,plotWidth);
+    if(!preserved){resetView();return null;}
+    state.fullStart=rows[0].openTime;state.fullEnd=rows.at(-1).closeTime;
+    state.viewStart=preserved.start;state.viewEnd=preserved.end;requestRedraw();
+    return preserved;
+  }
+  async function activateTimeframe(interval,{force=false,focus=null}={}){
+    if(!PRICE_INTERVALS.includes(interval))throw new Error(`Unsupported Binance timeframe: ${interval}`);
     state.marketStarted=true;state.marketDesiredLive=true;state.displayInterval=interval;
+    try{localStorage.setItem(PRICE_INTERVAL_SLOT,interval);}catch(_error){}
     const generation=++state.marketRequestGeneration;
     state.marketAbortController?.abort();
     const controller=new AbortController();state.marketAbortController=controller;
@@ -625,7 +763,7 @@
     const cached=!force?state.candleCache.get(interval):null;
     if(cached?.length){
       state.marketLoading=false;
-      state.displayCandles=cached.slice();applyFilters();resetView();connectMarketSocket(interval,generation);return {cached:true,rows:cached};
+      state.displayCandles=cached.slice();applyFilters();applyActivatedTimeframeView(cached,focus,interval);connectMarketSocket(interval,generation);return {cached:true,rows:cached};
     }
     state.marketLoading=true;
     try{
@@ -633,7 +771,7 @@
       if(!rows||!marketRequestCurrent(interval,generation))return {stale:true};
       if(!rows.length)throw new Error(`No Binance ${interval} candles returned`);
       state.candleCache.set(interval,rows);state.displayCandles=rows.slice();
-      applyFilters();resetView();connectMarketSocket(interval,generation);
+      applyFilters();applyActivatedTimeframeView(rows,focus,interval);connectMarketSocket(interval,generation);
       return {cached:false,rows};
     }catch(error){
       if(error?.name==="AbortError"||!marketRequestCurrent(interval,generation))return {stale:true};
@@ -894,7 +1032,9 @@
     });
   }
 
+  function resetYAuto(){state.manualPriceRange=null;state.yAxisDrag=null;}
   function resetView(){
+    resetYAuto();
     const chartRows=state.displayCandles;if(!chartRows.length)return;
     const machine=$("machineSelect").value,scalpTimes=state.scalpSignals.filter(s=>!machine||s.machineId===machine).map(s=>s.time);
     const v2Times=state.scalpV2Signals.filter(s=>!machine||s.machineId===machine).map(s=>s.time),first=chartRows[0].openTime,last=chartRows.at(-1).closeTime;
@@ -917,12 +1057,17 @@
     if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;}
     const ctx=canvas.getContext("2d");ctx.setTransform(ratio,0,0,ratio,0,0);
     ctx.imageSmoothingEnabled=false;ctx.globalAlpha=1;ctx.globalCompositeOperation="source-over";ctx.setLineDash([]);
-    return {ctx,width:cssW,height:cssH,left:58,right:66,top:16,bottom:24};
+    return {ctx,width:cssW,height:cssH,left:58,right:66,top:8,bottom:42};
   }
 
+  function chartVerticalLayout(height,top=8,bottom=42,volumeFraction=DEFAULT_VOLUME_FRACTION){
+    const plotH=Math.max(1,height-top-bottom),fraction=clamp(Number(volumeFraction)||DEFAULT_VOLUME_FRACTION,VOLUME_FRACTION_MIN,VOLUME_FRACTION_MAX);
+    const volumeH=Math.max(1,Math.floor(plotH*fraction)),priceH=Math.max(1,plotH-volumeH);
+    return {plotH,priceH,volumeH,volumeTop:top+priceH,plotBottom:top+plotH,volumeFraction:fraction};
+  }
   function plotGeometry(canvas){
-    const size=canvasSize(canvas);
-    return {...size,plotW:Math.max(1,size.width-size.left-size.right),plotH:Math.max(1,size.height-size.top-size.bottom)};
+    const size=canvasSize(canvas),vertical=chartVerticalLayout(size.height,size.top,size.bottom,state.volumeFraction);
+    return {...size,...vertical,plotW:Math.max(1,size.width-size.left-size.right)};
   }
   function xFor(time,g){return g.left+(time-state.viewStart)/(state.viewEnd-state.viewStart)*g.plotW;}
   function timeFor(x,g){return state.viewStart+(x-g.left)/g.plotW*(state.viewEnd-state.viewStart);}
@@ -943,6 +1088,16 @@
   function tradeMarkerSpecs(sets){
     return (sets?.scalp||[]).flatMap(event=>markerSpecsForEvent(event,true));
   }
+  function connectorColor(pnlUsd){return Number(pnlUsd)>=0?"#1e88e5":"#f6465d";}
+  function tradeConnectorSpecs(sets){
+    return (sets?.scalp||[]).flatMap(event=>{
+      const markers=markerSpecsForEvent(event,true),entry=markers.find(marker=>marker.role==="ENTRY"),exit=markers.find(marker=>marker.role==="EXIT"),outcome=state.outcomes.get(event.id);
+      const resolved=event.linkedTrade?!!exit:outcome?.status==="RESOLVED";
+      if(!resolved||!entry||!exit)return [];
+      const pnlUsd=finite(exit.pnlUsd)??finite(outcome?.pnlUsd)??finite(event.linkedTrade?.estimatedPnlUsd)??0;
+      return [{entry,exit,pnlUsd,color:connectorColor(pnlUsd)}];
+    });
+  }
   function markerCoordinates(marker,g,yForPrice){return {x:xFor(marker.time,g),y:yForPrice(marker.price)};}
 
   function clearCanvas(g){
@@ -950,30 +1105,120 @@
   }
   function drawGrid(g,hLines=5){
     const ctx=g.ctx;ctx.strokeStyle=COLORS.grid;ctx.lineWidth=hairline();ctx.beginPath();
-    for(let i=0;i<=hLines;i++){const y=px(g.top+i*g.plotH/hLines);ctx.moveTo(px(g.left),y);ctx.lineTo(px(g.left+g.plotW),y);}
+    for(let i=0;i<=hLines;i++){const y=px(g.top+i*g.priceH/hLines);ctx.moveTo(px(g.left),y);ctx.lineTo(px(g.left+g.plotW),y);}
     ctx.stroke();ctx.strokeStyle=COLORS.verticalGrid;ctx.lineWidth=hairline();ctx.beginPath();
     const divisions=8;
-    for(let i=0;i<=divisions;i++){const x=px(g.left+i*g.plotW/divisions);ctx.moveTo(x,px(g.top));ctx.lineTo(x,px(g.top+g.plotH));}
+    for(let i=0;i<=divisions;i++){const x=px(g.left+i*g.plotW/divisions);ctx.moveTo(x,px(g.top));ctx.lineTo(x,px(g.plotBottom));}
     ctx.stroke();
+    ctx.strokeStyle=COLORS.grid;ctx.beginPath();ctx.moveTo(px(g.left),px(g.volumeTop));ctx.lineTo(px(g.left+g.plotW),px(g.volumeTop));ctx.stroke();
     ctx.fillStyle=COLORS.axis;ctx.font="10px Arial";ctx.textAlign="center";
     for(let i=0;i<=divisions;i++){const time=state.viewStart+i*(state.viewEnd-state.viewStart)/divisions;ctx.fillText(dubai(time).slice(0,16),g.left+i*g.plotW/divisions,g.height-7);}
   }
 
+  function drawVolumeBars(candles,g,estimatedWidth){
+    const maxVolume=Math.max(1,...candles.map(c=>finite(c.volume)??0)),scaledMax=maxVolume/.88,ctx=g.ctx;
+    const width=Math.max(2,ix(estimatedWidth)),bottom=g.volumeTop+g.volumeH;
+    for(const candle of candles){
+      const x=xFor(candle.openTime+(candle.closeTime-candle.openTime)/2,g),volume=Math.max(0,finite(candle.volume)??0);
+      const height=Math.max(1,volume/scaledMax*g.volumeH),left=ix(x-width/2),top=bottom-height;
+      ctx.fillStyle=candle.close>=candle.open?COLORS.volumeBull:COLORS.volumeBear;
+      ctx.fillRect(left,top,width,height);
+    }
+  }
+
+  function candleIndicatorTime(candle){return candle.openTime+(candle.closeTime-candle.openTime)/2;}
+  function calculateEma(candles,period){
+    const p=clamp(Math.round(Number(period)||1),1,999),alpha=2/(p+1),out=[];let current=null;
+    for(let index=0;index<candles.length;index++){
+      if(index<p-1)continue;
+      const close=finite(candles[index].close);if(close===null)continue;
+      if(current===null){
+        const seed=candles.slice(index-p+1,index+1).map(candle=>finite(candle.close));
+        if(seed.some(value=>value===null))continue;
+        current=seed.reduce((sum,value)=>sum+value,0)/p;
+      }else current=close*alpha+current*(1-alpha);
+      out.push({time:candleIndicatorTime(candles[index]),value:current});
+    }
+    return out;
+  }
+  function sameUtcDayMs(a,b){const left=new Date(a),right=new Date(b);return left.getUTCFullYear()===right.getUTCFullYear()&&left.getUTCMonth()===right.getUTCMonth()&&left.getUTCDate()===right.getUTCDate();}
+  function calculateVwap(candles){
+    const out=[];let priceVolume=0,volumeTotal=0,previousTime=null;
+    for(const candle of candles){
+      if(previousTime!==null&&!sameUtcDayMs(previousTime,candle.openTime)){priceVolume=0;volumeTotal=0;}
+      const high=finite(candle.high),low=finite(candle.low),close=finite(candle.close),volume=finite(candle.volume)??0;
+      if(high!==null&&low!==null&&close!==null&&volume>=0){
+        priceVolume+=(high+low+close)/3*volume;volumeTotal+=volume;
+        if(volumeTotal>0)out.push({time:candleIndicatorTime(candle),value:priceVolume/volumeTotal});
+      }
+      previousTime=candle.openTime;
+    }
+    return out;
+  }
+  function hexAlpha(hex,alphaPct){
+    const value=String(hex||"#000000").replace("#",""),alpha=clamp(Number(alphaPct)||0,0,100)/100;
+    return `rgba(${parseInt(value.slice(0,2),16)||0},${parseInt(value.slice(2,4),16)||0},${parseInt(value.slice(4,6),16)||0},${alpha})`;
+  }
+  function currentIndicatorSeries(){
+    const settings=state.indicatorSettings||normalizeIndicatorSettings({}),candles=state.displayCandles,last=candles.at(-1);
+    const key=JSON.stringify([state.displayInterval,candles.length,last?.openTime,last?.high,last?.low,last?.close,last?.volume,settings]);
+    if(state.indicatorSeriesCache?.key===key)return state.indicatorSeriesCache.value;
+    const value={
+      emas:settings.emas.map(line=>line.enabled?calculateEma(candles,line.period):[]),
+      vwap:settings.vwap.enabled?calculateVwap(candles):[]
+    };
+    state.indicatorSeriesCache={key,value};return value;
+  }
+  function drawIndicatorSeries(ctx,points,g,y,style){
+    const visible=points.filter(point=>point.time>=state.viewStart-timeframeMs(state.displayInterval)&&point.time<=state.viewEnd);
+    if(visible.length<2)return;
+    ctx.strokeStyle=hexAlpha(style.color,style.alpha);ctx.lineWidth=snapWidth(style.width);ctx.lineJoin="round";ctx.lineCap="round";ctx.beginPath();
+    visible.forEach((point,index)=>{const x=xFor(point.time,g),lineY=y(point.value);if(index===0)ctx.moveTo(x,lineY);else ctx.lineTo(x,lineY);});ctx.stroke();
+  }
+  function drawPriceIndicators(ctx,g,y){
+    const settings=state.indicatorSettings||normalizeIndicatorSettings({}),series=currentIndicatorSeries();
+    settings.emas.forEach((line,index)=>{if(line.enabled)drawIndicatorSeries(ctx,series.emas[index],g,y,line);});
+    if(settings.vwap.enabled)drawIndicatorSeries(ctx,series.vwap,g,y,settings.vwap);
+  }
+  function drawTradeConnectors(ctx,sets,g,y){
+    const connectors=tradeConnectorSpecs(sets).filter(link=>link.exit.time>=state.viewStart&&link.entry.time<=state.viewEnd);
+    ctx.save();ctx.globalAlpha=.86;ctx.lineWidth=snapWidth(1.25);ctx.lineCap="round";
+    for(const link of connectors){
+      const entry=markerCoordinates(link.entry,g,y),exit=markerCoordinates(link.exit,g,y);
+      ctx.strokeStyle=link.color;ctx.beginPath();ctx.moveTo(entry.x,entry.y);ctx.lineTo(exit.x,exit.y);ctx.stroke();
+    }
+    ctx.restore();return connectors.length;
+  }
+
+  function validPriceRange(range){return Number.isFinite(range?.min)&&Number.isFinite(range?.max)&&range.max>range.min;}
+  function resolvedPriceRange(autoMin,autoMax){return validPriceRange(state.manualPriceRange)?state.manualPriceRange:{min:autoMin,max:autoMax};}
+  function scalePriceRange(range,deltaY,priceHeight){
+    if(!validPriceRange(range))return null;
+    const center=(range.min+range.max)/2,span=range.max-range.min;
+    const factor=clamp(Math.exp(Number(deltaY)/Math.max(40,Number(priceHeight)||40)),.05,20),half=span*factor/2;
+    return {min:center-half,max:center+half};
+  }
+  function isRightAxisStrip(g,x){return x>=g.left+g.plotW&&x<=g.width;}
+  function isRightPriceAxisHit(g,x,y){return isRightAxisStrip(g,x)&&y>=g.top&&y<=g.top+g.priceH;}
+
   function drawPrice(){
     const canvas=$("priceChart"),g=plotGeometry(canvas);clearCanvas(g);drawGrid(g,6);
     const candles=visibleCandles();
-    if(!candles.length){g.ctx.fillStyle=COLORS.axis;g.ctx.fillText("Load local database + Binance data to begin.",g.left+20,g.top+30);return;}
+    if(!candles.length){g.ctx.fillStyle=COLORS.axis;g.ctx.fillText("Waiting for Binance candle history.",g.left+20,g.top+30);return;}
     const sets=visibleSignalSets(),markerSpecs=tradeMarkerSpecs(sets),visibleMarkerSpecs=markerSpecs.filter(marker=>marker.time>=state.viewStart&&marker.time<=state.viewEnd);
     let min=Math.min(...candles.map(c=>c.low)),max=Math.max(...candles.map(c=>c.high));
     for(const marker of visibleMarkerSpecs){min=Math.min(min,marker.price);max=Math.max(max,marker.price);}
     const pad=Math.max((max-min)*.08,max*.0002);min-=pad;max+=pad;
-    state.priceAxisRange={min,max,top:g.top,plotH:g.plotH};
-    const y=value=>g.top+(max-value)/(max-min)*g.plotH;
+    ({min,max}=resolvedPriceRange(min,max));
+    state.priceAxisRange={min,max,top:g.top,plotH:g.priceH};
+    const y=value=>g.top+(max-value)/(max-min)*g.priceH;
     const ctx=g.ctx;
     ctx.fillStyle=COLORS.axis;ctx.textAlign="right";ctx.font="10px Arial";
-    for(let i=0;i<=6;i++){const value=max-i*(max-min)/6;ctx.fillText(formatPrice(value),g.width-5,g.top+i*g.plotH/6+3);}
+    for(let i=0;i<=6;i++){const value=max-i*(max-min)/6;ctx.fillText(formatPrice(value),g.width-5,g.top+i*g.priceH/6+3);}
 
     const estimatedWidth=Math.max(2,Math.min(13,g.plotW/Math.max(1,candles.length)*.68));
+    drawVolumeBars(candles,g,estimatedWidth);
+    ctx.save();ctx.beginPath();ctx.rect(g.left,g.top,g.plotW,g.priceH);ctx.clip();
     for(const c of candles){
       const x=xFor(c.openTime+(c.closeTime-c.openTime)/2,g),up=c.close>=c.open,body=up?COLORS.candleUp:COLORS.candleDown;
       const wickX=px(x),highY=px(y(c.high)),lowY=px(y(c.low));
@@ -983,6 +1228,8 @@
       const width=Math.max(2,ix(estimatedWidth)),left=ix(x-width/2);
       ctx.fillRect(left,top,width,height);ctx.strokeRect(px(left),px(top),width,height);
     }
+    drawPriceIndicators(ctx,g,y);
+    drawTradeConnectors(ctx,sets,g,y);
 
     state.markerHits=[];
     if($("showMarkers").checked){
@@ -1007,16 +1254,27 @@
         state.markerHits.push({x,y:markerY,event:marker.event,outcome:marker.outcome,scalp:marker.scalp,markerRole:marker.role,markerTime:marker.time,markerPrice:marker.price,actual:marker.actual,timeBasis:marker.timeBasis});
       }
     }
+    ctx.restore();
     drawSharedCrosshair(g,true);
-    if(Number.isFinite(state.pricePointerY))drawPriceAxisTag(g,state.pricePointerY);
+    if(crosshairScope(g,state.pricePointerY).showPriceTag)drawPriceAxisTag(g,state.pricePointerY);
   }
 
+  function crosshairScope(g,pointerY){
+    const inPrice=Number.isFinite(pointerY)&&pointerY>=g.top&&pointerY<=g.top+g.priceH;
+    return {
+      vertical:{top:g.top,bottom:g.plotBottom},
+      horizontal:inPrice?{left:g.left,right:g.left+g.plotW,y:pointerY}:null,
+      showPriceTag:inPrice
+    };
+  }
   function drawSharedCrosshair(g,pricePanel){
     if(!Number.isFinite(state.crosshairTime)||state.crosshairTime<state.viewStart||state.crosshairTime>state.viewEnd)return;
-    const x=xFor(state.crosshairTime,g),ctx=g.ctx,snappedX=px(x);
-    ctx.strokeStyle="rgba(112,122,138,.38)";ctx.lineWidth=hairline();ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(snappedX,px(g.top));ctx.lineTo(snappedX,px(g.top+g.plotH));ctx.stroke();ctx.setLineDash([]);
+    const x=xFor(state.crosshairTime,g),ctx=g.ctx,snappedX=px(x),scope=crosshairScope(g,state.pricePointerY);
+    ctx.strokeStyle="rgba(112,122,138,.38)";ctx.lineWidth=hairline();ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(snappedX,px(scope.vertical.top));ctx.lineTo(snappedX,px(scope.vertical.bottom));
+    if(pricePanel&&scope.horizontal){ctx.moveTo(px(scope.horizontal.left),px(scope.horizontal.y));ctx.lineTo(px(scope.horizontal.right),px(scope.horizontal.y));}
+    ctx.stroke();ctx.setLineDash([]);
     if(pricePanel){
-      const label=`${dubai(state.crosshairTime)} GST`,boxY=g.top+g.plotH-20,paddingX=6;
+      const label=`${dubai(state.crosshairTime)} GST`,boxY=g.plotBottom+4,paddingX=6;
       ctx.font="10px Arial";
       const textW=ctx.measureText(label).width,boxW=textW+paddingX*2;
       const boxX=clamp(x-boxW/2,g.left,g.left+g.plotW-boxW);
@@ -1045,41 +1303,20 @@
   const requestRedraw=createFrameScheduler(callback=>requestAnimationFrame(callback),drawAll);
 
   function formattedOutcomeText(outcome){
-    if(!outcome)return "Status: unavailable";
+    if(!outcome)return "";
     return [
-      `Status: ${outcome.status??"unavailable"}`,
-      `Quantity: ${formatQuantity(outcome.testLot)} BTC`,
-      `Entry: ${formatPrice(outcome.entryPrice)} · Exit: ${formatPrice(outcome.exitPrice)}`,
-      `${outcome.tpDriver}: ${formatPriceDistance(outcome.tpDistance)} → target ${formatPrice(outcome.targetPrice)} · ${outcome.slDriver}: ${formatPriceDistance(outcome.slDistance)} → stop ${formatPrice(outcome.stopPrice)}`,
       `Return: ${formatPercent(outcome.barrierReturn)} · P/L: ${formatUsd(outcome.pnlUsd)}`,
       `Gross P/L: ${formatUsd(outcome.grossPnlUsd)} · fees: ${formatUsd(outcome.feesUsd)}`,
       `MFE: ${formatPercent(outcome.mfe)} · MAE: ${formatPercent(outcome.mae)}`,
-      `Best / worst: ${finite(outcome.timeToBest)===null?"—":`${outcome.timeToBest}m`} / ${finite(outcome.timeToWorst)===null?"—":`${outcome.timeToWorst}m`}`,
-      `Barrier: ${outcome.barrier??"—"}${finite(outcome.barrierMinute)===null?"":` at ${outcome.barrierMinute}m`}`
+      `Best / worst: ${finite(outcome.timeToBest)===null?"—":`${outcome.timeToBest}m`} / ${finite(outcome.timeToWorst)===null?"—":`${outcome.timeToWorst}m`}`
     ].join("\n");
   }
 
-  function markerHeading(marker){
-    if(!marker)return "";
-    return `${marker.markerRole} MARKER · ${marker.actual?"ACTUAL RECORDED":"HYPOTHETICAL"} · ${dubai(marker.markerTime)} GST · price ${formatPrice(marker.markerPrice)} · ${marker.timeBasis||"timestamp basis unavailable"}\n`;
-  }
-  function scalpTooltip(signal,outcome,marker=null){
+  function scalpTooltip(signal,outcome){
     return [
-      markerHeading(marker),
       `SCALP ${signal.direction} ${signal.eventType} · rank ${signal.rank??"unavailable"}`,
-      `Simulation eligibility: ${signal.eligibility?.tag||"NOT EVALUATED"}`,
-      `${dubai(signal.time)} GST`,
-      `Timestamp source: ${signal.timestampField}${signal.timestampApproximate?" — approximate":""}`,
-      `Recorded action: ${signal.recordedAction} · status: ${signal.eventState??"not recorded"}`,
-      signal.blockingReason?`Blocking/rejection reason: ${signal.blockingReason}`:"",
-      "",
-      signal.linkedTrade
-        ?`ACTUAL TRADE · qty ${formatQuantity(signal.linkedTrade.filledQty??signal.linkedTrade.requestedQty)} BTC · entry ${formatPrice(signal.linkedTrade.entryPrice)} · exit ${formatPrice(signal.linkedTrade.exitPrice)} · P/L ${formatUsd(signal.linkedTrade.estimatedPnlUsd)}`
-        :"Detector-only · no exact-linked trade recorded",
-      "",
-      signal.linkedTrade?"":"OUTCOME (hypothetical)",
-      signal.linkedTrade?"":formattedOutcomeText(outcome)
-    ].join("\n");
+      formattedOutcomeText(outcome)
+    ].filter(Boolean).join("\n");
   }
 
   function drawPriceAxisTag(g,mouseY){
@@ -1089,11 +1326,33 @@
     const ctx=g.ctx,label=formatPrice(price),paddingX=6,boxH=16;
     ctx.font="10px Arial";
     const textW=ctx.measureText(label).width,boxW=textW+paddingX*2;
-    const boxX=g.width-boxW,boxY=clamp(mouseY-boxH/2,g.top,g.top+g.plotH-boxH);
+    const boxX=g.width-boxW,boxY=clamp(mouseY-boxH/2,g.top,g.top+g.priceH-boxH);
     ctx.fillStyle=COLORS.text;ctx.fillRect(boxX,boxY,boxW,boxH);
     ctx.fillStyle="#fff";ctx.textAlign="left";ctx.textBaseline="middle";
     ctx.fillText(label,boxX+paddingX,boxY+boxH/2+1);
     ctx.textBaseline="alphabetic";
+  }
+
+  function beginHorizontalPan(pointerX,pointerY,g){
+    if(!Number.isFinite(state.viewStart)||!Number.isFinite(state.viewEnd)||state.viewEnd<=state.viewStart)return null;
+    const manualY=validPriceRange(state.manualPriceRange);
+    return {mode:"x-pan",x:pointerX,y:pointerY,start:state.viewStart,end:state.viewEnd,plotW:g.plotW,priceH:g.priceH,manualY,yMin:manualY?state.manualPriceRange.min:null,yMax:manualY?state.manualPriceRange.max:null};
+  }
+  function horizontalPanRange(drag,pointerX){
+    if(drag?.mode!=="x-pan"||!Number.isFinite(drag.start)||!Number.isFinite(drag.end))return null;
+    const shift=-(pointerX-drag.x)/Math.max(1,drag.plotW)*(drag.end-drag.start);
+    return {start:drag.start+shift,end:drag.end+shift};
+  }
+  function manualYRangeForBodyPan(drag,pointerY){
+    if(!drag?.manualY||!Number.isFinite(drag.yMin)||!Number.isFinite(drag.yMax)||drag.yMax<=drag.yMin)return null;
+    const pricePerPixel=(drag.yMax-drag.yMin)/Math.max(1,drag.priceH),delta=(pointerY-drag.y)*pricePerPixel;
+    return {min:drag.yMin+delta,max:drag.yMax+delta};
+  }
+  function handleChartDoubleClick(event,canvas){
+    const g=plotGeometry(canvas),rect=canvas.getBoundingClientRect(),x=event.clientX-rect.left;
+    event.preventDefault();event.stopPropagation();
+    if(isRightAxisStrip(g,x)){resetYAuto();requestRedraw();return "y-only";}
+    resetView();return "full";
   }
 
   function bindCanvasInteraction(canvas){
@@ -1106,29 +1365,42 @@
       state.viewStart=focus-newWidth*ratio;state.viewEnd=state.viewStart+newWidth;requestRedraw();
     },{passive:false});
     canvas.addEventListener("pointerdown",event=>{
-      const g=plotGeometry(canvas);state.drag={x:event.clientX,start:state.viewStart,end:state.viewEnd,g};
+      if(event.button!==undefined&&event.button!==0)return;
+      const g=plotGeometry(canvas),rect=canvas.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;
+      if(canvas===$("priceChart")&&isRightPriceAxisHit(g,x,y)&&validPriceRange(state.priceAxisRange)){
+        state.yAxisDrag={startY:event.clientY,priceH:g.priceH,range:{min:state.priceAxisRange.min,max:state.priceAxisRange.max}};
+        state.drag=null;state.pricePointerY=null;canvas.style.cursor="ns-resize";hideTooltip();event.preventDefault();
+      }else{
+        state.drag=beginHorizontalPan(x,y,g);state.yAxisDrag=null;canvas.style.cursor=state.drag?"grabbing":"";event.preventDefault();
+      }
       if(canvas===$("priceChart"))state.pricePointerY=null;
       canvas.setPointerCapture(event.pointerId);
       requestRedraw();
     });
     canvas.addEventListener("pointermove",event=>{
-      const rect=canvas.getBoundingClientRect(),g=plotGeometry(canvas),x=event.clientX-rect.left;
+      const rect=canvas.getBoundingClientRect(),g=plotGeometry(canvas),x=event.clientX-rect.left,y=event.clientY-rect.top;
+      if(state.yAxisDrag){
+        state.manualPriceRange=scalePriceRange(state.yAxisDrag.range,event.clientY-state.yAxisDrag.startY,state.yAxisDrag.priceH);
+        state.pricePointerY=null;requestRedraw();return;
+      }
       state.crosshairTime=timeFor(x,g);
       if(state.drag){
-        const shift=-(event.clientX-state.drag.x)/g.plotW*(state.drag.end-state.drag.start);
-        state.viewStart=state.drag.start+shift;state.viewEnd=state.drag.end+shift;
+        const range=horizontalPanRange(state.drag,x);
+        if(range){state.viewStart=range.start;state.viewEnd=range.end;}
+        const yRange=manualYRangeForBodyPan(state.drag,y);
+        if(yRange)state.manualPriceRange=yRange;
       }
       requestRedraw();
       if(canvas===$("priceChart")&&!state.drag){
-        const y=event.clientY-rect.top;state.pricePointerY=y;
+        state.pricePointerY=y;canvas.style.cursor=isRightPriceAxisHit(g,x,y)?"ns-resize":"";
         const hit=state.markerHits.find(m=>Math.hypot(m.x-x,m.y-y)<13);
         if(hit)showTooltip(event.clientX,event.clientY,scalpTooltip(hit.event,hit.outcome,hit));else hideTooltip();
       }
     });
-    const end=event=>{state.drag=null;try{canvas.releasePointerCapture(event.pointerId);}catch(_error){}requestRedraw();};
+    const end=event=>{state.drag=null;state.yAxisDrag=null;canvas.style.cursor="";try{canvas.releasePointerCapture(event.pointerId);}catch(_error){}requestRedraw();};
     canvas.addEventListener("pointerup",end);canvas.addEventListener("pointercancel",end);
-    canvas.addEventListener("pointerleave",()=>{if(!state.drag){state.crosshairTime=null;if(canvas===$("priceChart"))state.pricePointerY=null;hideTooltip();requestRedraw();}});
-    canvas.addEventListener("dblclick",resetView);
+    canvas.addEventListener("pointerleave",()=>{if(!state.drag&&!state.yAxisDrag){state.crosshairTime=null;if(canvas===$("priceChart")){state.pricePointerY=null;canvas.style.cursor="";}hideTooltip();requestRedraw();}});
+    canvas.addEventListener("dblclick",event=>handleChartDoubleClick(event,canvas));
   }
 
   function showTooltip(x,y,text){
@@ -1141,7 +1413,10 @@
   function updateDatasetStatus(){
     const times=[...state.scalpSignals.map(r=>r.time),...state.scalpV2Signals.map(r=>r.time),...state.scalpTrades.flatMap(t=>[t.time,t.closedTime]).filter(Number.isFinite)];
     if(!state.scalpSignals.length&&!state.scalpV2Signals.length){
-      $("datasetStatus").className="statusline";$("datasetStatus").textContent="No usable records loaded.";
+      $("datasetStatus").className="statusline";
+      $("datasetStatus").textContent=state.displayCandles.length
+        ?`Binance ${state.displayInterval}: ${state.displayCandles.length.toLocaleString()} candles cached. Scalp signals load manually.`
+        :"Scalp signals not loaded; Binance price history is connecting.";
       $("rangeLabel").textContent="—";
       return;
     }
@@ -1178,11 +1453,20 @@
       if(!state.scalpSignals.length&&!state.scalpV2Signals.length)throw new Error(`No usable ${SYMBOL} rows found in the Scalp V1/V2 signal tables`);
       state.scalpTrades=[];attachScalpTrades();populateMachineSelect();
       updateMachineRows();
-      await activateTimeframe(state.displayInterval);
-      updateDatasetStatus();setStatus("Loaded","success");
+      updateDatasetStatus();setStatus("Signals loaded","success");
     }catch(error){
       console.error(error);$("datasetStatus").className="statusline error";$("datasetStatus").textContent=error.message||String(error);setStatus("Load failed","error");
     }finally{state.loading=false;$("loadButton").disabled=false;}
+  }
+  async function startPriceAutoConnect(){
+    setStatus(`Loading ${state.displayInterval}`,"busy");
+    try{
+      await activateTimeframe(state.displayInterval);
+      updateDatasetStatus();
+      if(state.marketSocket)setStatus("Price connecting","busy");
+    }catch(error){
+      console.error(error);$("datasetStatus").className="statusline error";$("datasetStatus").textContent=error.message||String(error);setStatus("Price load failed","error");
+    }
   }
   function mockScalpSignal(time,direction,eventType,rank,action="DETECTION_QUALIFIED",machine="mock-alpha"){
     const candleTime=Math.floor(time/1000),eventId=`1m|${eventType}|${direction}|${candleTime}|1|LIVE`;
@@ -1236,7 +1520,57 @@
       const directUrl=new URL(binanceKlinesUrl("15m",123456789,2000));
       assert(directUrl.origin+directUrl.pathname===BINANCE_KLINES_URL&&directUrl.searchParams.get("symbol")===SYMBOL&&directUrl.searchParams.get("interval")==="15m"&&directUrl.searchParams.get("limit")==="1500"&&directUrl.searchParams.get("endTime")==="123456789","per-TF REST endpoint uses direct Binance interval and 1,500 limit");
       assert(binanceKlineStreamName("1h")==="btcusdt@kline_1h"&&binanceKlineWsUrl("3m")==="wss://fstream.binance.com/market/stream?streams=btcusdt@kline_3m","per-TF WebSocket stream name and combined-stream URL are exact");
+      const renderedIntervals=[...$("timeframeButtons").querySelectorAll("button")].map(button=>button.dataset.interval);
+      assert(renderedIntervals.join("|")===PRICE_INTERVALS.join("|")&&PRICE_INTERVALS.length===10,"all 10 main-app timeframes are rendered in the Binance allowlist order");
+      assert(PRICE_INTERVALS.every(interval=>new URL(binanceKlinesUrl(interval,123456789)).searchParams.get("interval")===interval&&binanceKlineStreamName(interval)===`btcusdt@kline_${interval}`),"all 10 timeframes preserve exact Binance REST interval and WebSocket stream casing");
+      const switchRows=[{openTime:0,closeTime:299999},{openTime:300000,closeTime:600000}],focusFixture={anchorTime:300000,anchorRatio:.25,timePerPixel:1000,plotWidth:120,source:"crosshair"},focusedView=focusedViewRange(focusFixture,switchRows,"1m",120);
+      assert(focusedView.start===270000&&focusedView.end===390000&&(focusFixture.anchorTime-focusedView.start)/(focusedView.end-focusedView.start)===.25,"TF switch preserves crosshair candle X position and time-per-pixel zoom");
+      const focusSaved=[state.viewStart,state.viewEnd,state.crosshairTime];state.viewStart=100;state.viewEnd=300;state.crosshairTime=null;const centerFocus=captureTimeframeFocus({plotW:200});[state.viewStart,state.viewEnd,state.crosshairTime]=focusSaved;
+      assert(centerFocus.source==="center"&&centerFocus.anchorTime===200&&centerFocus.anchorRatio===.5&&centerFocus.timePerPixel===1,"TF switch falls back to the visible view center when no crosshair is active");
+      assert(bindControls.toString().includes("captureTimeframeFocus")&&bindControls.toString().includes("activateTimeframe(interval,{focus})")&&!startPriceAutoConnect.toString().includes("captureTimeframeFocus"),"TF buttons preserve focus while initial auto-connect retains fit-to-data behavior");
       assert(retryAfterDelay({status:429,headers:{get:()=>"12"}},1000)===12000&&retryAfterDelay({status:418,headers:{get:()=>null}},1000)===BINANCE_418_PAUSE_MS,"Binance 429/418 retry pauses honor Retry-After and fallback ban delay");
+      assert($("scalperLot").value==="0.01"&&$("scalperTpDriver").value==="TP_DELTA"&&$("scalperTpDelta").value==="250"&&$("scalperSlDriver").value==="SL_DELTA"&&$("scalperSlDelta").value==="700","Plotter Trade Values defaults use 0.01 lot with 250/700 delta drivers");
+
+      const emaFixture=[1,2,3,4,5].map((close,index)=>({openTime:index*MINUTE,closeTime:(index+1)*MINUTE-1,close}));
+      assert(calculateEma(emaFixture,3).map(point=>point.value).join("|")==="2|3|4","EMA uses an SMA seed followed by the standard 2/(period+1) recurrence");
+      const dayOne=Date.UTC(2025,0,1),dayTwo=Date.UTC(2025,0,2),vwapFixture=[
+        {openTime:dayOne,closeTime:dayOne+MINUTE-1,high:3,low:1,close:2,volume:2},
+        {openTime:dayOne+MINUTE,closeTime:dayOne+2*MINUTE-1,high:6,low:3,close:3,volume:1},
+        {openTime:dayTwo,closeTime:dayTwo+MINUTE-1,high:11,low:9,close:10,volume:1}
+      ],vwapValues=calculateVwap(vwapFixture).map(point=>point.value);
+      assert(vwapValues[0]===2&&Math.abs(vwapValues[1]-8/3)<1e-12&&vwapValues[2]===10,"VWAP uses cumulative typical-price volume and resets at each UTC day");
+      assert(DEFAULT_INDICATOR_SETTINGS.emas.map(line=>line.period).join("|")==="9|21|55|100|200"&&$("indicatorSettingsPanel").querySelectorAll('input[type="checkbox"]').length===6&&!document.querySelector(".sidebar #indicatorSettingsPanel")&&$("settingsOverlay").contains($("indicatorSettingsPanel")),"gear settings modal owns the five EMA rows plus VWAP outside the sidebar");
+      $("settingsButton").click();const settingsOpened=!$("settingsOverlay").hidden;document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape"}));
+      assert(settingsOpened&&$("settingsOverlay").hidden&&bindSettingsPanel.toString().includes('event.target===$("settingsOverlay")'),"settings modal opens from the gear and dismisses by Escape, backdrop, or Close");
+      const previousIndicatorRaw=localStorage.getItem(INDICATOR_SETTINGS_SLOT),previousIndicatorSettings=state.indicatorSettings;
+      const persistenceFixture=normalizeIndicatorSettings({emas:[{enabled:true,period:12,color:"#123456",alpha:37,width:4.5}],vwap:{enabled:true,color:"#654321",alpha:52,width:6}});
+      applyIndicatorSettingsToControls(persistenceFixture);saveIndicatorSettings();state.indicatorSettings=null;
+      const restoredIndicators=restoreIndicatorSettings();
+      assert(restoredIndicators.emas[0].enabled&&restoredIndicators.emas[0].period===12&&restoredIndicators.emas[0].color==="#123456"&&restoredIndicators.vwap.enabled&&restoredIndicators.vwap.width===6,"indicator settings persist to and restore from Plotter localStorage");
+      if(previousIndicatorRaw===null)localStorage.removeItem(INDICATOR_SETTINGS_SLOT);else localStorage.setItem(INDICATOR_SETTINGS_SLOT,previousIndicatorRaw);
+      state.indicatorSettings=previousIndicatorSettings;state.indicatorSeriesCache=null;applyIndicatorSettingsToControls(previousIndicatorSettings);
+
+      const defaultLayout=chartVerticalLayout(430),lowClampedLayout=chartVerticalLayout(430,8,42,.01),highClampedLayout=chartVerticalLayout(430,8,42,.9);
+      assert(defaultLayout.volumeFraction===.22&&defaultLayout.volumeH===Math.floor(defaultLayout.plotH*.22)&&lowClampedLayout.volumeFraction===.10&&highClampedLayout.volumeFraction===.45,"volume panel defaults to 22% and clamps to the main-app 10-45% range");
+      const volumePaints=[],savedView=[state.viewStart,state.viewEnd];state.viewStart=0;state.viewEnd=200;
+      drawVolumeBars([{openTime:0,closeTime:100,open:1,close:2,volume:8}],{ctx:{fillRect:(...args)=>volumePaints.push(args)},left:0,plotW:100,volumeTop:80,volumeH:20},6);
+      state.viewStart=savedView[0];state.viewEnd=savedView[1];
+      assert(volumePaints.length===1&&volumePaints[0][2]===6&&volumePaints[0][3]>0,"volume panel paints one aligned bar per visible candle");
+      const scopeFixture={top:8,priceH:290,plotBottom:388,left:58,plotW:900};
+      assert(crosshairScope(scopeFixture,100).horizontal?.y===100&&crosshairScope(scopeFixture,350).horizontal===null&&!crosshairScope(scopeFixture,350).showPriceTag&&crosshairScope(scopeFixture,350).vertical.bottom===388,"crosshair vertical spans price and volume while horizontal line and price tag stay in price region");
+      const panSaved=[state.viewStart,state.viewEnd,state.manualPriceRange];state.viewStart=100;state.viewEnd=200;state.manualPriceRange=null;
+      const autoBodyDrag=beginHorizontalPan(400,100,{plotW:1000,priceH:200}),panned=horizontalPanRange(autoBodyDrag,500),autoYAttempt=manualYRangeForBodyPan(autoBodyDrag,150);
+      state.manualPriceRange={min:90,max:110};const manualBodyDrag=beginHorizontalPan(400,100,{plotW:1000,priceH:200}),shiftedY=manualYRangeForBodyPan(manualBodyDrag,150);
+      [state.viewStart,state.viewEnd,state.manualPriceRange]=panSaved;
+      assert(panned.start===90&&panned.end===190&&panned.end-panned.start===100&&autoYAttempt===null&&shiftedY.min===95&&shiftedY.max===115&&shiftedY.max-shiftedY.min===20,"chart-body drag pans X and shifts Y only when manual Y was active at drag start");
+      const scaleStart={min:90,max:110},scaledRange=scalePriceRange(scaleStart,100,400);
+      assert(isRightPriceAxisHit({...scopeFixture,width:1024},1000,100)&&!isRightPriceAxisHit({...scopeFixture,width:1024},900,100)&&scaledRange.max-scaledRange.min>scaleStart.max-scaleStart.min&&(scaledRange.min+scaledRange.max)/2===100&&state.drag===null,"right-axis drag scales around center and never invokes body-pan state");
+      const resetSaved={candles:state.displayCandles,viewStart:state.viewStart,viewEnd:state.viewEnd,fullStart:state.fullStart,fullEnd:state.fullEnd,manual:state.manualPriceRange};
+      state.viewStart=25;state.viewEnd=75;state.manualPriceRange={min:90,max:110};resetYAuto();const axisKeptX=state.viewStart===25&&state.viewEnd===75&&state.manualPriceRange===null;
+      state.displayCandles=[{openTime:0,closeTime:99},{openTime:100,closeTime:199}];state.viewStart=25;state.viewEnd=75;state.manualPriceRange={min:90,max:110};resetView();
+      const bodyReset=state.manualPriceRange===null&&state.viewStart===0&&state.viewEnd===199;
+      state.displayCandles=resetSaved.candles;state.viewStart=resetSaved.viewStart;state.viewEnd=resetSaved.viewEnd;state.fullStart=resetSaved.fullStart;state.fullEnd=resetSaved.fullEnd;state.manualPriceRange=resetSaved.manual;
+      assert(axisKeptX&&bodyReset&&handleChartDoubleClick.toString().includes('isRightAxisStrip(g,x)'),"right-axis double-click resets Y only while body double-click resets Y and X view");
 
       const fixture=buildMockFixture(),normalizedScalp=normalizeScalpSignals(fixture.scalpRaw),normalizedTrades=normalizeScalpTrades(fixture.scalpTrades);
       assert(normalizedScalp.signals.length===4&&new Set(normalizedScalp.signals.map(s=>s.eventType)).size===2,"SCALP CROSS + BOUNCE schema normalization");
@@ -1313,12 +1647,16 @@
       const feeAwareLevels=tradeLevels({entryPrice:63000,side:1,quantity:.01,feePercent:.1,tpDriver:"NET_TARGET",target:5,slDriver:"NET_SL",stop:3});
       assert(Math.abs(monetaryPnl({entryPrice:63000,exitPrice:feeAwareLevels.targetPrice,side:1,quantity:.01,feePercent:.1}).pnlUsd-5)<1e-9&&Math.abs(monetaryPnl({entryPrice:63000,exitPrice:feeAwareLevels.stopPrice,side:1,quantity:.01,feePercent:.1}).pnlUsd+3)<1e-9,"NET_TARGET and NET_SL prices remain net of configured entry and exit fees");
 
+      const tooltipFixture=scalpTooltip({direction:"LONG",eventType:"BOUNCE",rank:67},{barrierReturn:1.2,pnlUsd:5,grossPnlUsd:5.5,feesUsd:.5,mfe:2.1,mae:-.7,timeToBest:4,timeToWorst:2});
+      assert(tooltipFixture.split("\n").length===5&&tooltipFixture.startsWith("SCALP LONG BOUNCE · rank 67\nReturn:")&&!/MARKER|Simulation eligibility|Timestamp|Recorded action|Detector-only|OUTCOME|Status:|Quantity:|Entry:|TP_DELTA|SL_DELTA|Barrier:/.test(tooltipFixture),"entry/outcome tooltip contains only the five requested compact lines");
+
       const markerEvent={id:"marker-fixture",side:1,time:1,timestampApproximate:false,linkedTrade:null};
       state.outcomes.set(markerEvent.id,{status:"RESOLVED",entryTime:1000,entryPrice:63000,exitTime:61000,exitPrice:63500,pnlUsd:5});
       const resolvedMarkers=markerSpecsForEvent(markerEvent,true);
       assert(resolvedMarkers.length===2&&resolvedMarkers[0].time===1000&&resolvedMarkers[1].time===61000,"hypothetical entry/exit markers use exact outcome timestamps");
+      assert(tradeConnectorSpecs({scalp:[markerEvent]}).length===1&&tradeConnectorSpecs({scalp:[markerEvent]})[0].color==="#1e88e5"&&connectorColor(-.01)==="#f6465d"&&drawTradeConnectors.toString().includes("globalAlpha=.86"),"resolved connectors use blue/red P&L colors at 0.86 opacity");
       state.outcomes.set(markerEvent.id,{status:"OPEN / UNRESOLVED",entryTime:1000,entryPrice:63000,exitTime:null,exitPrice:null});
-      assert(markerSpecsForEvent(markerEvent,true).map(marker=>marker.role).join("|")==="ENTRY","open trade has entry marker only");
+      assert(markerSpecsForEvent(markerEvent,true).map(marker=>marker.role).join("|")==="ENTRY"&&tradeConnectorSpecs({scalp:[markerEvent]}).length===0,"open trade has entry marker only and no connector");
       state.outcomes.set(markerEvent.id,{status:"AMBIGUOUS",entryTime:1000,entryPrice:63000,exitTime:null,exitPrice:null});
       assert(markerSpecsForEvent(markerEvent,true).map(marker=>marker.role).join("|")==="ENTRY","ambiguous trade fabricates no exit marker");
       const actualMarkerEvent={id:"actual-marker",side:1,linkedTrade:{time:2000,entryPrice:63010,closedTime:62000,exitPrice:63490,estimatedPnlUsd:4.8,timestampField:"event_at",closedTimestampField:"closed_at"}};
@@ -1336,6 +1674,7 @@
       assert(!$("horizon")&&!evaluateOutcome.toString().includes("slice(entryIndex,entryIndex+"),"outcomes remain active until TP, SL, or data end");
       assert(LOCAL_API_BASE==="http://127.0.0.1:3001","fixed local API endpoint");
       assert(SIGNAL_SOURCES.map(source=>source.table).join("|")==="scalp_v1_signals|scalp_v2_signals","only Scalp V1/V2 tables remain configured");
+      assert(startPriceAutoConnect.toString().includes("activateTimeframe")&&!startPriceAutoConnect.toString().includes("loadLocalTable")&&loadRealData.toString().includes("loadLocalTable(SCALP_SIGNAL_TABLE)")&&!loadRealData.toString().includes("activateTimeframe")&&!loadRealData.toString().includes("fetchBinanceHistory")&&!loadRealData.toString().includes("connectMarketSocket")&&$("loadButton").textContent.trim()==="Load Scalp Signals"&&bindControls.toString().includes('$("loadButton").addEventListener("click",loadRealData)'),"Load button is signals-only and price auto-connect remains independent");
       assert(!document.querySelector("#timelinePanel,#aggregatePanel,#maStackPanel,#ssscStatsPanel,#agreementStatsPanel,#snapshotLayerList"),"removed panels and snapshot picker are absent");
       let scheduledRedraws=0,completedRedraws=0,scheduledCallback=null;
       const testRedrawScheduler=createFrameScheduler(callback=>{scheduledRedraws++;scheduledCallback=callback;},()=>{completedRedraws++;});
@@ -1346,7 +1685,8 @@
       assert(formatPrice(118450.49)==="118,450"&&formatUsd(123.44)==="$123.4"&&formatUsd(-7.16)==="-$7.2","price and P/L precision");
       assert(RESULT_COLUMNS.every(([key])=>resultColumnOrder.includes(key))&&$("resultsHeader").querySelectorAll("th[draggable=true]").length===RESULT_COLUMNS.length,"every result column is draggable");
       assert(document.querySelectorAll(".lower-panel[data-panel-key]").length===2&&document.querySelectorAll("[data-resize-panel]").length===2,"retained lower panels remain collapsible and resizable");
-      assert(COLORS.candleUp==="rgb(255,255,255)"&&COLORS.candleDown==="rgb(145,145,145)"&&COLORS.candleStroke==="rgb(133,133,133)","exact candle body, outline and wick colours");
+      assert(COLORS.candleUp==="#ffffff"&&COLORS.candleDown==="#969696"&&COLORS.candleStroke==="#969696"&&COLORS.volumeBull==="rgba(95,95,95,.42)"&&COLORS.volumeBear==="rgba(122,122,122,.58)","exact main-app candle and volume colours");
+      assert(bindCanvasInteraction.toString().includes("handleChartDoubleClick"),"double-click remains wired to the split axis/body reset handler");
       assert(canvasSize.toString().includes("devicePixelRatio")===false&&dprValue.toString().includes("devicePixelRatio")&&canvasSize.toString().includes("imageSmoothingEnabled=false"),"DPR backing scale and sharp canvas reset");
       assert(renderResults.toString().includes(".sort((a,b)=>a.time-b.time)"),"chronological results remain oldest to newest");
 
@@ -1366,7 +1706,7 @@
     $("exportResultsCsv").addEventListener("click",exportResultsCsv);
     $("machineSelect").addEventListener("change",updateMachineRows);
     document.querySelectorAll("input,select").forEach(control=>{
-      if(control.id==="machineSelect")return;
+      if(control.id==="machineSelect"||control.closest("#indicatorSettingsPanel"))return;
       control.addEventListener("change",()=>{
         if(control.id==="scalperTpDriver"||control.id==="scalperSlDriver")syncTradeDriverUi();
         applyFilters();
@@ -1375,9 +1715,10 @@
     $("scalperControlsPanel").querySelectorAll('input[type="number"]').forEach(control=>control.addEventListener("input",applyFilters));
     $("timeframeButtons").querySelectorAll("button").forEach(button=>button.addEventListener("click",async()=>{
       const interval=button.dataset.interval;if(interval===state.displayInterval&&state.marketStarted)return;
+      const focus=captureTimeframeFocus(plotGeometry($("priceChart")));
       $("timeframeButtons").querySelectorAll("button").forEach(b=>b.classList.toggle("active",b===button));
       setStatus(`Loading ${interval}`,"busy");
-      try{await activateTimeframe(interval);updateDatasetStatus();}
+      try{await activateTimeframe(interval,{focus});updateDatasetStatus();}
       catch(error){console.error(error);$("datasetStatus").className="statusline error";$("datasetStatus").textContent=error.message||String(error);setStatus("Price load failed","error");}
     }));
     bindCanvasInteraction($("priceChart"));
@@ -1397,7 +1738,11 @@
     });
   }
 
-  restoreSidebarWidth();restoreResultColumnOrder();restoreLowerPanels();restoreSidebarCards();bindSidebarCards();syncTradeDriverUi();bindControls();renderResultColumnVisibility();applyFilters();runSelfTests();requestRedraw();
+  restoreSidebarWidth();restorePriceTimeframe();restoreIndicatorSettings();restoreResultColumnOrder();restoreLowerPanels();restoreSidebarCards();bindSidebarCards();bindIndicatorSettings();bindSettingsPanel();syncTradeDriverUi();bindControls();renderResultColumnVisibility();applyFilters();
+  const selfTestRun=runSelfTests();
+  const autoConnect=()=>Promise.resolve(selfTestRun).finally(startPriceAutoConnect);
+  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",autoConnect,{once:true});else autoConnect();
+  requestRedraw();
 })();
 </script>
 </body>
