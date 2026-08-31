@@ -58,6 +58,9 @@ function harness(overrides={}){
     const chasingUpdates=h.updates.filter(item=>item.statusCode==="chasing");
     assert(chasingUpdates.some(item=>item.price==="101"),"the chase status must publish the initial resting order price");
     assert.equal(chasingUpdates[chasingUpdates.length-1].price,"102","the chase status must publish each newly repriced resting order price");
+    const bookUpdate=chasingUpdates.find(item=>item.bestBid&&item.bestAsk);
+    assert.equal(bookUpdate.bestBid,"100","the chase status must publish the current best bid");
+    assert.equal(bookUpdate.bestAsk,"101","the chase status must publish the current best ask");
   }
   {
     const h=harness();

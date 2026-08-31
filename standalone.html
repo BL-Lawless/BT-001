@@ -4446,7 +4446,8 @@ button:hover{filter:brightness(1.04)}
   width:100%;
   min-width:0;
   margin:0;
-  padding:5px 7px;
+  box-sizing:border-box;
+  padding:5px 18px 5px 7px;
   border:1px solid #d9dce1;
   border-radius:5px;
   background:#fff;
@@ -4454,6 +4455,37 @@ button:hover{filter:brightness(1.04)}
   font:700 13px Arial,Helvetica,sans-serif;
   text-align:center;
 }
+.rapid-fire-number-control{
+  min-width:0;
+  position:relative;
+  display:flex;
+  align-items:stretch;
+}
+.rapid-fire-lot-control{width:100%}
+.rapid-fire-number-steppers{
+  position:absolute;
+  top:1px;
+  right:1px;
+  bottom:1px;
+  width:15px;
+  display:grid;
+  grid-template-rows:1fr 1fr;
+  overflow:hidden;
+  border-left:1px solid #d9dce1;
+  border-radius:0 4px 4px 0;
+}
+.rapid-fire-number-steppers button{
+  width:100%;
+  min-width:0;
+  min-height:0;
+  margin:0;
+  padding:0;
+  border:0;
+  background:#eef0f2;
+  color:#4b5563;
+  font:700 7px/1 Arial,Helvetica,sans-serif;
+}
+.rapid-fire-number-steppers button+button{border-top:1px solid #d9dce1}
 .rapid-fire-button,
 .rapid-fire-action-title{
   margin:0;
@@ -4576,8 +4608,8 @@ button:hover{filter:brightness(1.04)}
 .rapid-fire-status.is-error{border-color:#f6465d;color:#f6465d;font-weight:800}
 .rapid-fire-protection-row{
   display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:7px;
+  grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr) 58px;
+  gap:5px;
 }
 .rapid-fire-protection-box{
   min-width:0;
@@ -4597,11 +4629,11 @@ button:hover{filter:brightness(1.04)}
   text-transform:uppercase;
   white-space:nowrap;
 }
-.rapid-fire-protection-box input{
-  width:82px;
-  min-width:82px;
-  max-width:82px;
-  flex:0 0 82px;
+.rapid-fire-protection-price{
+  width:auto;
+  min-width:0;
+  max-width:none;
+  flex:1 1 66px;
   box-sizing:border-box;
   margin:0;
   padding:4px 5px;
@@ -4617,8 +4649,8 @@ button:hover{filter:brightness(1.04)}
   background:#edf9f0;
 }
 .rapid-fire-protection-set{
-  width:30px;
-  min-width:30px;
+  width:28px;
+  min-width:28px;
   margin:0;
   padding:4px 3px;
   border:1px solid #d9dce1;
@@ -4628,13 +4660,81 @@ button:hover{filter:brightness(1.04)}
   font:700 11px Arial,Helvetica,sans-serif;
 }
 .rapid-fire-protection-pl{
-  min-width:45px;
+  width:50px;
+  min-width:42px;
+  max-width:50px;
+  flex:0 1 50px;
+  box-sizing:border-box;
+  margin:0;
+  padding:4px 5px;
+  border:1px solid #d9dce1;
+  border-radius:4px;
+  background:#fff;
   color:#111;
+  font:700 12px Arial,Helvetica,sans-serif;
   font-weight:700;
   text-align:right;
   font-variant-numeric:tabular-nums;
   white-space:nowrap;
 }
+.rapid-fire-protection-box:nth-child(2) .rapid-fire-protection-pl{
+  width:58px;
+  min-width:58px;
+  max-width:58px;
+  flex-basis:58px;
+  padding-right:18px;
+}
+.rapid-fire-tp-pl-control{
+  width:58px;
+  min-width:58px;
+  max-width:58px;
+  flex:0 0 58px;
+}
+.rapid-fire-new-average-toggle{
+  min-width:0;
+  display:grid;
+  grid-template-columns:1fr 14px;
+  grid-template-rows:1fr 1fr;
+  align-items:center;
+  column-gap:3px;
+  padding:4px 5px;
+  border:1px solid #d9dce1;
+  border-radius:5px;
+  background:#fff;
+  color:#6b7280;
+  font:800 9px/1 Arial,Helvetica,sans-serif;
+  letter-spacing:.02em;
+  text-transform:uppercase;
+}
+.rapid-fire-new-average-toggle span{text-align:left}
+.rapid-fire-new-average-toggle i{
+  grid-column:2;
+  grid-row:1 / span 2;
+  width:14px;
+  height:8px;
+  position:relative;
+  border-radius:999px;
+  background:#c8cdd4;
+}
+.rapid-fire-new-average-toggle i::after{
+  content:"";
+  position:absolute;
+  top:1px;
+  left:1px;
+  width:6px;
+  height:6px;
+  border-radius:50%;
+  background:#fff;
+  box-shadow:0 1px 2px rgba(0,0,0,.24);
+  transition:transform .12s ease;
+}
+.rapid-fire-new-average-toggle.is-active{
+  border-color:#86c99a;
+  background:#edf9f0;
+  color:#047857;
+}
+.rapid-fire-new-average-toggle.is-active i{background:#0a9950}
+.rapid-fire-new-average-toggle.is-active i::after{transform:translateX(6px)}
 .rapid-fire-window [aria-disabled="true"]{cursor:not-allowed;opacity:.62}
 .rapid-fire-window button:disabled{cursor:not-allowed;opacity:.55}
 
@@ -5113,6 +5213,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         clientOrderId:run.clientOrderId,
         startedAt:run.startedAt,
         expiresAt:run.expiresAt,
+        bestBid:run.bestBid,
+        bestAsk:run.bestAsk,
         meta:run.meta
       },extra || {}));
     }
@@ -5137,7 +5239,15 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       const valid = value && value.fresh === true && number(value.bid) > 0 && number(value.ask) > 0;
       return valid ? value : null;
     }
-    function book(){ return usableBook(bookState()); }
+    function rememberBook(value){
+      if(!run || !value) return value;
+      const bid = number(value.bid);
+      const ask = number(value.ask);
+      if(bid > 0) run.bestBid = String(value.bid);
+      if(ask > 0) run.bestAsk = String(value.ask);
+      return value;
+    }
+    function book(){ return usableBook(rememberBook(bookState())); }
     function applyOrder(order,source){
       if(!run || !order) return;
       const normalized = normalizeOrder(order);
@@ -5183,6 +5293,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }
     async function submitFresh(top,recovery){
       if(!run) return;
+      rememberBook(top);
       run.everReceivedBook = !!usableBook(top) || run.everReceivedBook;
       const qty = remaining();
       if(!(qty > 0)) return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
@@ -5249,7 +5360,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
           await cancel(noPrice?run.label + " expired — no book data received":run.label + " expired — remaining qty cancelled",noPrice?{result:"no-price",statusCode:"no-price"}:{result:"expired",statusCode:"expired"});
           return;
         }
-        let rawBook = bookState();
+        let rawBook = rememberBook(bookState());
         let top = usableBook(rawBook);
         if(run.needsSubmit){
           if(!top){
@@ -5257,7 +5368,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
             if(!hasData && !run.firstBookWaitCompleted && typeof opts.waitForTopOfBook === "function"){
               run.firstBookWaitCompleted = true;
               update("Waiting for book data...","normal",{reason:"waiting-book",statusCode:"waiting"});
-              try{ rawBook = await opts.waitForTopOfBook({timeoutMs:Number(opts.firstBookTimeoutMs) || 3000}); }
+              try{ rawBook = rememberBook(await opts.waitForTopOfBook({timeoutMs:Number(opts.firstBookTimeoutMs) || 3000})); }
               catch(_ignored){ rawBook = null; }
               if(!run) return;
               if(run.expiresAt && Date.now() >= run.expiresAt){
@@ -5410,6 +5521,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         recovering:false,
         firstBookWaitCompleted:false,
         everReceivedBook:false,
+        bestBid:null,
+        bestAsk:null,
         reactiveRecovery:false,
         canceling:false,
         cancelIntent:null,
@@ -5587,6 +5700,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   let rapidFireMasterStopOrder = null;
   let rapidFireTakeProfitDraftPrice = null;
   let rapidFireTakeProfitOrder = null;
+  let rapidFireAddDraft = {quantity:0,direction:"LONG"};
+  let rapidFireNewAverageVisible = true;
   let rapidFireProtectionFees = {symbol:"",takerRate:null,entryCommission:null,entryFeeSource:""};
   let rapidFireProtectionReconcileTimer = null;
   let rapidFireProtectionReconciling = false;
@@ -6133,6 +6248,10 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const fillPercent=fillBase>0?clamp(filled/fillBase*100,0,100):0;
     const fillText=Number(fillPercent.toFixed(2));
     const chasePrice=num(value.price)>0?String(value.price).trim():"";
+    const orderSide=String(value.meta&&value.meta.orderSide||"").toUpperCase();
+    const bookLabel=orderSide==="SELL"?"best bid":orderSide==="BUY"?"best ask":"";
+    const bookValue=orderSide==="SELL"?value.bestBid:orderSide==="BUY"?value.bestAsk:null;
+    const currentBook=num(bookValue)>0?String(bookValue).trim():"";
     if(code==="waiting") return {message:"Waiting for price...",tone:"normal"};
     if(code==="stale") return {message:"Price feed stale",tone:"error"};
     if(code==="repricing") return {message:"Repricing...",tone:"error"};
@@ -6143,8 +6262,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     if(code==="expired") return {message:"Expired",tone:"error"};
     if(code==="no-price") return {message:"No price data",tone:"error"};
     if(code==="stopped"||code==="inactive") return {message:String(value.message||"").trim()||"Stopped",tone:"error"};
-    if(["breakeven","master-sl","take-profit","reverse-protection-cancel"].includes(code))return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
-    return {message:"Chasing — "+fillText+"%"+(chasePrice?" @ price: "+chasePrice:""),tone:value.tone==="error"?"error":"normal"};
+    if(["breakeven","master-sl","take-profit","staged-protection","reverse-protection-cancel"].includes(code))return {message:String(value.message||""),tone:value.tone==="error"?"error":"normal"};
+    return {message:"Chasing — "+fillText+"%"+(chasePrice?" @ price: "+chasePrice:"")+(bookLabel&&currentBook?" | "+bookLabel+": "+currentBook:""),tone:value.tone==="error"?"error":"normal"};
   }
   async function submitOpenPositionCloseChsLimit(livePos,quantity,price){
     const clientId = freshOpenPositionCloseClientId();
@@ -6346,7 +6465,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         symbol:openPositionCloseChs.symbol,
         quantity:preview.roundedQty,
         expiresAt:openPositionCloseChs.expiresAt,
-        meta:{distTicks:openPositionCloseChs.distTicks,type:"otf-close"}
+        meta:{distTicks:openPositionCloseChs.distTicks,type:"otf-close",orderSide:openPositionCloseChs.side}
       });
       return;
     }catch(e){
@@ -6394,6 +6513,39 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     if(!(entryCommission>=0&&exitRate>=0&&exitRate<1))return null;
     return raw-entryCommission-exit*qty*exitRate;
   }
+  function rapidFireProtectionContext(options){
+    const opts=options||{};
+    const position=opts.position||rapidFirePositionSnapshot();
+    const directionText=position?position.side:(toUpper(opts.direction||rapidFireAddDraft.direction||direction)==="SHORT"?"SHORT":"LONG");
+    const quantity=position?position.qty:Math.max(0,num(opts.quantity==null?rapidFireAddDraft.quantity:opts.quantity)||0);
+    const entry=position?position.entry:currentPriceReference();
+    const exitRate=num(rapidFireProtectionFees.takerRate);
+    const entryCommission=position
+      ? num(rapidFireProtectionFees.entryCommission)
+      : entry>0&&quantity>0&&exitRate>=0?entry*quantity*exitRate:null;
+    return {position,direction:directionText,quantity,entry,exitRate,entryCommission};
+  }
+  function rapidFireProtectionPriceFromPl(kind,plValue,options){
+    const pl=num(plValue);
+    const context=rapidFireProtectionContext(options);
+    const entry=num(context.entry);
+    const quantity=Math.max(0,num(context.quantity)||0);
+    if(pl==null||!(entry>0&&quantity>0))return null;
+    let rawPrice=null;
+    if(kind==="sl"){
+      const rate=num(context.exitRate);
+      const commission=num(context.entryCommission);
+      if(!(rate>=0&&rate<1&&commission>=0))return null;
+      rawPrice=context.direction==="SHORT"
+        ? (quantity*entry-commission-pl)/(quantity*(1+rate))
+        : (pl+commission+quantity*entry)/(quantity*(1-rate));
+    }else{
+      rawPrice=context.direction==="SHORT"?entry-pl/quantity:entry+pl/quantity;
+    }
+    if(!(rawPrice>0))return null;
+    const normalized=normalizeRapidFirePrice(rawPrice);
+    return normalized.executable?normalized.text:null;
+  }
   function rapidFireSnapshot(options){
     const opts=options||{};
     const position=rapidFirePositionSnapshot();
@@ -6411,8 +6563,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const typedTp=opts.tpPrice==null?null:num(opts.tpPrice);
     const liveMasterStopPrice=num(rapidFireMasterStopOrder&&rapidFireMasterStopOrder.price);
     const liveTakeProfitPrice=num(rapidFireTakeProfitOrder&&rapidFireTakeProfitOrder.price);
-    const masterStopPrice=opts.slPrice!=null?(typedSl>0?typedSl:null):(liveMasterStopPrice>0?liveMasterStopPrice:null);
-    const takeProfitPrice=opts.tpPrice!=null?(typedTp>0?typedTp:null):(liveTakeProfitPrice>0?liveTakeProfitPrice:null);
+    const masterStopPrice=opts.slPrice!=null?(typedSl>0?typedSl:null):(liveMasterStopPrice>0?liveMasterStopPrice:rapidFireMasterDraftPrice>0?rapidFireMasterDraftPrice:null);
+    const takeProfitPrice=opts.tpPrice!=null?(typedTp>0?typedTp:null):(liveTakeProfitPrice>0?liveTakeProfitPrice:rapidFireTakeProfitDraftPrice>0?rapidFireTakeProfitDraftPrice:null);
+    const protectionContext=rapidFireProtectionContext({quantity:opts.addQuantity,direction:opts.direction});
     return {
       symbol:String(currentSymbol()),
       position,
@@ -6425,14 +6578,19 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       closeQty,
       masterStopPrice,
       takeProfitPrice,
-      masterSlPl:position?rapidFireProtectionPl(position.entry,masterStopPrice,position.qty,position.side,{
+      masterSlPl:rapidFireProtectionPl(protectionContext.entry,masterStopPrice,protectionContext.quantity,protectionContext.direction,{
         feeAware:true,
-        entryCommission:rapidFireProtectionFees.entryCommission,
-        exitRate:rapidFireProtectionFees.takerRate
-      }):null,
-      takeProfitPl:position?rapidFireProtectionPl(position.entry,takeProfitPrice,position.qty,position.side,{feeAware:false}):null,
+        entryCommission:protectionContext.entryCommission,
+        exitRate:protectionContext.exitRate
+      }),
+      takeProfitPl:rapidFireProtectionPl(protectionContext.entry,takeProfitPrice,protectionContext.quantity,protectionContext.direction,{feeAware:false}),
+      protectionReferencePrice:protectionContext.entry,
+      protectionQuantity:protectionContext.quantity,
+      protectionDirection:protectionContext.direction,
+      newAverageVisible:rapidFireNewAverageVisible,
       protectionBusy:rapidFireProtectionBusy,
       protectionAction:rapidFireProtectionAction,
+      masterStopOrder:rapidFireMasterStopOrder?{...rapidFireMasterStopOrder}:null,
       takeProfitOrder:rapidFireTakeProfitOrder?{...rapidFireTakeProfitOrder}:null,
       active:!!rapidFireChaseContext,
       busy:!!rapidFireChaseContext||rapidFireBreakevenBusy||rapidFireProtectionBusy,
@@ -6445,22 +6603,51 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       }
     };
   }
-  function rapidFireLotRules(){
+  function rapidFirePrecision(stepValue){
+    const text=String(stepValue==null?"":stepValue).trim();
+    if(!text)return 0;
+    if(/[eE]/.test(text)){
+      const match=text.match(/[eE]-(\d+)$/);
+      return match?Math.max(0,Number(match[1])||0):0;
+    }
+    return (text.split(".")[1]||"").replace(/0+$/g,"").length;
+  }
+  function rapidFireLotRules(settingsOverride){
     const helper=window.BT001SymbolTradingSettings;
-    const settings=helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null;
+    const settings=settingsOverride||(helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null);
     const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
     const lotFilter=filters.find(filter=>toUpper(filter&&filter.filterType)==="LOT_SIZE")||null;
-    const stepSize=Math.max(0,num(settings&&settings.stepSize)||num(lotFilter&&lotFilter.stepSize)||0.001);
-    const minQty=Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize);
-    const maxQty=Math.max(minQty,num(lotFilter&&lotFilter.maxQty)||Number.MAX_SAFE_INTEGER);
-    const stepText=String((settings&&settings.stepSize)||(lotFilter&&lotFilter.stepSize)||stepSize);
-    const precision=(stepText.split(".")[1]||"").replace(/0+$/g,"").length;
-    return {helper,settings,stepSize,minQty,maxQty,precision};
+    const stepText=String((settings&&settings.stepSize)||(lotFilter&&lotFilter.stepSize)||"");
+    const stepSize=Math.max(0,num(stepText)||0);
+    const minQty=stepSize>0?Math.max(stepSize,num(lotFilter&&lotFilter.minQty)||stepSize):0;
+    const maxQty=stepSize>0?Math.max(minQty,num(lotFilter&&lotFilter.maxQty)||Number.MAX_SAFE_INTEGER):0;
+    return {helper,settings,stepSize,minQty,maxQty,precision:rapidFirePrecision(stepText),available:stepSize>0};
+  }
+  function rapidFirePriceRules(settingsOverride){
+    const helper=window.BT001SymbolTradingSettings;
+    const settings=settingsOverride||(helper&&typeof helper.getCached==="function"?helper.getCached(currentSymbol()):null);
+    const filters=Array.isArray(settings&&settings.filters)?settings.filters:[];
+    const priceFilter=filters.find(filter=>toUpper(filter&&filter.filterType)==="PRICE_FILTER")||null;
+    const tickText=String((settings&&settings.tickSize)||(priceFilter&&priceFilter.tickSize)||"");
+    const tickSize=Math.max(0,num(tickText)||0);
+    return {helper,settings,tickSize,precision:rapidFirePrecision(tickText),available:tickSize>0};
+  }
+  function normalizeRapidFirePrice(value,options){
+    const opts=options||{};
+    const rules=rapidFirePriceRules(opts.settings);
+    const raw=num(value);
+    if(!(raw>0)||!rules.available)return {...rules,price:0,text:"",executable:false};
+    const normalizedText=rules.helper&&typeof rules.helper.normalizePrice==="function"
+      ? rules.helper.normalizePrice(raw,rules.settings)
+      : Number(Math.round(raw/rules.tickSize)*rules.tickSize).toFixed(rules.precision);
+    const price=Math.max(0,num(normalizedText)||0);
+    return {...rules,price,text:price.toFixed(rules.precision),executable:price>0};
   }
   function normalizeRapidFireQuantity(value,options){
     const opts=options||{};
-    const rules=rapidFireLotRules();
+    const rules=rapidFireLotRules(opts.settings);
     const raw=Math.max(0,num(value)||0);
+    if(!rules.available)return {...rules,quantity:0,text:"",executable:false};
     const scaled=opts.roundDown?Math.floor((raw+rules.stepSize*1e-9)/rules.stepSize)*rules.stepSize:raw;
     const normalizedText=rules.helper&&typeof rules.helper.normalizeQty==="function"
       ? rules.helper.normalizeQty(scaled,rules.settings)
@@ -6614,21 +6801,18 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }
   }
   function normalizeRapidFireProtectionPrice(value,settings){
-    const raw=num(value);
-    if(!(raw>0))throw new Error("Price must be greater than zero.");
-    const helper=window.BT001SymbolTradingSettings;
-    const normalized=helper&&typeof helper.normalizePrice==="function"
-      ? helper.normalizePrice(raw,settings||helper.getCached(currentSymbol()))
-      : String(Number(raw.toFixed(8)));
-    if(!(num(normalized)>0))throw new Error("Price normalization failed.");
-    return String(normalized);
+    if(!(num(value)>0))throw new Error("Price must be greater than zero.");
+    const normalized=normalizeRapidFirePrice(value,{settings});
+    if(!normalized.available)throw new Error("Binance PRICE_FILTER tick size is unavailable for the current symbol.");
+    if(!normalized.executable)throw new Error("Price normalization failed.");
+    return normalized.text;
   }
   function setRapidFireProtectionDraft(kind,value){
     const price=num(value);
     if(kind==="sl"){
       rapidFireMasterDraftPrice=price>0?price:null;
       const stopInput=q("calcModuleStopLevel");
-      if(stopInput&&price>0){
+      if(stopInput&&price>0&&rapidFirePositionSnapshot()){
         stopInput.value=String(value);
         masterStopMarkedForDeletion=false;
         masterStopDraftDirty=true;
@@ -6645,17 +6829,29 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     calculate();
     return rapidFireSnapshot();
   }
+  function setRapidFireAddDraft(value,directionValue){
+    rapidFireAddDraft={
+      quantity:Math.max(0,num(value)||0),
+      direction:toUpper(directionValue)==="SHORT"?"SHORT":"LONG"
+    };
+    calculate();
+    return {...rapidFireAddDraft};
+  }
+  function setRapidFireNewAverageVisible(value){
+    rapidFireNewAverageVisible=value===true;
+    calculate();
+    return rapidFireNewAverageVisible;
+  }
   async function refreshRapidFireProtectionFees(livePos,force){
     const live=livePos||rapidFirePositionSnapshot();
     const symbol=String(currentSymbol());
-    if(!live||!(num(live.qty)>0))return rapidFireProtectionFees;
-    if(!force&&rapidFireProtectionFees.symbol===symbol&&num(rapidFireProtectionFees.takerRate)>=0&&num(rapidFireProtectionFees.entryCommission)>=0)return rapidFireProtectionFees;
+    if(!force&&rapidFireProtectionFees.symbol===symbol&&num(rapidFireProtectionFees.takerRate)>=0&&(!live||num(rapidFireProtectionFees.entryCommission)>=0))return rapidFireProtectionFees;
     const gateway=window.BT001_BINANCE_TRADING;
     if(!gateway||typeof gateway.commissionRate!=="function")return rapidFireProtectionFees;
     const commission=await gateway.commissionRate(symbol);
     const takerRate=num(commission&&commission.takerCommissionRate);
     if(!(takerRate>=0&&takerRate<1))throw new Error("Binance taker commission rate is unavailable.");
-    const entryFee=rapidFireOpenEntryCommission(live,takerRate);
+    const entryFee=live?rapidFireOpenEntryCommission(live,takerRate):{amount:null,source:"flat-live-market-estimate"};
     rapidFireProtectionFees={symbol,takerRate,entryCommission:entryFee.amount,entryFeeSource:entryFee.source};
     return rapidFireProtectionFees;
   }
@@ -6670,6 +6866,10 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const requestedQuantity=normalizeQtyComparable(quantityValue);
     return currentPrice!=null&&requestedPrice!=null&&currentPrice===requestedPrice
       &&currentQuantity!=null&&requestedQuantity!=null&&currentQuantity===requestedQuantity;
+  }
+  function rapidFireProtectionPriceForUpdate(requestedPrice,liveOrder,quantityOnly){
+    const livePrice=num(liveOrder&&liveOrder.price);
+    return quantityOnly&&livePrice>0?liveOrder.price:requestedPrice;
   }
   function isBinanceNoChangeOrderError(error){
     return /no need to modify the order/i.test(String(error&&error.message||error||""));
@@ -6706,6 +6906,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   function syncRapidFireMasterStopFromSnapshot(livePos,snapshot){
     if(!snapshot||snapshot.algoFetchError)return rapidFireMasterStopOrder;
     const found=livePos?findStopOrderForPosition(livePos,snapshot,true):null;
+    const previous=rapidFireMasterStopOrder;
     rapidFireMasterStopOrder=found&&found.order?{
       symbol:String(found.order.symbol||currentSymbol()),
       price:num(found.price),
@@ -6714,7 +6915,11 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     currentStopAlgoMeta=rapidFireMasterStopOrder?rapidFireMasterStopOrder.meta:null;
     const rfInput=q("rapidFireMasterSl");
     const editing=!!(rfInput&&document.activeElement===rfInput);
-    if(rapidFireMasterStopOrder&&!editing){
+    const externallyChanged=!!(previous&&rapidFireMasterStopOrder&&(
+      String(previous.price)!==String(rapidFireMasterStopOrder.price)
+      ||String(previous.meta&&previous.meta.algoId||previous.meta&&previous.meta.clientAlgoId||"")!==String(rapidFireMasterStopOrder.meta&&rapidFireMasterStopOrder.meta.algoId||rapidFireMasterStopOrder.meta&&rapidFireMasterStopOrder.meta.clientAlgoId||"")
+    ));
+    if(rapidFireMasterStopOrder&&(!editing||externallyChanged)){
       const stopInput=q("calcModuleStopLevel");
       if(stopInput)stopInput.value=String(rapidFireMasterStopOrder.price);
       masterStopDraftDirty=false;
@@ -6740,8 +6945,11 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       const [live,snapshot]=await Promise.all([signedPosition(),readOpenOrdersSnapshot()]);
       syncRapidFireMasterStopFromSnapshot(live,snapshot);
       syncRapidFireTakeProfitFromSnapshot(snapshot);
-      if(live)await refreshRapidFireProtectionFees(live,true);
       calculate();
+      try{window.dispatchEvent(new CustomEvent("bt001:rapid-fire-live-sync",{detail:rapidFireSnapshot()}));}catch(_error){}
+      await refreshRapidFireProtectionFees(live,true);
+      calculate();
+      try{window.dispatchEvent(new CustomEvent("bt001:rapid-fire-live-sync",{detail:rapidFireSnapshot()}));}catch(_error){}
     }catch(_error){}
   }
   function scheduleRapidFireLiveOrderSync(){
@@ -6796,6 +7004,51 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       rapidFireProtectionAction=null;
     }
   }
+  async function cancelRapidFireMasterStop(){
+    if(rapidFireProtectionBusy)throw new Error("A Rapid Fire protection update is already active.");
+    if(rapidFireChaseContext)throw new Error("A Rapid Fire action is already active.");
+    if(typeof hasKeys!=="function"||!hasKeys())throw new Error("API keys required.");
+    rapidFireProtectionBusy=true;
+    rapidFireProtectionAction="master-sl";
+    publishRapidFireStatus({statusCode:"master-sl",message:"Cancelling Master SL...",tone:"normal"});
+    try{
+      const off=typeof timeOffset==="function"?await timeOffset():0;
+      const [live,snapshot]=await Promise.all([signedPosition({off}),readOpenOrdersSnapshot({off})]);
+      syncRapidFireMasterStopFromSnapshot(live,snapshot);
+      if(!rapidFireMasterStopOrder||!rapidFireMasterStopOrder.meta){
+        rapidFireMasterDraftPrice=null;
+        publishRapidFireStatus({statusCode:"master-sl",message:"Master SL — Nothing to cancel",tone:"normal"});
+        calculate();
+        return Object.freeze({cancelled:false,noOrder:true});
+      }
+      const meta=rapidFireMasterStopOrder.meta;
+      const cancelled=await runPlanWriteRow({
+        writable:true,
+        mode:"sl-cancel",
+        payload:{symbol:meta.symbol||currentSymbol(),algoId:meta.algoId,clientAlgoId:meta.clientAlgoId,meta}
+      },live&&live.side,{off,slReplaceState:new Map()});
+      if(!binanceWriteConfirmed(cancelled&&cancelled.response))throw new Error("Binance Master SL cancellation returned an unexpected response.");
+      const confirmedSnapshot=await readOpenOrdersSnapshot({off,binanceRestGateBypass:true});
+      if(confirmedSnapshot.algoFetchError)throw confirmedSnapshot.algoFetchError;
+      if(live&&findStopOrderForPosition(live,confirmedSnapshot,true))throw new Error("Master SL cancellation was not confirmed.");
+      rapidFireMasterStopOrder=null;
+      rapidFireMasterDraftPrice=null;
+      clearMasterStopBinanceState();
+      publishRapidFireStatus({statusCode:"master-sl",message:"Master SL cancelled",tone:"normal"});
+      calculate();
+      return Object.freeze({cancelled:true});
+    }catch(error){
+      try{
+        const [live,snapshot]=await Promise.all([signedPosition(),readOpenOrdersSnapshot()]);
+        syncRapidFireMasterStopFromSnapshot(live,snapshot);
+      }catch(_ignored){}
+      publishRapidFireStatus({statusCode:"master-sl",message:"Master SL cancel failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+      throw error;
+    }finally{
+      rapidFireProtectionBusy=false;
+      rapidFireProtectionAction=null;
+    }
+  }
   async function executeRapidFireTakeProfit(priceValue,options){
     const opts=options||{};
     if(rapidFireProtectionBusy&&!opts.reconcile)throw new Error("A Rapid Fire protection update is already active.");
@@ -6816,8 +7069,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       ]);
       if(!live||!(num(live.qty)>0))throw new Error("No open position.");
       syncRapidFireTakeProfitFromSnapshot(snapshot);
-      const normalizedPrice=normalizeRapidFireProtectionPrice(priceValue,settings);
-      const normalizedQty=normalizeRapidFireQuantity(live.qty);
+      const updatePrice=rapidFireProtectionPriceForUpdate(priceValue,rapidFireTakeProfitOrder,opts.quantityOnly===true);
+      const normalizedPrice=normalizeRapidFireProtectionPrice(updatePrice,settings);
+      const normalizedQty=normalizeRapidFireQuantity(live.qty,{settings});
       if(!normalizedQty.executable)throw new Error("Full open-position quantity is not executable.");
       const orderSide=live.side==="SHORT"?"BUY":"SELL";
       const positionSide=toUpper(live.positionSide||"");
@@ -6949,7 +7203,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       if(!live||!(num(live.qty)>0))return;
       const normalized=normalizeRapidFireQuantity(live.qty);
       if(!normalized.executable||Math.abs(normalized.quantity-(num(rapidFireTakeProfitOrder.quantity)||0))<=Math.max(1e-12,normalized.stepSize*1e-6))return;
-      await executeRapidFireTakeProfit(rapidFireTakeProfitOrder.price,{reconcile:true,silent:true});
+      await executeRapidFireTakeProfit(null,{reconcile:true,quantityOnly:true,silent:true});
       publishRapidFireStatus({statusCode:"take-profit",message:"TP quantity amended in place — "+normalized.text,tone:"normal"});
     }catch(error){
       publishRapidFireStatus({statusCode:"take-profit",message:"TP quantity amend failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
@@ -6975,6 +7229,43 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     else if(identity&&identity.clientOrderId) send.origClientOrderId=String(identity.clientOrderId);
     return send;
   }
+  async function rapidFireConfirmedFilledPosition(){
+    for(let attempt=0;attempt<4;attempt+=1){
+      const live=await signedPosition({binanceRestGateBypass:true});
+      if(live&&num(live.qty)>0&&num(live.entry)>0)return live;
+      if(attempt<3)await new Promise(resolve=>setTimeout(resolve,150));
+    }
+    return null;
+  }
+  async function placeRapidFireStagedProtections(context,state){
+    const staged=context&&context.stagedProtection;
+    if(!staged||String(state&&state.statusCode||state&&state.result||"").toLowerCase()!=="filled")return null;
+    const hasSl=staged.slPl!=null||num(staged.slPrice)>0;
+    const hasTp=staged.tpPl!=null||num(staged.tpPrice)>0;
+    if(!hasSl&&!hasTp)return null;
+    const live=await rapidFireConfirmedFilledPosition();
+    if(!live)throw new Error("Confirmed Add fill did not produce an authoritative open position for staged protection placement.");
+    if(staged.slPl!=null)await refreshRapidFireProtectionFees(live,true);
+    const jobs=[];
+    const slPrice=staged.slPl!=null?rapidFireProtectionPriceFromPl("sl",staged.slPl,{position:live}):staged.slPrice;
+    const tpPrice=staged.tpPl!=null?rapidFireProtectionPriceFromPl("tp",staged.tpPl,{position:live}):staged.tpPrice;
+    if(num(slPrice)>0)jobs.push({kind:"SL",run:()=>executeRapidFireMasterStop(slPrice)});
+    if(num(tpPrice)>0)jobs.push({kind:"TP",run:()=>executeRapidFireTakeProfit(tpPrice)});
+    if(!jobs.length)throw new Error("Staged protection could not be recalculated from the confirmed entry price.");
+    const results=[];
+    for(const job of jobs){
+      try{results.push({kind:job.kind,status:"fulfilled",value:await job.run()});}
+      catch(error){results.push({kind:job.kind,status:"rejected",reason:error});}
+    }
+    const failed=results.filter(item=>item.status==="rejected");
+    if(failed.length){
+      const message=failed.map(item=>item.kind+": "+(item.reason&&item.reason.message?item.reason.message:String(item.reason))).join(" | ");
+      publishRapidFireStatus({statusCode:"staged-protection",message:"Staged protection placement incomplete — "+message,tone:"error"});
+    }else{
+      publishRapidFireStatus({statusCode:"staged-protection",message:"Staged "+results.map(item=>item.kind).join(" + ")+" placed after confirmed Add fill",tone:"normal"});
+    }
+    return results;
+  }
   function ensureRapidFireChaseEngine(){
     if(rapidFireChaseEngine) return rapidFireChaseEngine;
     const factory=window.CalculatorChaseEngine;
@@ -6996,7 +7287,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       submit:async ({quantity,price})=>{
         if(!rapidFireChaseContext) throw new Error("Rapid Fire context is unavailable.");
         const clientId=freshRapidFireClientId();
-        const normalized=normalizeRapidFireQuantity(quantity);
+        const normalized=normalizeRapidFireQuantity(quantity,{settings:rapidFireChaseContext.tradingSettings});
+        if(!normalized.executable)throw new Error("Binance LOT_SIZE step size is unavailable or the quantity is below the symbol minimum.");
         const send={
           symbol:rapidFireChaseContext.symbol,
           side:rapidFireChaseContext.orderSide,
@@ -7022,7 +7314,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         if(!rapidFireChaseContext) throw new Error("Rapid Fire context is unavailable.");
         const send=rapidFireIdentityParams(identity);
         send.side=rapidFireChaseContext.orderSide;
-        send.quantity=normalizeRapidFireQuantity(quantity).text;
+        const normalized=normalizeRapidFireQuantity(quantity,{settings:rapidFireChaseContext.tradingSettings});
+        if(!normalized.executable)throw new Error("Binance LOT_SIZE step size is unavailable or the quantity is below the symbol minimum.");
+        send.quantity=normalized.text;
         send.price=String(price);
         return signedOrderWrite("PUT",send);
       },
@@ -7038,11 +7332,15 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       },
       onUpdate:state=>publishRapidFireStatus(state),
       onFinish:async state=>{
+        const completedContext=rapidFireChaseContext;
         rapidFireChaseContext=null;
         setTopOfBookVisibilityConsumer("rapid-fire-action",false);
         publishRapidFireStatus(state);
         calculate();
         try{await readBinance({preserveSendPlan:true,source:"postSendRefresh"});}catch(_ignored){}
+        try{await placeRapidFireStagedProtections(completedContext,state);}catch(error){
+          publishRapidFireStatus({statusCode:"staged-protection",message:"Staged protection placement failed: "+(error&&error.message?error.message:String(error)),tone:"error"});
+        }
         scheduleRapidFireTakeProfitReconcile();
       }
     });
@@ -7063,7 +7361,11 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         await cancelRapidFireProtections();
         if(rapidFireChaseContext!==startingContext)return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
       }
-      const live=await signedPosition();
+      const settingsApi=window.BT001SymbolTradingSettings;
+      const [live,tradingSettings]=await Promise.all([
+        signedPosition(),
+        settingsApi&&typeof settingsApi.get==="function"?settingsApi.get(currentSymbol()):Promise.resolve(null)
+      ]);
       if(rapidFireChaseContext!==startingContext) return Object.freeze({active:false,result:"cancelled",statusCode:"cancelled"});
       const hasPosition=!!(live&&num(live.qty)>0);
       const liveSide=hasPosition&&String(live.side).toUpperCase()==="SHORT"?"SHORT":"LONG";
@@ -7087,7 +7389,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         reduceOnly=false;
         roleType="CHASE_REVERSE";
       }else requested=num(input.quantity)||0;
-      const normalized=normalizeRapidFireQuantity(requested,{roundDown:action==="close"});
+      const normalized=normalizeRapidFireQuantity(requested,{roundDown:action==="close",settings:tradingSettings});
+      if(!normalized.available)throw new Error("Binance LOT_SIZE step size is unavailable for the current symbol.");
       if(!normalized.executable) throw new Error("Lot size is below the symbol minimum of "+normalized.minQty+".");
       if(action==="close"&&normalized.quantity>Math.abs(num(live.qty)||0)+1e-9) throw new Error("Close quantity exceeds the open position.");
       if(action!=="reverse"){
@@ -7102,9 +7405,15 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       const validOption=openPositionCloseChsValidOption(openPositionCloseUi.chsValidKey);
       const startedAt=Date.now();
       rapidFireChaseContext={
-        action,symbol:String(currentSymbol()),direction:selectedDirection,orderSide,positionSide,reduceOnly,
+        action,symbol:String(currentSymbol()),direction:selectedDirection,orderSide,positionSide,reduceOnly,tradingSettings,
         roleType,distTicks:Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0)),
-        requestedQty:normalized.quantity,startedAt,expiresAt:validOption.ms==null?0:startedAt+validOption.ms
+        requestedQty:normalized.quantity,startedAt,expiresAt:validOption.ms==null?0:startedAt+validOption.ms,
+        stagedProtection:action==="add"&&!hasPosition?{
+          slPrice:num(input.slPrice)>0?num(input.slPrice):null,
+          tpPrice:num(input.tpPrice)>0?num(input.tpPrice):null,
+          slPl:input.slPl!=null&&String(input.slPl).trim()!==""?num(input.slPl):null,
+          tpPl:input.tpPl!=null&&String(input.tpPl).trim()!==""?num(input.tpPl):null
+        }:null
       };
       setTopOfBookVisibilityConsumer("rapid-fire-action",true);
       warmTopOfBook();
@@ -7113,7 +7422,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         symbol:rapidFireChaseContext.symbol,
         quantity:normalized.quantity,
         expiresAt:rapidFireChaseContext.expiresAt,
-        meta:{action,distTicks:rapidFireChaseContext.distTicks,validKey:validOption.key}
+        meta:{action,distTicks:rapidFireChaseContext.distTicks,validKey:validOption.key,orderSide:rapidFireChaseContext.orderSide}
       });
       return rapidFireChaseEngine.state();
     }catch(error){
@@ -7239,7 +7548,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       let row = openRows.shift() || null;
       openRows.forEach(extra => extra.remove());
       if(!row){
-        row = addRow("calcModuleEntryRows",Math.round(position.entry),Number(position.qty).toFixed(3),{
+        row = addRow("calcModuleEntryRows",String(position.entry),String(position.qty),{
           locked:true,
           openPosition:true,
           keepRemoveEnabled:true,
@@ -7248,8 +7557,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       }else{
         const level = levelInput(row);
         const lot = lotInput(row);
-        if(level) level.value = String(Math.round(position.entry));
-        if(lot) lot.value = Number(position.qty).toFixed(3);
+        if(level) level.value = String(position.entry);
+        if(lot) lot.value = String(position.qty);
         setOpenPositionRow(row,true);
         setRowLocked(row,true,{keepRemoveEnabled:true});
       }
@@ -10237,6 +10546,36 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       lot:num(lotInput(row)?.value)
     })).filter(item => !isRowChaseOriginalCancelled(item.row) && item.level != null && item.lot != null && item.lot > 0);
   }
+  function rapidFireNewAverageRow(openEntryRow){
+    if(window.BT001_RAPID_FIRE_VISIBLE!==true||!rapidFireNewAverageVisible)return null;
+    const position=rapidFirePositionSnapshot();
+    const normalized=normalizeRapidFireQuantity(rapidFireAddDraft.quantity);
+    if(!position||!normalized.executable)return null;
+    const hub=window.PUBLIC_MARKET_DATA_HUB;
+    const top=hub&&typeof hub.getTopOfBook==="function"?hub.getTopOfBook():null;
+    if(!top||top.fresh!==true)return null;
+    const orderSide=position.side==="SHORT"?"SELL":"BUY";
+    const chasePrice=num(normalizedChasePrice(orderSide,top,Math.max(0,Math.round(num(openPositionCloseUi.chsDistTicks)||0))));
+    if(!(chasePrice>0))return null;
+    const {domain}=getArchitectureServices();
+    const rowsForAverage=[{level:position.entry,lot:position.qty},{level:chasePrice,lot:normalized.quantity}];
+    const weighted=domain&&typeof domain.weightedAverage==="function"
+      ? domain.weightedAverage(rowsForAverage)
+      : {qty:position.qty+normalized.quantity,avg:(position.entry*position.qty+chasePrice*normalized.quantity)/(position.qty+normalized.quantity)};
+    if(!(num(weighted&&weighted.avg)>0))return null;
+    const averageNormalized=normalizeRapidFirePrice(weighted.avg);
+    const averageText=averageNormalized.executable?averageNormalized.text:String(weighted.avg);
+    return {
+      type:"new-average",
+      level:weighted.avg,
+      row:null,
+      openPosition:false,
+      sourceStyle:"new-average",
+      rapidFireProjection:true,
+      connectorFromRow:openEntryRow&&openEntryRow.row||null,
+      text:"New average : "+averageText
+    };
+  }
   function currentOverlayRows(){
     const rawEntries = usableOverlayRows("calcModuleEntryRows");
     const rawExits = usableOverlayRows("calcModuleExitRows");
@@ -10358,7 +10697,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     }));
     const openEntryRow = entryRows.find(item => item && item.openPosition);
     const extraEntryCount = entryRows.filter(item => item && !item.openPosition).length;
-    const newAverageRow = openEntryRow && extraEntryCount > 0 && entryAvg != null && !approxEqual(entryAvg,openEntryRow.level,1e-9) ? {
+    const calculatorNewAverageRow = openEntryRow && extraEntryCount > 0 && entryAvg != null && !approxEqual(entryAvg,openEntryRow.level,1e-9) ? {
       type:"new-average",
       level:entryAvg,
       row:null,
@@ -10367,6 +10706,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       connectorFromRow:openEntryRow.row,
       text:"New average : " + fmtPrice(entryAvg)
     } : null;
+    const newAverageRow=rapidFireNewAverageRow(openEntryRow)||calculatorNewAverageRow;
     return {entries:entryRows, exits:exitRows, stop:stopRow, partialStops:partialStopRows, newAverage:newAverageRow, entryAvg, entryQty, stopMath};
   }
   function overlayBoxAtClient(clientX,clientY){
@@ -10576,7 +10916,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     alignOrdersOtfButtons();
     overlayLevelBoxes = [];
     const calculatorOpen = calculatorWindowVisible();
-    if(calculatorOpen && !levelsVisible) return;
+    if(calculatorOpen && !levelsVisible && window.BT001_RAPID_FIRE_VISIBLE!==true) return;
     const showOrders=effectiveOrdersVisible();
     if(!calculatorOpen && !showOrders) return;
     if(!canvas || !ctx) return;
@@ -10596,7 +10936,9 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       overlayRows.partialStops || [],
       overlayRows.newAverage ? [overlayRows.newAverage] : []
     )
-      .filter(item => item && (calculatorOpen ? levelsVisible : (((item.binanceBacked || item.openPosition) && showOrders)||(window.BT001_RAPID_FIRE_VISIBLE===true&&item.rapidFireProtection))))
+      .filter(item => item && (calculatorOpen
+        ? (levelsVisible||(window.BT001_RAPID_FIRE_VISIBLE===true&&item.rapidFireProjection))
+        : (((item.binanceBacked || item.openPosition) && showOrders)||(window.BT001_RAPID_FIRE_VISIBLE===true&&(item.rapidFireProtection||item.rapidFireProjection)))))
       .map(item => {
         const y = top + ((maxP - item.level) / (maxP - minP)) * priceH;
         const text = item.openPosition
@@ -13662,7 +14004,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         currentStopAlgoMeta = algoStop && algoStop.order ? buildAlgoOrderMeta(algoStop.order) : null;
       }
       if(pos && stop != null){
-        q("calcModuleStopLevel").value = Math.round(stop);
+        q("calcModuleStopLevel").value = String(stop);
         lastStopEdit = "level";
         masterStopDraftDirty = false;
         syncStopFromLevel(pos.entry);
@@ -14067,12 +14409,18 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       rapidFire:Object.freeze({
         snapshot:rapidFireSnapshot,
         lotRules:rapidFireLotRules,
+        priceRules:rapidFirePriceRules,
+        normalizePrice:normalizeRapidFirePrice,
         normalizeQuantity:normalizeRapidFireQuantity,
+        setAddDraft:setRapidFireAddDraft,
+        setNewAverageVisible:setRapidFireNewAverageVisible,
         execute:executeRapidFireChase,
         breakevenLock:executeRapidFireBreakevenLock,
         setProtectionDraft:setRapidFireProtectionDraft,
         clearProtectionDraft:clearRapidFireProtectionDraft,
+        protectionPriceFromPl:rapidFireProtectionPriceFromPl,
         setMasterStop:executeRapidFireMasterStop,
+        cancelMasterStop:cancelRapidFireMasterStop,
         setTakeProfit:executeRapidFireTakeProfit,
         cancelTakeProfit:cancelRapidFireTakeProfit,
         cancelProtections:cancelRapidFireProtections,
@@ -14081,8 +14429,13 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         setVisible(active){
           setTopOfBookVisibilityConsumer("rapid-fire",active===true);
           setOrdersVisibilityConsumer("rapid-fire",active===true);
-          if(active){warmTopOfBook();void warmRapidFireProtection();}
-          else{rapidFireMasterDraftPrice=null;rapidFireTakeProfitDraftPrice=null;calculate();}
+          if(active){
+            warmTopOfBook();
+            const settingsApi=window.BT001SymbolTradingSettings;
+            if(settingsApi&&typeof settingsApi.get==="function")void settingsApi.get(currentSymbol()).then(()=>calculate()).catch(()=>{});
+            void warmRapidFireProtection();
+          }
+          else{rapidFireAddDraft={quantity:0,direction:"LONG"};calculate();}
         },
         subscribe(listener){
           if(typeof listener!=="function") return ()=>{};
@@ -14140,8 +14493,13 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
   let selectedDirection="LONG";
   let doubleArmTimer=null;
   let closeQuantityOverride=null;
+  let pendingMasterStopValue=null;
   let pendingTakeProfitValue=null;
   let takeProfitEditValue=null;
+  const protectionEditDriver={sl:"price",tp:"price"};
+  const protectionPlTarget={sl:null,tp:null};
+  const lastProtectionOrderSignature={sl:null,tp:null};
+  let lastProtectionPositionSignature=null;
 
   function q(id){return document.getElementById(id);}
   function api(){return window.CALCULATOR_MODULE&&window.CALCULATOR_MODULE.rapidFire;}
@@ -14158,7 +14516,75 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     return (rounded>0?"+":"")+rounded+"%";
   }
   function moneyColor(value){const parsed=number(value);return parsed==null||parsed===0?"#111":parsed>0?"#047857":"#f6465d";}
-  function lot(value,precision=3){const parsed=number(value);return parsed==null?"0.000":parsed.toFixed(Math.max(0,precision));}
+  function lot(value,precision=0){const digits=Math.max(0,Number(precision)||0);const parsed=number(value);return (parsed==null?0:parsed).toFixed(digits);}
+  function decimalDraft(value,allowNegative=false){
+    let text=String(value==null?"":value).replace(/,/g,"").replace(allowNegative?/[^0-9.\-]/g:/[^0-9.]/g,"");
+    const negative=allowNegative&&text.startsWith("-");
+    text=text.replace(/-/g,"");
+    const dot=text.indexOf(".");
+    if(dot>=0)text=text.slice(0,dot+1)+text.slice(dot+1).replace(/\./g,"");
+    return (negative?"-":"")+text;
+  }
+  function bindNumericDraftInput(input,options){
+    const opts=options||{};
+    if(!input)return null;
+    const controller={
+      input,
+      commit(reason,event){
+        if(typeof opts.onCommit==="function")opts.onCommit(input.value,reason||"change",event||null);
+      },
+      setDraft(value,commit=false){
+        input.value=decimalDraft(value,opts.allowNegative===true);
+        input.dispatchEvent(new Event("input",{bubbles:true}));
+        if(commit)input.dispatchEvent(new Event("change",{bubbles:true}));
+      }
+    };
+    input.dataset.rfNumericDraft="1";
+    input.addEventListener("input",event=>{
+      const draft=decimalDraft(event.target.value,opts.allowNegative===true);
+      if(event.target.value!==draft)event.target.value=draft;
+      if(typeof opts.onDraft==="function")opts.onDraft(draft,event);
+    },false);
+    input.addEventListener("change",event=>controller.commit("change",event),false);
+    input.addEventListener("keydown",event=>{
+      if(event.key!=="Enter")return;
+      event.preventDefault();
+      input.blur();
+    },false);
+    return controller;
+  }
+  function bindNumericStepper(controller,upButton,downButton,stepResolver,precisionResolver){
+    if(!controller)return;
+    const adjust=direction=>{
+      const step=Math.max(0,number(typeof stepResolver==="function"?stepResolver():stepResolver)||0);
+      if(!(step>0))return;
+      const precision=Math.max(0,number(typeof precisionResolver==="function"?precisionResolver():precisionResolver)||0);
+      const next=protectionWheelValue(controller.input.value,step,direction,precision);
+      if(next!=null)controller.setDraft(next,true);
+    };
+    [[upButton,1],[downButton,-1]].forEach(([button,direction])=>{
+      if(!button)return;
+      button.addEventListener("mousedown",event=>event.preventDefault(),false);
+      button.addEventListener("click",()=>adjust(direction),false);
+    });
+  }
+  function protectionPlText(value){const parsed=number(value);return parsed==null?"":parsed.toFixed(2);}
+  function protectionOrderSignature(order){
+    if(!order)return "";
+    const meta=order.meta||{};
+    return [order.orderId,order.clientOrderId,meta.algoId,meta.clientAlgoId,order.price,order.quantity].map(value=>String(value==null?"":value)).join("|");
+  }
+  function normalizedPriceText(value,bridge){
+    const normalized=bridge&&typeof bridge.normalizePrice==="function"?bridge.normalizePrice(value):null;
+    return normalized&&normalized.executable?normalized.text:(number(value)>0?String(value):"");
+  }
+  function protectionWheelValue(currentValue,stepValue,direction,precision){
+    const current=number(currentValue)||0;
+    const step=Math.max(0,number(stepValue)||0);
+    if(!(step>0))return null;
+    const scale=Math.pow(10,Math.max(0,number(precision)||0));
+    return Math.round((current+direction*step)*scale)/scale;
+  }
   function positionSizeParts(sizeValue,closeQtyValue){
     const size=Math.max(0,number(sizeValue)||0);
     const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
@@ -14251,14 +14677,72 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const closeSlider=q("rapidFireClosePercent");
     const slInput=q("rapidFireMasterSl");
     const tpInput=q("rapidFireTakeProfit");
+    const slPlInput=q("rapidFireMasterSlPl");
+    const tpPlInput=q("rapidFireTakeProfitPl");
+    const lotInput=q("rapidFireLot");
+    const addQuantity=lotInput?lotInput.value:0;
+    if(typeof bridge.setAddDraft==="function")bridge.setAddDraft(addQuantity,selectedDirection);
+    const referenceSnapshot=bridge.snapshot({addQuantity,direction:selectedDirection});
+    const referencePosition=referenceSnapshot.position;
+    const positionSignature=referencePosition
+      ? [referenceSnapshot.symbol,referencePosition.side,referencePosition.qty,referencePosition.entry].map(String).join("|")
+      : "";
+    const positionReferenceChanged=lastProtectionPositionSignature!==null&&lastProtectionPositionSignature!==positionSignature;
+    lastProtectionPositionSignature=positionSignature;
+    if(positionReferenceChanged&&referencePosition){
+      ["sl","tp"].forEach(kind=>{
+        protectionEditDriver[kind]="price";
+        protectionPlTarget[kind]=null;
+        const liveOrder=kind==="sl"?referenceSnapshot.masterStopOrder:referenceSnapshot.takeProfitOrder;
+        if(liveOrder&&typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft(kind);
+      });
+    }
+    ["sl","tp"].forEach(kind=>{
+      const target=protectionPlTarget[kind];
+      if(protectionEditDriver[kind]!=="pl"||target==null||typeof bridge.protectionPriceFromPl!=="function")return;
+      const price=bridge.protectionPriceFromPl(kind,target,{quantity:addQuantity,direction:selectedDirection});
+      if(!(number(price)>0))return;
+      const input=kind==="sl"?slInput:tpInput;
+      const priceText=normalizedPriceText(price,bridge);
+      input.value=priceText;
+      if(kind==="sl")pendingMasterStopValue=priceText;
+      else pendingTakeProfitValue=priceText;
+      if(typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft(kind,priceText);
+    });
     const slEditing=document.activeElement===slInput;
     const tpEditing=document.activeElement===tpInput;
-    const snapshot=bridge.snapshot({
+    let snapshot=bridge.snapshot({
       closePercent:closeSlider?closeSlider.value:100,
       closeQty:closeQuantityOverride,
       slPrice:slEditing?slInput.value:null,
-      tpPrice:tpEditing?tpInput.value:null
+      tpPrice:tpEditing?tpInput.value:null,
+      addQuantity,
+      direction:selectedDirection
     });
+    const liveOrderSignatures={
+      sl:protectionOrderSignature(snapshot.masterStopOrder),
+      tp:protectionOrderSignature(snapshot.takeProfitOrder)
+    };
+    const authoritativeProtectionChange={sl:false,tp:false};
+    ["sl","tp"].forEach(kind=>{
+      const previous=lastProtectionOrderSignature[kind];
+      const current=liveOrderSignatures[kind];
+      authoritativeProtectionChange[kind]=previous!==null&&previous!==current;
+      lastProtectionOrderSignature[kind]=current;
+      if(!authoritativeProtectionChange[kind])return;
+      protectionEditDriver[kind]="price";
+      protectionPlTarget[kind]=null;
+      if(kind==="sl")pendingMasterStopValue=null;
+      else{pendingTakeProfitValue=null;takeProfitEditValue=null;}
+    });
+    if(authoritativeProtectionChange.sl||authoritativeProtectionChange.tp){
+      snapshot=bridge.snapshot({
+        closePercent:closeSlider?closeSlider.value:100,
+        closeQty:closeQuantityOverride,
+        addQuantity,
+        direction:selectedDirection
+      });
+    }
     const position=snapshot.position;
     if(position)selectedDirection=position.side;
     const openSize=q("rapidFireOpenSize");
@@ -14266,19 +14750,28 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const floating=q("rapidFirePl");
     const floatingPercent=q("rapidFirePlPercent");
     const rules=bridge.lotRules();
-    const precision=Math.max(3,number(rules.precision)||3);
+    const precision=Math.max(0,number(rules.precision)||0);
+    const zeroLot=lot(0,precision);
+    const priceRules=typeof bridge.priceRules==="function"?bridge.priceRules():{tickSize:0,precision:0,available:false};
+    [slInput,tpInput].forEach(input=>{
+      if(!input)return;
+      input.step=priceRules.available?String(priceRules.tickSize):"any";
+      input.dataset.precision=String(priceRules.precision);
+    });
     const {closed,remaining}=positionSizeParts(snapshot.size,snapshot.closeQty);
     if(openSize){
-      openSize.min="0.000";
+      openSize.disabled=!rules.available;
+      openSize.min=zeroLot;
       openSize.max=lot(snapshot.size,precision);
-      openSize.step=String(rules.stepSize);
+      openSize.step=rules.available?String(rules.stepSize):"any";
       openSize.dataset.precision=String(precision);
       if(document.activeElement!==openSize)openSize.value=lot(remaining,precision);
     }
     if(closeSize){
-      closeSize.min="0.000";
+      closeSize.disabled=!rules.available;
+      closeSize.min=zeroLot;
       closeSize.max=lot(snapshot.size,precision);
-      closeSize.step=String(rules.stepSize);
+      closeSize.step=rules.available?String(rules.stepSize):"any";
       closeSize.dataset.precision=String(precision);
       if(document.activeElement!==closeSize)closeSize.value=lot(closed,precision);
     }
@@ -14298,11 +14791,12 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       dir.setAttribute("aria-disabled",position?"true":"false");
       dir.title=position?"Direction follows the open position":"Click to switch LONG / SHORT";
     }
-    const lotInput=q("rapidFireLot");
     if(lotInput){
-      lotInput.min="0.000";
-      lotInput.step=String(rules.stepSize);
+      lotInput.disabled=!rules.available;
+      lotInput.min=zeroLot;
+      lotInput.step=rules.available?String(rules.stepSize):"any";
       lotInput.dataset.precision=String(rules.precision);
+      if(document.activeElement!==lotInput&&number(lotInput.value)===0)lotInput.value=zeroLot;
     }
     const busy=!!snapshot.busy;
     const actionButtons={add:q("rapidFireAdd"),double:q("rapidFireDouble"),close:q("rapidFireClose"),reverse:q("rapidFireReverse"),breakeven:q("rapidFireBreakeven")};
@@ -14310,7 +14804,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     Object.entries(actionButtons).forEach(([action,button])=>{
       if(!button)return;
       const active=busy&&snapshot.activeAction===action;
-      button.disabled=busy&&(!active||action==="breakeven");
+      button.disabled=!rules.available||(busy&&(!active||action==="breakeven"));
       button.classList.toggle("is-cancel",active&&action!=="breakeven");
       if(active&&action!=="breakeven")button.textContent="Cancel";
       else if(action!=="double"||button.dataset.armed!=="1")button.textContent=actionLabels[action];
@@ -14323,20 +14817,27 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       resetDoubleArm();
     }
     const protectionBusy=!!snapshot.protectionBusy;
-    [slInput,tpInput].forEach(input=>{if(input)input.disabled=!position||protectionBusy;});
+    [slInput,tpInput,slPlInput,tpPlInput].forEach(input=>{if(input)input.disabled=protectionBusy||!priceRules.available;});
     const tpSet=q("rapidFireTakeProfitSet");
-    if(tpSet)tpSet.disabled=!position||protectionBusy;
-    if(slInput&&document.activeElement!==slInput)slInput.value=snapshot.masterStopPrice==null?"":String(snapshot.masterStopPrice);
+    if(tpSet)tpSet.disabled=protectionBusy||!priceRules.available;
+    if(slInput&&(document.activeElement!==slInput||authoritativeProtectionChange.sl))slInput.value=snapshot.masterStopPrice==null?"":normalizedPriceText(snapshot.masterStopPrice,bridge);
+    if(!position&&snapshot.masterStopPrice>0)pendingMasterStopValue=String(snapshot.masterStopPrice);
     const tpField=takeProfitFieldState(snapshot.takeProfitOrder,snapshot.takeProfitPrice,pendingTakeProfitValue);
     if(tpField.hasLive)pendingTakeProfitValue=null;
-    if(tpInput&&document.activeElement!==tpInput){
-      tpInput.value=tpField.value;
+    if(tpInput&&(document.activeElement!==tpInput||authoritativeProtectionChange.tp)){
+      tpInput.value=tpField.value===""?"":normalizedPriceText(tpField.value,bridge);
     }
     if(tpInput)tpInput.classList.toggle("is-pending-unsent",tpField.pending);
-    const slPreview=q("rapidFireMasterSlPl");
-    const tpPreview=q("rapidFireTakeProfitPl");
-    if(slPreview){slPreview.textContent=money(snapshot.masterSlPl);slPreview.style.color=moneyColor(snapshot.masterSlPl);}
-    if(tpPreview){tpPreview.textContent=money(snapshot.takeProfitPl);tpPreview.style.color=moneyColor(snapshot.takeProfitPl);}
+    if(slInput)slInput.classList.toggle("is-pending-unsent",!position&&number(snapshot.masterStopPrice)>0);
+    if(slPlInput&&(document.activeElement!==slPlInput||authoritativeProtectionChange.sl))slPlInput.value=protectionEditDriver.sl==="pl"&&protectionPlTarget.sl!=null?protectionPlText(protectionPlTarget.sl):protectionPlText(snapshot.masterSlPl);
+    if(tpPlInput&&(document.activeElement!==tpPlInput||authoritativeProtectionChange.tp))tpPlInput.value=protectionEditDriver.tp==="pl"&&protectionPlTarget.tp!=null?protectionPlText(protectionPlTarget.tp):protectionPlText(snapshot.takeProfitPl);
+    if(slPlInput)slPlInput.style.color=moneyColor(snapshot.masterSlPl);
+    if(tpPlInput)tpPlInput.style.color=moneyColor(snapshot.takeProfitPl);
+    const newAverageToggle=q("rapidFireNewAverageToggle");
+    if(newAverageToggle){
+      newAverageToggle.setAttribute("aria-pressed",snapshot.newAverageVisible?"true":"false");
+      newAverageToggle.classList.toggle("is-active",!!snapshot.newAverageVisible);
+    }
   }
   async function execute(config){
     const bridge=api();
@@ -14373,27 +14874,48 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     const bridge=api();
     if(!bridge||!input)return;
     const rawValue=valueOverride!=null?valueOverride:input.value;
-    if(kind==="tp"&&String(rawValue==null?"":rawValue).trim()===""){
+    const snapshot=bridge.snapshot();
+    if(String(rawValue==null?"":rawValue).trim()===""){
       try{
-        const snapshot=bridge.snapshot();
-        if(snapshot.takeProfitOrder&&typeof bridge.cancelTakeProfit==="function"){
-          const pending=bridge.cancelTakeProfit();
+        const liveOrder=kind==="tp"?snapshot.takeProfitOrder:snapshot.masterStopOrder;
+        const cancel=kind==="tp"?bridge.cancelTakeProfit:bridge.cancelMasterStop;
+        const shouldCheckAuthoritatively=kind==="sl"&&snapshot.position&&typeof cancel==="function";
+        if(snapshot.position&&(liveOrder||shouldCheckAuthoritatively)&&typeof cancel==="function"){
+          const pending=cancel();
           render();
           await pending;
         }
-        pendingTakeProfitValue=null;
-        takeProfitEditValue=null;
-        if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
-      }catch(_error){takeProfitEditValue=null;}
+        if(kind==="sl")pendingMasterStopValue=null;
+        else{pendingTakeProfitValue=null;takeProfitEditValue=null;}
+        protectionPlTarget[kind]=null;
+        protectionEditDriver[kind]="price";
+        if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft(kind);
+      }catch(_error){if(kind==="tp")takeProfitEditValue=null;}
       render();
       return;
     }
     const price=number(rawValue);
     if(!(price>0))return;
+    const normalized=typeof bridge.normalizePrice==="function"?bridge.normalizePrice(price):null;
+    if(!normalized||!normalized.executable){
+      setStatus("Binance PRICE_FILTER tick size is unavailable for the current symbol.","error");
+      return;
+    }
+    const normalizedPrice=normalized.text;
+    input.value=normalizedPrice;
+    if(!snapshot.position){
+      if(typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft(kind,normalizedPrice);
+      if(kind==="sl")pendingMasterStopValue=normalizedPrice;
+      else{pendingTakeProfitValue=normalizedPrice;takeProfitEditValue=null;}
+      render();
+      return;
+    }
     try{
-      const pending=kind==="sl"?bridge.setMasterStop(price):bridge.setTakeProfit(price);
+      const pending=kind==="sl"?bridge.setMasterStop(normalizedPrice):bridge.setTakeProfit(normalizedPrice);
       render();
       await pending;
+      protectionEditDriver[kind]="price";
+      protectionPlTarget[kind]=null;
       if(kind==="tp"){
         pendingTakeProfitValue=null;
         takeProfitEditValue=null;
@@ -14420,14 +14942,17 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Remaining lot"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Close lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Remaining lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Close lot"></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
         <div class="rapid-fire-add-row" aria-label="Add, double, or protect position">
           <button class="rapid-fire-dir is-long" id="rapidFireDir" type="button">LONG</button>
-          <input class="rapid-fire-lot" id="rapidFireLot" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Rapid Fire lot size">
+          <span class="rapid-fire-number-control rapid-fire-lot-control">
+            <input class="rapid-fire-lot" id="rapidFireLot" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Rapid Fire lot size">
+            <span class="rapid-fire-number-steppers"><button id="rapidFireLotUp" type="button" tabindex="-1" aria-label="Increase Rapid Fire lot">&#9650;</button><button id="rapidFireLotDown" type="button" tabindex="-1" aria-label="Decrease Rapid Fire lot">&#9660;</button></span>
+          </span>
           <button class="rapid-fire-button" id="rapidFireAdd" type="button">ADD</button>
           <button class="rapid-fire-button" id="rapidFireDouble" type="button" title="Click once to arm, then again within 3 seconds">DBL</button>
           <button class="rapid-fire-button" id="rapidFireBreakeven" type="button" title="Place a fee-aware Master SL at breakeven">B.E.</button>
@@ -14454,15 +14979,19 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         <div class="rapid-fire-protection-row" aria-label="Rapid Fire protection orders">
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">SL</span>
-            <input id="rapidFireMasterSl" type="number" inputmode="decimal" min="0" placeholder="Price" aria-label="Master stop loss price">
-            <span class="rapid-fire-protection-pl" id="rapidFireMasterSlPl">-</span>
+            <input class="rapid-fire-protection-price" id="rapidFireMasterSl" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Master stop loss price">
+            <input class="rapid-fire-protection-pl" id="rapidFireMasterSlPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Master stop loss P/L">
           </label>
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">TP</span>
-            <input id="rapidFireTakeProfit" type="number" inputmode="decimal" min="0" placeholder="Price" aria-label="Take profit price">
+            <input class="rapid-fire-protection-price" id="rapidFireTakeProfit" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Take profit price">
             <button class="rapid-fire-protection-set" id="rapidFireTakeProfitSet" type="button">Set</button>
-            <span class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl">-</span>
+            <span class="rapid-fire-number-control rapid-fire-tp-pl-control">
+              <input class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Take profit P/L">
+              <span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitPlUp" type="button" tabindex="-1" aria-label="Increase take profit P/L">&#9650;</button><button id="rapidFireTakeProfitPlDown" type="button" tabindex="-1" aria-label="Decrease take profit P/L">&#9660;</button></span>
+            </span>
           </label>
+          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the New Average projection line"><span>New</span><span>Avg</span><i aria-hidden="true"></i></button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -14475,36 +15004,46 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     q("rapidFireDir").addEventListener("click",()=>{
       if(api().snapshot().position)return;
       selectedDirection=selectedDirection==="LONG"?"SHORT":"LONG";
+      if(typeof api().setAddDraft==="function")api().setAddDraft(q("rapidFireLot").value,selectedDirection);
       render();
     },false);
-    q("rapidFireLot").addEventListener("change",event=>{
-      const bridge=api();
-      const normalized=bridge.normalizeQuantity(event.target.value);
-      event.target.value=lot(normalized.quantity,normalized.precision);
-    },false);
+    const lotInput=q("rapidFireLot");
     const openSize=q("rapidFireOpenSize");
     const closeSize=q("rapidFireCloseSize");
-    const syncEditedSize=(editedKind,event,finalize=false)=>{
+    const syncEditedSize=(editedKind,input,finalize=false)=>{
       const bridge=api();
       const snapshot=bridge.snapshot();
-      const precision=Math.max(3,number(event.target.dataset.precision)||3);
-      const parts=editedPositionSizeParts(snapshot.size,event.target.value,editedKind,value=>bridge.normalizeQuantity(value));
+      const precision=Math.max(0,number(input.dataset.precision)||0);
+      const parts=editedPositionSizeParts(snapshot.size,input.value,editedKind,value=>bridge.normalizeQuantity(value));
       const edited=parts.active;
       closeQuantityOverride=parts.closed;
-      const typed=event.target.value;
+      const typed=input.value;
       setCloseSliderDisplay(parts.total>0?closeQuantityOverride/parts.total*100:0);
       render();
-      event.target.value=finalize?lot(edited,precision):typed;
+      input.value=finalize?lot(edited,precision):typed;
     };
-    openSize.addEventListener("input",event=>syncEditedSize("remaining",event),false);
-    openSize.addEventListener("change",event=>syncEditedSize("remaining",event,true),false);
-    closeSize.addEventListener("input",event=>{
-      syncEditedSize("close",event);
-    },false);
-    closeSize.addEventListener("change",event=>{
-      syncEditedSize("close",event,true);
-    },false);
-    q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",direction:selectedDirection,quantity:q("rapidFireLot").value}),false);
+    const lotController=bindNumericDraftInput(lotInput,{
+      onDraft:value=>{
+        const bridge=api();
+        if(bridge&&typeof bridge.setAddDraft==="function")bridge.setAddDraft(value,selectedDirection);
+        render();
+      },
+      onCommit:()=>{
+        const bridge=api();
+        const normalized=bridge.normalizeQuantity(lotInput.value);
+        if(normalized.available)lotInput.value=normalized.text;
+        if(typeof bridge.setAddDraft==="function")bridge.setAddDraft(lotInput.value,selectedDirection);
+      }
+    });
+    bindNumericStepper(lotController,q("rapidFireLotUp"),q("rapidFireLotDown"),()=>api().lotRules().stepSize,()=>api().lotRules().precision);
+    bindNumericDraftInput(openSize,{onDraft:()=>syncEditedSize("remaining",openSize),onCommit:()=>syncEditedSize("remaining",openSize,true)});
+    bindNumericDraftInput(closeSize,{onDraft:()=>syncEditedSize("close",closeSize),onCommit:()=>syncEditedSize("close",closeSize,true)});
+    q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",
+      direction:selectedDirection,quantity:q("rapidFireLot").value,
+      slPrice:q("rapidFireMasterSl").value,tpPrice:q("rapidFireTakeProfit").value,
+      slPl:protectionEditDriver.sl==="pl"?protectionPlTarget.sl:null,
+      tpPl:protectionEditDriver.tp==="pl"?protectionPlTarget.tp:null
+    }),false);
     q("rapidFireDouble").addEventListener("click",()=>{
       const button=q("rapidFireDouble");
       const snapshot=api().snapshot();
@@ -14533,23 +15072,122 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     q("rapidFireReverse").addEventListener("click",()=>executeOrCancel({action:"reverse",percent:reverseSlider.value}),false);
     const slInput=q("rapidFireMasterSl");
     const tpInput=q("rapidFireTakeProfit");
-    slInput.addEventListener("input",()=>previewProtection("sl",slInput),false);
-    tpInput.addEventListener("input",()=>{
+    const slPlInput=q("rapidFireMasterSlPl");
+    const tpPlInput=q("rapidFireTakeProfitPl");
+    const newAverageToggle=q("rapidFireNewAverageToggle");
+    newAverageToggle.addEventListener("click",()=>{
       const bridge=api();
-      const hasLiveTakeProfit=!!(bridge&&bridge.snapshot().takeProfitOrder);
-      takeProfitEditValue=tpInput.value.trim()===""?null:tpInput.value;
-      pendingTakeProfitValue=hasLiveTakeProfit?null:takeProfitEditValue;
-      previewProtection("tp",tpInput);
+      const next=newAverageToggle.getAttribute("aria-pressed")!=="true";
+      if(bridge&&typeof bridge.setNewAverageVisible==="function")bridge.setNewAverageVisible(next);
+      render();
     },false);
-    slInput.addEventListener("change",()=>{void commitProtection("sl",slInput);},false);
-    slInput.addEventListener("keydown",event=>{if(event.key==="Enter")slInput.blur();},false);
+    const draftProtectionPrice=(kind,input,value)=>{
+      protectionEditDriver[kind]="price";
+      protectionPlTarget[kind]=null;
+      if(kind==="sl")pendingMasterStopValue=value.trim()===""?null:value;
+      else{
+        const bridge=api();
+        const hasLiveTakeProfit=!!(bridge&&bridge.snapshot().takeProfitOrder);
+        takeProfitEditValue=value.trim()===""?null:value;
+        pendingTakeProfitValue=hasLiveTakeProfit?null:takeProfitEditValue;
+      }
+      previewProtection(kind,input);
+    };
+    const finalizeProtectionPriceDraft=(kind,input)=>{
+      if(input.value.trim()==="")return;
+      const bridge=api();
+      const normalized=bridge.normalizePrice(input.value);
+      if(!normalized.executable)return;
+      input.value=normalized.text;
+      if(kind==="sl")pendingMasterStopValue=normalized.text;
+      else{pendingTakeProfitValue=normalized.text;takeProfitEditValue=normalized.text;}
+      previewProtection(kind,input);
+    };
+    const draftProtectionPl=(kind,plInput,priceInput,value)=>{
+      protectionEditDriver[kind]="pl";
+      protectionPlTarget[kind]=value.trim()===""?null:value;
+      if(protectionPlTarget[kind]==null){
+        priceInput.value="";
+        if(kind==="sl")pendingMasterStopValue=null;
+        else{pendingTakeProfitValue=null;takeProfitEditValue="";}
+        previewProtection(kind,priceInput);
+        return;
+      }
+      const bridge=api();
+      const price=bridge&&typeof bridge.protectionPriceFromPl==="function"
+        ? bridge.protectionPriceFromPl(kind,protectionPlTarget[kind],{quantity:lotInput.value,direction:selectedDirection})
+        : null;
+      if(number(price)>0){
+        priceInput.value=String(price);
+        if(kind==="sl")pendingMasterStopValue=String(price);
+        else{pendingTakeProfitValue=String(price);takeProfitEditValue=String(price);}
+        previewProtection(kind,priceInput);
+      }else render();
+    };
+    const finalizeProtectionPl=(kind,input)=>{
+      if(input.value.trim()==="")return;
+      input.value=protectionPlText(input.value);
+      protectionPlTarget[kind]=input.value;
+    };
+    const numericControllers={
+      slPrice:bindNumericDraftInput(slInput,{onDraft:value=>draftProtectionPrice("sl",slInput,value),onCommit:()=>{void commitProtection("sl",slInput);}}),
+      tpPrice:bindNumericDraftInput(tpInput,{onDraft:value=>draftProtectionPrice("tp",tpInput,value),onCommit:()=>finalizeProtectionPriceDraft("tp",tpInput)}),
+      slPl:bindNumericDraftInput(slPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("sl",slPlInput,slInput,value),onCommit:()=>{finalizeProtectionPl("sl",slPlInput);void commitProtection("sl",slInput);}}),
+      tpPl:bindNumericDraftInput(tpPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("tp",tpPlInput,tpInput,value),onCommit:()=>finalizeProtectionPl("tp",tpPlInput)})
+    };
+    bindNumericStepper(numericControllers.tpPl,q("rapidFireTakeProfitPlUp"),q("rapidFireTakeProfitPlDown"),0.5,2);
+    const bindProtectionWheel=(kind,controller,mode)=>{
+      const input=controller.input;
+      input.addEventListener("wheel",event=>{
+        if(input.disabled)return;
+        const bridge=api();
+        if(!bridge)return;
+        const direction=event.deltaY<0?1:-1;
+        const snapshot=bridge.snapshot();
+        if(mode==="price"){
+          const rules=bridge.priceRules();
+          if(!rules.available)return;
+          const fallback=kind==="sl"?snapshot.masterStopPrice:snapshot.takeProfitPrice;
+          const base=number(input.value)>0?input.value:(number(fallback)>0?fallback:snapshot.protectionReferencePrice);
+          if(!(number(base)>0))return;
+          const adjusted=protectionWheelValue(base,rules.tickSize,direction,rules.precision);
+          const normalized=bridge.normalizePrice(adjusted);
+          if(!normalized.executable)return;
+          input.value=normalized.text;
+        }else{
+          const fallback=kind==="sl"?snapshot.masterSlPl:snapshot.takeProfitPl;
+          const adjusted=protectionWheelValue(number(input.value)==null?fallback:input.value,0.5,direction,2);
+          if(adjusted==null)return;
+          input.value=protectionPlText(adjusted);
+        }
+        event.preventDefault();
+        controller.setDraft(input.value,true);
+      },{passive:false});
+    };
+    bindProtectionWheel("sl",numericControllers.slPrice,"price");
+    bindProtectionWheel("sl",numericControllers.slPl,"pl");
+    bindProtectionWheel("tp",numericControllers.tpPrice,"price");
+    bindProtectionWheel("tp",numericControllers.tpPl,"pl");
     const tpSet=q("rapidFireTakeProfitSet");
     const tpProtectionBox=tpInput.closest(".rapid-fire-protection-box");
     tpSet.addEventListener("mousedown",event=>event.preventDefault(),false);
     tpProtectionBox.addEventListener("focusout",()=>{setTimeout(()=>{
       if(tpProtectionBox.contains(document.activeElement))return;
       const bridge=api();
-      if(!bridge||!bridge.snapshot().takeProfitOrder)return;
+      if(!bridge)return;
+      if(!bridge.snapshot().takeProfitOrder){
+        if(tpInput.value.trim()!==""){
+          const normalized=bridge.normalizePrice(tpInput.value);
+          if(normalized.executable){
+            tpInput.value=normalized.text;
+            pendingTakeProfitValue=normalized.text;
+            takeProfitEditValue=normalized.text;
+            if(typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft("tp",normalized.text);
+            render();
+          }
+        }
+        return;
+      }
       pendingTakeProfitValue=null;
       takeProfitEditValue=null;
       if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
@@ -14564,6 +15202,7 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       render();
     });
     window.addEventListener("v13:open-position-change",render,false);
+    window.addEventListener("bt001:rapid-fire-live-sync",render,false);
     return win;
   }
   function show(){

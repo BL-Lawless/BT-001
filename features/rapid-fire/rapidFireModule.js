@@ -11,8 +11,13 @@
   let selectedDirection="LONG";
   let doubleArmTimer=null;
   let closeQuantityOverride=null;
+  let pendingMasterStopValue=null;
   let pendingTakeProfitValue=null;
   let takeProfitEditValue=null;
+  const protectionEditDriver={sl:"price",tp:"price"};
+  const protectionPlTarget={sl:null,tp:null};
+  const lastProtectionOrderSignature={sl:null,tp:null};
+  let lastProtectionPositionSignature=null;
 
   function q(id){return document.getElementById(id);}
   function api(){return window.CALCULATOR_MODULE&&window.CALCULATOR_MODULE.rapidFire;}
@@ -29,7 +34,75 @@
     return (rounded>0?"+":"")+rounded+"%";
   }
   function moneyColor(value){const parsed=number(value);return parsed==null||parsed===0?"#111":parsed>0?"#047857":"#f6465d";}
-  function lot(value,precision=3){const parsed=number(value);return parsed==null?"0.000":parsed.toFixed(Math.max(0,precision));}
+  function lot(value,precision=0){const digits=Math.max(0,Number(precision)||0);const parsed=number(value);return (parsed==null?0:parsed).toFixed(digits);}
+  function decimalDraft(value,allowNegative=false){
+    let text=String(value==null?"":value).replace(/,/g,"").replace(allowNegative?/[^0-9.\-]/g:/[^0-9.]/g,"");
+    const negative=allowNegative&&text.startsWith("-");
+    text=text.replace(/-/g,"");
+    const dot=text.indexOf(".");
+    if(dot>=0)text=text.slice(0,dot+1)+text.slice(dot+1).replace(/\./g,"");
+    return (negative?"-":"")+text;
+  }
+  function bindNumericDraftInput(input,options){
+    const opts=options||{};
+    if(!input)return null;
+    const controller={
+      input,
+      commit(reason,event){
+        if(typeof opts.onCommit==="function")opts.onCommit(input.value,reason||"change",event||null);
+      },
+      setDraft(value,commit=false){
+        input.value=decimalDraft(value,opts.allowNegative===true);
+        input.dispatchEvent(new Event("input",{bubbles:true}));
+        if(commit)input.dispatchEvent(new Event("change",{bubbles:true}));
+      }
+    };
+    input.dataset.rfNumericDraft="1";
+    input.addEventListener("input",event=>{
+      const draft=decimalDraft(event.target.value,opts.allowNegative===true);
+      if(event.target.value!==draft)event.target.value=draft;
+      if(typeof opts.onDraft==="function")opts.onDraft(draft,event);
+    },false);
+    input.addEventListener("change",event=>controller.commit("change",event),false);
+    input.addEventListener("keydown",event=>{
+      if(event.key!=="Enter")return;
+      event.preventDefault();
+      input.blur();
+    },false);
+    return controller;
+  }
+  function bindNumericStepper(controller,upButton,downButton,stepResolver,precisionResolver){
+    if(!controller)return;
+    const adjust=direction=>{
+      const step=Math.max(0,number(typeof stepResolver==="function"?stepResolver():stepResolver)||0);
+      if(!(step>0))return;
+      const precision=Math.max(0,number(typeof precisionResolver==="function"?precisionResolver():precisionResolver)||0);
+      const next=protectionWheelValue(controller.input.value,step,direction,precision);
+      if(next!=null)controller.setDraft(next,true);
+    };
+    [[upButton,1],[downButton,-1]].forEach(([button,direction])=>{
+      if(!button)return;
+      button.addEventListener("mousedown",event=>event.preventDefault(),false);
+      button.addEventListener("click",()=>adjust(direction),false);
+    });
+  }
+  function protectionPlText(value){const parsed=number(value);return parsed==null?"":parsed.toFixed(2);}
+  function protectionOrderSignature(order){
+    if(!order)return "";
+    const meta=order.meta||{};
+    return [order.orderId,order.clientOrderId,meta.algoId,meta.clientAlgoId,order.price,order.quantity].map(value=>String(value==null?"":value)).join("|");
+  }
+  function normalizedPriceText(value,bridge){
+    const normalized=bridge&&typeof bridge.normalizePrice==="function"?bridge.normalizePrice(value):null;
+    return normalized&&normalized.executable?normalized.text:(number(value)>0?String(value):"");
+  }
+  function protectionWheelValue(currentValue,stepValue,direction,precision){
+    const current=number(currentValue)||0;
+    const step=Math.max(0,number(stepValue)||0);
+    if(!(step>0))return null;
+    const scale=Math.pow(10,Math.max(0,number(precision)||0));
+    return Math.round((current+direction*step)*scale)/scale;
+  }
   function positionSizeParts(sizeValue,closeQtyValue){
     const size=Math.max(0,number(sizeValue)||0);
     const closed=Math.min(size,Math.max(0,number(closeQtyValue)||0));
@@ -122,14 +195,72 @@
     const closeSlider=q("rapidFireClosePercent");
     const slInput=q("rapidFireMasterSl");
     const tpInput=q("rapidFireTakeProfit");
+    const slPlInput=q("rapidFireMasterSlPl");
+    const tpPlInput=q("rapidFireTakeProfitPl");
+    const lotInput=q("rapidFireLot");
+    const addQuantity=lotInput?lotInput.value:0;
+    if(typeof bridge.setAddDraft==="function")bridge.setAddDraft(addQuantity,selectedDirection);
+    const referenceSnapshot=bridge.snapshot({addQuantity,direction:selectedDirection});
+    const referencePosition=referenceSnapshot.position;
+    const positionSignature=referencePosition
+      ? [referenceSnapshot.symbol,referencePosition.side,referencePosition.qty,referencePosition.entry].map(String).join("|")
+      : "";
+    const positionReferenceChanged=lastProtectionPositionSignature!==null&&lastProtectionPositionSignature!==positionSignature;
+    lastProtectionPositionSignature=positionSignature;
+    if(positionReferenceChanged&&referencePosition){
+      ["sl","tp"].forEach(kind=>{
+        protectionEditDriver[kind]="price";
+        protectionPlTarget[kind]=null;
+        const liveOrder=kind==="sl"?referenceSnapshot.masterStopOrder:referenceSnapshot.takeProfitOrder;
+        if(liveOrder&&typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft(kind);
+      });
+    }
+    ["sl","tp"].forEach(kind=>{
+      const target=protectionPlTarget[kind];
+      if(protectionEditDriver[kind]!=="pl"||target==null||typeof bridge.protectionPriceFromPl!=="function")return;
+      const price=bridge.protectionPriceFromPl(kind,target,{quantity:addQuantity,direction:selectedDirection});
+      if(!(number(price)>0))return;
+      const input=kind==="sl"?slInput:tpInput;
+      const priceText=normalizedPriceText(price,bridge);
+      input.value=priceText;
+      if(kind==="sl")pendingMasterStopValue=priceText;
+      else pendingTakeProfitValue=priceText;
+      if(typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft(kind,priceText);
+    });
     const slEditing=document.activeElement===slInput;
     const tpEditing=document.activeElement===tpInput;
-    const snapshot=bridge.snapshot({
+    let snapshot=bridge.snapshot({
       closePercent:closeSlider?closeSlider.value:100,
       closeQty:closeQuantityOverride,
       slPrice:slEditing?slInput.value:null,
-      tpPrice:tpEditing?tpInput.value:null
+      tpPrice:tpEditing?tpInput.value:null,
+      addQuantity,
+      direction:selectedDirection
     });
+    const liveOrderSignatures={
+      sl:protectionOrderSignature(snapshot.masterStopOrder),
+      tp:protectionOrderSignature(snapshot.takeProfitOrder)
+    };
+    const authoritativeProtectionChange={sl:false,tp:false};
+    ["sl","tp"].forEach(kind=>{
+      const previous=lastProtectionOrderSignature[kind];
+      const current=liveOrderSignatures[kind];
+      authoritativeProtectionChange[kind]=previous!==null&&previous!==current;
+      lastProtectionOrderSignature[kind]=current;
+      if(!authoritativeProtectionChange[kind])return;
+      protectionEditDriver[kind]="price";
+      protectionPlTarget[kind]=null;
+      if(kind==="sl")pendingMasterStopValue=null;
+      else{pendingTakeProfitValue=null;takeProfitEditValue=null;}
+    });
+    if(authoritativeProtectionChange.sl||authoritativeProtectionChange.tp){
+      snapshot=bridge.snapshot({
+        closePercent:closeSlider?closeSlider.value:100,
+        closeQty:closeQuantityOverride,
+        addQuantity,
+        direction:selectedDirection
+      });
+    }
     const position=snapshot.position;
     if(position)selectedDirection=position.side;
     const openSize=q("rapidFireOpenSize");
@@ -137,19 +268,28 @@
     const floating=q("rapidFirePl");
     const floatingPercent=q("rapidFirePlPercent");
     const rules=bridge.lotRules();
-    const precision=Math.max(3,number(rules.precision)||3);
+    const precision=Math.max(0,number(rules.precision)||0);
+    const zeroLot=lot(0,precision);
+    const priceRules=typeof bridge.priceRules==="function"?bridge.priceRules():{tickSize:0,precision:0,available:false};
+    [slInput,tpInput].forEach(input=>{
+      if(!input)return;
+      input.step=priceRules.available?String(priceRules.tickSize):"any";
+      input.dataset.precision=String(priceRules.precision);
+    });
     const {closed,remaining}=positionSizeParts(snapshot.size,snapshot.closeQty);
     if(openSize){
-      openSize.min="0.000";
+      openSize.disabled=!rules.available;
+      openSize.min=zeroLot;
       openSize.max=lot(snapshot.size,precision);
-      openSize.step=String(rules.stepSize);
+      openSize.step=rules.available?String(rules.stepSize):"any";
       openSize.dataset.precision=String(precision);
       if(document.activeElement!==openSize)openSize.value=lot(remaining,precision);
     }
     if(closeSize){
-      closeSize.min="0.000";
+      closeSize.disabled=!rules.available;
+      closeSize.min=zeroLot;
       closeSize.max=lot(snapshot.size,precision);
-      closeSize.step=String(rules.stepSize);
+      closeSize.step=rules.available?String(rules.stepSize):"any";
       closeSize.dataset.precision=String(precision);
       if(document.activeElement!==closeSize)closeSize.value=lot(closed,precision);
     }
@@ -169,11 +309,12 @@
       dir.setAttribute("aria-disabled",position?"true":"false");
       dir.title=position?"Direction follows the open position":"Click to switch LONG / SHORT";
     }
-    const lotInput=q("rapidFireLot");
     if(lotInput){
-      lotInput.min="0.000";
-      lotInput.step=String(rules.stepSize);
+      lotInput.disabled=!rules.available;
+      lotInput.min=zeroLot;
+      lotInput.step=rules.available?String(rules.stepSize):"any";
       lotInput.dataset.precision=String(rules.precision);
+      if(document.activeElement!==lotInput&&number(lotInput.value)===0)lotInput.value=zeroLot;
     }
     const busy=!!snapshot.busy;
     const actionButtons={add:q("rapidFireAdd"),double:q("rapidFireDouble"),close:q("rapidFireClose"),reverse:q("rapidFireReverse"),breakeven:q("rapidFireBreakeven")};
@@ -181,7 +322,7 @@
     Object.entries(actionButtons).forEach(([action,button])=>{
       if(!button)return;
       const active=busy&&snapshot.activeAction===action;
-      button.disabled=busy&&(!active||action==="breakeven");
+      button.disabled=!rules.available||(busy&&(!active||action==="breakeven"));
       button.classList.toggle("is-cancel",active&&action!=="breakeven");
       if(active&&action!=="breakeven")button.textContent="Cancel";
       else if(action!=="double"||button.dataset.armed!=="1")button.textContent=actionLabels[action];
@@ -194,20 +335,27 @@
       resetDoubleArm();
     }
     const protectionBusy=!!snapshot.protectionBusy;
-    [slInput,tpInput].forEach(input=>{if(input)input.disabled=!position||protectionBusy;});
+    [slInput,tpInput,slPlInput,tpPlInput].forEach(input=>{if(input)input.disabled=protectionBusy||!priceRules.available;});
     const tpSet=q("rapidFireTakeProfitSet");
-    if(tpSet)tpSet.disabled=!position||protectionBusy;
-    if(slInput&&document.activeElement!==slInput)slInput.value=snapshot.masterStopPrice==null?"":String(snapshot.masterStopPrice);
+    if(tpSet)tpSet.disabled=protectionBusy||!priceRules.available;
+    if(slInput&&(document.activeElement!==slInput||authoritativeProtectionChange.sl))slInput.value=snapshot.masterStopPrice==null?"":normalizedPriceText(snapshot.masterStopPrice,bridge);
+    if(!position&&snapshot.masterStopPrice>0)pendingMasterStopValue=String(snapshot.masterStopPrice);
     const tpField=takeProfitFieldState(snapshot.takeProfitOrder,snapshot.takeProfitPrice,pendingTakeProfitValue);
     if(tpField.hasLive)pendingTakeProfitValue=null;
-    if(tpInput&&document.activeElement!==tpInput){
-      tpInput.value=tpField.value;
+    if(tpInput&&(document.activeElement!==tpInput||authoritativeProtectionChange.tp)){
+      tpInput.value=tpField.value===""?"":normalizedPriceText(tpField.value,bridge);
     }
     if(tpInput)tpInput.classList.toggle("is-pending-unsent",tpField.pending);
-    const slPreview=q("rapidFireMasterSlPl");
-    const tpPreview=q("rapidFireTakeProfitPl");
-    if(slPreview){slPreview.textContent=money(snapshot.masterSlPl);slPreview.style.color=moneyColor(snapshot.masterSlPl);}
-    if(tpPreview){tpPreview.textContent=money(snapshot.takeProfitPl);tpPreview.style.color=moneyColor(snapshot.takeProfitPl);}
+    if(slInput)slInput.classList.toggle("is-pending-unsent",!position&&number(snapshot.masterStopPrice)>0);
+    if(slPlInput&&(document.activeElement!==slPlInput||authoritativeProtectionChange.sl))slPlInput.value=protectionEditDriver.sl==="pl"&&protectionPlTarget.sl!=null?protectionPlText(protectionPlTarget.sl):protectionPlText(snapshot.masterSlPl);
+    if(tpPlInput&&(document.activeElement!==tpPlInput||authoritativeProtectionChange.tp))tpPlInput.value=protectionEditDriver.tp==="pl"&&protectionPlTarget.tp!=null?protectionPlText(protectionPlTarget.tp):protectionPlText(snapshot.takeProfitPl);
+    if(slPlInput)slPlInput.style.color=moneyColor(snapshot.masterSlPl);
+    if(tpPlInput)tpPlInput.style.color=moneyColor(snapshot.takeProfitPl);
+    const newAverageToggle=q("rapidFireNewAverageToggle");
+    if(newAverageToggle){
+      newAverageToggle.setAttribute("aria-pressed",snapshot.newAverageVisible?"true":"false");
+      newAverageToggle.classList.toggle("is-active",!!snapshot.newAverageVisible);
+    }
   }
   async function execute(config){
     const bridge=api();
@@ -244,27 +392,48 @@
     const bridge=api();
     if(!bridge||!input)return;
     const rawValue=valueOverride!=null?valueOverride:input.value;
-    if(kind==="tp"&&String(rawValue==null?"":rawValue).trim()===""){
+    const snapshot=bridge.snapshot();
+    if(String(rawValue==null?"":rawValue).trim()===""){
       try{
-        const snapshot=bridge.snapshot();
-        if(snapshot.takeProfitOrder&&typeof bridge.cancelTakeProfit==="function"){
-          const pending=bridge.cancelTakeProfit();
+        const liveOrder=kind==="tp"?snapshot.takeProfitOrder:snapshot.masterStopOrder;
+        const cancel=kind==="tp"?bridge.cancelTakeProfit:bridge.cancelMasterStop;
+        const shouldCheckAuthoritatively=kind==="sl"&&snapshot.position&&typeof cancel==="function";
+        if(snapshot.position&&(liveOrder||shouldCheckAuthoritatively)&&typeof cancel==="function"){
+          const pending=cancel();
           render();
           await pending;
         }
-        pendingTakeProfitValue=null;
-        takeProfitEditValue=null;
-        if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
-      }catch(_error){takeProfitEditValue=null;}
+        if(kind==="sl")pendingMasterStopValue=null;
+        else{pendingTakeProfitValue=null;takeProfitEditValue=null;}
+        protectionPlTarget[kind]=null;
+        protectionEditDriver[kind]="price";
+        if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft(kind);
+      }catch(_error){if(kind==="tp")takeProfitEditValue=null;}
       render();
       return;
     }
     const price=number(rawValue);
     if(!(price>0))return;
+    const normalized=typeof bridge.normalizePrice==="function"?bridge.normalizePrice(price):null;
+    if(!normalized||!normalized.executable){
+      setStatus("Binance PRICE_FILTER tick size is unavailable for the current symbol.","error");
+      return;
+    }
+    const normalizedPrice=normalized.text;
+    input.value=normalizedPrice;
+    if(!snapshot.position){
+      if(typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft(kind,normalizedPrice);
+      if(kind==="sl")pendingMasterStopValue=normalizedPrice;
+      else{pendingTakeProfitValue=normalizedPrice;takeProfitEditValue=null;}
+      render();
+      return;
+    }
     try{
-      const pending=kind==="sl"?bridge.setMasterStop(price):bridge.setTakeProfit(price);
+      const pending=kind==="sl"?bridge.setMasterStop(normalizedPrice):bridge.setTakeProfit(normalizedPrice);
       render();
       await pending;
+      protectionEditDriver[kind]="price";
+      protectionPlTarget[kind]=null;
       if(kind==="tp"){
         pendingTakeProfitValue=null;
         takeProfitEditValue=null;
@@ -291,14 +460,17 @@
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Remaining lot"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Close lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Remaining lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Close lot"></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
         <div class="rapid-fire-add-row" aria-label="Add, double, or protect position">
           <button class="rapid-fire-dir is-long" id="rapidFireDir" type="button">LONG</button>
-          <input class="rapid-fire-lot" id="rapidFireLot" type="number" inputmode="decimal" min="0.000" step="0.001" value="0.000" aria-label="Rapid Fire lot size">
+          <span class="rapid-fire-number-control rapid-fire-lot-control">
+            <input class="rapid-fire-lot" id="rapidFireLot" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Rapid Fire lot size">
+            <span class="rapid-fire-number-steppers"><button id="rapidFireLotUp" type="button" tabindex="-1" aria-label="Increase Rapid Fire lot">&#9650;</button><button id="rapidFireLotDown" type="button" tabindex="-1" aria-label="Decrease Rapid Fire lot">&#9660;</button></span>
+          </span>
           <button class="rapid-fire-button" id="rapidFireAdd" type="button">ADD</button>
           <button class="rapid-fire-button" id="rapidFireDouble" type="button" title="Click once to arm, then again within 3 seconds">DBL</button>
           <button class="rapid-fire-button" id="rapidFireBreakeven" type="button" title="Place a fee-aware Master SL at breakeven">B.E.</button>
@@ -325,15 +497,19 @@
         <div class="rapid-fire-protection-row" aria-label="Rapid Fire protection orders">
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">SL</span>
-            <input id="rapidFireMasterSl" type="number" inputmode="decimal" min="0" placeholder="Price" aria-label="Master stop loss price">
-            <span class="rapid-fire-protection-pl" id="rapidFireMasterSlPl">-</span>
+            <input class="rapid-fire-protection-price" id="rapidFireMasterSl" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Master stop loss price">
+            <input class="rapid-fire-protection-pl" id="rapidFireMasterSlPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Master stop loss P/L">
           </label>
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">TP</span>
-            <input id="rapidFireTakeProfit" type="number" inputmode="decimal" min="0" placeholder="Price" aria-label="Take profit price">
+            <input class="rapid-fire-protection-price" id="rapidFireTakeProfit" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Take profit price">
             <button class="rapid-fire-protection-set" id="rapidFireTakeProfitSet" type="button">Set</button>
-            <span class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl">-</span>
+            <span class="rapid-fire-number-control rapid-fire-tp-pl-control">
+              <input class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Take profit P/L">
+              <span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitPlUp" type="button" tabindex="-1" aria-label="Increase take profit P/L">&#9650;</button><button id="rapidFireTakeProfitPlDown" type="button" tabindex="-1" aria-label="Decrease take profit P/L">&#9660;</button></span>
+            </span>
           </label>
+          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the New Average projection line"><span>New</span><span>Avg</span><i aria-hidden="true"></i></button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -346,36 +522,46 @@
     q("rapidFireDir").addEventListener("click",()=>{
       if(api().snapshot().position)return;
       selectedDirection=selectedDirection==="LONG"?"SHORT":"LONG";
+      if(typeof api().setAddDraft==="function")api().setAddDraft(q("rapidFireLot").value,selectedDirection);
       render();
     },false);
-    q("rapidFireLot").addEventListener("change",event=>{
-      const bridge=api();
-      const normalized=bridge.normalizeQuantity(event.target.value);
-      event.target.value=lot(normalized.quantity,normalized.precision);
-    },false);
+    const lotInput=q("rapidFireLot");
     const openSize=q("rapidFireOpenSize");
     const closeSize=q("rapidFireCloseSize");
-    const syncEditedSize=(editedKind,event,finalize=false)=>{
+    const syncEditedSize=(editedKind,input,finalize=false)=>{
       const bridge=api();
       const snapshot=bridge.snapshot();
-      const precision=Math.max(3,number(event.target.dataset.precision)||3);
-      const parts=editedPositionSizeParts(snapshot.size,event.target.value,editedKind,value=>bridge.normalizeQuantity(value));
+      const precision=Math.max(0,number(input.dataset.precision)||0);
+      const parts=editedPositionSizeParts(snapshot.size,input.value,editedKind,value=>bridge.normalizeQuantity(value));
       const edited=parts.active;
       closeQuantityOverride=parts.closed;
-      const typed=event.target.value;
+      const typed=input.value;
       setCloseSliderDisplay(parts.total>0?closeQuantityOverride/parts.total*100:0);
       render();
-      event.target.value=finalize?lot(edited,precision):typed;
+      input.value=finalize?lot(edited,precision):typed;
     };
-    openSize.addEventListener("input",event=>syncEditedSize("remaining",event),false);
-    openSize.addEventListener("change",event=>syncEditedSize("remaining",event,true),false);
-    closeSize.addEventListener("input",event=>{
-      syncEditedSize("close",event);
-    },false);
-    closeSize.addEventListener("change",event=>{
-      syncEditedSize("close",event,true);
-    },false);
-    q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",direction:selectedDirection,quantity:q("rapidFireLot").value}),false);
+    const lotController=bindNumericDraftInput(lotInput,{
+      onDraft:value=>{
+        const bridge=api();
+        if(bridge&&typeof bridge.setAddDraft==="function")bridge.setAddDraft(value,selectedDirection);
+        render();
+      },
+      onCommit:()=>{
+        const bridge=api();
+        const normalized=bridge.normalizeQuantity(lotInput.value);
+        if(normalized.available)lotInput.value=normalized.text;
+        if(typeof bridge.setAddDraft==="function")bridge.setAddDraft(lotInput.value,selectedDirection);
+      }
+    });
+    bindNumericStepper(lotController,q("rapidFireLotUp"),q("rapidFireLotDown"),()=>api().lotRules().stepSize,()=>api().lotRules().precision);
+    bindNumericDraftInput(openSize,{onDraft:()=>syncEditedSize("remaining",openSize),onCommit:()=>syncEditedSize("remaining",openSize,true)});
+    bindNumericDraftInput(closeSize,{onDraft:()=>syncEditedSize("close",closeSize),onCommit:()=>syncEditedSize("close",closeSize,true)});
+    q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",
+      direction:selectedDirection,quantity:q("rapidFireLot").value,
+      slPrice:q("rapidFireMasterSl").value,tpPrice:q("rapidFireTakeProfit").value,
+      slPl:protectionEditDriver.sl==="pl"?protectionPlTarget.sl:null,
+      tpPl:protectionEditDriver.tp==="pl"?protectionPlTarget.tp:null
+    }),false);
     q("rapidFireDouble").addEventListener("click",()=>{
       const button=q("rapidFireDouble");
       const snapshot=api().snapshot();
@@ -404,23 +590,122 @@
     q("rapidFireReverse").addEventListener("click",()=>executeOrCancel({action:"reverse",percent:reverseSlider.value}),false);
     const slInput=q("rapidFireMasterSl");
     const tpInput=q("rapidFireTakeProfit");
-    slInput.addEventListener("input",()=>previewProtection("sl",slInput),false);
-    tpInput.addEventListener("input",()=>{
+    const slPlInput=q("rapidFireMasterSlPl");
+    const tpPlInput=q("rapidFireTakeProfitPl");
+    const newAverageToggle=q("rapidFireNewAverageToggle");
+    newAverageToggle.addEventListener("click",()=>{
       const bridge=api();
-      const hasLiveTakeProfit=!!(bridge&&bridge.snapshot().takeProfitOrder);
-      takeProfitEditValue=tpInput.value.trim()===""?null:tpInput.value;
-      pendingTakeProfitValue=hasLiveTakeProfit?null:takeProfitEditValue;
-      previewProtection("tp",tpInput);
+      const next=newAverageToggle.getAttribute("aria-pressed")!=="true";
+      if(bridge&&typeof bridge.setNewAverageVisible==="function")bridge.setNewAverageVisible(next);
+      render();
     },false);
-    slInput.addEventListener("change",()=>{void commitProtection("sl",slInput);},false);
-    slInput.addEventListener("keydown",event=>{if(event.key==="Enter")slInput.blur();},false);
+    const draftProtectionPrice=(kind,input,value)=>{
+      protectionEditDriver[kind]="price";
+      protectionPlTarget[kind]=null;
+      if(kind==="sl")pendingMasterStopValue=value.trim()===""?null:value;
+      else{
+        const bridge=api();
+        const hasLiveTakeProfit=!!(bridge&&bridge.snapshot().takeProfitOrder);
+        takeProfitEditValue=value.trim()===""?null:value;
+        pendingTakeProfitValue=hasLiveTakeProfit?null:takeProfitEditValue;
+      }
+      previewProtection(kind,input);
+    };
+    const finalizeProtectionPriceDraft=(kind,input)=>{
+      if(input.value.trim()==="")return;
+      const bridge=api();
+      const normalized=bridge.normalizePrice(input.value);
+      if(!normalized.executable)return;
+      input.value=normalized.text;
+      if(kind==="sl")pendingMasterStopValue=normalized.text;
+      else{pendingTakeProfitValue=normalized.text;takeProfitEditValue=normalized.text;}
+      previewProtection(kind,input);
+    };
+    const draftProtectionPl=(kind,plInput,priceInput,value)=>{
+      protectionEditDriver[kind]="pl";
+      protectionPlTarget[kind]=value.trim()===""?null:value;
+      if(protectionPlTarget[kind]==null){
+        priceInput.value="";
+        if(kind==="sl")pendingMasterStopValue=null;
+        else{pendingTakeProfitValue=null;takeProfitEditValue="";}
+        previewProtection(kind,priceInput);
+        return;
+      }
+      const bridge=api();
+      const price=bridge&&typeof bridge.protectionPriceFromPl==="function"
+        ? bridge.protectionPriceFromPl(kind,protectionPlTarget[kind],{quantity:lotInput.value,direction:selectedDirection})
+        : null;
+      if(number(price)>0){
+        priceInput.value=String(price);
+        if(kind==="sl")pendingMasterStopValue=String(price);
+        else{pendingTakeProfitValue=String(price);takeProfitEditValue=String(price);}
+        previewProtection(kind,priceInput);
+      }else render();
+    };
+    const finalizeProtectionPl=(kind,input)=>{
+      if(input.value.trim()==="")return;
+      input.value=protectionPlText(input.value);
+      protectionPlTarget[kind]=input.value;
+    };
+    const numericControllers={
+      slPrice:bindNumericDraftInput(slInput,{onDraft:value=>draftProtectionPrice("sl",slInput,value),onCommit:()=>{void commitProtection("sl",slInput);}}),
+      tpPrice:bindNumericDraftInput(tpInput,{onDraft:value=>draftProtectionPrice("tp",tpInput,value),onCommit:()=>finalizeProtectionPriceDraft("tp",tpInput)}),
+      slPl:bindNumericDraftInput(slPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("sl",slPlInput,slInput,value),onCommit:()=>{finalizeProtectionPl("sl",slPlInput);void commitProtection("sl",slInput);}}),
+      tpPl:bindNumericDraftInput(tpPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("tp",tpPlInput,tpInput,value),onCommit:()=>finalizeProtectionPl("tp",tpPlInput)})
+    };
+    bindNumericStepper(numericControllers.tpPl,q("rapidFireTakeProfitPlUp"),q("rapidFireTakeProfitPlDown"),0.5,2);
+    const bindProtectionWheel=(kind,controller,mode)=>{
+      const input=controller.input;
+      input.addEventListener("wheel",event=>{
+        if(input.disabled)return;
+        const bridge=api();
+        if(!bridge)return;
+        const direction=event.deltaY<0?1:-1;
+        const snapshot=bridge.snapshot();
+        if(mode==="price"){
+          const rules=bridge.priceRules();
+          if(!rules.available)return;
+          const fallback=kind==="sl"?snapshot.masterStopPrice:snapshot.takeProfitPrice;
+          const base=number(input.value)>0?input.value:(number(fallback)>0?fallback:snapshot.protectionReferencePrice);
+          if(!(number(base)>0))return;
+          const adjusted=protectionWheelValue(base,rules.tickSize,direction,rules.precision);
+          const normalized=bridge.normalizePrice(adjusted);
+          if(!normalized.executable)return;
+          input.value=normalized.text;
+        }else{
+          const fallback=kind==="sl"?snapshot.masterSlPl:snapshot.takeProfitPl;
+          const adjusted=protectionWheelValue(number(input.value)==null?fallback:input.value,0.5,direction,2);
+          if(adjusted==null)return;
+          input.value=protectionPlText(adjusted);
+        }
+        event.preventDefault();
+        controller.setDraft(input.value,true);
+      },{passive:false});
+    };
+    bindProtectionWheel("sl",numericControllers.slPrice,"price");
+    bindProtectionWheel("sl",numericControllers.slPl,"pl");
+    bindProtectionWheel("tp",numericControllers.tpPrice,"price");
+    bindProtectionWheel("tp",numericControllers.tpPl,"pl");
     const tpSet=q("rapidFireTakeProfitSet");
     const tpProtectionBox=tpInput.closest(".rapid-fire-protection-box");
     tpSet.addEventListener("mousedown",event=>event.preventDefault(),false);
     tpProtectionBox.addEventListener("focusout",()=>{setTimeout(()=>{
       if(tpProtectionBox.contains(document.activeElement))return;
       const bridge=api();
-      if(!bridge||!bridge.snapshot().takeProfitOrder)return;
+      if(!bridge)return;
+      if(!bridge.snapshot().takeProfitOrder){
+        if(tpInput.value.trim()!==""){
+          const normalized=bridge.normalizePrice(tpInput.value);
+          if(normalized.executable){
+            tpInput.value=normalized.text;
+            pendingTakeProfitValue=normalized.text;
+            takeProfitEditValue=normalized.text;
+            if(typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft("tp",normalized.text);
+            render();
+          }
+        }
+        return;
+      }
       pendingTakeProfitValue=null;
       takeProfitEditValue=null;
       if(typeof bridge.clearProtectionDraft==="function")bridge.clearProtectionDraft("tp");
@@ -435,6 +720,7 @@
       render();
     });
     window.addEventListener("v13:open-position-change",render,false);
+    window.addEventListener("bt001:rapid-fire-live-sync",render,false);
     return win;
   }
   function show(){

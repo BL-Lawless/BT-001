@@ -61,6 +61,8 @@
         clientOrderId:run.clientOrderId,
         startedAt:run.startedAt,
         expiresAt:run.expiresAt,
+        bestBid:run.bestBid,
+        bestAsk:run.bestAsk,
         meta:run.meta
       },extra || {}));
     }
@@ -85,7 +87,15 @@
       const valid = value && value.fresh === true && number(value.bid) > 0 && number(value.ask) > 0;
       return valid ? value : null;
     }
-    function book(){ return usableBook(bookState()); }
+    function rememberBook(value){
+      if(!run || !value) return value;
+      const bid = number(value.bid);
+      const ask = number(value.ask);
+      if(bid > 0) run.bestBid = String(value.bid);
+      if(ask > 0) run.bestAsk = String(value.ask);
+      return value;
+    }
+    function book(){ return usableBook(rememberBook(bookState())); }
     function applyOrder(order,source){
       if(!run || !order) return;
       const normalized = normalizeOrder(order);
@@ -131,6 +141,7 @@
     }
     async function submitFresh(top,recovery){
       if(!run) return;
+      rememberBook(top);
       run.everReceivedBook = !!usableBook(top) || run.everReceivedBook;
       const qty = remaining();
       if(!(qty > 0)) return finish(run.label + " filled","normal",{result:"filled",statusCode:"filled"});
@@ -197,7 +208,7 @@
           await cancel(noPrice?run.label + " expired — no book data received":run.label + " expired — remaining qty cancelled",noPrice?{result:"no-price",statusCode:"no-price"}:{result:"expired",statusCode:"expired"});
           return;
         }
-        let rawBook = bookState();
+        let rawBook = rememberBook(bookState());
         let top = usableBook(rawBook);
         if(run.needsSubmit){
           if(!top){
@@ -205,7 +216,7 @@
             if(!hasData && !run.firstBookWaitCompleted && typeof opts.waitForTopOfBook === "function"){
               run.firstBookWaitCompleted = true;
               update("Waiting for book data...","normal",{reason:"waiting-book",statusCode:"waiting"});
-              try{ rawBook = await opts.waitForTopOfBook({timeoutMs:Number(opts.firstBookTimeoutMs) || 3000}); }
+              try{ rawBook = rememberBook(await opts.waitForTopOfBook({timeoutMs:Number(opts.firstBookTimeoutMs) || 3000})); }
               catch(_ignored){ rawBook = null; }
               if(!run) return;
               if(run.expiresAt && Date.now() >= run.expiresAt){
@@ -358,6 +369,8 @@
         recovering:false,
         firstBookWaitCompleted:false,
         everReceivedBook:false,
+        bestBid:null,
+        bestAsk:null,
         reactiveRecovery:false,
         canceling:false,
         cancelIntent:null,
