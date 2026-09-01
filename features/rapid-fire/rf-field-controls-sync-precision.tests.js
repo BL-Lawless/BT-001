@@ -18,7 +18,7 @@ function between(source,startText,endText){
 }
 
 assert(/id="rapidFireTakeProfitPl" type="text"/.test(rapid)&&rapid.includes('id="rapidFireTakeProfitPlUp"')&&rapid.includes('id="rapidFireTakeProfitPlDown"'),"TP P/L must expose decimal-safe custom spinner arrows");
-assert(rapid.includes('bindNumericStepper(numericControllers.tpPl')&&rapid.includes(',0.5,2);'),"TP P/L spinner must retain a 0.5 step and two-decimal commit precision");
+assert(rapid.includes('upButton,downButton,step:0.5,precision:2')&&rapid.includes('bindNumericAdjustControls(numericControllers.tpPl,protectionAdjustOptions("tp","pl"'),"TP P/L arrows and wheel must retain a shared 0.5 step and two-decimal precision");
 assert(rapid.includes("function protectionPlText(value)")&&rapid.includes("parsed.toFixed(2)"),"P/L display must use two decimal places");
 
 const protectionMarkup=between(rapid,'<div class="rapid-fire-protection-row"','</div>\n      </div>`');
@@ -27,12 +27,25 @@ assert(/\.rapid-fire-protection-row\{[^}]*grid-template-columns:[^;]*58px/s.test
 assert(calculator.includes("if(window.BT001_RAPID_FIRE_VISIBLE!==true||!rapidFireNewAverageVisible)return null;"),"the New Average toggle must gate projection rendering");
 assert(rapid.includes("bridge.setNewAverageVisible(next)")&&calculator.includes("setNewAverageVisible:setRapidFireNewAverageVisible"),"the row toggle must update Calculator projection state");
 
-for(const binding of [
-  'bindProtectionWheel("sl",numericControllers.slPrice,"price")',
-  'bindProtectionWheel("sl",numericControllers.slPl,"pl")',
-  'bindProtectionWheel("tp",numericControllers.tpPrice,"price")',
-  'bindProtectionWheel("tp",numericControllers.tpPl,"pl")'
-])assert(rapid.includes(binding),`${binding} must be installed`);
+const numericFieldControls=[
+  {name:"Add quantity",input:"rapidFireLot",up:"rapidFireLotUp",down:"rapidFireLotDown",binding:"bindNumericAdjustControls(lotController"},
+  {name:"Remaining",input:"rapidFireOpenSize",up:"rapidFireOpenSizeUp",down:"rapidFireOpenSizeDown",binding:"bindNumericAdjustControls(sizeControllers.remaining"},
+  {name:"Close",input:"rapidFireCloseSize",up:"rapidFireCloseSizeUp",down:"rapidFireCloseSizeDown",binding:"bindNumericAdjustControls(sizeControllers.close"},
+  {name:"SL Price",input:"rapidFireMasterSl",up:"rapidFireMasterSlUp",down:"rapidFireMasterSlDown",binding:"bindNumericAdjustControls(numericControllers.slPrice"},
+  {name:"SL P/L",input:"rapidFireMasterSlPl",up:"rapidFireMasterSlPlUp",down:"rapidFireMasterSlPlDown",binding:"bindNumericAdjustControls(numericControllers.slPl"},
+  {name:"TP Price",input:"rapidFireTakeProfit",up:"rapidFireTakeProfitUp",down:"rapidFireTakeProfitDown",binding:"bindNumericAdjustControls(numericControllers.tpPrice"},
+  {name:"TP P/L",input:"rapidFireTakeProfitPl",up:"rapidFireTakeProfitPlUp",down:"rapidFireTakeProfitPlDown",binding:"bindNumericAdjustControls(numericControllers.tpPl"}
+];
+for(const field of numericFieldControls){
+  assert(new RegExp(`id="${field.input}" type="text"`).test(rapid),`${field.name} must remain a decimal-safe text input`);
+  assert(rapid.includes(`id="${field.up}"`)&&rapid.includes(`id="${field.down}"`),`${field.name} must expose both custom spinner buttons`);
+  assert(rapid.includes(field.binding),`${field.name} must use the shared arrow/wheel controller`);
+}
+assert.equal((rapid.match(/bindNumericAdjustControls\(/g)||[]).length,8,"exactly seven fields plus the shared definition must use the unified adjust-control path");
+assert.equal((rapid.match(/class="rapid-fire-number-control/g)||[]).length,7,"all seven numeric fields must inherit hover/focus spinner visibility from the shared wrapper");
+assert(/\.rapid-fire-number-steppers\{[^}]*opacity:0;[^}]*visibility:hidden;[^}]*pointer-events:none;/s.test(css),"all seven shared spinner controls must be hidden and non-interactive by default");
+assert(css.includes(".rapid-fire-number-control:hover .rapid-fire-number-steppers")&&css.includes(".rapid-fire-number-control:focus-within .rapid-fire-number-steppers"),"all seven shared spinner controls must reveal on field hover or focus");
+assert(/\.rapid-fire-number-control:focus-within \.rapid-fire-number-steppers\{[^}]*opacity:1;[^}]*visibility:visible;[^}]*pointer-events:auto;/s.test(css),"revealed shared spinner controls must become visible and interactive");
 assert(rapid.includes('{passive:false}')&&rapid.includes("event.preventDefault()"),"wheel handlers must suppress native page/input scrolling");
 
 const wheelContext={number:value=>Number.isFinite(Number(value))?Number(value):null,Math};

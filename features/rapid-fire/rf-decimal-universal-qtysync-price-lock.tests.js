@@ -42,7 +42,7 @@ for(const binding of [
 
 const draftContext={String,Event};
 vm.createContext(draftContext);
-vm.runInContext(between(rapid,"function decimalDraft","function bindNumericStepper"),draftContext);
+vm.runInContext(between(rapid,"function decimalDraft","function bindNumericAdjustControls"),draftContext);
 assert.equal(draftContext.decimalDraft("."),".","a lone decimal point must remain a valid editing draft");
 assert.equal(draftContext.decimalDraft("0."),"0.","0. must survive until the user types fractional digits");
 assert.equal(draftContext.decimalDraft("0.005"),"0.005","a completed decimal draft must remain unchanged before commit");

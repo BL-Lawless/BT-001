@@ -93,6 +93,36 @@ assert(rapidChaseSource.includes('signedOrderWrite("POST"')&&otfChaseSource.incl
 assert(!rapidChaseSource.includes("BT001_BINANCE_TRADING")&&!rapidChaseSource.includes("tradingWrite"),"Add, Double, Close, and Reverse must not route through the direct RF Target gateway");
 for(const action of ["add","double","close","reverse"])assert(rapidChaseSource.includes(`action===\"${action}\"`)||action==="add","all RF actions must remain in the shared chase execution path");
 assert(rapid.includes("const REVERSE_PERCENT_STEPS=Object.freeze([25,...Array.from({length:28},(_value,index)=>(index+3)*10)])"),"Reverse steps must be 25, then every 10 percent from 30 through 300");
+assert(rapid.includes('title="Show or hide the Average projection line"><span>Avg</span>')&&!rapid.includes("<span>New</span><span>Avg</span>"),"the New Average toggle must display the compact Avg label");
+assert(rapid.includes('bindNumericAdjustControls(lotController,{upButton:q("rapidFireLotUp"),downButton:q("rapidFireLotDown"),step:0.001,precision:()=>Math.max(3,api().lotRules().precision),commit:false,min:0})'),"Add quantity must bind shared arrow and wheel adjustment at an exact 0.001 draft step");
+assert(rapid.includes('lotController.commit("trigger")'),"Add execution must commit its wheel-adjusted draft through live symbol quantity normalization");
+
+const numericAdjustStart=rapid.indexOf("function bindNumericAdjustControls");
+const numericAdjustEnd=rapid.indexOf("function protectionPlText",numericAdjustStart);
+const numericAdjustContext={
+  number:value=>Number.isFinite(Number(value))?Number(value):null,
+  protectionWheelValue:(current,step,direction,precision)=>Math.round(((Number(current)||0)+direction*step)*10**precision)/10**precision,
+  Math
+};
+vm.createContext(numericAdjustContext);
+vm.runInContext(rapid.slice(numericAdjustStart,numericAdjustEnd),numericAdjustContext);
+let wheelListener=null;
+let wheelDraft=null;
+const wheelInput={value:"1.234",disabled:false,addEventListener:(name,listener)=>{if(name==="wheel")wheelListener=listener;},focus:()=>{}};
+const wheelController={input:wheelInput,setDraft:value=>{wheelDraft=value;wheelInput.value=String(value);}};
+const buttonListeners={};
+const adjustButton=id=>({addEventListener:(name,listener)=>{buttonListeners[id+":"+name]=listener;}});
+numericAdjustContext.bindNumericAdjustControls(wheelController,{upButton:adjustButton("up"),downButton:adjustButton("down"),step:.001,precision:3,commit:false,min:0});
+let prevented=false;
+wheelListener({deltaY:-1,preventDefault:()=>{prevented=true;}});
+assert.equal(wheelDraft,1.235,"one upward Add wheel tick must increase quantity by exactly 0.001");
+wheelListener({deltaY:1,preventDefault:()=>{}});
+assert.equal(wheelDraft,1.234,"one downward Add wheel tick must decrease quantity by exactly 0.001");
+buttonListeners["up:click"]();
+assert.equal(wheelDraft,1.235,"the shared Add spinner-up control must use the same exact 0.001 adjustment");
+buttonListeners["down:click"]();
+assert.equal(wheelDraft,1.234,"the shared Add spinner-down control must use the same exact 0.001 adjustment");
+assert.equal(prevented,true,"Add quantity wheel handling must prevent page scrolling");
 
 const snapStart=rapid.indexOf("function snapPercent");
 const snapEnd=rapid.indexOf("function sliderTicks",snapStart);

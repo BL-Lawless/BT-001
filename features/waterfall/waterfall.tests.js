@@ -132,6 +132,8 @@ for(const label of ["One Hour","Four Hours","Six Hours","One Day","One Week"]){
 }
 assert(wfSource.includes('class="wf-section-label is-trades">Trades</span>')&&!wfSource.includes("wfTfLabel(trade.bucketTf)"),"the grouped bottom label row must replace repeated per-bucket TF labels");
 assert(wfSource.includes('const WF_SELECTION_STORAGE_KEY = "btc_futures_chart_v13_wf_period_tf_v1"')&&wfSource.includes("localStorage.getItem(WF_SELECTION_STORAGE_KEY)")&&wfSource.includes("localStorage.setItem(WF_SELECTION_STORAGE_KEY"),"WF Period/TF must use versioned browser persistence");
+assert(wfSource.includes('const WF_GEOMETRY_STORAGE_KEY = "btc_futures_chart_v13_wf_window_geometry_v1"'),"WF window geometry must use its own versioned browser persistence key");
+assert(wfSource.includes("restoreExpandedRect();")&&wfSource.indexOf("restoreExpandedRect();",wfSource.indexOf("function install()"))<wfSource.indexOf("ensureWindow();",wfSource.indexOf("function install()")),"WF geometry must restore from storage before the initial window is created");
 assert(wfSource.includes('source:"waterfall-selection-restore"')&&wfSource.includes("if(!restoreWfSelection()){"),"restored WF Period must flow through the shared display-controls owner");
 assert(wfSource.includes("const restoredSelection = restoreWfSelection();")&&wfSource.includes("if(restoredPeriodChanged) return;"),"WF reopen must restore its saved Period/TF before loading");
 assert(wfSource.includes('if(!visible && !source.startsWith("waterfall-")) return;'),"hidden WF must not let unrelated display-period changes overwrite its saved selection");
@@ -155,6 +157,28 @@ assert.equal(selectionContext.wfSyncState.selectedTf,"1d","restoring WF must ret
 assert.equal(ownerPeriod,"1w","restoring WF must synchronize its Period through the main display-controls owner");
 selectionContext.persistWfSelection("1m","6h");
 assert.deepStrictEqual(JSON.parse(persisted.get("btc_futures_chart_v13_wf_period_tf_v1")),{version:1,period:"1m",tf:"6h"},"WF must persist the last selected Period/TF pair");
+
+const geometryFunctionsStart = wfSource.indexOf("function saveExpandedRect");
+const geometryFunctionsEnd = wfSource.indexOf("function restoreWfHoverTarget",geometryFunctionsStart);
+const geometryStore = new Map();
+const geometryContext = {
+  WF_GEOMETRY_STORAGE_KEY:"btc_futures_chart_v13_wf_window_geometry_v1",
+  wfSyncState:{expandedRect:null},
+  localStorage:{getItem:key=>geometryStore.get(key)||null,setItem:(key,value)=>geometryStore.set(key,value)},
+  window:{innerWidth:1600,innerHeight:900},
+  clamp:(value,min,max)=>Math.min(max,Math.max(min,value)),
+  JSON,Number,Object,Math
+};
+vm.createContext(geometryContext);
+vm.runInContext(wfSource.slice(geometryFunctionsStart,geometryFunctionsEnd),geometryContext);
+const savedRect={left:123,top:87,width:740,height:515};
+const geometryWin={classList:{contains:()=>false},getBoundingClientRect:()=>savedRect,style:{}};
+geometryContext.saveExpandedRect(geometryWin);
+assert.deepStrictEqual(JSON.parse(geometryStore.get("btc_futures_chart_v13_wf_window_geometry_v1")),{version:1,...savedRect},"WF drag/resize geometry must be written to browser storage");
+geometryContext.wfSyncState.expandedRect=null;
+assert.equal(geometryContext.restoreExpandedRect(),true,"WF geometry must read successfully after a full module reload");
+geometryContext.applyExpandedRect(geometryWin);
+assert.deepStrictEqual({...geometryWin.style},{left:"123px",top:"87px",right:"auto",width:"740px",height:"515px"},"WF must apply the restored position and dimensions exactly when they fit the viewport");
 assert(!wfSource.includes('__bt001WfFastReloadBound'),"WF's old DOM period-change binding must be removed");
 assert(!wfSource.includes("CLOSED_TRADES_STATE."),"WF cannot reference the raw CLOSED_TRADES_STATE global at all after extraction - it isn't exported and is out of scope");
 assert(wfSource.includes("const acceptResult = () =>")&&wfSource.includes("{silent:true,acceptResult}"),"WF's own stale-period veto must still be constructed and passed as an additional guard");

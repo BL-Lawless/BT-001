@@ -71,20 +71,37 @@
     },false);
     return controller;
   }
-  function bindNumericStepper(controller,upButton,downButton,stepResolver,precisionResolver){
-    if(!controller)return;
+  function bindNumericAdjustControls(controller,{upButton=null,downButton=null,step,precision,commit=true,min=null,base=null,validateBase=null,normalize=null,format=null}={}){
+    if(!controller)return null;
     const adjust=direction=>{
-      const step=Math.max(0,number(typeof stepResolver==="function"?stepResolver():stepResolver)||0);
-      if(!(step>0))return;
-      const precision=Math.max(0,number(typeof precisionResolver==="function"?precisionResolver():precisionResolver)||0);
-      const next=protectionWheelValue(controller.input.value,step,direction,precision);
-      if(next!=null)controller.setDraft(next,true);
+      if(controller.input.disabled)return;
+      const increment=Math.max(0,number(typeof step==="function"?step():step)||0);
+      if(!(increment>0))return;
+      const digits=Math.max(0,number(typeof precision==="function"?precision():precision)||0);
+      const current=typeof base==="function"?base():controller.input.value;
+      if(typeof validateBase==="function"&&!validateBase(current))return;
+      let next=protectionWheelValue(current,increment,direction,digits);
+      if(next==null)return;
+      if(min!=null&&number(min)!=null)next=Math.max(number(min),next);
+      if(typeof normalize==="function"){
+        next=normalize(next);
+        if(next==null)return;
+      }
+      if(typeof format==="function")next=format(next);
+      controller.setDraft(next,commit);
     };
     [[upButton,1],[downButton,-1]].forEach(([button,direction])=>{
       if(!button)return;
       button.addEventListener("mousedown",event=>event.preventDefault(),false);
       button.addEventListener("click",()=>adjust(direction),false);
     });
+    controller.input.addEventListener("wheel",event=>{
+      const direction=event.deltaY<0?1:-1;
+      event.preventDefault();
+      try{controller.input.focus({preventScroll:true});}catch(_e){controller.input.focus();}
+      adjust(direction);
+    },{passive:false});
+    return {adjust};
   }
   function protectionPlText(value){const parsed=number(value);return parsed==null?"":parsed.toFixed(2);}
   function protectionOrderSignature(order){
@@ -460,8 +477,8 @@
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Remaining lot"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Close lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><span class="rapid-fire-number-control rapid-fire-size-control"><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Remaining lot"><span class="rapid-fire-number-steppers"><button id="rapidFireOpenSizeUp" type="button" tabindex="-1" aria-label="Increase Remaining lot">&#9650;</button><button id="rapidFireOpenSizeDown" type="button" tabindex="-1" aria-label="Decrease Remaining lot">&#9660;</button></span></span></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><span class="rapid-fire-number-control rapid-fire-size-control"><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Close lot"><span class="rapid-fire-number-steppers"><button id="rapidFireCloseSizeUp" type="button" tabindex="-1" aria-label="Increase Close lot">&#9650;</button><button id="rapidFireCloseSizeDown" type="button" tabindex="-1" aria-label="Decrease Close lot">&#9660;</button></span></span></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
@@ -497,19 +514,19 @@
         <div class="rapid-fire-protection-row" aria-label="Rapid Fire protection orders">
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">SL</span>
-            <input class="rapid-fire-protection-price" id="rapidFireMasterSl" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Master stop loss price">
-            <input class="rapid-fire-protection-pl" id="rapidFireMasterSlPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Master stop loss P/L">
+            <span class="rapid-fire-number-control rapid-fire-protection-price-control"><input class="rapid-fire-protection-price" id="rapidFireMasterSl" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Master stop loss price"><span class="rapid-fire-number-steppers"><button id="rapidFireMasterSlUp" type="button" tabindex="-1" aria-label="Increase stop loss price">&#9650;</button><button id="rapidFireMasterSlDown" type="button" tabindex="-1" aria-label="Decrease stop loss price">&#9660;</button></span></span>
+            <span class="rapid-fire-number-control rapid-fire-protection-pl-control"><input class="rapid-fire-protection-pl" id="rapidFireMasterSlPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Master stop loss P/L"><span class="rapid-fire-number-steppers"><button id="rapidFireMasterSlPlUp" type="button" tabindex="-1" aria-label="Increase stop loss P/L">&#9650;</button><button id="rapidFireMasterSlPlDown" type="button" tabindex="-1" aria-label="Decrease stop loss P/L">&#9660;</button></span></span>
           </label>
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">TP</span>
-            <input class="rapid-fire-protection-price" id="rapidFireTakeProfit" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Take profit price">
+            <span class="rapid-fire-number-control rapid-fire-protection-price-control"><input class="rapid-fire-protection-price" id="rapidFireTakeProfit" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Take profit price"><span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitUp" type="button" tabindex="-1" aria-label="Increase take profit price">&#9650;</button><button id="rapidFireTakeProfitDown" type="button" tabindex="-1" aria-label="Decrease take profit price">&#9660;</button></span></span>
             <button class="rapid-fire-protection-set" id="rapidFireTakeProfitSet" type="button">Set</button>
-            <span class="rapid-fire-number-control rapid-fire-tp-pl-control">
+            <span class="rapid-fire-number-control rapid-fire-protection-pl-control rapid-fire-tp-pl-control">
               <input class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Take profit P/L">
               <span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitPlUp" type="button" tabindex="-1" aria-label="Increase take profit P/L">&#9650;</button><button id="rapidFireTakeProfitPlDown" type="button" tabindex="-1" aria-label="Decrease take profit P/L">&#9660;</button></span>
             </span>
           </label>
-          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the New Average projection line"><span>New</span><span>Avg</span><i aria-hidden="true"></i></button>
+          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the Average projection line"><span>Avg</span><i aria-hidden="true"></i></button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -553,15 +570,22 @@
         if(typeof bridge.setAddDraft==="function")bridge.setAddDraft(lotInput.value,selectedDirection);
       }
     });
-    bindNumericStepper(lotController,q("rapidFireLotUp"),q("rapidFireLotDown"),()=>api().lotRules().stepSize,()=>api().lotRules().precision);
-    bindNumericDraftInput(openSize,{onDraft:()=>syncEditedSize("remaining",openSize),onCommit:()=>syncEditedSize("remaining",openSize,true)});
-    bindNumericDraftInput(closeSize,{onDraft:()=>syncEditedSize("close",closeSize),onCommit:()=>syncEditedSize("close",closeSize,true)});
-    q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",
-      direction:selectedDirection,quantity:q("rapidFireLot").value,
-      slPrice:q("rapidFireMasterSl").value,tpPrice:q("rapidFireTakeProfit").value,
-      slPl:protectionEditDriver.sl==="pl"?protectionPlTarget.sl:null,
-      tpPl:protectionEditDriver.tp==="pl"?protectionPlTarget.tp:null
-    }),false);
+    bindNumericAdjustControls(lotController,{upButton:q("rapidFireLotUp"),downButton:q("rapidFireLotDown"),step:0.001,precision:()=>Math.max(3,api().lotRules().precision),commit:false,min:0});
+    const sizeControllers={
+      remaining:bindNumericDraftInput(openSize,{onDraft:()=>syncEditedSize("remaining",openSize),onCommit:()=>syncEditedSize("remaining",openSize,true)}),
+      close:bindNumericDraftInput(closeSize,{onDraft:()=>syncEditedSize("close",closeSize),onCommit:()=>syncEditedSize("close",closeSize,true)})
+    };
+    bindNumericAdjustControls(sizeControllers.remaining,{upButton:q("rapidFireOpenSizeUp"),downButton:q("rapidFireOpenSizeDown"),step:()=>api().lotRules().stepSize,precision:()=>api().lotRules().precision,min:0});
+    bindNumericAdjustControls(sizeControllers.close,{upButton:q("rapidFireCloseSizeUp"),downButton:q("rapidFireCloseSizeDown"),step:()=>api().lotRules().stepSize,precision:()=>api().lotRules().precision,min:0});
+    q("rapidFireAdd").addEventListener("click",()=>{
+      lotController.commit("trigger");
+      void executeOrCancel({action:"add",
+        direction:selectedDirection,quantity:q("rapidFireLot").value,
+        slPrice:q("rapidFireMasterSl").value,tpPrice:q("rapidFireTakeProfit").value,
+        slPl:protectionEditDriver.sl==="pl"?protectionPlTarget.sl:null,
+        tpPl:protectionEditDriver.tp==="pl"?protectionPlTarget.tp:null
+      });
+    },false);
     q("rapidFireDouble").addEventListener("click",()=>{
       const button=q("rapidFireDouble");
       const snapshot=api().snapshot();
@@ -653,39 +677,38 @@
       slPl:bindNumericDraftInput(slPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("sl",slPlInput,slInput,value),onCommit:()=>{finalizeProtectionPl("sl",slPlInput);void commitProtection("sl",slInput);}}),
       tpPl:bindNumericDraftInput(tpPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("tp",tpPlInput,tpInput,value),onCommit:()=>finalizeProtectionPl("tp",tpPlInput)})
     };
-    bindNumericStepper(numericControllers.tpPl,q("rapidFireTakeProfitPlUp"),q("rapidFireTakeProfitPlDown"),0.5,2);
-    const bindProtectionWheel=(kind,controller,mode)=>{
-      const input=controller.input;
-      input.addEventListener("wheel",event=>{
-        if(input.disabled)return;
-        const bridge=api();
-        if(!bridge)return;
-        const direction=event.deltaY<0?1:-1;
-        const snapshot=bridge.snapshot();
-        if(mode==="price"){
-          const rules=bridge.priceRules();
-          if(!rules.available)return;
+    const protectionAdjustOptions=(kind,mode,upButton,downButton)=>{
+      const bridge=api();
+      const controller=numericControllers[kind+(mode==="price"?"Price":"Pl")];
+      if(mode==="price")return {
+        upButton,downButton,
+        step:()=>api().priceRules().tickSize,
+        precision:()=>api().priceRules().precision,
+        base:()=>{
+          const snapshot=api().snapshot();
           const fallback=kind==="sl"?snapshot.masterStopPrice:snapshot.takeProfitPrice;
-          const base=number(input.value)>0?input.value:(number(fallback)>0?fallback:snapshot.protectionReferencePrice);
-          if(!(number(base)>0))return;
-          const adjusted=protectionWheelValue(base,rules.tickSize,direction,rules.precision);
-          const normalized=bridge.normalizePrice(adjusted);
-          if(!normalized.executable)return;
-          input.value=normalized.text;
-        }else{
-          const fallback=kind==="sl"?snapshot.masterSlPl:snapshot.takeProfitPl;
-          const adjusted=protectionWheelValue(number(input.value)==null?fallback:input.value,0.5,direction,2);
-          if(adjusted==null)return;
-          input.value=protectionPlText(adjusted);
+          return number(controller.input.value)>0?controller.input.value:(number(fallback)>0?fallback:snapshot.protectionReferencePrice);
+        },
+        validateBase:value=>number(value)>0,
+        normalize:value=>{
+          const normalized=api().normalizePrice(value);
+          return normalized.executable?normalized.text:null;
         }
-        event.preventDefault();
-        controller.setDraft(input.value,true);
-      },{passive:false});
+      };
+      return {
+        upButton,downButton,step:0.5,precision:2,
+        base:()=>{
+          const snapshot=bridge.snapshot();
+          const fallback=kind==="sl"?snapshot.masterSlPl:snapshot.takeProfitPl;
+          return number(controller.input.value)==null?fallback:controller.input.value;
+        },
+        format:protectionPlText
+      };
     };
-    bindProtectionWheel("sl",numericControllers.slPrice,"price");
-    bindProtectionWheel("sl",numericControllers.slPl,"pl");
-    bindProtectionWheel("tp",numericControllers.tpPrice,"price");
-    bindProtectionWheel("tp",numericControllers.tpPl,"pl");
+    bindNumericAdjustControls(numericControllers.slPrice,protectionAdjustOptions("sl","price",q("rapidFireMasterSlUp"),q("rapidFireMasterSlDown")));
+    bindNumericAdjustControls(numericControllers.slPl,protectionAdjustOptions("sl","pl",q("rapidFireMasterSlPlUp"),q("rapidFireMasterSlPlDown")));
+    bindNumericAdjustControls(numericControllers.tpPrice,protectionAdjustOptions("tp","price",q("rapidFireTakeProfitUp"),q("rapidFireTakeProfitDown")));
+    bindNumericAdjustControls(numericControllers.tpPl,protectionAdjustOptions("tp","pl",q("rapidFireTakeProfitPlUp"),q("rapidFireTakeProfitPlDown")));
     const tpSet=q("rapidFireTakeProfitSet");
     const tpProtectionBox=tpInput.closest(".rapid-fire-protection-box");
     tpSet.addEventListener("mousedown",event=>event.preventDefault(),false);

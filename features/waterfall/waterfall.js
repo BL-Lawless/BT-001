@@ -70,6 +70,7 @@
   const WF_BLACK = "#1e2329";
   const WF_RAW_TRADE_LIMIT = 10;
   const WF_SELECTION_STORAGE_KEY = "btc_futures_chart_v13_wf_period_tf_v1";
+  const WF_GEOMETRY_STORAGE_KEY = "btc_futures_chart_v13_wf_window_geometry_v1";
   const wfAggregation = () => window.BT001_WATERFALL_AGGREGATION;
   const wfEscape = value => String(value == null ? "" : value)
     .replace(/&/g,"&amp;")
@@ -662,15 +663,39 @@
       width:rect.width,
       height:rect.height
     };
+    try{
+      localStorage.setItem(WF_GEOMETRY_STORAGE_KEY,JSON.stringify({version:1,...wfSyncState.expandedRect}));
+    }catch(_e){}
+  }
+  function restoreExpandedRect(){
+    try{
+      const stored = JSON.parse(localStorage.getItem(WF_GEOMETRY_STORAGE_KEY) || "null");
+      if(!stored || stored.version !== 1) return false;
+      const rect = stored && {
+        left:Number(stored.left),
+        top:Number(stored.top),
+        width:Number(stored.width),
+        height:Number(stored.height)
+      };
+      if(!rect || !Object.values(rect).every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) return false;
+      wfSyncState.expandedRect = rect;
+      return true;
+    }catch(_e){
+      return false;
+    }
   }
   function applyExpandedRect(win){
     const rect = wfSyncState.expandedRect;
     if(!win || !rect) return;
-    win.style.left = Math.max(6,rect.left) + "px";
-    win.style.top = Math.max(6,rect.top) + "px";
+    const width = clamp(rect.width,520,Math.max(520,window.innerWidth - 12));
+    const height = clamp(rect.height,360,Math.max(360,window.innerHeight - 12));
+    const left = clamp(rect.left,6,Math.max(6,window.innerWidth - width - 6));
+    const top = clamp(rect.top,6,Math.max(6,window.innerHeight - height - 6));
+    win.style.left = left + "px";
+    win.style.top = top + "px";
     win.style.right = "auto";
-    win.style.width = Math.max(520,rect.width) + "px";
-    win.style.height = Math.max(360,rect.height) + "px";
+    win.style.width = width + "px";
+    win.style.height = height + "px";
   }
   function restoreWfHoverTarget(){
     const chart = q("wfChart");
@@ -2181,6 +2206,7 @@
 
   function install(){
     ensureToggle();
+    restoreExpandedRect();
     ensureWindow();
     if(!restoreWfSelection()){
       const requestedPeriod = currentPeriodValue();

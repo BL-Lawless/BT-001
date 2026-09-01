@@ -562,6 +562,8 @@ function scaledCompressionSnapshot(targetAtr, slots) {
   assert.equal(runtime.visible, false);
 
   assert(moduleSource.includes('tip.id = "v33MAStackTooltip"'), "tooltip DOM identity changed");
+  assert(!moduleSource.includes("compactRankTooltipHtml")&&!moduleSource.includes("Stack Rank")&&!moduleSource.includes("LED Bias Match")&&!moduleSource.includes("__v33RankTipHtml"),"the development-only Stack Rank tooltip implementation must be fully removed");
+  assert(!/ledRow\.addEventListener\("mouse(?:enter|move|leave)"/.test(moduleSource),"the MA rank LED row must not retain tooltip hover bindings");
   assert(cssSource.includes("#v33MAStackMetric") && cssSource.includes(".v33-ma-stack-box") && cssSource.includes("#v33MAStackTooltip"));
   const maOwnerIndex = htmlSource.indexOf("features/ma/ma-index.js");
   const volatilityIndex = htmlSource.indexOf("features/ma-stack/ma-stack-volatility.js");

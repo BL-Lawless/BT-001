@@ -116,71 +116,6 @@
         `<div class="v33-ma-stack-tip-spacer"></div>`+
         `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipSummary(r && r.maEvent,r))}</div>`;
     }
-    function compactRankTooltipHtml(tf,r){
-      const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
-      const diag = rank && rank.diagnostics ? rank.diagnostics : null;
-      const dbg = diag && diag.debug ? diag.debug : null;
-      const labelMap = Array.isArray(rank.labels) && rank.labels.length === 5 ? rank.labels : ["EMA 9","EMA 21","EMA 55","EMA 100","EMA 200"];
-      const side = rank.selectedRegime === "bullish" || rank.selectedRegime === "bearish" ? rank.selectedRegime : "mixed";
-      const ledStates = diag && diag.ledStates ? diag.ledStates : {
-        MA1:!!(rank.okByEma && rank.okByEma[0]),
-        MA2:!!(rank.okByEma && rank.okByEma[1]),
-        MA3:!!(rank.okByEma && rank.okByEma[2]),
-        MA4:!!(rank.okByEma && rank.okByEma[3]),
-        MA5:!!(rank.okByEma && rank.okByEma[4])
-      };
-      const visualMeta = rankVisualMeta(rank);
-      const sideLabel = side === "bullish" ? "Selected regime: bullish" : side === "bearish" ? "Selected regime: bearish" : "Selected regime: transition/compression";
-      const fastState = rank.fastPairState || rank.fastStack || "mixed";
-      const slowState = rank.slowPairState || rank.slowStack || "mixed";
-      const fastScore = Number.isFinite(Number(rank.fastMatch)) ? Number(rank.fastMatch) : 0;
-      const slowScore = Number.isFinite(Number(rank.slowMatch)) ? Number(rank.slowMatch) : 0;
-      const hingeText = rank.hingeText || "mixed";
-      const fastText = fastState === "mixed" ? "Fast pair: mixed 0/2" : `Fast pair: ${fastState} ${fastScore}/2`;
-      const slowText = slowState === "mixed" ? "Slow pair: mixed 0/2" : `Slow pair: ${slowState} ${slowScore}/2`;
-      const rankRows = visualMeta.map(item => `${item.label}: ${item.on ? "OK" : "out"}`);
-      const fmtDbg = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-US",{maximumFractionDigits:8}) : String(v);
-      const showDebug = !!window.MA_SOURCE_DEBUG;
-      const dbgLines = !showDebug
-        ? []
-        : (dbg ? [
-        "DEBUG",
-        `TF used: ${dbg.tfKey || tf.key || "-"}`,
-        `TF interval: ${dbg.tfInterval || "-"}`,
-        `source index: ${Number.isFinite(Number(dbg.sourceIndex)) ? Number(dbg.sourceIndex) : "-"}`,
-        `source type: ${dbg.sourceType || "-"}`,
-        `source path: ${dbg.sourcePath || "-"}`,
-        `${labelMap[0]}: ${fmtDbg(dbg.values && dbg.values.MA1)} (valid: ${!!(dbg.valid && dbg.valid.MA1)})`,
-        `${labelMap[1]}: ${fmtDbg(dbg.values && dbg.values.MA2)} (valid: ${!!(dbg.valid && dbg.valid.MA2)})`,
-        `${labelMap[2]}: ${fmtDbg(dbg.values && dbg.values.MA3)} (valid: ${!!(dbg.valid && dbg.valid.MA3)})`,
-        `${labelMap[3]}: ${fmtDbg(dbg.values && dbg.values.MA4)} (valid: ${!!(dbg.valid && dbg.valid.MA4)})`,
-        `${labelMap[4]}: ${fmtDbg(dbg.values && dbg.values.MA5)} (valid: ${!!(dbg.valid && dbg.valid.MA5)})`,
-        `tol: ${fmtDbg(dbg.tolerance)}`,
-        `${labelMap[0]} < ${labelMap[1]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA1<MA2"])}`,
-        `${labelMap[1]} < ${labelMap[2]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA2<MA3"])}`,
-        `${labelMap[2]} < ${labelMap[3]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA3<MA4"])}`,
-        `${labelMap[3]} < ${labelMap[4]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA4<MA5"])}`,
-        `${labelMap[0]} > ${labelMap[1]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA1>MA2"])}`,
-        `${labelMap[1]} > ${labelMap[2]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA2>MA3"])}`,
-        `${labelMap[2]} > ${labelMap[3]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA3>MA4"])}`,
-        `${labelMap[3]} > ${labelMap[4]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA4>MA5"])}`,
-        `${labelMap[0]} - ${labelMap[1]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA1-MA2"])}`,
-        `${labelMap[1]} - ${labelMap[2]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA2-MA3"])}`,
-        `${labelMap[2]} - ${labelMap[3]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA3-MA4"])}`,
-        `${labelMap[3]} - ${labelMap[4]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA4-MA5"])}`
-      ] : ["DEBUG: unavailable"]);
-      return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)} Stack Rank</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(sideLabel)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(`LED Bias Match: ${Number(rank.okCount)||0}/5`)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(fastText)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(`${rank.hingeSlotLabel || "MA3"}: ${hingeText}`)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(slowText)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(`Summary: ${rank.summary || "Transition / Compression"}`)}</div>`+
-        `<div class="v33-ma-stack-tip-spacer is-small"></div>`+
-        rankRows.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
-        (showDebug ? `<div class="v33-ma-stack-tip-spacer"></div>` : "")+
-        dbgLines.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("");
-    }
     function ensureMaStackTooltip(){
       let tip = document.getElementById("v33MAStackTooltip");
       if(tip) return tip;
@@ -247,7 +182,6 @@
     function renderEnhanced(results){
       ensureDom(); const strip=$id("v33MAStackStrip"); if(!strip) return;
       const summaryTooltipHtmlByTf = new Map();
-      const rankTooltipHtmlByTf = new Map();
       const html = TFs.map(tf=>{
         const r=results[tf.key] || unavailable("Unavailable");
         const style = stackButtonStyle(r);
@@ -262,7 +196,6 @@
           return `<span class="${cls}" data-ema="${item.label}" aria-hidden="true"></span>`;
         }).join("");
         summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
-        rankTooltipHtmlByTf.set(tf.key,compactRankTooltipHtml(tf,r));
         const liveBadge = r.provisional ? '<span class="v33-ma-live-badge" aria-label="Live forming candle">L</span>' : "";
         return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" data-provisional="${r.provisional?'true':'false'}" aria-label="${tf.key} MA Stack${r.provisional?' (live, forming candle)':''}"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}${liveBadge}</span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
       }).join("");
@@ -275,7 +208,6 @@
         const ev = btn.dataset.event || "";
         const evKey = btn.dataset.eventKey || "";
         btn.__v33SummaryTipHtml = summaryTooltipHtmlByTf.get(tf) || "";
-        btn.__v33RankTipHtml = rankTooltipHtmlByTf.get(tf) || "";
         const head = btn.querySelector(".v33-ma-head");
         const group = btn.closest(".v33-ma-stack-group");
         const ledRow = group ? group.querySelector(".v33-ma-rank-leds") : null;
@@ -293,11 +225,9 @@
         if(head){
           head.addEventListener("mouseenter",()=>{ btn.__v33TipHtml = btn.__v33SummaryTipHtml || ""; showMaStackTooltip(btn); },false);
           head.addEventListener("mousemove",()=>positionMaStackTooltip(btn),false);
+          head.addEventListener("mouseleave",hideMaStackTooltip,false);
         }
         if(ledRow){
-          ledRow.addEventListener("mouseenter",()=>{ btn.__v33TipHtml = btn.__v33RankTipHtml || ""; showMaStackTooltip(btn); },false);
-          ledRow.addEventListener("mousemove",()=>positionMaStackTooltip(btn),false);
-          ledRow.addEventListener("mouseleave",hideMaStackTooltip,false);
           ledRow.addEventListener("click",()=>switchTf(btn.dataset.interval),false);
         }
         if(group) group.addEventListener("mouseleave",hideMaStackTooltip,false);

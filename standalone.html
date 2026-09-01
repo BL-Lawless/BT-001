@@ -4305,9 +4305,6 @@ button:hover{filter:brightness(1.04)}
 #v33MAStackTooltip .v33-ma-stack-tip-spacer{
   height:8px;
 }
-#v33MAStackTooltip .v33-ma-stack-tip-spacer.is-small{
-  height:6px;
-}
 @keyframes v33StackFlashCross{
   0%,49%,100%{box-shadow:inset 0 1px 0 rgba(255,255,255,.78);border-color:rgba(31,41,55,.16)}
   12%,62%{box-shadow:0 0 0 3px rgba(255,0,0,.85),0 0 11px rgba(255,0,0,.65),inset 0 1px 0 rgba(255,255,255,.78);border-color:#ff0000}
@@ -4396,7 +4393,7 @@ button:hover{filter:brightness(1.04)}
   min-width:0;
   box-sizing:border-box;
   margin:0;
-  padding:0;
+  padding:0 16px 0 0;
   border:0;
   outline:0;
   background:transparent;
@@ -4405,6 +4402,7 @@ button:hover{filter:brightness(1.04)}
   text-align:center;
   font-variant-numeric:tabular-nums;
 }
+.rapid-fire-size-control{width:100%}
 .rapid-fire-size-input[readonly]{color:#111;cursor:default}
 .rapid-fire-size-closed{color:#4b5563}
 .rapid-fire-size-separator{color:#6b7280}
@@ -4473,6 +4471,16 @@ button:hover{filter:brightness(1.04)}
   overflow:hidden;
   border-left:1px solid #d9dce1;
   border-radius:0 4px 4px 0;
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  transition:opacity .1s ease;
+}
+.rapid-fire-number-control:hover .rapid-fire-number-steppers,
+.rapid-fire-number-control:focus-within .rapid-fire-number-steppers{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
 }
 .rapid-fire-number-steppers button{
   width:100%;
@@ -4636,7 +4644,7 @@ button:hover{filter:brightness(1.04)}
   flex:1 1 66px;
   box-sizing:border-box;
   margin:0;
-  padding:4px 5px;
+  padding:4px 18px 4px 5px;
   border:1px solid #d9dce1;
   border-radius:4px;
   background:#fff;
@@ -4644,6 +4652,10 @@ button:hover{filter:brightness(1.04)}
   font:700 12px Arial,Helvetica,sans-serif;
   text-align:center;
 }
+.rapid-fire-protection-price-control{
+  flex:1 1 66px;
+}
+.rapid-fire-protection-price-control .rapid-fire-protection-price{width:100%}
 .rapid-fire-protection-box input.is-pending-unsent{
   border-color:#86c99a;
   background:#edf9f0;
@@ -4666,7 +4678,7 @@ button:hover{filter:brightness(1.04)}
   flex:0 1 50px;
   box-sizing:border-box;
   margin:0;
-  padding:4px 5px;
+  padding:4px 18px 4px 5px;
   border:1px solid #d9dce1;
   border-radius:4px;
   background:#fff;
@@ -4676,6 +4688,12 @@ button:hover{filter:brightness(1.04)}
   text-align:right;
   font-variant-numeric:tabular-nums;
   white-space:nowrap;
+}
+.rapid-fire-protection-pl-control{
+  width:58px;
+  min-width:58px;
+  max-width:58px;
+  flex:0 0 58px;
 }
 .rapid-fire-protection-box:nth-child(2) .rapid-fire-protection-pl{
   width:58px;
@@ -4694,7 +4712,7 @@ button:hover{filter:brightness(1.04)}
   min-width:0;
   display:grid;
   grid-template-columns:1fr 14px;
-  grid-template-rows:1fr 1fr;
+  grid-template-rows:1fr;
   align-items:center;
   column-gap:3px;
   padding:4px 5px;
@@ -4704,12 +4722,11 @@ button:hover{filter:brightness(1.04)}
   color:#6b7280;
   font:800 9px/1 Arial,Helvetica,sans-serif;
   letter-spacing:.02em;
-  text-transform:uppercase;
 }
 .rapid-fire-new-average-toggle span{text-align:left}
 .rapid-fire-new-average-toggle i{
   grid-column:2;
-  grid-row:1 / span 2;
+  grid-row:1;
   width:14px;
   height:8px;
   position:relative;
@@ -14553,20 +14570,37 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
     },false);
     return controller;
   }
-  function bindNumericStepper(controller,upButton,downButton,stepResolver,precisionResolver){
-    if(!controller)return;
+  function bindNumericAdjustControls(controller,{upButton=null,downButton=null,step,precision,commit=true,min=null,base=null,validateBase=null,normalize=null,format=null}={}){
+    if(!controller)return null;
     const adjust=direction=>{
-      const step=Math.max(0,number(typeof stepResolver==="function"?stepResolver():stepResolver)||0);
-      if(!(step>0))return;
-      const precision=Math.max(0,number(typeof precisionResolver==="function"?precisionResolver():precisionResolver)||0);
-      const next=protectionWheelValue(controller.input.value,step,direction,precision);
-      if(next!=null)controller.setDraft(next,true);
+      if(controller.input.disabled)return;
+      const increment=Math.max(0,number(typeof step==="function"?step():step)||0);
+      if(!(increment>0))return;
+      const digits=Math.max(0,number(typeof precision==="function"?precision():precision)||0);
+      const current=typeof base==="function"?base():controller.input.value;
+      if(typeof validateBase==="function"&&!validateBase(current))return;
+      let next=protectionWheelValue(current,increment,direction,digits);
+      if(next==null)return;
+      if(min!=null&&number(min)!=null)next=Math.max(number(min),next);
+      if(typeof normalize==="function"){
+        next=normalize(next);
+        if(next==null)return;
+      }
+      if(typeof format==="function")next=format(next);
+      controller.setDraft(next,commit);
     };
     [[upButton,1],[downButton,-1]].forEach(([button,direction])=>{
       if(!button)return;
       button.addEventListener("mousedown",event=>event.preventDefault(),false);
       button.addEventListener("click",()=>adjust(direction),false);
     });
+    controller.input.addEventListener("wheel",event=>{
+      const direction=event.deltaY<0?1:-1;
+      event.preventDefault();
+      try{controller.input.focus({preventScroll:true});}catch(_e){controller.input.focus();}
+      adjust(direction);
+    },{passive:false});
+    return {adjust};
   }
   function protectionPlText(value){const parsed=number(value);return parsed==null?"":parsed.toFixed(2);}
   function protectionOrderSignature(order){
@@ -14942,8 +14976,8 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       </header>
       <div class="rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Remaining lot"></label>
-          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Close lot"></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><span class="rapid-fire-number-control rapid-fire-size-control"><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Remaining lot"><span class="rapid-fire-number-steppers"><button id="rapidFireOpenSizeUp" type="button" tabindex="-1" aria-label="Increase Remaining lot">&#9650;</button><button id="rapidFireOpenSizeDown" type="button" tabindex="-1" aria-label="Decrease Remaining lot">&#9660;</button></span></span></label>
+          <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><span class="rapid-fire-number-control rapid-fire-size-control"><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Close lot"><span class="rapid-fire-number-steppers"><button id="rapidFireCloseSizeUp" type="button" tabindex="-1" aria-label="Increase Close lot">&#9650;</button><button id="rapidFireCloseSizeDown" type="button" tabindex="-1" aria-label="Decrease Close lot">&#9660;</button></span></span></label>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L</div><div class="rapid-fire-summary-value" id="rapidFirePl">-</div></div>
           <div class="rapid-fire-summary-cell"><div class="rapid-fire-summary-label">Floating P/L%</div><div class="rapid-fire-summary-value" id="rapidFirePlPercent">-</div></div>
         </div>
@@ -14979,19 +15013,19 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         <div class="rapid-fire-protection-row" aria-label="Rapid Fire protection orders">
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">SL</span>
-            <input class="rapid-fire-protection-price" id="rapidFireMasterSl" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Master stop loss price">
-            <input class="rapid-fire-protection-pl" id="rapidFireMasterSlPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Master stop loss P/L">
+            <span class="rapid-fire-number-control rapid-fire-protection-price-control"><input class="rapid-fire-protection-price" id="rapidFireMasterSl" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Master stop loss price"><span class="rapid-fire-number-steppers"><button id="rapidFireMasterSlUp" type="button" tabindex="-1" aria-label="Increase stop loss price">&#9650;</button><button id="rapidFireMasterSlDown" type="button" tabindex="-1" aria-label="Decrease stop loss price">&#9660;</button></span></span>
+            <span class="rapid-fire-number-control rapid-fire-protection-pl-control"><input class="rapid-fire-protection-pl" id="rapidFireMasterSlPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Master stop loss P/L"><span class="rapid-fire-number-steppers"><button id="rapidFireMasterSlPlUp" type="button" tabindex="-1" aria-label="Increase stop loss P/L">&#9650;</button><button id="rapidFireMasterSlPlDown" type="button" tabindex="-1" aria-label="Decrease stop loss P/L">&#9660;</button></span></span>
           </label>
           <label class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">TP</span>
-            <input class="rapid-fire-protection-price" id="rapidFireTakeProfit" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Take profit price">
+            <span class="rapid-fire-number-control rapid-fire-protection-price-control"><input class="rapid-fire-protection-price" id="rapidFireTakeProfit" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Take profit price"><span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitUp" type="button" tabindex="-1" aria-label="Increase take profit price">&#9650;</button><button id="rapidFireTakeProfitDown" type="button" tabindex="-1" aria-label="Decrease take profit price">&#9660;</button></span></span>
             <button class="rapid-fire-protection-set" id="rapidFireTakeProfitSet" type="button">Set</button>
-            <span class="rapid-fire-number-control rapid-fire-tp-pl-control">
+            <span class="rapid-fire-number-control rapid-fire-protection-pl-control rapid-fire-tp-pl-control">
               <input class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Take profit P/L">
               <span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitPlUp" type="button" tabindex="-1" aria-label="Increase take profit P/L">&#9650;</button><button id="rapidFireTakeProfitPlDown" type="button" tabindex="-1" aria-label="Decrease take profit P/L">&#9660;</button></span>
             </span>
           </label>
-          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the New Average projection line"><span>New</span><span>Avg</span><i aria-hidden="true"></i></button>
+          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the Average projection line"><span>Avg</span><i aria-hidden="true"></i></button>
         </div>
       </div>`;
     document.body.appendChild(win);
@@ -15035,15 +15069,22 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
         if(typeof bridge.setAddDraft==="function")bridge.setAddDraft(lotInput.value,selectedDirection);
       }
     });
-    bindNumericStepper(lotController,q("rapidFireLotUp"),q("rapidFireLotDown"),()=>api().lotRules().stepSize,()=>api().lotRules().precision);
-    bindNumericDraftInput(openSize,{onDraft:()=>syncEditedSize("remaining",openSize),onCommit:()=>syncEditedSize("remaining",openSize,true)});
-    bindNumericDraftInput(closeSize,{onDraft:()=>syncEditedSize("close",closeSize),onCommit:()=>syncEditedSize("close",closeSize,true)});
-    q("rapidFireAdd").addEventListener("click",()=>executeOrCancel({action:"add",
-      direction:selectedDirection,quantity:q("rapidFireLot").value,
-      slPrice:q("rapidFireMasterSl").value,tpPrice:q("rapidFireTakeProfit").value,
-      slPl:protectionEditDriver.sl==="pl"?protectionPlTarget.sl:null,
-      tpPl:protectionEditDriver.tp==="pl"?protectionPlTarget.tp:null
-    }),false);
+    bindNumericAdjustControls(lotController,{upButton:q("rapidFireLotUp"),downButton:q("rapidFireLotDown"),step:0.001,precision:()=>Math.max(3,api().lotRules().precision),commit:false,min:0});
+    const sizeControllers={
+      remaining:bindNumericDraftInput(openSize,{onDraft:()=>syncEditedSize("remaining",openSize),onCommit:()=>syncEditedSize("remaining",openSize,true)}),
+      close:bindNumericDraftInput(closeSize,{onDraft:()=>syncEditedSize("close",closeSize),onCommit:()=>syncEditedSize("close",closeSize,true)})
+    };
+    bindNumericAdjustControls(sizeControllers.remaining,{upButton:q("rapidFireOpenSizeUp"),downButton:q("rapidFireOpenSizeDown"),step:()=>api().lotRules().stepSize,precision:()=>api().lotRules().precision,min:0});
+    bindNumericAdjustControls(sizeControllers.close,{upButton:q("rapidFireCloseSizeUp"),downButton:q("rapidFireCloseSizeDown"),step:()=>api().lotRules().stepSize,precision:()=>api().lotRules().precision,min:0});
+    q("rapidFireAdd").addEventListener("click",()=>{
+      lotController.commit("trigger");
+      void executeOrCancel({action:"add",
+        direction:selectedDirection,quantity:q("rapidFireLot").value,
+        slPrice:q("rapidFireMasterSl").value,tpPrice:q("rapidFireTakeProfit").value,
+        slPl:protectionEditDriver.sl==="pl"?protectionPlTarget.sl:null,
+        tpPl:protectionEditDriver.tp==="pl"?protectionPlTarget.tp:null
+      });
+    },false);
     q("rapidFireDouble").addEventListener("click",()=>{
       const button=q("rapidFireDouble");
       const snapshot=api().snapshot();
@@ -15135,39 +15176,38 @@ R4 scope: MA/VWAP thickness isolation. The patch18 drawInd thickness key is now 
       slPl:bindNumericDraftInput(slPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("sl",slPlInput,slInput,value),onCommit:()=>{finalizeProtectionPl("sl",slPlInput);void commitProtection("sl",slInput);}}),
       tpPl:bindNumericDraftInput(tpPlInput,{allowNegative:true,onDraft:value=>draftProtectionPl("tp",tpPlInput,tpInput,value),onCommit:()=>finalizeProtectionPl("tp",tpPlInput)})
     };
-    bindNumericStepper(numericControllers.tpPl,q("rapidFireTakeProfitPlUp"),q("rapidFireTakeProfitPlDown"),0.5,2);
-    const bindProtectionWheel=(kind,controller,mode)=>{
-      const input=controller.input;
-      input.addEventListener("wheel",event=>{
-        if(input.disabled)return;
-        const bridge=api();
-        if(!bridge)return;
-        const direction=event.deltaY<0?1:-1;
-        const snapshot=bridge.snapshot();
-        if(mode==="price"){
-          const rules=bridge.priceRules();
-          if(!rules.available)return;
+    const protectionAdjustOptions=(kind,mode,upButton,downButton)=>{
+      const bridge=api();
+      const controller=numericControllers[kind+(mode==="price"?"Price":"Pl")];
+      if(mode==="price")return {
+        upButton,downButton,
+        step:()=>api().priceRules().tickSize,
+        precision:()=>api().priceRules().precision,
+        base:()=>{
+          const snapshot=api().snapshot();
           const fallback=kind==="sl"?snapshot.masterStopPrice:snapshot.takeProfitPrice;
-          const base=number(input.value)>0?input.value:(number(fallback)>0?fallback:snapshot.protectionReferencePrice);
-          if(!(number(base)>0))return;
-          const adjusted=protectionWheelValue(base,rules.tickSize,direction,rules.precision);
-          const normalized=bridge.normalizePrice(adjusted);
-          if(!normalized.executable)return;
-          input.value=normalized.text;
-        }else{
-          const fallback=kind==="sl"?snapshot.masterSlPl:snapshot.takeProfitPl;
-          const adjusted=protectionWheelValue(number(input.value)==null?fallback:input.value,0.5,direction,2);
-          if(adjusted==null)return;
-          input.value=protectionPlText(adjusted);
+          return number(controller.input.value)>0?controller.input.value:(number(fallback)>0?fallback:snapshot.protectionReferencePrice);
+        },
+        validateBase:value=>number(value)>0,
+        normalize:value=>{
+          const normalized=api().normalizePrice(value);
+          return normalized.executable?normalized.text:null;
         }
-        event.preventDefault();
-        controller.setDraft(input.value,true);
-      },{passive:false});
+      };
+      return {
+        upButton,downButton,step:0.5,precision:2,
+        base:()=>{
+          const snapshot=bridge.snapshot();
+          const fallback=kind==="sl"?snapshot.masterSlPl:snapshot.takeProfitPl;
+          return number(controller.input.value)==null?fallback:controller.input.value;
+        },
+        format:protectionPlText
+      };
     };
-    bindProtectionWheel("sl",numericControllers.slPrice,"price");
-    bindProtectionWheel("sl",numericControllers.slPl,"pl");
-    bindProtectionWheel("tp",numericControllers.tpPrice,"price");
-    bindProtectionWheel("tp",numericControllers.tpPl,"pl");
+    bindNumericAdjustControls(numericControllers.slPrice,protectionAdjustOptions("sl","price",q("rapidFireMasterSlUp"),q("rapidFireMasterSlDown")));
+    bindNumericAdjustControls(numericControllers.slPl,protectionAdjustOptions("sl","pl",q("rapidFireMasterSlPlUp"),q("rapidFireMasterSlPlDown")));
+    bindNumericAdjustControls(numericControllers.tpPrice,protectionAdjustOptions("tp","price",q("rapidFireTakeProfitUp"),q("rapidFireTakeProfitDown")));
+    bindNumericAdjustControls(numericControllers.tpPl,protectionAdjustOptions("tp","pl",q("rapidFireTakeProfitPlUp"),q("rapidFireTakeProfitPlDown")));
     const tpSet=q("rapidFireTakeProfitSet");
     const tpProtectionBox=tpInput.closest(".rapid-fire-protection-box");
     tpSet.addEventListener("mousedown",event=>event.preventDefault(),false);
@@ -20838,71 +20878,6 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
         `<div class="v33-ma-stack-tip-spacer"></div>`+
         `<div class="v33-ma-stack-tip-event">${escHtml(maPairTooltipSummary(r && r.maEvent,r))}</div>`;
     }
-    function compactRankTooltipHtml(tf,r){
-      const rank = r && r.rank ? r.rank : buildStackRank(null,"mixed",0);
-      const diag = rank && rank.diagnostics ? rank.diagnostics : null;
-      const dbg = diag && diag.debug ? diag.debug : null;
-      const labelMap = Array.isArray(rank.labels) && rank.labels.length === 5 ? rank.labels : ["EMA 9","EMA 21","EMA 55","EMA 100","EMA 200"];
-      const side = rank.selectedRegime === "bullish" || rank.selectedRegime === "bearish" ? rank.selectedRegime : "mixed";
-      const ledStates = diag && diag.ledStates ? diag.ledStates : {
-        MA1:!!(rank.okByEma && rank.okByEma[0]),
-        MA2:!!(rank.okByEma && rank.okByEma[1]),
-        MA3:!!(rank.okByEma && rank.okByEma[2]),
-        MA4:!!(rank.okByEma && rank.okByEma[3]),
-        MA5:!!(rank.okByEma && rank.okByEma[4])
-      };
-      const visualMeta = rankVisualMeta(rank);
-      const sideLabel = side === "bullish" ? "Selected regime: bullish" : side === "bearish" ? "Selected regime: bearish" : "Selected regime: transition/compression";
-      const fastState = rank.fastPairState || rank.fastStack || "mixed";
-      const slowState = rank.slowPairState || rank.slowStack || "mixed";
-      const fastScore = Number.isFinite(Number(rank.fastMatch)) ? Number(rank.fastMatch) : 0;
-      const slowScore = Number.isFinite(Number(rank.slowMatch)) ? Number(rank.slowMatch) : 0;
-      const hingeText = rank.hingeText || "mixed";
-      const fastText = fastState === "mixed" ? "Fast pair: mixed 0/2" : `Fast pair: ${fastState} ${fastScore}/2`;
-      const slowText = slowState === "mixed" ? "Slow pair: mixed 0/2" : `Slow pair: ${slowState} ${slowScore}/2`;
-      const rankRows = visualMeta.map(item => `${item.label}: ${item.on ? "OK" : "out"}`);
-      const fmtDbg = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-US",{maximumFractionDigits:8}) : String(v);
-      const showDebug = !!window.MA_SOURCE_DEBUG;
-      const dbgLines = !showDebug
-        ? []
-        : (dbg ? [
-        "DEBUG",
-        `TF used: ${dbg.tfKey || tf.key || "-"}`,
-        `TF interval: ${dbg.tfInterval || "-"}`,
-        `source index: ${Number.isFinite(Number(dbg.sourceIndex)) ? Number(dbg.sourceIndex) : "-"}`,
-        `source type: ${dbg.sourceType || "-"}`,
-        `source path: ${dbg.sourcePath || "-"}`,
-        `${labelMap[0]}: ${fmtDbg(dbg.values && dbg.values.MA1)} (valid: ${!!(dbg.valid && dbg.valid.MA1)})`,
-        `${labelMap[1]}: ${fmtDbg(dbg.values && dbg.values.MA2)} (valid: ${!!(dbg.valid && dbg.valid.MA2)})`,
-        `${labelMap[2]}: ${fmtDbg(dbg.values && dbg.values.MA3)} (valid: ${!!(dbg.valid && dbg.valid.MA3)})`,
-        `${labelMap[3]}: ${fmtDbg(dbg.values && dbg.values.MA4)} (valid: ${!!(dbg.valid && dbg.valid.MA4)})`,
-        `${labelMap[4]}: ${fmtDbg(dbg.values && dbg.values.MA5)} (valid: ${!!(dbg.valid && dbg.valid.MA5)})`,
-        `tol: ${fmtDbg(dbg.tolerance)}`,
-        `${labelMap[0]} < ${labelMap[1]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA1<MA2"])}`,
-        `${labelMap[1]} < ${labelMap[2]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA2<MA3"])}`,
-        `${labelMap[2]} < ${labelMap[3]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA3<MA4"])}`,
-        `${labelMap[3]} < ${labelMap[4]}: ${!!(dbg.bearishComparisons && dbg.bearishComparisons["MA4<MA5"])}`,
-        `${labelMap[0]} > ${labelMap[1]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA1>MA2"])}`,
-        `${labelMap[1]} > ${labelMap[2]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA2>MA3"])}`,
-        `${labelMap[2]} > ${labelMap[3]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA3>MA4"])}`,
-        `${labelMap[3]} > ${labelMap[4]}: ${!!(dbg.bullishComparisons && dbg.bullishComparisons["MA4>MA5"])}`,
-        `${labelMap[0]} - ${labelMap[1]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA1-MA2"])}`,
-        `${labelMap[1]} - ${labelMap[2]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA2-MA3"])}`,
-        `${labelMap[2]} - ${labelMap[3]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA3-MA4"])}`,
-        `${labelMap[3]} - ${labelMap[4]}: ${fmtDbg(dbg.deltas && dbg.deltas["MA4-MA5"])}`
-      ] : ["DEBUG: unavailable"]);
-      return `<div class="v33-ma-stack-tip-title">${escHtml(tf.key)} Stack Rank</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(sideLabel)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(`LED Bias Match: ${Number(rank.okCount)||0}/5`)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(fastText)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(`${rank.hingeSlotLabel || "MA3"}: ${hingeText}`)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(slowText)}</div>`+
-        `<div class="v33-ma-stack-tip-row">${escHtml(`Summary: ${rank.summary || "Transition / Compression"}`)}</div>`+
-        `<div class="v33-ma-stack-tip-spacer is-small"></div>`+
-        rankRows.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("")+
-        (showDebug ? `<div class="v33-ma-stack-tip-spacer"></div>` : "")+
-        dbgLines.map(line=>`<div class="v33-ma-stack-tip-row">${escHtml(line)}</div>`).join("");
-    }
     function ensureMaStackTooltip(){
       let tip = document.getElementById("v33MAStackTooltip");
       if(tip) return tip;
@@ -20969,7 +20944,6 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
     function renderEnhanced(results){
       ensureDom(); const strip=$id("v33MAStackStrip"); if(!strip) return;
       const summaryTooltipHtmlByTf = new Map();
-      const rankTooltipHtmlByTf = new Map();
       const html = TFs.map(tf=>{
         const r=results[tf.key] || unavailable("Unavailable");
         const style = stackButtonStyle(r);
@@ -20984,7 +20958,6 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
           return `<span class="${cls}" data-ema="${item.label}" aria-hidden="true"></span>`;
         }).join("");
         summaryTooltipHtmlByTf.set(tf.key,compactTooltipHtml(tf,r));
-        rankTooltipHtmlByTf.set(tf.key,compactRankTooltipHtml(tf,r));
         const liveBadge = r.provisional ? '<span class="v33-ma-live-badge" aria-label="Live forming candle">L</span>' : "";
         return `<div class="v33-ma-stack-group" data-tf="${tf.key}"><button type="button" class="v33-ma-stack-box" data-interval="${tf.interval}" data-tf="${tf.key}" data-event="${ev||''}" data-event-key="${eventKey.replace(/"/g,'&quot;')}" data-state="${r.state}" data-provisional="${r.provisional?'true':'false'}" aria-label="${tf.key} MA Stack${r.provisional?' (live, forming candle)':''}"${style}><span class="v33-ma-head"><span class="v33-tf-label">${tf.key}</span>${stackIconHtml(r.icon)}${liveBadge}</span></button><span class="v33-ma-rank-leds" data-tf="${tf.key}" aria-hidden="true">${leds}</span></div>`;
       }).join("");
@@ -20997,7 +20970,6 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
         const ev = btn.dataset.event || "";
         const evKey = btn.dataset.eventKey || "";
         btn.__v33SummaryTipHtml = summaryTooltipHtmlByTf.get(tf) || "";
-        btn.__v33RankTipHtml = rankTooltipHtmlByTf.get(tf) || "";
         const head = btn.querySelector(".v33-ma-head");
         const group = btn.closest(".v33-ma-stack-group");
         const ledRow = group ? group.querySelector(".v33-ma-rank-leds") : null;
@@ -21015,11 +20987,9 @@ const name=$("apiNicknameMain");if(name){name.value=nickname();name.addEventList
         if(head){
           head.addEventListener("mouseenter",()=>{ btn.__v33TipHtml = btn.__v33SummaryTipHtml || ""; showMaStackTooltip(btn); },false);
           head.addEventListener("mousemove",()=>positionMaStackTooltip(btn),false);
+          head.addEventListener("mouseleave",hideMaStackTooltip,false);
         }
         if(ledRow){
-          ledRow.addEventListener("mouseenter",()=>{ btn.__v33TipHtml = btn.__v33RankTipHtml || ""; showMaStackTooltip(btn); },false);
-          ledRow.addEventListener("mousemove",()=>positionMaStackTooltip(btn),false);
-          ledRow.addEventListener("mouseleave",hideMaStackTooltip,false);
           ledRow.addEventListener("click",()=>switchTf(btn.dataset.interval),false);
         }
         if(group) group.addEventListener("mouseleave",hideMaStackTooltip,false);
@@ -47127,6 +47097,7 @@ if(typeof window !== "undefined"){
   const WF_BLACK = "#1e2329";
   const WF_RAW_TRADE_LIMIT = 10;
   const WF_SELECTION_STORAGE_KEY = "btc_futures_chart_v13_wf_period_tf_v1";
+  const WF_GEOMETRY_STORAGE_KEY = "btc_futures_chart_v13_wf_window_geometry_v1";
   const wfAggregation = () => window.BT001_WATERFALL_AGGREGATION;
   const wfEscape = value => String(value == null ? "" : value)
     .replace(/&/g,"&amp;")
@@ -47719,15 +47690,39 @@ if(typeof window !== "undefined"){
       width:rect.width,
       height:rect.height
     };
+    try{
+      localStorage.setItem(WF_GEOMETRY_STORAGE_KEY,JSON.stringify({version:1,...wfSyncState.expandedRect}));
+    }catch(_e){}
+  }
+  function restoreExpandedRect(){
+    try{
+      const stored = JSON.parse(localStorage.getItem(WF_GEOMETRY_STORAGE_KEY) || "null");
+      if(!stored || stored.version !== 1) return false;
+      const rect = stored && {
+        left:Number(stored.left),
+        top:Number(stored.top),
+        width:Number(stored.width),
+        height:Number(stored.height)
+      };
+      if(!rect || !Object.values(rect).every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) return false;
+      wfSyncState.expandedRect = rect;
+      return true;
+    }catch(_e){
+      return false;
+    }
   }
   function applyExpandedRect(win){
     const rect = wfSyncState.expandedRect;
     if(!win || !rect) return;
-    win.style.left = Math.max(6,rect.left) + "px";
-    win.style.top = Math.max(6,rect.top) + "px";
+    const width = clamp(rect.width,520,Math.max(520,window.innerWidth - 12));
+    const height = clamp(rect.height,360,Math.max(360,window.innerHeight - 12));
+    const left = clamp(rect.left,6,Math.max(6,window.innerWidth - width - 6));
+    const top = clamp(rect.top,6,Math.max(6,window.innerHeight - height - 6));
+    win.style.left = left + "px";
+    win.style.top = top + "px";
     win.style.right = "auto";
-    win.style.width = Math.max(520,rect.width) + "px";
-    win.style.height = Math.max(360,rect.height) + "px";
+    win.style.width = width + "px";
+    win.style.height = height + "px";
   }
   function restoreWfHoverTarget(){
     const chart = q("wfChart");
@@ -49238,6 +49233,7 @@ if(typeof window !== "undefined"){
 
   function install(){
     ensureToggle();
+    restoreExpandedRect();
     ensureWindow();
     if(!restoreWfSelection()){
       const requestedPeriod = currentPeriodValue();
