@@ -19,7 +19,7 @@ assert(main.includes("const TOP_OF_BOOK_HEALTHY_STALE_MS = 5000"),"a confirmed h
 const topOfBookQueue=main.slice(main.indexOf("function queueTopOfBookDepth"),main.indexOf("function handleKline"));
 assert(!topOfBookQueue.includes("publishMarketUpdate"),"depth ticks must only update stored top-of-book state");
 assert(topOfBookQueue.includes("const eventAt = Number(d && d.E)"),"depth freshness must use Binance event time E");
-assert(topOfBookQueue.includes("d.b[0][0]")&&topOfBookQueue.includes("d.a[0][0]"),"depth top-of-book must extract index zero bid and ask prices");
+assert(topOfBookQueue.includes("slice(0,5)")&&topOfBookQueue.includes("const bid = bidDepth[0]")&&topOfBookQueue.includes("const ask = askDepth[0]"),"depth handling must retain all five levels while preserving index-zero best bid and ask prices");
 assert(main.includes('connectionKey:"public-top-of-book"'),"top-of-book depth must use an independent WebSocket connection");
 const mainConnectStart=main.indexOf("function connect({force=false");
 const mainMessageStart=main.indexOf("onMessage:event =>",mainConnectStart);
@@ -157,9 +157,15 @@ const queueContext={
   Number,String,Object
 };
 const queueTopOfBookDepth=vm.runInNewContext(`(${topOfBookQueue.trim()})`,queueContext);
-queueTopOfBookDepth({E:1234,u:9,s:"BTCUSDT",b:[["100","2"]],a:[["101","3"]]});
+queueTopOfBookDepth({E:1234,u:9,s:"BTCUSDT",b:[["100","2"],["99","4"],["98","6"],["97","8"],["96","10"]],a:[["101","3"],["102","5"],["103","7"],["104","9"],["105","11"]]});
 assert.equal(queueContext.topOfBookFeedState.topOfBook.bid,100,"top depth bid must become Bid1");
 assert.equal(queueContext.topOfBookFeedState.topOfBook.ask,101,"top depth ask must become Ask1");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.bidSize,2,"top depth bid quantity must become Bid1 resting size");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.askSize,3,"top depth ask quantity must become Ask1 resting size");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.bidDepthSize,30,"all five bid quantities must contribute to total resting size");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.askDepthSize,35,"all five ask quantities must contribute to total resting size");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.bidDepth.length,5,"the shared snapshot must retain all five bid levels");
+assert.equal(queueContext.topOfBookFeedState.topOfBook.askDepth.length,5,"the shared snapshot must retain all five ask levels");
 assert.equal(queueContext.topOfBookFeedState.topOfBook.at,1234,"stored top-of-book timestamp must be Binance depth event time E");
 assert.equal(queueContext.topOfBookFeedState.topOfBook.receivedAt,10000,"local receipt time should remain available separately for diagnostics");
 assert.equal(queueContext.topOfBookFeedDiag.lastMessageTime,10000,"socket activity diagnostics should continue using local receipt time");
@@ -182,6 +188,8 @@ const delayedTopOfBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim
 });
 assert.equal(delayedTopOfBook().ageMs,16000,"a delayed event must retain its true 16s exchange age after local processing");
 assert.equal(delayedTopOfBook().fresh,false,"a delayed event must not pass freshness just because it was processed locally now");
+assert.equal(delayedTopOfBook().bidDepthSize,30,"the public snapshot must expose the summed five-level bid depth");
+assert.equal(delayedTopOfBook().askDepthSize,35,"the public snapshot must expose the summed five-level ask depth");
 const getTopOfBook=vm.runInNewContext(`(${main.slice(bookStart,bookEnd).trim()})`,{
   topOfBookFeedState:{topOfBook:{symbol:"BTCUSDT",bid:100,ask:101,at:9601}},
   topOfBookSocketOpen:()=>false,

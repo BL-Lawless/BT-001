@@ -767,6 +767,59 @@ button:hover{filter:brightness(1.04)}
   font-variant-numeric:tabular-nums;
   white-space:nowrap;
 }
+.chart-market-gauges{
+  display:inline-flex;
+  align-items:center;
+  flex:0 0 auto;
+  white-space:nowrap;
+}
+.chart-book-pressure-gauge{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  min-height:20px;
+  padding:1px 7px;
+  border-left:1px solid rgba(148,163,184,.55);
+  color:#1f2937;
+  font:700 11px/1 Arial,sans-serif;
+  white-space:nowrap;
+}
+.book-pressure-track{
+  position:relative;
+  box-sizing:border-box;
+  width:72px;
+  height:10px;
+  overflow:hidden;
+  border:1px solid rgba(100,116,139,.62);
+  border-radius:3px;
+  background:rgba(148,163,184,.16);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.65);
+}
+.book-pressure-track::after{
+  content:"";
+  position:absolute;
+  z-index:2;
+  top:0;
+  bottom:0;
+  left:50%;
+  width:1px;
+  background:rgba(71,85,105,.48);
+}
+.book-pressure-fill{
+  position:absolute;
+  z-index:1;
+  top:1px;
+  bottom:1px;
+  left:calc(50% - 2px);
+  width:4px;
+  border-radius:1px;
+  background:#647083;
+  transition:left .08s linear,width .08s linear,background-color .08s linear;
+}
+.chart-book-pressure-gauge.is-bid-muted .book-pressure-fill{background:rgba(22,163,74,.60)}
+.chart-book-pressure-gauge.is-bid-strong .book-pressure-fill{background:#00a83d}
+.chart-book-pressure-gauge.is-ask-muted .book-pressure-fill{background:rgba(220,38,38,.60)}
+.chart-book-pressure-gauge.is-ask-strong .book-pressure-fill{background:#dc2626}
 .adx-direction-tag{
   display:inline-block;
   margin:0 .28em;

@@ -377,14 +377,13 @@
   flex-basis:calc(6ch + 23px);
 }
 .rapid-fire-new-average-toggle{
-  width:58px;
+  box-sizing:border-box;
+  width:26px;
   min-width:0;
-  flex:0 0 58px;
-  display:grid;
-  grid-template-columns:1fr 14px;
-  grid-template-rows:1fr;
+  flex:0 0 26px;
+  display:flex;
   align-items:center;
-  column-gap:3px;
+  justify-content:center;
   padding:4px 5px;
   border:1px solid #d9dce1;
   border-radius:5px;
@@ -393,10 +392,8 @@
   font:800 9px/1 Arial,Helvetica,sans-serif;
   letter-spacing:.02em;
 }
-.rapid-fire-new-average-toggle span{text-align:left}
 .rapid-fire-new-average-toggle i{
-  grid-column:2;
-  grid-row:1;
+  flex:0 0 14px;
   width:14px;
   height:8px;
   position:relative;

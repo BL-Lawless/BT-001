@@ -5258,16 +5258,29 @@ const marketDataHub = (() => {
     publishMarketUpdate({type:"price",source:"markPrice",price,exchangeTime:ms});
   }
   function queueTopOfBookDepth(d){
-    const bid = Number(d && Array.isArray(d.b) && d.b[0] && d.b[0][0]);
-    const ask = Number(d && Array.isArray(d.a) && d.a[0] && d.a[0][0]);
+    const depthSide = levels => (Array.isArray(levels) ? levels : []).slice(0,5).map(level => [Number(level && level[0]),Number(level && level[1])]).filter(level => Number.isFinite(level[0]) && level[0] > 0 && Number.isFinite(level[1]) && level[1] >= 0);
+    const bidDepth = depthSide(d && d.b);
+    const askDepth = depthSide(d && d.a);
+    const bid = bidDepth[0] && bidDepth[0][0];
+    const ask = askDepth[0] && askDepth[0][0];
+    const bidSize = bidDepth[0] && bidDepth[0][1];
+    const askSize = askDepth[0] && askDepth[0][1];
+    const bidDepthSize = bidDepth.reduce((sum,level) => sum + level[1],0);
+    const askDepthSize = askDepth.reduce((sum,level) => sum + level[1],0);
     const eventAt = Number(d && d.E);
-    if(!Number.isFinite(bid) || bid <= 0 || !Number.isFinite(ask) || ask <= 0 || ask < bid || !Number.isFinite(eventAt) || eventAt <= 0) return false;
+    if(!bidDepth.length || !askDepth.length || !Number.isFinite(bid) || !Number.isFinite(ask) || ask < bid || !Number.isFinite(eventAt) || eventAt <= 0) return false;
     const receivedAt = now();
     const symbol = String((d && d.s) || ensureBufferSymbol()).toUpperCase();
     topOfBookFeedState.topOfBook = Object.freeze({
       symbol,
       bid,
       ask,
+      bidSize,
+      askSize,
+      bidDepth:Object.freeze(bidDepth.map(level => Object.freeze(level))),
+      askDepth:Object.freeze(askDepth.map(level => Object.freeze(level))),
+      bidDepthSize,
+      askDepthSize,
       at:eventAt,
       receivedAt,
       updateId:Number.isFinite(Number(d && d.u)) ? Number(d.u) : null
@@ -5795,7 +5808,14 @@ const marketDataHub = (() => {
       symbol:expectedSymbol,
       bid:matches ? book.bid : null,
       ask:matches ? book.ask : null,
+      bidSize:matches ? book.bidSize : null,
+      askSize:matches ? book.askSize : null,
+      bidDepth:matches ? book.bidDepth : null,
+      askDepth:matches ? book.askDepth : null,
+      bidDepthSize:matches ? book.bidDepthSize : null,
+      askDepthSize:matches ? book.askDepthSize : null,
       at:matches ? book.at : null,
+      updateId:matches ? book.updateId : null,
       ageMs,
       hasData:matches,
       state:matches ? (fresh ? "fresh" : "stale") : "waiting",
@@ -5888,6 +5908,7 @@ const marketDataHub = (() => {
     getTopOfBook:topOfBookSnapshot,
     ensureTopOfBook,
     setTopOfBookConsumerActive,
+    subscribeTopOfBook:subscribeTopOfBookTick,
     topOfBookDiagnostics,
     getLatestPrice:() => Number(diag.latestAggTradeTickTime||0)>=Number(diag.lastMarkPriceTickTime||0)
       ? {price:Number(diag.latestPrice)||null,at:Number(diag.latestAggTradeTickTime)||null,source:diag.latestPrice?"aggTrade":"unavailable"}
@@ -22629,6 +22650,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   const PRESSURE_MODE_KEY = "bt001_pressure_meter_mode";
   const PRESSURE_LB_KEY = "bt001_pressure_meter_lookback";
   const TF_LOOKBACKS = [5,10,20,50];
+  // Calibration history only. Displayed lean always comes from the newest depth tick.
+  const BOOK_PRESSURE_REFERENCE_MS = 3 * 60 * 1000;
+  const BOOK_PRESSURE_REFERENCE_MAX_SAMPLES = 2000;
   const n = value => {
     const num = Number(value);
     return Number.isFinite(num) ? num : null;
@@ -22660,7 +22684,9 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     hoverToggle:false,
     redrawFrame:null,
     tradabilityRect:null,
-    tradabilityModel:null
+    tradabilityModel:null,
+    bookPressureModel:null,
+    bookPressureDepthHistory:new Map()
   };
   function currentSymbol(){
     try{
@@ -23052,8 +23078,19 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const adxTag=typeof volatility.adxDirectionTag==="function"?volatility.adxDirectionTag(adx,adxDirection,adxCrossed,25):{glyph:"−",tone:"grey"};
     return {atr:Number.isFinite(atr)?atr:null,adx:Number.isFinite(adx)?adx:null,plusDi:adxValues.plusDi&&Number(adxValues.plusDi[last]),minusDi:adxValues.minusDi&&Number(adxValues.minusDi[last]),adxDirection,adxCrossed,adxTag};
   }
-  function updateChartVolatilityReadout(){
+  function ensureChartMarketGaugeRow(){
     const row = document.querySelector(".chart-indicator-toggles");
+    if(!row) return null;
+    let group = document.getElementById("chartMarketGauges");
+    if(group) return group;
+    group = document.createElement("span");
+    group.id = "chartMarketGauges";
+    group.className = "chart-market-gauges";
+    row.appendChild(group);
+    return group;
+  }
+  function updateChartVolatilityReadout(){
+    const row = ensureChartMarketGaugeRow();
     if(!row) return;
     let node = document.getElementById("chartVolatilityReadout");
     if(!node){
@@ -23068,6 +23105,85 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const tag=model.adxTag||{glyph:"−",tone:"grey"};
     node.innerHTML = "ADX : " + adx + '<span class="adx-direction-tag is-' + String(tag.tone||"grey") + '" aria-label="ADX direction ' + String(tag.tone||"grey") + '">' + String(tag.glyph||"−") + "</span>| ATR : " + atr;
     node.title = tfLabel(currentTf()) + " chart volatility";
+  }
+  function computeBookPressureModel(book,typicalDepth,referenceSamples=0){
+    const bidSize = Number(book && book.bidDepthSize);
+    const askSize = Number(book && book.askDepthSize);
+    const reference = Number(typicalDepth);
+    const available = !!(book && book.fresh && Number.isFinite(bidSize) && bidSize >= 0 && Number.isFinite(askSize) && askSize >= 0 && bidSize + askSize > 0 && Number.isFinite(reference) && reference > 0);
+    if(!available) return Object.freeze({available:false,bidSize:null,askSize:null,totalDepth:null,typicalDepth:null,rawLean:0,magnitudeRatio:0,lean:0,side:"neutral",tone:"neutral",referenceSamples:0});
+    const totalDepth = bidSize + askSize;
+    const rawLean = (bidSize - askSize) / totalDepth;
+    const magnitudeRatio = totalDepth / reference;
+    const lean = Math.max(-1,Math.min(1,rawLean * magnitudeRatio)); // Equivalent to current (Bid5 - Ask5) / typical total depth.
+    const balanced = Math.abs(lean) <= .05;
+    const side = balanced ? "neutral" : lean > 0 ? "bid" : "ask";
+    const tone = side === "neutral" ? "neutral" : Math.abs(lean) >= .5 ? "strong" : "muted";
+    return Object.freeze({available:true,bidSize,askSize,totalDepth,typicalDepth:reference,rawLean,magnitudeRatio,lean,side,tone,referenceSamples:Number(referenceSamples)||0});
+  }
+  function updateBookPressureReference(book){
+    const symbol = String(book && book.symbol || "").toUpperCase();
+    const at = Number(book && book.at);
+    const totalDepth = Number(book && book.bidDepthSize) + Number(book && book.askDepthSize);
+    if(!book || book.fresh !== true || !symbol || !Number.isFinite(at) || at <= 0 || !Number.isFinite(totalDepth) || totalDepth <= 0) return {typicalDepth:null,sampleCount:0};
+    let history = meterState.bookPressureDepthHistory.get(symbol);
+    if(!history){
+      history = {samples:[],sum:0,lastKey:"",lastTypical:null};
+      meterState.bookPressureDepthHistory.set(symbol,history);
+    }
+    const key = at + ":" + String(book.updateId == null ? "" : book.updateId);
+    if(history.lastKey === key) return {typicalDepth:history.lastTypical,sampleCount:Math.max(0,history.samples.length - 1)};
+    const cutoff = at - BOOK_PRESSURE_REFERENCE_MS;
+    while(history.samples.length && (history.samples[0].at < cutoff || history.samples.length >= BOOK_PRESSURE_REFERENCE_MAX_SAMPLES)){
+      history.sum -= history.samples.shift().totalDepth;
+    }
+    const typicalDepth = history.samples.length ? history.sum / history.samples.length : totalDepth;
+    const sampleCount = history.samples.length;
+    history.samples.push({at,totalDepth});
+    history.sum += totalDepth;
+    history.lastKey = key;
+    history.lastTypical = typicalDepth;
+    return {typicalDepth,sampleCount};
+  }
+  function ensureBookPressureGauge(){
+    const row = ensureChartMarketGaugeRow();
+    if(!row) return null;
+    let node = document.getElementById("chartBookPressureGauge");
+    if(node) return node;
+    node = document.createElement("span");
+    node.id = "chartBookPressureGauge";
+    node.className = "chart-book-pressure-gauge is-neutral";
+    node.setAttribute("role","img");
+    node.innerHTML = '<span class="book-pressure-label">Book</span><span class="book-pressure-track" aria-hidden="true"><span class="book-pressure-fill"></span></span>';
+    row.appendChild(node);
+    return node;
+  }
+  function formatBookPressureSize(value){
+    if(!Number.isFinite(Number(value))) return "n/a";
+    return Number(value).toLocaleString(undefined,{maximumFractionDigits:3});
+  }
+  function updateBookPressureGauge(){
+    const node = ensureBookPressureGauge();
+    if(!node) return null;
+    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
+    const book = hub && typeof hub.getTopOfBook === "function" ? hub.getTopOfBook() : null;
+    const reference = updateBookPressureReference(book);
+    const model = computeBookPressureModel(book,reference.typicalDepth,reference.sampleCount);
+    const fill = node.querySelector(".book-pressure-fill");
+    node.className = "chart-book-pressure-gauge is-" + (model.side === "neutral" ? "neutral" : model.side + "-" + model.tone);
+    if(fill){
+      const magnitudePct = Math.abs(model.lean) * 50;
+      fill.style.left = model.side === "bid" ? (50 - magnitudePct) + "%" : model.side === "ask" ? "50%" : "calc(50% - 2px)";
+      fill.style.width = model.side === "neutral" ? "4px" : magnitudePct + "%";
+    }
+    const detail = model.available
+      ? "Bid5 " + formatBookPressureSize(model.bidSize) + " / Ask5 " + formatBookPressureSize(model.askSize) + " / Typical " + formatBookPressureSize(model.typicalDepth) + " / Depth " + model.magnitudeRatio.toFixed(2) + "x"
+      : "five-level bid / ask size unavailable";
+    node.title = "Book Pressure - " + detail;
+    const stateLabel = !model.available ? "unavailable" : model.side === "neutral" ? "balanced" : model.side + " side";
+    node.setAttribute("aria-label","Book Pressure: " + stateLabel + ". " + detail);
+    meterState.bookPressureModel = model;
+    return model;
   }
   function computePressureModel(mode){
     const useDaily = mode !== "tf";
@@ -23434,10 +23550,21 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       if(event && event.type === "kline" && String(event.tf || "").toLowerCase() === TRADABILITY_TF) requestRedraw();
     });
   }
+  if(tradabilityHub && typeof tradabilityHub.setTopOfBookConsumerActive === "function"){
+    tradabilityHub.setTopOfBookConsumerActive("book-pressure-gauge",true);
+  }
+  if(tradabilityHub && typeof tradabilityHub.subscribeTopOfBook === "function" && !window.__bt001BookPressureGaugeSubscribed){
+    window.__bt001BookPressureGaugeSubscribed = true;
+    window.__bt001BookPressureGaugeUnsubscribe = tradabilityHub.subscribeTopOfBook(() => updateBookPressureGauge());
+  }
   window.BT001_TRADABILITY_GAUGE = Object.freeze({
     timeframe:TRADABILITY_TF,
     snapshot:() => meterState.tradabilityModel,
     rect:() => meterState.tradabilityRect && {...meterState.tradabilityRect}
+  });
+  window.BT001_BOOK_PRESSURE_GAUGE = Object.freeze({
+    snapshot:() => meterState.bookPressureModel || computeBookPressureModel(null),
+    refresh:updateBookPressureGauge
   });
 
   const prevDraw = draw;
@@ -23447,6 +23574,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       drawAxisDayRangeVisual();
       drawDailyVolumeSplitVisual();
       updateChartVolatilityReadout();
+      updateBookPressureGauge();
     }catch(error){
       console.warn(MODULE + " draw failed",error);
     }

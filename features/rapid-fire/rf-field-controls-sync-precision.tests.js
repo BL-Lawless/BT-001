@@ -24,7 +24,7 @@ assert(rapid.includes("function protectionPlText(value)")&&rapid.includes("parse
 const protectionMarkup=between(rapid,'<div class="rapid-fire-protection-row"','</div>\n      </div>`');
 const protectionOrder=["rapidFireMasterSl","rapidFireMasterSlPl","rapidFireTakeProfit","rapidFireTakeProfitPl","rapidFireTakeProfitSet","rapidFireNewAverageToggle"].map(id=>protectionMarkup.indexOf(`id="${id}"`));
 assert(protectionOrder.every((position,index)=>position>=0&&(index===0||position>protectionOrder[index-1])),"the row order must be SL Price, SL P/L, TP Price, TP P/L, Set, then Average toggle");
-assert(/\.rapid-fire-protection-row\{[^}]*display:flex;[^}]*gap:5px;/s.test(css)&&/\.rapid-fire-new-average-toggle\{[^}]*width:58px;[^}]*flex:0 0 58px;/s.test(css),"the protection row must retain its five-pixel spacing and compact Average allocation");
+assert(/\.rapid-fire-protection-row\{[^}]*display:flex;[^}]*gap:5px;/s.test(css)&&/\.rapid-fire-new-average-toggle\{[^}]*box-sizing:border-box;[^}]*width:26px;[^}]*flex:0 0 26px;[^}]*justify-content:center;[^}]*padding:4px 5px;/s.test(css),"the protection row must retain its five-pixel spacing and give the label-free Average switch symmetric five-pixel side padding");
 assert(!protectionMarkup.includes('<span>Avg</span>')&&protectionMarkup.includes('id="rapidFireNewAverageToggle"'),"the Average toggle must contain no text label");
 assert(calculator.includes("if(window.BT001_RAPID_FIRE_VISIBLE!==true||!rapidFireNewAverageVisible)return null;"),"the New Average toggle must gate projection rendering");
 assert(rapid.includes("bridge.setNewAverageVisible(next)")&&calculator.includes("setNewAverageVisible:setRapidFireNewAverageVisible"),"the row toggle must update Calculator projection state");
