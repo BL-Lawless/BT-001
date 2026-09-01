@@ -29,7 +29,7 @@ function between(source,startText,endText){
 
   assert(/id="rapidFireMasterSlPl" type="text"/.test(rapid)&&/id="rapidFireTakeProfitPl" type="text"/.test(rapid),"SL and TP P/L values must use decimal-preserving editable inputs");
   assert(rapid.includes("input.disabled=protectionBusy||!priceRules.available")&&!rapid.includes("input.disabled=!position||protectionBusy"),"protection inputs must stay enabled while flat once live price rules are available");
-  assert(css.includes(".rapid-fire-protection-pl{")&&css.includes("max-width:50px"),"editable P/L fields must remain bounded in the compact RF layout");
+  assert(/\.rapid-fire-protection-pl-control\{[^}]*min-width:calc\(6ch \+ 23px\);[^}]*flex:1 0 calc\(6ch \+ 23px\);/s.test(css),"editable P/L fields must preserve their full six-character value and grow evenly in the compact RF layout");
 
   let referenceEntry=100;
   const conversionContext={

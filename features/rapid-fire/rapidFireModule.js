@@ -5,6 +5,8 @@
   const CLOSE_PERCENT_STEPS=Object.freeze(Array.from({length:101},(_value,index)=>index));
   const CLOSE_PERCENT_TICKS=Object.freeze(Array.from({length:11},(_value,index)=>index*10));
   const REVERSE_PERCENT_STEPS=Object.freeze([25,...Array.from({length:28},(_value,index)=>(index+3)*10)]);
+  const NUMERIC_HOLD_DELAY_MS=320;
+  const NUMERIC_HOLD_INTERVAL_MS=80;
   let windowApi=null;
   let statusUnsubscribe=null;
   let refreshTimer=null;
@@ -92,8 +94,33 @@
     };
     [[upButton,1],[downButton,-1]].forEach(([button,direction])=>{
       if(!button)return;
-      button.addEventListener("mousedown",event=>event.preventDefault(),false);
-      button.addEventListener("click",()=>adjust(direction),false);
+      let delayTimer=null;
+      let repeatTimer=null;
+      let holding=false;
+      const stopHold=()=>{
+        holding=false;
+        if(delayTimer!=null){clearTimeout(delayTimer);delayTimer=null;}
+        if(repeatTimer!=null){clearInterval(repeatTimer);repeatTimer=null;}
+      };
+      button.addEventListener("mousedown",event=>{
+        if(event.button!=null&&event.button!==0)return;
+        event.preventDefault();
+        stopHold();
+        holding=true;
+        adjust(direction);
+        delayTimer=setTimeout(()=>{
+          delayTimer=null;
+          if(!holding)return;
+          repeatTimer=setInterval(()=>adjust(direction),NUMERIC_HOLD_INTERVAL_MS);
+        },NUMERIC_HOLD_DELAY_MS);
+        document.addEventListener("mouseup",stopHold,{once:true});
+      },false);
+      button.addEventListener("mouseup",stopHold,false);
+      button.addEventListener("mouseleave",stopHold,false);
+      button.addEventListener("blur",stopHold,false);
+      button.addEventListener("click",event=>{
+        if(!event||event.detail===0)adjust(direction);
+      },false);
     });
     controller.input.addEventListener("wheel",event=>{
       const direction=event.deltaY<0?1:-1;
@@ -512,21 +539,21 @@
         </div>
         <div class="rapid-fire-status" id="rapidFireStatus" aria-live="polite"></div>
         <div class="rapid-fire-protection-row" aria-label="Rapid Fire protection orders">
-          <label class="rapid-fire-protection-box">
+          <div class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">SL</span>
             <span class="rapid-fire-number-control rapid-fire-protection-price-control"><input class="rapid-fire-protection-price" id="rapidFireMasterSl" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Master stop loss price"><span class="rapid-fire-number-steppers"><button id="rapidFireMasterSlUp" type="button" tabindex="-1" aria-label="Increase stop loss price">&#9650;</button><button id="rapidFireMasterSlDown" type="button" tabindex="-1" aria-label="Decrease stop loss price">&#9660;</button></span></span>
             <span class="rapid-fire-number-control rapid-fire-protection-pl-control"><input class="rapid-fire-protection-pl" id="rapidFireMasterSlPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Master stop loss P/L"><span class="rapid-fire-number-steppers"><button id="rapidFireMasterSlPlUp" type="button" tabindex="-1" aria-label="Increase stop loss P/L">&#9650;</button><button id="rapidFireMasterSlPlDown" type="button" tabindex="-1" aria-label="Decrease stop loss P/L">&#9660;</button></span></span>
-          </label>
-          <label class="rapid-fire-protection-box">
+          </div>
+          <div class="rapid-fire-protection-box">
             <span class="rapid-fire-protection-label">TP</span>
             <span class="rapid-fire-number-control rapid-fire-protection-price-control"><input class="rapid-fire-protection-price" id="rapidFireTakeProfit" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" placeholder="Price" aria-label="Take profit price"><span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitUp" type="button" tabindex="-1" aria-label="Increase take profit price">&#9650;</button><button id="rapidFireTakeProfitDown" type="button" tabindex="-1" aria-label="Decrease take profit price">&#9660;</button></span></span>
-            <button class="rapid-fire-protection-set" id="rapidFireTakeProfitSet" type="button">Set</button>
             <span class="rapid-fire-number-control rapid-fire-protection-pl-control rapid-fire-tp-pl-control">
               <input class="rapid-fire-protection-pl" id="rapidFireTakeProfitPl" type="text" inputmode="decimal" pattern="-?[0-9]*[.]?[0-9]*" placeholder="P/L" aria-label="Take profit P/L">
               <span class="rapid-fire-number-steppers"><button id="rapidFireTakeProfitPlUp" type="button" tabindex="-1" aria-label="Increase take profit P/L">&#9650;</button><button id="rapidFireTakeProfitPlDown" type="button" tabindex="-1" aria-label="Decrease take profit P/L">&#9660;</button></span>
             </span>
-          </label>
-          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the Average projection line"><span>Avg</span><i aria-hidden="true"></i></button>
+            <button class="rapid-fire-protection-set" id="rapidFireTakeProfitSet" type="button">Set</button>
+          </div>
+          <button class="rapid-fire-new-average-toggle is-active" id="rapidFireNewAverageToggle" type="button" aria-pressed="true" title="Show or hide the Average projection line"><i aria-hidden="true"></i></button>
         </div>
       </div>`;
     document.body.appendChild(win);

@@ -67,7 +67,8 @@ assert(calculator.includes("rapidFireProtectionPl")&&calculator.includes("raw-en
 assert(calculator.includes("await cancelRapidFireProtections()")&&calculator.indexOf("await cancelRapidFireProtections()")<calculator.indexOf("const settingsApi=window.BT001SymbolTradingSettings;",calculator.indexOf("async function executeRapidFireChase")),"Reverse must cancel Master SL and TP before reading and submitting the reverse chase");
 assert(calculator.includes('rapidFireProtection:true')&&calculator.includes('text:"TP | "'),"RF SL and TP drafts must feed Calculator's chart-level overlay");
 assert(rapid.includes('rapid-fire-protection-label">SL</span>')&&!rapid.includes('rapid-fire-protection-label">Master SL</span>'),"the RF protection label must be SL");
-assert(/\.rapid-fire-protection-price\{[^}]*min-width:0;[^}]*flex:1 1 66px;/s.test(css),"SL and TP price inputs must share one compact flexible width");
+assert(/\.rapid-fire-protection-price-control\{[^}]*min-width:calc\(7ch \+ 23px\);[^}]*flex:1 0 calc\(7ch \+ 23px\);/s.test(css),"SL and TP price fields must fit seven characters, six pixels of text padding, borders, and permanently reserved arrows");
+assert(/\.rapid-fire-protection-pl-control\{[^}]*min-width:calc\(6ch \+ 23px\);[^}]*flex:1 0 calc\(6ch \+ 23px\);/s.test(css),"SL and TP P/L fields must fit six characters, six pixels of text padding, borders, and permanently reserved arrows");
 assert(rapid.includes('id="rapidFireTakeProfitSet" type="button">Set</button>')&&rapid.includes("const typedValue=takeProfitCommitValue(tpInput.value,takeProfitEditValue)")&&rapid.includes('commitProtection("tp",tpInput,typedValue)'),'TP Set must commit the captured edit rather than a blur-reverted field value');
 assert(rapid.includes('String(rawValue==null?"":rawValue).trim()===""')&&rapid.includes('kind==="tp"?bridge.cancelTakeProfit:bridge.cancelMasterStop')&&calculator.includes("cancelTakeProfit:cancelRapidFireTakeProfit"),"empty TP plus Set must route through the dedicated Binance TP cancellation bridge");
 assert(calculator.includes("syncRapidFireTakeProfitFromSnapshot(snapshot)")&&calculator.includes("gateway.cancelOrder(rapidFireTakeProfitIdentityParams(rapidFireTakeProfitOrder))")&&calculator.includes("cancelled:false,noOrder:true"),"TP cancellation must refresh authoritative orders, cancel the tracked Binance order, and no-op when none exists");
@@ -93,7 +94,7 @@ assert(rapidChaseSource.includes('signedOrderWrite("POST"')&&otfChaseSource.incl
 assert(!rapidChaseSource.includes("BT001_BINANCE_TRADING")&&!rapidChaseSource.includes("tradingWrite"),"Add, Double, Close, and Reverse must not route through the direct RF Target gateway");
 for(const action of ["add","double","close","reverse"])assert(rapidChaseSource.includes(`action===\"${action}\"`)||action==="add","all RF actions must remain in the shared chase execution path");
 assert(rapid.includes("const REVERSE_PERCENT_STEPS=Object.freeze([25,...Array.from({length:28},(_value,index)=>(index+3)*10)])"),"Reverse steps must be 25, then every 10 percent from 30 through 300");
-assert(rapid.includes('title="Show or hide the Average projection line"><span>Avg</span>')&&!rapid.includes("<span>New</span><span>Avg</span>"),"the New Average toggle must display the compact Avg label");
+assert(rapid.includes('title="Show or hide the Average projection line"><i aria-hidden="true"></i></button>')&&!rapid.includes('<span>Avg</span>'),"the New Average toggle must display only the switch control");
 assert(rapid.includes('bindNumericAdjustControls(lotController,{upButton:q("rapidFireLotUp"),downButton:q("rapidFireLotDown"),step:0.001,precision:()=>Math.max(3,api().lotRules().precision),commit:false,min:0})'),"Add quantity must bind shared arrow and wheel adjustment at an exact 0.001 draft step");
 assert(rapid.includes('lotController.commit("trigger")'),"Add execution must commit its wheel-adjusted draft through live symbol quantity normalization");
 
@@ -102,8 +103,17 @@ const numericAdjustEnd=rapid.indexOf("function protectionPlText",numericAdjustSt
 const numericAdjustContext={
   number:value=>Number.isFinite(Number(value))?Number(value):null,
   protectionWheelValue:(current,step,direction,precision)=>Math.round(((Number(current)||0)+direction*step)*10**precision)/10**precision,
+  NUMERIC_HOLD_DELAY_MS:320,NUMERIC_HOLD_INTERVAL_MS:80,
   Math
 };
+let holdDelay=null;
+let holdRepeat=null;
+let documentMouseup=null;
+numericAdjustContext.setTimeout=callback=>{holdDelay=callback;return 1;};
+numericAdjustContext.clearTimeout=()=>{holdDelay=null;};
+numericAdjustContext.setInterval=callback=>{holdRepeat=callback;return 2;};
+numericAdjustContext.clearInterval=()=>{holdRepeat=null;};
+numericAdjustContext.document={addEventListener:(name,listener)=>{if(name==="mouseup")documentMouseup=listener;}};
 vm.createContext(numericAdjustContext);
 vm.runInContext(rapid.slice(numericAdjustStart,numericAdjustEnd),numericAdjustContext);
 let wheelListener=null;
@@ -123,6 +133,21 @@ assert.equal(wheelDraft,1.235,"the shared Add spinner-up control must use the sa
 buttonListeners["down:click"]();
 assert.equal(wheelDraft,1.234,"the shared Add spinner-down control must use the same exact 0.001 adjustment");
 assert.equal(prevented,true,"Add quantity wheel handling must prevent page scrolling");
+let holdPrevented=false;
+buttonListeners["up:mousedown"]({button:0,preventDefault:()=>{holdPrevented=true;}});
+assert.equal(wheelDraft,1.235,"spinner hold must perform one immediate step on mouse-down");
+holdDelay();
+holdRepeat();
+holdRepeat();
+assert.equal(wheelDraft,1.237,"spinner hold must repeat at the field's exact increment after the initial delay");
+buttonListeners["up:mouseleave"]();
+assert.equal(holdRepeat,null,"spinner hold must stop when the pointer leaves the button");
+assert.equal(typeof documentMouseup,"function","spinner hold must also install a document-level mouse-up stop");
+assert.equal(holdPrevented,true,"spinner hold must prevent the native button mouse-down action");
+wheelInput.value="0";
+buttonListeners["down:mousedown"]({button:0,preventDefault:()=>{}});
+assert.equal(wheelDraft,0,"spinner hold must preserve the field's configured lower bound");
+documentMouseup();
 
 const snapStart=rapid.indexOf("function snapPercent");
 const snapEnd=rapid.indexOf("function sliderTicks",snapStart);

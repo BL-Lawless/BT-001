@@ -22,8 +22,10 @@ assert(rapid.includes('upButton,downButton,step:0.5,precision:2')&&rapid.include
 assert(rapid.includes("function protectionPlText(value)")&&rapid.includes("parsed.toFixed(2)"),"P/L display must use two decimal places");
 
 const protectionMarkup=between(rapid,'<div class="rapid-fire-protection-row"','</div>\n      </div>`');
-assert(protectionMarkup.indexOf('id="rapidFireNewAverageToggle"')>protectionMarkup.indexOf('id="rapidFireTakeProfitPl"'),"New Average toggle must be the third control in the SL/TP row");
-assert(/\.rapid-fire-protection-row\{[^}]*grid-template-columns:[^;]*58px/s.test(css),"the protection row must reserve a compact third column for New Average");
+const protectionOrder=["rapidFireMasterSl","rapidFireMasterSlPl","rapidFireTakeProfit","rapidFireTakeProfitPl","rapidFireTakeProfitSet","rapidFireNewAverageToggle"].map(id=>protectionMarkup.indexOf(`id="${id}"`));
+assert(protectionOrder.every((position,index)=>position>=0&&(index===0||position>protectionOrder[index-1])),"the row order must be SL Price, SL P/L, TP Price, TP P/L, Set, then Average toggle");
+assert(/\.rapid-fire-protection-row\{[^}]*display:flex;[^}]*gap:5px;/s.test(css)&&/\.rapid-fire-new-average-toggle\{[^}]*width:58px;[^}]*flex:0 0 58px;/s.test(css),"the protection row must retain its five-pixel spacing and compact Average allocation");
+assert(!protectionMarkup.includes('<span>Avg</span>')&&protectionMarkup.includes('id="rapidFireNewAverageToggle"'),"the Average toggle must contain no text label");
 assert(calculator.includes("if(window.BT001_RAPID_FIRE_VISIBLE!==true||!rapidFireNewAverageVisible)return null;"),"the New Average toggle must gate projection rendering");
 assert(rapid.includes("bridge.setNewAverageVisible(next)")&&calculator.includes("setNewAverageVisible:setRapidFireNewAverageVisible"),"the row toggle must update Calculator projection state");
 
@@ -47,6 +49,9 @@ assert(/\.rapid-fire-number-steppers\{[^}]*opacity:0;[^}]*visibility:hidden;[^}]
 assert(css.includes(".rapid-fire-number-control:hover .rapid-fire-number-steppers")&&css.includes(".rapid-fire-number-control:focus-within .rapid-fire-number-steppers"),"all seven shared spinner controls must reveal on field hover or focus");
 assert(/\.rapid-fire-number-control:focus-within \.rapid-fire-number-steppers\{[^}]*opacity:1;[^}]*visibility:visible;[^}]*pointer-events:auto;/s.test(css),"revealed shared spinner controls must become visible and interactive");
 assert(rapid.includes('{passive:false}')&&rapid.includes("event.preventDefault()"),"wheel handlers must suppress native page/input scrolling");
+assert(rapid.includes("const NUMERIC_HOLD_DELAY_MS=320")&&rapid.includes("const NUMERIC_HOLD_INTERVAL_MS=80")&&rapid.includes('button.addEventListener("mouseleave",stopHold,false)')&&rapid.includes('document.addEventListener("mouseup",stopHold,{once:true})'),"all seven shared spinner bindings must repeat after a short delay and stop on leave or mouse-up");
+assert(/\.rapid-fire-protection-price\{[^}]*padding:4px 18px 4px 3px;/s.test(css)&&/\.rapid-fire-protection-pl\{[^}]*padding:4px 18px 4px 3px;/s.test(css),"price and P/L text must keep three pixels on each side plus a permanently reserved fifteen-pixel spinner");
+assert(/\.rapid-fire-protection-price-control\{[^}]*min-width:calc\(7ch \+ 23px\);[^}]*flex:1 0 calc\(7ch \+ 23px\);/s.test(css)&&/\.rapid-fire-protection-pl-control\{[^}]*min-width:calc\(6ch \+ 23px\);[^}]*flex:1 0 calc\(6ch \+ 23px\);/s.test(css),"all four value fields must receive the same flex-grow share above their exact content minima");
 
 const wheelContext={number:value=>Number.isFinite(Number(value))?Number(value):null,Math};
 vm.createContext(wheelContext);

@@ -296,21 +296,16 @@
 }
 .rapid-fire-status.is-error{border-color:#f6465d;color:#f6465d;font-weight:800}
 .rapid-fire-protection-row{
-  display:grid;
-  grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr) 58px;
-  gap:5px;
-}
-.rapid-fire-protection-box{
-  min-width:0;
   display:flex;
   gap:5px;
-  align-items:center;
-  padding:5px;
-  border:1px solid #d9dce1;
-  border-radius:5px;
-  background:#fff;
+  align-items:stretch;
+}
+.rapid-fire-protection-box{
+  display:contents;
 }
 .rapid-fire-protection-label{
+  flex:0 0 auto;
+  align-self:center;
   color:#4b5563;
   font-size:10px;
   font-weight:800;
@@ -319,13 +314,12 @@
   white-space:nowrap;
 }
 .rapid-fire-protection-price{
-  width:auto;
+  width:100%;
   min-width:0;
   max-width:none;
-  flex:1 1 66px;
   box-sizing:border-box;
   margin:0;
-  padding:4px 18px 4px 5px;
+  padding:4px 18px 4px 3px;
   border:1px solid #d9dce1;
   border-radius:4px;
   background:#fff;
@@ -334,9 +328,10 @@
   text-align:center;
 }
 .rapid-fire-protection-price-control{
-  flex:1 1 66px;
+  min-width:calc(7ch + 23px);
+  flex:1 0 calc(7ch + 23px);
+  font:700 12px Arial,Helvetica,sans-serif;
 }
-.rapid-fire-protection-price-control .rapid-fire-protection-price{width:100%}
 .rapid-fire-protection-box input.is-pending-unsent{
   border-color:#86c99a;
   background:#edf9f0;
@@ -344,6 +339,7 @@
 .rapid-fire-protection-set{
   width:28px;
   min-width:28px;
+  flex:0 0 28px;
   margin:0;
   padding:4px 3px;
   border:1px solid #d9dce1;
@@ -353,13 +349,12 @@
   font:700 11px Arial,Helvetica,sans-serif;
 }
 .rapid-fire-protection-pl{
-  width:50px;
-  min-width:42px;
-  max-width:50px;
-  flex:0 1 50px;
+  width:100%;
+  min-width:0;
+  max-width:none;
   box-sizing:border-box;
   margin:0;
-  padding:4px 18px 4px 5px;
+  padding:4px 18px 4px 3px;
   border:1px solid #d9dce1;
   border-radius:4px;
   background:#fff;
@@ -371,26 +366,18 @@
   white-space:nowrap;
 }
 .rapid-fire-protection-pl-control{
-  width:58px;
-  min-width:58px;
-  max-width:58px;
-  flex:0 0 58px;
-}
-.rapid-fire-protection-box:nth-child(2) .rapid-fire-protection-pl{
-  width:58px;
-  min-width:58px;
-  max-width:58px;
-  flex-basis:58px;
-  padding-right:18px;
+  min-width:calc(6ch + 23px);
+  flex:1 0 calc(6ch + 23px);
+  font:700 12px Arial,Helvetica,sans-serif;
 }
 .rapid-fire-tp-pl-control{
-  width:58px;
-  min-width:58px;
-  max-width:58px;
-  flex:0 0 58px;
+  min-width:calc(6ch + 23px);
+  flex-basis:calc(6ch + 23px);
 }
 .rapid-fire-new-average-toggle{
+  width:58px;
   min-width:0;
+  flex:0 0 58px;
   display:grid;
   grid-template-columns:1fr 14px;
   grid-template-rows:1fr;
