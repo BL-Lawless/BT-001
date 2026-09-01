@@ -2,6 +2,8 @@
   "use strict";
 
   const WINDOW_KEY="btc_futures_chart_v13_rapid_fire_window_v3";
+  const EMERGENCY_TOGGLE_WINDOW_MS=1500;
+  const EMERGENCY_TOGGLE_PATTERN=Object.freeze([false,true,false,true]);
   const CLOSE_PERCENT_STEPS=Object.freeze(Array.from({length:101},(_value,index)=>index));
   const CLOSE_PERCENT_TICKS=Object.freeze(Array.from({length:11},(_value,index)=>index*10));
   const REVERSE_PERCENT_STEPS=Object.freeze([25,...Array.from({length:28},(_value,index)=>(index+3)*10)]);
@@ -20,9 +22,23 @@
   const protectionPlTarget={sl:null,tp:null};
   const lastProtectionOrderSignature={sl:null,tp:null};
   let lastProtectionPositionSignature=null;
+  let emergencyToggleHistory=[];
 
   function q(id){return document.getElementById(id);}
   function api(){return window.CALCULATOR_MODULE&&window.CALCULATOR_MODULE.rapidFire;}
+  function recordRapidFireEmergencyToggle(visible,completedAt=Date.now()){
+    const cutoff=completedAt-EMERGENCY_TOGGLE_WINDOW_MS;
+    emergencyToggleHistory=emergencyToggleHistory.filter(entry=>entry.completedAt>=cutoff);
+    emergencyToggleHistory.push({visible:visible===true,completedAt});
+    if(emergencyToggleHistory.length>EMERGENCY_TOGGLE_PATTERN.length){
+      emergencyToggleHistory=emergencyToggleHistory.slice(-EMERGENCY_TOGGLE_PATTERN.length);
+    }
+    const matched=emergencyToggleHistory.length===EMERGENCY_TOGGLE_PATTERN.length
+      && emergencyToggleHistory.every((entry,index)=>entry.visible===EMERGENCY_TOGGLE_PATTERN[index])
+      && completedAt-emergencyToggleHistory[0].completedAt<=EMERGENCY_TOGGLE_WINDOW_MS;
+    if(matched)emergencyToggleHistory=[];
+    return matched;
+  }
   function number(value){const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;}
   function money(value){
     const parsed=number(value);
@@ -790,11 +806,24 @@
     resetDoubleArm();
     if(refreshTimer!=null){clearInterval(refreshTimer);refreshTimer=null;}
   }
+  async function stopRapidFireOperations(){
+    const bridge=api();
+    const snapshot=bridge&&bridge.snapshot();
+    if(snapshot&&snapshot.active&&typeof bridge.cancel==="function"){
+      try{await bridge.cancel();}catch(_error){}
+    }
+    setStatus("All RF operations are stopped");
+    render();
+  }
   function bind(){
     const trigger=q("rapidFireBtn");
     if(!trigger||trigger.dataset.bound==="1")return;
     trigger.dataset.bound="1";
-    trigger.addEventListener("click",()=>isOpen()?hide():show(),false);
+    trigger.addEventListener("click",()=>{
+      const opening=!isOpen();
+      if(opening)show();else hide();
+      if(recordRapidFireEmergencyToggle(opening))void stopRapidFireOperations();
+    },false);
     window.RAPID_FIRE_MODULE=Object.freeze({open:show,hide,snapshot:()=>api()?.snapshot()||null,destroy(){hide();if(statusUnsubscribe)statusUnsubscribe();}});
   }
 

@@ -53,6 +53,7 @@ assert(css.includes("grid-template-columns:repeat(4,minmax(0,1fr))")&&css.includ
 assert(css.includes("height:284px")&&css.includes("min-height:272px")&&rapid.includes("minHeight:272,defaultWidth:500,defaultHeight:284"),"Rapid Fire must open compactly and permit resizing below the default height");
 assert(/\.rapid-fire-lot\{[^}]*width:100%/s.test(css)&&css.includes("grid-template-columns:82px 86px repeat(3,minmax(0,1fr))"),"DIR must match the row-title width while ADD, DBL, and B.E. share the remaining width equally");
 assert(/\.rapid-fire-status\{[^}]*width:100%;[^}]*height:34px/s.test(css),"status must remain a full-width single-line row");
+assert(/\.rapid-fire-status\{[^}]*font-size:11px;[^}]*font-weight:400;/s.test(css)&&!/\.rapid-fire-status\.is-error\{[^}]*font-weight:/s.test(css),"RF status text must be one pixel smaller and remain normal-weight for every tone");
 assert(css.includes(".rapid-fire-slider-ticks i")&&rapid.includes("sliderTicks(REVERSE_PERCENT_STEPS,25,300,100)"),"both sliders must render discrete tick markers");
 assert(css.includes(".rapid-fire-slider-ticks i.is-reference{background:#4b5563}")&&css.includes(".rapid-fire-reverse-slider::-moz-range-progress"),"Reverse must emphasize 100 percent and suppress its progress fill");
 assert(rapid.includes('q("rapidFireStatus").addEventListener("click",()=>setStatus(""),false)'),"clicking RF status must clear its message");
@@ -97,6 +98,25 @@ assert(rapid.includes("const REVERSE_PERCENT_STEPS=Object.freeze([25,...Array.fr
 assert(rapid.includes('title="Show or hide the Average projection line"><i aria-hidden="true"></i></button>')&&!rapid.includes('<span>Avg</span>'),"the New Average toggle must display only the switch control");
 assert(rapid.includes('bindNumericAdjustControls(lotController,{upButton:q("rapidFireLotUp"),downButton:q("rapidFireLotDown"),step:0.001,precision:()=>Math.max(3,api().lotRules().precision),commit:false,min:0})'),"Add quantity must bind shared arrow and wheel adjustment at an exact 0.001 draft step");
 assert(rapid.includes('lotController.commit("trigger")'),"Add execution must commit its wheel-adjusted draft through live symbol quantity normalization");
+
+const emergencyToggleStart=rapid.indexOf("function recordRapidFireEmergencyToggle");
+const emergencyToggleEnd=rapid.indexOf("function number",emergencyToggleStart);
+const emergencyToggleContext={EMERGENCY_TOGGLE_WINDOW_MS:1500,EMERGENCY_TOGGLE_PATTERN:[false,true,false,true],emergencyToggleHistory:[],Date};
+vm.createContext(emergencyToggleContext);
+vm.runInContext(rapid.slice(emergencyToggleStart,emergencyToggleEnd),emergencyToggleContext);
+assert.equal(emergencyToggleContext.recordRapidFireEmergencyToggle(false,0),false,"one off transition must not emergency-stop RF");
+assert.equal(emergencyToggleContext.recordRapidFireEmergencyToggle(true,400),false,"off-on alone must not emergency-stop RF");
+assert.equal(emergencyToggleContext.recordRapidFireEmergencyToggle(false,800),false,"off-on-off alone must not emergency-stop RF");
+assert.equal(emergencyToggleContext.recordRapidFireEmergencyToggle(true,1200),true,"off-on-off-on inside 1.5 seconds must emergency-stop RF");
+emergencyToggleContext.emergencyToggleHistory=[];
+for(const [visible,at] of [[false,0],[true,500],[false,1000]])assert.equal(emergencyToggleContext.recordRapidFireEmergencyToggle(visible,at),false);
+assert.equal(emergencyToggleContext.recordRapidFireEmergencyToggle(true,1501),false,"the full pattern beyond 1.5 seconds must not emergency-stop RF");
+emergencyToggleContext.emergencyToggleHistory=[];
+for(const [visible,at] of [[true,0],[false,200],[true,400],[false,600]])assert.equal(emergencyToggleContext.recordRapidFireEmergencyToggle(visible,at),false,"a fast four-toggle sequence in the wrong state order must not emergency-stop RF");
+const emergencyStopSource=rapid.slice(rapid.indexOf("async function stopRapidFireOperations"),rapid.indexOf("function bind",rapid.indexOf("async function stopRapidFireOperations")));
+assert(emergencyStopSource.includes("await bridge.cancel()")&&emergencyStopSource.includes('setStatus("All RF operations are stopped")'),"the emergency sequence must use the existing chase cancellation and show its exact confirmation");
+assert(!emergencyStopSource.includes("cancelMasterStop")&&!emergencyStopSource.includes("cancelTakeProfit")&&!emergencyStopSource.includes("cancelProtections"),"the emergency sequence must never touch SL or TP cancellation");
+assert(rapid.includes("if(opening)show();else hide();")&&rapid.includes("if(recordRapidFireEmergencyToggle(opening))void stopRapidFireOperations();"),"only completed main-launcher toggles must feed emergency detection");
 
 const numericAdjustStart=rapid.indexOf("function bindNumericAdjustControls");
 const numericAdjustEnd=rapid.indexOf("function protectionPlText",numericAdjustStart);

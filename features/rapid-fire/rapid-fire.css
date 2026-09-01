@@ -290,11 +290,13 @@
   border-radius:5px;
   background:#f7f8f9;
   color:#4b5563;
+  font-size:11px;
+  font-weight:400;
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
 }
-.rapid-fire-status.is-error{border-color:#f6465d;color:#f6465d;font-weight:800}
+.rapid-fire-status.is-error{border-color:#f6465d;color:#f6465d}
 .rapid-fire-protection-row{
   display:flex;
   gap:5px;
