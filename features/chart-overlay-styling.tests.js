@@ -14,7 +14,7 @@ buttonToggleIds.forEach(id=>assert(css.includes("#"+id),id+" must use the chart 
 assert(/\.chart-indicator-toggles > label\.toggle:has\([^}]+\)\{[^}]*height:22px;[^}]*padding:0 8px;[^}]*border:1px solid #d9dce1;[^}]*border-radius:6px;[^}]*font-size:11px;[^}]*font-weight:700;/s.test(css),"indicator controls must match the OBD/OTF/Orders button dimensions and typography");
 assert(/\.chart-indicator-toggles > label\.toggle:has\([^}]+:checked\)\{[^}]*background:rgba\(245,190,55,\.18\);[^}]*opacity:1;/s.test(css),"checked indicator controls must expose an active filled state");
 assert(/\.chart-indicator-toggles > label\.toggle > input:is\([^}]+\)\{[^}]*position:absolute;[^}]*opacity:0;[^}]*pointer-events:none;/s.test(css),"legacy checkbox state owners must be visually hidden without replacing their event logic");
-assert(/\.chart-volatility-readout\{[^}]*min-height:20px;[^}]*font:700 14px\/1 Arial,sans-serif;/s.test(css),"ADX/ATR must use the larger 14px type without changing its 20px minimum height");
+assert(/\.chart-volatility-readout\{[^}]*min-height:20px;[^}]*font:700 12\.5px\/1 Arial,sans-serif;/s.test(css),"ADX/ATR must use 12.5px type without changing its 20px minimum height");
 assert(/\.chart-book-pressure-gauge\{[^}]*min-height:20px;[^}]*font:700 14px\/1 Arial,sans-serif;/s.test(css),"Book Pressure must use the larger 14px type without changing its 20px minimum height");
 assert(/\.adx-direction-tag\{[^}]*font-size:1em;/.test(css),"the ADX direction glyph must inherit the enlarged readout size");
 const orderRules=["tglEMA20","tglEMA50","tglEMA3","tglEMA4","tglEMA5","tglVWAP","tglDSMA","tglKeyLevels","tglSMC"].map((id,index)=>`.chart-indicator-toggles > label.toggle:has(> #${id}){order:${index-9}}`);
