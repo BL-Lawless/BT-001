@@ -853,7 +853,7 @@ button:hover{filter:brightness(1.04)}
 .adx-direction-tag.is-cross-bullish{color:rgba(22,163,74,.50)}
 .adx-direction-tag.is-cross-bearish{color:rgba(220,38,38,.50)}
 
-.chart-overlay-control-group{position:absolute;top:8px;right:92px;z-index:18;display:flex;align-items:center;gap:6px;visibility:hidden;pointer-events:auto}
+.chart-overlay-control-group{position:absolute;top:8px;right:12px;z-index:18;display:flex;align-items:center;gap:6px;visibility:hidden;pointer-events:auto}
 .chart-overlay-control-group.is-aligned{visibility:visible}
 .chart-overlay-control-group > .calc-module-orders-toggle{position:static;inset:auto;margin:0;white-space:nowrap}
 .chart-overlay-control-group > [data-chart-control="liq"]{order:1}

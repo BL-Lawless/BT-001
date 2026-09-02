@@ -7,7 +7,7 @@
   const elapsed=value=>{const total=Math.max(0,Math.floor((Number(value)||0)/1000));return `${String(Math.floor(total/60)).padStart(2,"0")}:${String(total%60).padStart(2,"0")}`;};
   const text=(id,value)=>{const element=$(id);if(element)element.textContent=value==null||value===""?"--":String(value);};
   const CONTROL_ORDER=["liq","book","obd","otf","orders"];
-  let layoutFrame=0,layoutDiscoveryObserver=null,stackObserver=null,layoutResizeObserver=null,observedStackMetric=null,observedWrap=null,dprQuery=null;
+  let layoutFrame=0,layoutDiscoveryObserver=null,toolbarObserver=null,layoutResizeObserver=null,observedAnchor=null,observedToolbar=null,observedWrap=null,dprQuery=null;
   function ensureOverlayGroup(){
     const canvas=$("chart"),wrap=canvas&&canvas.parentElement;
     if(!wrap||!wrap.classList.contains("chart-wrap"))return null;
@@ -22,17 +22,17 @@
     desired.forEach(control=>group.appendChild(control));
   }
   function installLayoutObservers(){
-    const group=ensureOverlayGroup(),canvas=$("chart"),wrap=canvas&&canvas.parentElement,metric=$("v33MAStackMetric");
+    const group=ensureOverlayGroup(),canvas=$("chart"),wrap=canvas&&canvas.parentElement,anchor=$("calcOpenBtn"),toolbar=anchor&&anchor.parentElement&&anchor.parentElement.parentElement;
     if(!group||!wrap)return;
     if(typeof ResizeObserver==="function"){
       if(!layoutResizeObserver)layoutResizeObserver=new ResizeObserver(scheduleOverlayAlignment);
       if(observedWrap!==wrap){if(observedWrap)layoutResizeObserver.unobserve(observedWrap);observedWrap=wrap;layoutResizeObserver.observe(wrap);}
-      if(metric&&observedStackMetric!==metric){if(observedStackMetric)layoutResizeObserver.unobserve(observedStackMetric);observedStackMetric=metric;layoutResizeObserver.observe(metric);}
+      if(anchor&&observedAnchor!==anchor){if(observedAnchor)layoutResizeObserver.unobserve(observedAnchor);observedAnchor=anchor;layoutResizeObserver.observe(anchor);}
+      if(toolbar&&observedToolbar!==toolbar){if(observedToolbar)layoutResizeObserver.unobserve(observedToolbar);observedToolbar=toolbar;layoutResizeObserver.observe(toolbar);}
     }
-    if(metric&&stackObserver&&stackObserver.__target!==metric){stackObserver.disconnect();stackObserver=null;}
-    if(metric&&observedStackMetric!==metric)observedStackMetric=metric;
-    if(metric&&!stackObserver&&typeof MutationObserver==="function"){
-      stackObserver=new MutationObserver(scheduleOverlayAlignment);stackObserver.__target=metric;stackObserver.observe(metric,{childList:true,subtree:true,attributes:true,attributeFilter:["style","class"]});
+    if(toolbar&&toolbarObserver&&toolbarObserver.__target!==toolbar){toolbarObserver.disconnect();toolbarObserver=null;}
+    if(toolbar&&!toolbarObserver&&typeof MutationObserver==="function"){
+      toolbarObserver=new MutationObserver(scheduleOverlayAlignment);toolbarObserver.__target=toolbar;toolbarObserver.observe(toolbar,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["style","class"]});
     }
     if(!layoutDiscoveryObserver&&typeof MutationObserver==="function"&&document.body){
       layoutDiscoveryObserver=new MutationObserver(scheduleOverlayAlignment);layoutDiscoveryObserver.observe(document.body,{childList:true,subtree:true});
@@ -47,14 +47,14 @@
   }
   function alignOverlayGroup(){
     layoutFrame=0;
-    const group=ensureOverlayGroup(),canvas=$("chart"),wrap=canvas&&canvas.parentElement,target=document.querySelector('.v33-ma-stack-box[data-tf="1D"]');
+    const group=ensureOverlayGroup(),canvas=$("chart"),wrap=canvas&&canvas.parentElement,target=$("calcOpenBtn");
     if(!group||!wrap)return false;
     orderOverlayControls(group);installLayoutObservers();
     if(!target){group.classList.remove("is-aligned");return false;}
     try{
       const wrapRect=wrap.getBoundingClientRect(),targetRect=target.getBoundingClientRect();
       if(!(targetRect.width>0)||!(targetRect.height>0)){group.classList.remove("is-aligned");return false;}
-      group.style.right=Math.max(0,wrapRect.right-targetRect.right)+"px";
+      group.style.right=(wrapRect.right-targetRect.right)+"px";
       group.classList.add("is-aligned");
       return true;
     }catch(_error){group.classList.remove("is-aligned");return false;}

@@ -12,15 +12,16 @@
     const add=(side,level)=>{
       const levelPrice=finite(level&&level[0]),size=finite(level&&level[1]);
       if(!(size>0)||!(levelPrice>0))return;
-      if(side==="bid"&&(levelPrice>current||levelPrice<lower))return;
-      if(side==="ask"&&(levelPrice<current||levelPrice>upper))return;
-      const distance=side==="bid"?current-levelPrice:levelPrice-current;
-      const index=Math.min(Math.max(0,Math.ceil(range/step)-1),Math.floor(Math.max(0,distance-Number.EPSILON)/step));
+      if(side==="bid"&&levelPrice>current)return;
+      if(side==="ask"&&levelPrice<current)return;
+      const index=Math.floor(levelPrice/step);
+      const bucketLow=index*step,bucketHigh=bucketLow+step;
+      if(bucketHigh<=lower||bucketLow>=upper)return;
       const key=side+":"+index;
       const existing=buckets.get(key)||{
         side,index,volume:0,
-        low:side==="bid"?Math.max(lower,current-(index+1)*step):current+index*step,
-        high:side==="bid"?current-index*step:Math.min(upper,current+(index+1)*step)
+        low:bucketLow,
+        high:bucketHigh
       };
       existing.volume+=size;
       buckets.set(key,existing);
