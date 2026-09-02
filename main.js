@@ -22649,6 +22649,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   const TRADABILITY_TF = "15m";
   const PRESSURE_MODE_KEY = "bt001_pressure_meter_mode";
   const PRESSURE_LB_KEY = "bt001_pressure_meter_lookback";
+  const BOOK_PRESSURE_WINDOW_KEY = "bt001_book_pressure_window_percentage_v1";
+  const BOOK_PRESSURE_WINDOW_MIN = .01;
+  const BOOK_PRESSURE_WINDOW_MAX = 10;
+  const BOOK_PRESSURE_WINDOW_DEFAULT = .10;
   const TF_LOOKBACKS = [5,10,20,50];
   // Calibration history only. Displayed lean always comes from the newest depth tick.
   const BOOK_PRESSURE_REFERENCE_MS = 3 * 60 * 1000;
@@ -22686,7 +22690,15 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     tradabilityRect:null,
     tradabilityModel:null,
     bookPressureModel:null,
-    bookPressureDepthHistory:new Map()
+    bookPressureDepthHistory:new Map(),
+    bookPressurePercentage:(() => {
+      try{
+        const saved = Number(localStorage.getItem(BOOK_PRESSURE_WINDOW_KEY));
+        return Number.isFinite(saved) && saved >= BOOK_PRESSURE_WINDOW_MIN && saved <= BOOK_PRESSURE_WINDOW_MAX ? saved : BOOK_PRESSURE_WINDOW_DEFAULT;
+      }catch(_error){
+        return BOOK_PRESSURE_WINDOW_DEFAULT;
+      }
+    })()
   };
   function currentSymbol(){
     try{
@@ -23106,6 +23118,146 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     node.innerHTML = "ADX : " + adx + '<span class="adx-direction-tag is-' + String(tag.tone||"grey") + '" aria-label="ADX direction ' + String(tag.tone||"grey") + '">' + String(tag.glyph||"−") + "</span>| ATR : " + atr;
     node.title = tfLabel(currentTf()) + " chart volatility";
   }
+  const bookPressureFeedState = {
+    socket:null,generation:0,reconnectTimer:null,symbol:"",snapshotLastUpdateId:null,lastUpdateId:null,
+    snapshotReady:false,synced:false,bids:new Map(),asks:new Map(),buffer:[],lastEventAt:0,lastReceivedAt:0,lastError:null
+  };
+  function bookPressureWsBase(){
+    const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/stream").replace(/\/+$/g,"");
+    if(/\/(?:public|market|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|market|private)\/stream$/i,"/stream");
+    if(/\/(?:public|market|private)\/ws$/i.test(raw)) return raw.replace(/\/(?:public|market|private)\/ws$/i,"/stream");
+    if(/\/stream$/i.test(raw)) return raw;
+    if(/\/ws$/i.test(raw)) return raw.replace(/\/ws$/i,"/stream");
+    return raw + "/stream";
+  }
+  function bookPressureDepthUrl(symbol){
+    const rest = String((cfg() && cfg().rest) || "https://fapi.binance.com/fapi/v1/klines");
+    return rest.replace(/\/fapi\/v1\/klines(?:\?.*)?$/i,"/fapi/v1/depth") + "?symbol=" + encodeURIComponent(symbol) + "&limit=1000";
+  }
+  function normalizeBookPressureLevels(levels){
+    return (Array.isArray(levels) ? levels : []).map(level => [Number(level && level[0]),Number(level && level[1])]).filter(level => Number.isFinite(level[0]) && level[0] > 0 && Number.isFinite(level[1]) && level[1] >= 0);
+  }
+  function applyBookPressureLevels(target,levels){
+    normalizeBookPressureLevels(levels).forEach(([price,size]) => {
+      if(size === 0) target.delete(price);
+      else target.set(price,size);
+    });
+  }
+  function closeBookPressureFeed(){
+    if(bookPressureFeedState.reconnectTimer){clearTimeout(bookPressureFeedState.reconnectTimer);bookPressureFeedState.reconnectTimer=null;}
+    bookPressureFeedState.generation += 1;
+    const socket=bookPressureFeedState.socket;
+    bookPressureFeedState.socket=null;
+    try{if(socket&&typeof socket.disconnect==="function") socket.disconnect(); else if(socket&&typeof socket.close==="function") socket.close();}catch(_error){}
+  }
+  function resetBookPressureFeed(symbol){
+    closeBookPressureFeed();
+    Object.assign(bookPressureFeedState,{symbol,snapshotLastUpdateId:null,lastUpdateId:null,snapshotReady:false,synced:false,bids:new Map(),asks:new Map(),buffer:[],lastEventAt:0,lastReceivedAt:0,lastError:null});
+  }
+  function scheduleBookPressureReconnect(reason){
+    bookPressureFeedState.lastError=reason || "depth feed disconnected";
+    if(bookPressureFeedState.reconnectTimer) return;
+    bookPressureFeedState.reconnectTimer=setTimeout(()=>{bookPressureFeedState.reconnectTimer=null;connectBookPressureFeed(true);},1000);
+  }
+  function applyBookPressureEvent(event){
+    const updateId=Number(event && event.u);
+    if(!Number.isFinite(updateId)) return false;
+    applyBookPressureLevels(bookPressureFeedState.bids,event.b);
+    applyBookPressureLevels(bookPressureFeedState.asks,event.a);
+    bookPressureFeedState.lastUpdateId=updateId;
+    bookPressureFeedState.lastEventAt=Number(event.E)||Date.now();
+    bookPressureFeedState.lastReceivedAt=Date.now();
+    return true;
+  }
+  function bridgeBookPressureEvents(){
+    const snapshotId=Number(bookPressureFeedState.snapshotLastUpdateId);
+    if(!bookPressureFeedState.snapshotReady || !Number.isFinite(snapshotId)) return;
+    const buffered=bookPressureFeedState.buffer.filter(event=>Number(event&&event.u)>=snapshotId);
+    const first=buffered.findIndex(event=>Number(event&&event.U)<=snapshotId && Number(event&&event.u)>=snapshotId);
+    if(first<0){bookPressureFeedState.buffer=buffered.slice(-2000);return;}
+    let previous=null;
+    for(const event of buffered.slice(first)){
+      if(previous!=null && Number(event.pu)!==previous){scheduleBookPressureReconnect("deep order book sequence gap");return;}
+      if(!applyBookPressureEvent(event)) continue;
+      previous=Number(event.u);
+    }
+    bookPressureFeedState.synced=previous!=null;
+    bookPressureFeedState.buffer=[];
+    if(bookPressureFeedState.synced) updateBookPressureGauge();
+  }
+  async function loadBookPressureSnapshot(token,symbol){
+    try{
+      const response=await API.fetch(bookPressureDepthUrl(symbol),{cache:"no-store",headers:{"Cache-Control":"no-cache","Pragma":"no-cache"}});
+      const data=await response.json().catch(()=>null);
+      if(!response.ok || !data || !Number.isFinite(Number(data.lastUpdateId))) throw new Error(data&&data.msg?data.msg:"depth snapshot HTTP "+response.status);
+      if(token!==bookPressureFeedState.generation || symbol!==bookPressureFeedState.symbol) return;
+      bookPressureFeedState.bids=new Map(normalizeBookPressureLevels(data.bids));
+      bookPressureFeedState.asks=new Map(normalizeBookPressureLevels(data.asks));
+      bookPressureFeedState.snapshotLastUpdateId=Number(data.lastUpdateId);
+      bookPressureFeedState.lastUpdateId=Number(data.lastUpdateId);
+      bookPressureFeedState.snapshotReady=true;
+      bridgeBookPressureEvents();
+    }catch(error){
+      if(token!==bookPressureFeedState.generation) return;
+      scheduleBookPressureReconnect(error&&error.message?error.message:String(error));
+    }
+  }
+  function connectBookPressureFeed(force=false){
+    const symbol=currentSymbol();
+    if(!symbol) return;
+    const existing=bookPressureFeedState.socket;
+    if(!force && bookPressureFeedState.symbol===symbol && existing && (existing.readyState===WebSocket.CONNECTING || existing.readyState===WebSocket.OPEN)) return;
+    resetBookPressureFeed(symbol);
+    const token=++bookPressureFeedState.generation;
+    const stream=symbol.toLowerCase()+"@depth@100ms";
+    try{
+      bookPressureFeedState.socket=API.connectWebSocket(bookPressureWsBase()+"?streams="+stream,{
+        connectionKey:"book-pressure-deep-order-book",reconnect:false,
+        onOpen:()=>{if(token===bookPressureFeedState.generation) loadBookPressureSnapshot(token,symbol);},
+        onMessage:event=>{
+          if(token!==bookPressureFeedState.generation) return;
+          let data;
+          try{const message=JSON.parse(event.data);data=message&&message.data?message.data:message;}catch(_error){return;}
+          if(!data || String(data.s||"").toUpperCase()!==symbol || !Array.isArray(data.b) || !Array.isArray(data.a)) return;
+          if(!bookPressureFeedState.synced){bookPressureFeedState.buffer.push(data);bridgeBookPressureEvents();return;}
+          if(Number(data.u)<=Number(bookPressureFeedState.lastUpdateId)) return;
+          if(Number(data.pu)!==Number(bookPressureFeedState.lastUpdateId)){scheduleBookPressureReconnect("deep order book sequence gap");return;}
+          if(applyBookPressureEvent(data)) updateBookPressureGauge();
+        },
+        onError:()=>{if(token===bookPressureFeedState.generation)scheduleBookPressureReconnect("deep order book WebSocket error");},
+        onClose:()=>{if(token===bookPressureFeedState.generation)scheduleBookPressureReconnect("deep order book WebSocket closed");}
+      });
+    }catch(error){scheduleBookPressureReconnect(error&&error.message?error.message:String(error));}
+  }
+  function currentBookPressurePrice(){
+    const hub=window.PUBLIC_MARKET_DATA_HUB||null;
+    const latest=hub&&typeof hub.getLatestPrice==="function"?hub.getLatestPrice():null;
+    const live=Number(latest&&latest.price);
+    if(Number.isFinite(live)&&live>0) return live;
+    const bids=[...bookPressureFeedState.bids.keys()],asks=[...bookPressureFeedState.asks.keys()];
+    const bid=bids.length?Math.max(...bids):null,ask=asks.length?Math.min(...asks):null;
+    return Number.isFinite(bid)&&Number.isFinite(ask)?(bid+ask)/2:null;
+  }
+  function computeBookPressureWindow(bidEntries,askEntries,price,percentage){
+    const current=Number(price),pct=Number(percentage);
+    const distance=Number.isFinite(current)&&current>0&&Number.isFinite(pct)?current*pct/100:null;
+    const lower=Number.isFinite(distance)?current-distance:null,upper=Number.isFinite(distance)?current+distance:null;
+    const bids=Array.from(bidEntries||[]),asks=Array.from(askEntries||[]);
+    const includedBids=Number.isFinite(lower)?bids.filter(([level])=>Number(level)>=lower&&Number(level)<=current):[];
+    const includedAsks=Number.isFinite(upper)?asks.filter(([level])=>Number(level)<=upper&&Number(level)>=current):[];
+    const bidPrices=bids.map(([level])=>Number(level)).filter(Number.isFinite),askPrices=asks.map(([level])=>Number(level)).filter(Number.isFinite);
+    const bidCoverageComplete=Number.isFinite(lower)&&bidPrices.length>0&&Math.min(...bidPrices)<=lower;
+    const askCoverageComplete=Number.isFinite(upper)&&askPrices.length>0&&Math.max(...askPrices)>=upper;
+    return Object.freeze({price:current,percentage:pct,distance,lower,upper,bidDepthSize:includedBids.reduce((sum,[,size])=>sum+Number(size),0),askDepthSize:includedAsks.reduce((sum,[,size])=>sum+Number(size),0),bidLevelCount:includedBids.length,askLevelCount:includedAsks.length,bidCoverageComplete,askCoverageComplete,coverageComplete:bidCoverageComplete&&askCoverageComplete});
+  }
+  function bookPressureDepthSnapshot(){
+    connectBookPressureFeed();
+    const price=currentBookPressurePrice();
+    const percentage=meterState.bookPressurePercentage;
+    const windowDepth=computeBookPressureWindow(bookPressureFeedState.bids.entries(),bookPressureFeedState.asks.entries(),price,percentage);
+    const ageMs=bookPressureFeedState.lastReceivedAt?Date.now()-bookPressureFeedState.lastReceivedAt:null;
+    return Object.freeze({symbol:bookPressureFeedState.symbol,...windowDepth,at:bookPressureFeedState.lastEventAt,updateId:bookPressureFeedState.lastUpdateId,ageMs,fresh:bookPressureFeedState.synced&&Number.isFinite(ageMs)&&ageMs<=5000,error:bookPressureFeedState.lastError});
+  }
   function computeBookPressureModel(book,typicalDepth,referenceSamples=0){
     const bidSize = Number(book && book.bidDepthSize);
     const askSize = Number(book && book.askDepthSize);
@@ -23153,10 +23305,71 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     node = document.createElement("span");
     node.id = "chartBookPressureGauge";
     node.className = "chart-book-pressure-gauge is-neutral";
-    node.setAttribute("role","img");
-    node.innerHTML = '<span class="book-pressure-label">Book</span><span class="book-pressure-track" aria-hidden="true"><span class="book-pressure-fill"></span></span>';
+    node.setAttribute("role","group");
+    node.innerHTML = '<span class="book-pressure-track" aria-hidden="true"><span class="book-pressure-fill"></span></span><span class="book-pressure-window-control"></span>';
     row.appendChild(node);
     return node;
+  }
+  function setBookPressurePercentage(value){
+    const next=Number(value);
+    if(!Number.isFinite(next)||next<BOOK_PRESSURE_WINDOW_MIN||next>BOOK_PRESSURE_WINDOW_MAX) return false;
+    meterState.bookPressurePercentage=next;
+    meterState.bookPressureDepthHistory.clear();
+    try{localStorage.setItem(BOOK_PRESSURE_WINDOW_KEY,String(next));}catch(_error){}
+    updateBookPressureGauge();
+    return true;
+  }
+  function bookPressurePercentageFromDollar(value,currentPrice){
+    const dollar=Number(value),price=Number(currentPrice);
+    if(!Number.isFinite(dollar)||dollar<=0||!Number.isFinite(price)||price<=0) return null;
+    const percentage=dollar/price*100;
+    return Number.isFinite(percentage)&&percentage>=BOOK_PRESSURE_WINDOW_MIN&&percentage<=BOOK_PRESSURE_WINDOW_MAX?percentage:null;
+  }
+  function setBookPressureDollar(value){
+    const percentage=bookPressurePercentageFromDollar(value,currentBookPressurePrice());
+    return percentage==null?false:setBookPressurePercentage(percentage);
+  }
+  function renderBookPressureWindowControl(node,book){
+    const slot=node&&node.querySelector(".book-pressure-window-control");
+    if(!slot||slot.querySelector("input")) return;
+    const distance=Number(book&&book.distance);
+    const dollarText=Number.isFinite(distance)?"$"+distance.toFixed(1):"$--.-";
+    const existingButton=slot.querySelector("button");
+    if(existingButton){
+      existingButton.textContent=dollarText;
+      existingButton.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click to edit dollar amount.";
+      existingButton.setAttribute("aria-label","Book Pressure depth window "+dollarText);
+      return;
+    }
+    const button=document.createElement("button");
+    button.type="button";
+    button.className="book-pressure-window-button";
+    button.textContent=dollarText;
+    button.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click to edit dollar amount.";
+    button.setAttribute("aria-label","Book Pressure depth window "+dollarText);
+    button.addEventListener("pointerdown",event=>event.stopPropagation());
+    button.addEventListener("mousedown",event=>event.stopPropagation());
+    button.addEventListener("click",event=>{
+      event.preventDefault();event.stopPropagation();
+      const input=document.createElement("input");
+      input.type="text";
+      input.className="book-pressure-window-input";
+      input.inputMode="decimal";
+      input.value=Number.isFinite(distance)?distance.toFixed(1):"";
+      input.setAttribute("aria-label","Book Pressure depth window in dollars");
+      input.addEventListener("pointerdown",event=>event.stopPropagation());
+      input.addEventListener("mousedown",event=>event.stopPropagation());
+      let closed=false;
+      const close=()=>{if(closed)return;closed=true;slot.innerHTML="";renderBookPressureWindowControl(node,bookPressureDepthSnapshot());};
+      input.addEventListener("keydown",keyEvent=>{
+        if(keyEvent.key==="Enter"){keyEvent.preventDefault();setBookPressureDollar(input.value);close();}
+        else if(keyEvent.key==="Escape"){keyEvent.preventDefault();close();}
+      });
+      input.addEventListener("blur",close,{once:true});
+      slot.replaceChildren(input);
+      input.focus();input.select();
+    });
+    slot.appendChild(button);
   }
   function formatBookPressureSize(value){
     if(!Number.isFinite(Number(value))) return "n/a";
@@ -23165,8 +23378,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   function updateBookPressureGauge(){
     const node = ensureBookPressureGauge();
     if(!node) return null;
-    const hub = window.PUBLIC_MARKET_DATA_HUB || null;
-    const book = hub && typeof hub.getTopOfBook === "function" ? hub.getTopOfBook() : null;
+    const book = bookPressureDepthSnapshot();
     const reference = updateBookPressureReference(book);
     const model = computeBookPressureModel(book,reference.typicalDepth,reference.sampleCount);
     const fill = node.querySelector(".book-pressure-fill");
@@ -23176,9 +23388,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       fill.style.left = model.side === "bid" ? (50 - magnitudePct) + "%" : model.side === "ask" ? "50%" : "calc(50% - 2px)";
       fill.style.width = model.side === "neutral" ? "4px" : magnitudePct + "%";
     }
+    renderBookPressureWindowControl(node,book);
     const detail = model.available
-      ? "Bid5 " + formatBookPressureSize(model.bidSize) + " / Ask5 " + formatBookPressureSize(model.askSize) + " / Typical " + formatBookPressureSize(model.typicalDepth) + " / Depth " + model.magnitudeRatio.toFixed(2) + "x"
-      : "five-level bid / ask size unavailable";
+      ? "Bid " + formatBookPressureSize(model.bidSize) + " (" + book.bidLevelCount + " levels) / Ask " + formatBookPressureSize(model.askSize) + " (" + book.askLevelCount + " levels) / Window " + book.percentage + "% (±$" + Number(book.distance).toFixed(2) + ") / Typical " + formatBookPressureSize(model.typicalDepth) + " / Depth " + model.magnitudeRatio.toFixed(2) + "x" + (book.coverageComplete ? "" : " / snapshot coverage partial")
+      : "percentage-window order book unavailable";
     node.title = "Book Pressure - " + detail;
     const stateLabel = !model.available ? "unavailable" : model.side === "neutral" ? "balanced" : model.side + " side";
     node.setAttribute("aria-label","Book Pressure: " + stateLabel + ". " + detail);
@@ -23550,12 +23763,11 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
       if(event && event.type === "kline" && String(event.tf || "").toLowerCase() === TRADABILITY_TF) requestRedraw();
     });
   }
-  if(tradabilityHub && typeof tradabilityHub.setTopOfBookConsumerActive === "function"){
-    tradabilityHub.setTopOfBookConsumerActive("book-pressure-gauge",true);
-  }
-  if(tradabilityHub && typeof tradabilityHub.subscribeTopOfBook === "function" && !window.__bt001BookPressureGaugeSubscribed){
+  if(tradabilityHub && typeof tradabilityHub.subscribe === "function" && !window.__bt001BookPressureGaugeSubscribed){
     window.__bt001BookPressureGaugeSubscribed = true;
-    window.__bt001BookPressureGaugeUnsubscribe = tradabilityHub.subscribeTopOfBook(() => updateBookPressureGauge());
+    window.__bt001BookPressureGaugeUnsubscribe = tradabilityHub.subscribe(event => {
+      if(event && event.type === "price") updateBookPressureGauge();
+    });
   }
   window.BT001_TRADABILITY_GAUGE = Object.freeze({
     timeframe:TRADABILITY_TF,
@@ -23564,6 +23776,10 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
   });
   window.BT001_BOOK_PRESSURE_GAUGE = Object.freeze({
     snapshot:() => meterState.bookPressureModel || computeBookPressureModel(null),
+    depthSnapshot:bookPressureDepthSnapshot,
+    percentage:()=>meterState.bookPressurePercentage,
+    setPercentage:setBookPressurePercentage,
+    setDollar:setBookPressureDollar,
     refresh:updateBookPressureGauge
   });
 

@@ -186,6 +186,17 @@
           <label class="field" id="stopField"><span>Net SL ($)</span><input id="scalperStop" type="number" min="0" step="0.1" value="3.0"></label>
           <label class="field" id="slDeltaField"><span>SL delta (price points)</span><input id="scalperSlDelta" type="number" min="0" step="0.1" value="700"></label>
 
+          <div class="control-subsection"><h3>Trade Management</h3></div>
+          <label class="field"><span>Move SL to BE</span><label><input id="moveSlToBeEnabled" type="checkbox"> Enabled</label></label>
+          <label class="field"><span>Trigger at % of target</span><input id="beThresholdPct" type="number" min="1" max="100" step="1" value="50"></label>
+          <label class="field"><span>Close % of position</span><label><input id="closePortionEnabled" type="checkbox"> Enabled</label></label>
+          <label class="field"><span>Trigger at % of target</span><input id="closeThresholdPct" type="number" min="1" max="100" step="1" value="50"></label>
+          <label class="field wide"><span>Close % of position</span><input id="closePortionPct" type="number" min="1" max="99" step="1" value="50"></label>
+          <label class="field"><span>Rank TP extension</span><label><input id="rankBoostEnabled" type="checkbox"> Enabled</label></label>
+          <label class="field"><span>Rank threshold</span><input id="rankBoostThreshold" type="number" min="0" max="100" step="1" value="90"></label>
+          <label class="field"><span>Extend TP (points)</span><input id="rankBoostPoints" type="number" min="0" step="0.1" value="0"></label>
+          <label class="field"><span>Max concurrent / direction</span><input id="maxConcurrentAutoPositions" type="number" min="1" step="1" value="1"></label>
+
           <div class="control-subsection"><h3>Execution costs</h3></div>
           <label class="field"><span>Fee / slippage units</span><select id="costUnit"><option value="bps">basis points</option><option value="percent">percent</option></select></label>
           <label class="field"><span>Fee / side</span><input id="fee" type="number" min="0" step=".01" value="4"></label>
@@ -277,7 +288,12 @@
   const SYMBOL="BTCUSDT";
   const PAGE_SIZE=1000;
   const BINANCE_LIMIT=1500;
-  const PRICE_HISTORY_CANDLES=3000;
+  const INITIAL_PRICE_HISTORY_CANDLES=1500;
+  const OLDER_HISTORY_THRESHOLD=120;
+  const OLDER_HISTORY_LIMIT=1500;
+  const OLDER_HISTORY_EDGE_CANDLES=2;
+  const PRICE_HISTORY_RETENTION_CAP=10000;
+  const OUTCOME_INTERVAL="1m";
   const BINANCE_KLINES_URL="https://fapi.binance.com/fapi/v1/klines";
   const BINANCE_WS_URL="wss://fstream.binance.com/market/stream";
   const BINANCE_429_PAUSE_MS=60000;
@@ -339,7 +355,7 @@
   const iso=time=>Number.isFinite(time)?new Date(time).toISOString():"—";
 
   const state={
-    displayCandles:[],candleCache:new Map(),outcomes:new Map(),
+    displayCandles:[],candleCache:new Map(),olderHistoryByInterval:new Map(),outcomeCandles:[],outcomes:new Map(),
     scalpSignals:[],scalpEvents:[],selectedScalpEvents:[],filteredScalpEvents:[],resultScalpEvents:[],scalpTrades:[],scalpErrors:[],
     scalpV2Signals:[],resultColumnsVisible:null,
     viewStart:null,viewEnd:null,fullStart:null,fullEnd:null,crosshairTime:null,pricePointerY:null,drag:null,
@@ -347,6 +363,8 @@
     displayInterval:"1m",highlightId:null,markerHits:[],loading:false,marketStarted:false,marketLoading:false,
     marketRequestGeneration:0,marketAbortController:null,marketSocket:null,marketSocketGeneration:0,
     marketReconnectTimer:null,marketDesiredLive:false,binanceRestPausedUntil:0,volumeFraction:DEFAULT_VOLUME_FRACTION,
+    outcomeHistoryLoading:false,outcomeHistoryNoMore:false,outcomeCoverageLimited:false,outcomeHistoryPromise:null,outcomeRequestGeneration:0,outcomeAbortController:null,
+    outcomeSocket:null,outcomeSocketGeneration:0,outcomeReconnectTimer:null,outcomeDesiredLive:false,
     indicatorSettings:null,indicatorSeriesCache:null
   };
   let resultColumnOrder=RESULT_COLUMNS.map(([key])=>key);
@@ -656,12 +674,12 @@
     });
   }
   function marketRequestCurrent(interval,generation){return generation===state.marketRequestGeneration&&interval===state.displayInterval;}
-  async function fetchBinanceHistory(interval,generation,{endTime=Date.now(),target=PRICE_HISTORY_CANDLES,signal}={}){
+  async function fetchBinanceHistory(interval,generation,{endTime=Date.now(),target=INITIAL_PRICE_HISTORY_CANDLES,signal,isCurrent=marketRequestCurrent,reportProgress=true}={}){
     let cursor=Math.floor(endTime),rows=[];
     while(rows.length<target){
-      if(!marketRequestCurrent(interval,generation))return null;
+      if(!isCurrent(interval,generation))return null;
       await waitForBinanceRestPause(signal);
-      if(!marketRequestCurrent(interval,generation))return null;
+      if(!isCurrent(interval,generation))return null;
       const limit=Math.min(BINANCE_LIMIT,target-rows.length),endpoint=binanceKlinesUrl(interval,cursor,limit);
       const response=await fetch(endpoint,{cache:"no-store",headers:{"Cache-Control":"no-cache","Pragma":"no-cache"},signal});
       if(response.status===429||response.status===418){
@@ -674,7 +692,9 @@
       if(!Array.isArray(page))throw new Error("Binance returned malformed candle data");
       const parsed=page.map(parseBinanceRestKline).filter(Boolean);
       rows=parsed.concat(rows);
+      if(reportProgress){
       $("datasetStatus").textContent=`Loading Binance ${interval}: ${rows.length.toLocaleString()} / ${target.toLocaleString()} candles…`;
+      }
       if(page.length<limit||!parsed.length)break;
       const next=parsed[0].openTime-1;
       if(next>=cursor)break;
@@ -683,11 +703,149 @@
     const unique=new Map(rows.map(candle=>[candle.openTime,candle]));
     return [...unique.values()].sort((a,b)=>a.openTime-b.openTime).slice(-target);
   }
+  function olderHistoryState(interval){
+    if(!state.olderHistoryByInterval.has(interval))state.olderHistoryByInterval.set(interval,{loading:false,noMore:false,armed:false,targetVisible:0});
+    return state.olderHistoryByInterval.get(interval);
+  }
+  function resetOlderHistoryState(interval){state.olderHistoryByInterval.set(interval,{loading:false,noMore:false,armed:false,targetVisible:0});}
+  function armOlderHistory(interval=state.displayInterval,targetVisible=0){
+    const history=olderHistoryState(interval);history.armed=true;
+    history.targetVisible=Math.max(history.targetVisible,Math.max(0,Math.ceil(finite(targetVisible)??0)));
+    return history;
+  }
+  function visibleCandleIndexRange(rows=state.candleCache.get(state.displayInterval)||state.displayCandles){
+    if(!rows?.length||!Number.isFinite(state.viewStart)||!Number.isFinite(state.viewEnd))return null;
+    const firstVisible=rows.findIndex(candle=>candle.closeTime>=state.viewStart),firstAfter=rows.findIndex(candle=>candle.openTime>state.viewEnd);
+    return {start:firstVisible<0?rows.length:firstVisible,end:firstAfter<0?rows.length:firstAfter};
+  }
+  function requestedVisibleCandles(interval=state.displayInterval){
+    const span=Number(state.viewEnd)-Number(state.viewStart);
+    return Number.isFinite(span)&&span>0?Math.max(1,Math.ceil(span/timeframeMs(interval))):0;
+  }
+  function olderHistoryFetchSize(existingLength,targetVisible,currentVisible=requestedVisibleCandles()){
+    const needed=Math.max(0,(finite(targetVisible)??0)-Math.max(0,finite(existingLength)??0));
+    return clamp(Math.ceil(Math.max(OLDER_HISTORY_THRESHOLD,needed+24,(finite(currentVisible)??0)*.6)),1,OLDER_HISTORY_LIMIT);
+  }
+  function mergeOlderCandles(existing,older,retention=PRICE_HISTORY_RETENTION_CAP){
+    const byTime=new Map();
+    for(const row of [...(older||[]),...(existing||[])]){
+      const candle=Array.isArray(row)?parseBinanceRestKline(row):row,time=finite(candle?.openTime);
+      if(time===null)continue;
+      byTime.set(time,{...(byTime.get(time)||{}),...candle});
+    }
+    const merged=[...byTime.values()].sort((a,b)=>a.openTime-b.openTime),cap=Math.max(1,Math.floor(finite(retention)??PRICE_HISTORY_RETENTION_CAP));
+    return merged.length>cap?merged.slice(0,cap):merged;
+  }
+  async function olderIfNeeded(range=visibleCandleIndexRange(),fetchHistory=fetchBinanceHistory){
+    const interval=state.displayInterval,generation=state.marketRequestGeneration,history=olderHistoryState(interval),existing=state.candleCache.get(interval)||[];
+    const zoomRequested=history.targetVisible,needsZoomBackfill=zoomRequested>existing.length,nearLeftEdge=!!range&&range.start<=OLDER_HISTORY_EDGE_CANDLES;
+    if(history.loading||history.noMore||!history.armed||!existing.length||!range||(!nearLeftEdge&&!needsZoomBackfill))return {started:false};
+    history.loading=true;history.armed=false;
+    const currentVisible=requestedVisibleCandles(interval),loadLimit=olderHistoryFetchSize(existing.length,zoomRequested,currentVisible),before=existing[0].openTime-1;
+    requestRedraw();
+    try{
+      const older=await fetchHistory(interval,generation,{endTime:before,target:loadLimit,signal:state.marketAbortController?.signal});
+      if(!older||!marketRequestCurrent(interval,generation))return {started:true,stale:true};
+      if(!older.length){history.noMore=true;history.targetVisible=0;return {started:true,fetched:0,noMore:true};}
+      const current=state.candleCache.get(interval)||existing,merged=mergeOlderCandles(current,older);
+      state.candleCache.set(interval,merged);state.displayCandles=merged.slice();state.fullStart=merged[0].openTime;state.fullEnd=merged.at(-1).closeTime;
+      state.indicatorSeriesCache=null;history.noMore=older.length<loadLimit;history.targetVisible=Math.max(0,zoomRequested-merged.length);
+      applyFilters();updateDatasetStatus();
+      return {started:true,fetched:older.length,added:Math.max(0,merged.length-current.length),noMore:history.noMore,rows:merged};
+    }catch(error){
+      if(error?.name!=="AbortError"&&marketRequestCurrent(interval,generation))console.error("Older candle fetch failed",error);
+      return {started:true,error};
+    }finally{history.loading=false;requestRedraw();}
+  }
+  function outcomeRequestCurrent(_interval,generation){return generation===state.outcomeRequestGeneration;}
+  function earliestOutcomeSignalTime(){
+    const times=state.scalpEvents.map(signal=>finite(signal.time)).filter(Number.isFinite);
+    return times.length?Math.min(...times):null;
+  }
+  function outcomeHistoryFetchSize(requiredStart,oldestTime=Date.now(),remainingCapacity=PRICE_HISTORY_RETENTION_CAP){
+    const gap=Math.max(0,Math.ceil((oldestTime-requiredStart)/timeframeMs(OUTCOME_INTERVAL)));
+    return Math.max(0,Math.min(OLDER_HISTORY_LIMIT,remainingCapacity,Math.max(OLDER_HISTORY_THRESHOLD,gap+24)));
+  }
+  function outcomeCoveragePending(event,candleRows=state.outcomeCandles){
+    if(!candleRows?.length)return true;
+    const first=candleRows[0],last=candleRows.at(-1),t=finite(event?.time),slack=timeframeMs(OUTCOME_INTERVAL)*2;
+    return t===null||t<first.openTime-slack||t>last.closeTime+slack;
+  }
+  function upsertOutcomeCandle(candle){
+    const rows=state.outcomeCandles.slice(),index=rows.findIndex(item=>item.openTime===candle.openTime);
+    if(index>=0)rows[index]=candle;else rows.push(candle);
+    rows.sort((a,b)=>a.openTime-b.openTime);
+    if(rows.length>PRICE_HISTORY_RETENTION_CAP)rows.splice(0,rows.length-PRICE_HISTORY_RETENTION_CAP);
+    state.outcomeCandles=rows;return rows;
+  }
+  async function ensureOutcomeHistoryCoverage(fetchHistory=fetchBinanceHistory){
+    if(state.outcomeHistoryLoading)return state.outcomeHistoryPromise||{started:false,inFlight:true};
+    const requiredStart=earliestOutcomeSignalTime();
+    if(requiredStart===null)return {started:false,noSignals:true};
+    state.outcomeHistoryLoading=true;state.outcomeCoverageLimited=false;
+    const generation=++state.outcomeRequestGeneration;
+    state.outcomeAbortController?.abort();
+    clearOutcomeReconnectTimer();closeOutcomeSocket();state.outcomeDesiredLive=false;
+    const controller=new AbortController();state.outcomeAbortController=controller;
+    const task=Promise.resolve().then(async()=>{
+      let fetched=0,requests=0;
+      try{
+        while(outcomeRequestCurrent(OUTCOME_INTERVAL,generation)){
+          const rows=state.outcomeCandles,edge=rows[Math.min(OLDER_HISTORY_EDGE_CANDLES,Math.max(0,rows.length-1))];
+          if(rows.length&&edge&&requiredStart>edge.openTime)return {started:requests>0,covered:true,fetched,requests,rows};
+          const remaining=PRICE_HISTORY_RETENTION_CAP-rows.length;
+          if(remaining<=0){state.outcomeCoverageLimited=true;return {started:requests>0,covered:false,limited:true,fetched,requests,rows};}
+          if(state.outcomeHistoryNoMore)return {started:requests>0,covered:false,noMore:true,fetched,requests,rows};
+          const oldest=rows.length?rows[0].openTime:Date.now(),target=outcomeHistoryFetchSize(requiredStart,oldest,remaining);
+          if(target<=0){state.outcomeCoverageLimited=true;return {started:requests>0,covered:false,limited:true,fetched,requests,rows};}
+          const page=await fetchHistory(OUTCOME_INTERVAL,generation,{endTime:oldest-1,target,signal:controller.signal,isCurrent:outcomeRequestCurrent,reportProgress:false});
+          if(!page||!outcomeRequestCurrent(OUTCOME_INTERVAL,generation))return {started:requests>0,stale:true,fetched,requests};
+          requests++;
+          if(!page.length){state.outcomeHistoryNoMore=true;return {started:true,covered:false,noMore:true,fetched,requests,rows};}
+          state.outcomeCandles=mergeOlderCandles(rows,page,PRICE_HISTORY_RETENTION_CAP);fetched+=page.length;
+          if(page.length<target)state.outcomeHistoryNoMore=true;
+        }
+        return {started:requests>0,stale:true,fetched,requests};
+      }catch(error){
+        if(error?.name!=="AbortError")console.error("Outcome 1m history fetch failed",error);
+        return {started:requests>0,error,fetched,requests};
+      }finally{
+        if(outcomeRequestCurrent(OUTCOME_INTERVAL,generation)){
+          state.outcomeHistoryLoading=false;state.outcomeHistoryPromise=null;
+          if(state.scalpEvents.length)applyFilters();
+        }
+      }
+    });
+    state.outcomeHistoryPromise=task;return task;
+  }
+  function clearOutcomeReconnectTimer(){if(state.outcomeReconnectTimer){clearTimeout(state.outcomeReconnectTimer);state.outcomeReconnectTimer=null;}}
+  function closeOutcomeSocket(){
+    const socket=state.outcomeSocket;state.outcomeSocket=null;if(!socket)return;
+    socket.onopen=socket.onmessage=socket.onerror=socket.onclose=null;try{socket.close(1000,"outcome stream reset");}catch(_error){}
+  }
+  function scheduleOutcomeReconnect(generation){
+    if(!state.outcomeDesiredLive||generation!==state.outcomeRequestGeneration||state.outcomeReconnectTimer)return;
+    state.outcomeReconnectTimer=setTimeout(()=>{state.outcomeReconnectTimer=null;if(generation===state.outcomeRequestGeneration)connectOutcomeSocket(generation);},PRICE_WS_RECONNECT_MS);
+  }
+  function connectOutcomeSocket(generation=state.outcomeRequestGeneration){
+    if(typeof WebSocket!=="function"||generation!==state.outcomeRequestGeneration)return;
+    state.outcomeDesiredLive=true;clearOutcomeReconnectTimer();closeOutcomeSocket();
+    const socketGeneration=++state.outcomeSocketGeneration,socket=new WebSocket(binanceKlineWsUrl(OUTCOME_INTERVAL));state.outcomeSocket=socket;
+    socket.onmessage=event=>{
+      if(state.outcomeSocket!==socket||socketGeneration!==state.outcomeSocketGeneration||generation!==state.outcomeRequestGeneration)return;
+      let message;try{message=JSON.parse(event.data);}catch(_error){return;}
+      const data=message?.data||message,kline=data?.k;if(data?.e!=="kline"||!kline||kline.i!==OUTCOME_INTERVAL)return;
+      const candle=parseBinanceWsKline(kline);if(!candle)return;upsertOutcomeCandle(candle);
+      if(candle.final)applyFilters();
+    };
+    socket.onerror=()=>{if(state.outcomeSocket===socket)scheduleOutcomeReconnect(generation);};
+    socket.onclose=()=>{if(state.outcomeSocket===socket){state.outcomeSocket=null;scheduleOutcomeReconnect(generation);}};
+  }
   function upsertCachedCandle(interval,candle){
     const rows=(state.candleCache.get(interval)||[]).slice(),index=rows.findIndex(item=>item.openTime===candle.openTime);
     if(index>=0)rows[index]=candle;else rows.push(candle);
     rows.sort((a,b)=>a.openTime-b.openTime);
-    if(rows.length>PRICE_HISTORY_CANDLES)rows.splice(0,rows.length-PRICE_HISTORY_CANDLES);
+    if(rows.length>PRICE_HISTORY_RETENTION_CAP)rows.splice(0,rows.length-PRICE_HISTORY_RETENTION_CAP);
     state.candleCache.set(interval,rows);
     if(interval===state.displayInterval)state.displayCandles=rows.slice();
     return rows;
@@ -765,12 +923,13 @@
       state.marketLoading=false;
       state.displayCandles=cached.slice();applyFilters();applyActivatedTimeframeView(cached,focus,interval);connectMarketSocket(interval,generation);return {cached:true,rows:cached};
     }
+    resetOlderHistoryState(interval);
     state.marketLoading=true;
     try{
       const rows=await fetchBinanceHistory(interval,generation,{signal:controller.signal});
       if(!rows||!marketRequestCurrent(interval,generation))return {stale:true};
       if(!rows.length)throw new Error(`No Binance ${interval} candles returned`);
-      state.candleCache.set(interval,rows);state.displayCandles=rows.slice();
+      state.candleCache.set(interval,rows);state.displayCandles=rows.slice();olderHistoryState(interval).noMore=rows.length<INITIAL_PRICE_HISTORY_CANDLES;
       applyFilters();applyActivatedTimeframeView(rows,focus,interval);connectMarketSocket(interval,generation);
       return {cached:false,rows};
     }catch(error){
@@ -803,13 +962,22 @@
       direction:$("scalperDirection").value,source:checkedValues(".scalper-source"),entryType:$("scalperEntryType").value,
       minimumRank:Math.max(0,finite($("scalperMinimumRank").value)??0),
       lot:String($("scalperLot").value),target:String($("scalperTarget").value),tpDelta:String($("scalperTpDelta").value),tpDriver:$("scalperTpDriver").value,
-      stop:String($("scalperStop").value),slDelta:String($("scalperSlDelta").value),slDriver:$("scalperSlDriver").value
+      stop:String($("scalperStop").value),slDelta:String($("scalperSlDelta").value),slDriver:$("scalperSlDriver").value,
+      moveSlToBeEnabled:$("moveSlToBeEnabled").checked,beThresholdPct:clamp(finite($("beThresholdPct").value)??50,1,100),
+      closePortionEnabled:$("closePortionEnabled").checked,closeThresholdPct:clamp(finite($("closeThresholdPct").value)??50,1,100),closePortionPct:clamp(finite($("closePortionPct").value)??50,1,99),
+      rankBoostEnabled:$("rankBoostEnabled").checked,rankBoostThreshold:clamp(finite($("rankBoostThreshold").value)??90,0,100),rankBoostPoints:Math.max(0,finite($("rankBoostPoints").value)??0),
+      maxConcurrentAutoPositions:Math.max(1,Math.round(finite($("maxConcurrentAutoPositions").value)??1))
     };
   }
   function syncTradeDriverUi(){
     const tpDelta=$("scalperTpDriver").value==="TP_DELTA",slDelta=$("scalperSlDriver").value==="SL_DELTA";
     $("targetField").classList.toggle("hidden",tpDelta);$("tpDeltaField").classList.toggle("hidden",!tpDelta);
     $("stopField").classList.toggle("hidden",slDelta);$("slDeltaField").classList.toggle("hidden",!slDelta);
+  }
+  function syncTradeManagementUi(){
+    $("beThresholdPct").disabled=!$("moveSlToBeEnabled").checked;
+    $("closeThresholdPct").disabled=$("closePortionPct").disabled=!$("closePortionEnabled").checked;
+    $("rankBoostThreshold").disabled=$("rankBoostPoints").disabled=!$("rankBoostEnabled").checked;
   }
   function monetaryPnl({entryPrice,exitPrice,side,quantity,feePercent=0}={}){
     const entry=finite(entryPrice),exit=finite(exitPrice),direction=Math.sign(finite(side)??0),lot=Math.max(0,finite(quantity)??0),fee=Math.max(0,finite(feePercent)??0);
@@ -833,48 +1001,108 @@
     return {targetPrice,stopPrice,tpDistance:Math.abs(targetPrice-entry),slDistance:Math.abs(entry-stopPrice)};
   }
 
-  function evaluateOutcome(event){
+  function roundOutwardPrice(price,side,tickSize=.1){
+    const value=finite(price),direction=Math.sign(finite(side)??0),tick=Math.max(Number.EPSILON,finite(tickSize)??.1);
+    if(value===null||!direction)return null;
+    const units=value/tick,rounded=direction>0?Math.ceil(units-1e-10):Math.floor(units+1e-10);
+    return Number((rounded*tick).toFixed(10));
+  }
+  function feeAwareBreakevenPrice({entryPrice,side,feePercent=0,tickSize=.1}={}){
+    const entry=finite(entryPrice),direction=Math.sign(finite(side)??0),rate=Math.max(0,finite(feePercent)??0)/100;
+    if(entry===null||!direction||rate>=1)return null;
+    const raw=direction>0?entry*(1+rate)/(1-rate):entry*(1-rate)/(1+rate);
+    return roundOutwardPrice(raw,direction,tickSize);
+  }
+  function candleReachesTarget(candle,price,side){return side>0?candle.high>=price:candle.low<=price;}
+  function candleReachesStop(candle,price,side){return side>0?candle.low<=price:candle.high>=price;}
+  function aggregatePnlLegs(legs,entryPrice,totalQuantity){
+    const grossPnlUsd=legs.reduce((sum,leg)=>sum+(finite(leg.grossPnlUsd)??0),0),feesUsd=legs.reduce((sum,leg)=>sum+(finite(leg.feesUsd)??0),0),pnlUsd=grossPnlUsd-feesUsd;
+    return {grossPnlUsd,feesUsd,pnlUsd,returnPercent:entryPrice*totalQuantity?pnlUsd/(entryPrice*totalQuantity)*100:null};
+  }
+
+  function pendingOutcome(){return {status:"OUTCOME DATA PENDING",barrier:"OUTCOME DATA PENDING",entryTime:null,entryPrice:null,exitPrice:null,barrierReturn:null,pnlUsd:null};}
+  function evaluateOutcome(event,config=scalperConfig(),candleRows=state.outcomeCandles,now=Date.now()){
     if(!event.side)return {status:"NO_DIRECTION",barrier:null};
-    const complete=state.displayCandles.filter(c=>c.closeTime<Date.now()).slice().sort((a,b)=>a.openTime-b.openTime);
+    const complete=candleRows.filter(c=>c.closeTime<now).slice().sort((a,b)=>a.openTime-b.openTime);
+    if(!complete.length||outcomeCoveragePending(event,complete))return pendingOutcome();
     const entryIndex=complete.findIndex(c=>c.openTime>event.time);
     if(entryIndex<0)return {status:"OPEN / UNRESOLVED",barrier:"OPEN / UNRESOLVED",entryTime:null,entryPrice:null,exitPrice:null,barrierReturn:null,pnlUsd:null};
-    const window=complete.slice(entryIndex),config=scalperConfig();
-    if(window[0].openTime-event.time>timeframeMs(state.displayInterval)*2)return {status:"OUTSIDE LOADED HISTORY",barrier:"OUTSIDE LOADED HISTORY",entryTime:null,entryPrice:null,exitPrice:null,barrierReturn:null,pnlUsd:null};
+    const window=complete.slice(entryIndex);
+    if(window[0].openTime-event.time>timeframeMs(OUTCOME_INTERVAL)*2)return pendingOutcome();
     const side=event.side,slip=costPercentInput("slippage")/100,fee=costPercentInput("fee"),testLot=Math.max(0,finite(config.lot)??0);
     const entryRaw=window[0].open,entry=entryRaw*(1+side*slip);
     let mfe=-Infinity,mae=Infinity,bestMinute=null,worstMinute=null;
     const levels=tradeLevels({entryPrice:entry,side,quantity:testLot,feePercent:fee,...config});
-    const tp=levels.targetPrice,sl=levels.stopPrice,tpDistance=levels.tpDistance,slDistance=levels.slDistance;
-    let barrier="OPEN / UNRESOLVED",barrierMinute=null,resolutionCandle=null;
+    const baseTargetPrice=levels.targetPrice,rankPoints=Math.max(0,finite(config.rankBoostPoints)??0),rankThreshold=finite(config.rankBoostThreshold)??90;
+    const rankBoostApplied=config.rankBoostEnabled===true&&finite(event.rank)!==null&&event.rank>rankThreshold&&rankPoints>0&&finite(baseTargetPrice)!==null;
+    const tp=rankBoostApplied?roundOutwardPrice(baseTargetPrice+side*rankPoints,side):baseTargetPrice;
+    const tpDistance=finite(tp)===null?0:Math.abs(tp-entry),initialSl=levels.stopPrice,initialSlDistance=finite(initialSl)===null?0:Math.abs(entry-initialSl);
+    const beThresholdPrice=config.moveSlToBeEnabled&&tpDistance>0?entry+(tp-entry)*clamp(finite(config.beThresholdPct)??50,1,100)/100:null;
+    const tp1Price=config.closePortionEnabled&&tpDistance>0?entry+(tp-entry)*clamp(finite(config.closeThresholdPct)??50,1,100)/100:null;
+    const partialQty=config.closePortionEnabled?testLot*clamp(finite(config.closePortionPct)??50,1,99)/100:0;
+    let remainingQty=testLot,effectiveSl=initialSl,beMoved=false,beMovedAt=null,partialClosed=false,tp1Time=null;
+    let barrier="OPEN / UNRESOLVED",barrierMinute=null,resolutionCandle=null,exitPrice=null;
+    const pnlLegs=[];
     for(let i=0;i<window.length;i++){
       const candle=window[i];
       const favourable=side>0?(candle.high-entry)/entry*100:(entry-candle.low)/entry*100;
       const adverse=side>0?(candle.low-entry)/entry*100:(entry-candle.high)/entry*100;
-      const elapsedMinutes=(i+1)*timeframeMs(state.displayInterval)/MINUTE;
+      const elapsedMinutes=(i+1)*timeframeMs(OUTCOME_INTERVAL)/MINUTE;
       if(favourable>mfe){mfe=favourable;bestMinute=elapsedMinutes;}
       if(adverse<mae){mae=adverse;worstMinute=elapsedMinutes;}
-      const hitTp=tpDistance>0&&finite(tp)!==null&&(side>0?candle.high>=tp:candle.low<=tp),hitSl=slDistance>0&&finite(sl)!==null&&(side>0?candle.low<=sl:candle.high>=sl);
-      if(hitTp&&hitSl){barrier="AMBIGUOUS";barrierMinute=elapsedMinutes;resolutionCandle=candle;break;}
-      if(hitTp){barrier="TP";barrierMinute=elapsedMinutes;resolutionCandle=candle;break;}
-      if(hitSl){barrier="SL";barrierMinute=elapsedMinutes;resolutionCandle=candle;break;}
+      const beNow=!beMoved&&finite(beThresholdPrice)!==null&&candleReachesTarget(candle,beThresholdPrice,side);
+      const prospectiveBe=beNow?feeAwareBreakevenPrice({entryPrice:entry,side,feePercent:fee}):effectiveSl;
+      const tp1Now=!partialClosed&&finite(tp1Price)!==null&&candleReachesTarget(candle,tp1Price,side);
+      const hitTp=tpDistance>0&&finite(tp)!==null&&candleReachesTarget(candle,tp,side);
+      const hitPriorSl=initialSlDistance>0&&finite(effectiveSl)!==null&&candleReachesStop(candle,effectiveSl,side);
+      const hitMovedSl=beNow&&finite(prospectiveBe)!==null&&candleReachesStop(candle,prospectiveBe,side);
+      if((hitTp&&(hitPriorSl||hitMovedSl))||(tp1Now&&(hitPriorSl||hitMovedSl))){barrier="AMBIGUOUS";barrierMinute=elapsedMinutes;resolutionCandle=candle;break;}
+      if(beNow){beMoved=true;beMovedAt=candle.openTime;effectiveSl=prospectiveBe;}
+      if(tp1Now){
+        partialClosed=true;tp1Time=candle.openTime;remainingQty=Math.max(0,testLot-partialQty);
+        pnlLegs.push(monetaryPnl({entryPrice:entry,exitPrice:tp1Price,side,quantity:partialQty,feePercent:fee}));
+        if(remainingQty<=Number.EPSILON){barrier="TP1 FULL";barrierMinute=elapsedMinutes;resolutionCandle=candle;exitPrice=tp1Price;break;}
+        if(!beMoved){
+          const rebuilt=tradeLevels({entryPrice:entry,side,quantity:remainingQty,feePercent:fee,...config});
+          effectiveSl=rebuilt.stopPrice;
+        }
+      }
+      const hitEffectiveSl=finite(effectiveSl)!==null&&Math.abs(entry-effectiveSl)>0&&candleReachesStop(candle,effectiveSl,side);
+      if(hitTp){barrier=partialClosed?"TP1 + TP2":"TP";barrierMinute=elapsedMinutes;resolutionCandle=candle;exitPrice=tp;break;}
+      if(hitEffectiveSl){barrier=partialClosed?(beMoved?"TP1 + BE":"TP1 + SL"):(beMoved?"BE":"SL");barrierMinute=elapsedMinutes;resolutionCandle=candle;exitPrice=effectiveSl;break;}
     }
-    const resolved=barrier==="TP"||barrier==="SL";
-    const exitPrice=barrier==="TP"?tp:barrier==="SL"?sl:null;
-    const money=resolved?monetaryPnl({entryPrice:entry,exitPrice,side,quantity:testLot,feePercent:fee}):{grossPnlUsd:null,feesUsd:null,pnlUsd:null,returnPercent:null};
+    const resolved=!["OPEN / UNRESOLVED","AMBIGUOUS"].includes(barrier);
+    if(resolved&&remainingQty>Number.EPSILON)pnlLegs.push(monetaryPnl({entryPrice:entry,exitPrice,side,quantity:remainingQty,feePercent:fee}));
+    const money=resolved?aggregatePnlLegs(pnlLegs,entry,testLot):{grossPnlUsd:null,feesUsd:null,pnlUsd:null,returnPercent:null};
     return {
       status:resolved?"RESOLVED":barrier==="AMBIGUOUS"?"AMBIGUOUS":"OPEN / UNRESOLVED",
       entryTime:window[0].openTime,entryPrice:entry,entryRaw,
       exitTime:resolved?resolutionCandle?.openTime??null:null,closeTime:resolved?resolutionCandle?.closeTime??null:null,
       lastObservedTime:window.at(-1)?.closeTime??null,mfe,mae,
       timeToBest:bestMinute,timeToWorst:worstMinute,barrier,barrierMinute,barrierReturn:money.returnPercent,exitPrice,testLot,
-      tpDistance,slDistance,targetPrice:tp,stopPrice:sl,tpDriver:config.tpDriver,slDriver:config.slDriver,grossPnlUsd:money.grossPnlUsd,feesUsd:money.feesUsd,pnlUsd:money.pnlUsd,
+      tpDistance,slDistance:initialSlDistance,targetPrice:tp,baseTargetPrice,stopPrice:initialSl,effectiveStopPrice:effectiveSl,tpDriver:config.tpDriver,slDriver:config.slDriver,
+      rankBoostApplied,rankBoostPoints:rankBoostApplied?rankPoints:0,beThresholdPrice,beMoved,beMovedAt,tp1Price,partialClosed,tp1Time,partialQty:partialClosed?partialQty:0,remainingQty,
+      grossPnlUsd:money.grossPnlUsd,feesUsd:money.feesUsd,pnlUsd:money.pnlUsd,
       timestampApproximate:event.timestampApproximate??true
     };
   }
 
-  function evaluateAllOutcomes(){
-    state.outcomes.clear();
-    for(const event of state.filteredScalpEvents)state.outcomes.set(event.id,evaluateOutcome(event));
+  function evaluateSequentialOutcomes(events,config=scalperConfig(),candleRows=state.outcomeCandles,now=Date.now()){
+    const outcomes=new Map(),activeByDirection=new Map([[1,[]],[-1,[]]]),limit=Math.max(1,Math.round(finite(config.maxConcurrentAutoPositions)??1));
+    const ordered=events.slice().sort((a,b)=>a.time-b.time||String(a.source).localeCompare(String(b.source))||String(a.id).localeCompare(String(b.id)));
+    for(const event of ordered){
+      const active=(activeByDirection.get(event.side)||[]).filter(tranche=>tranche.endTime>event.time);activeByDirection.set(event.side,active);
+      if(active.length>=limit){event.capacityBlocked=true;event.simulationTag="MAX CONCURRENT";continue;}
+      event.capacityBlocked=false;event.simulationTag="ELIGIBLE";
+      const outcome=evaluateOutcome(event,config,candleRows,now);outcomes.set(event.id,outcome);
+      if(outcome.status==="OUTCOME DATA PENDING"){event.simulationTag="OUTCOME DATA PENDING";continue;}
+      const endTime=outcome.status==="RESOLVED"&&Number.isFinite(outcome.closeTime)?outcome.closeTime:Infinity;
+      active.push({eventId:event.id,endTime});
+    }
+    return outcomes;
+  }
+  function evaluateAllOutcomes(events=state.filteredScalpEvents,config=scalperConfig()){
+    state.outcomes=evaluateSequentialOutcomes(events,config);
   }
 
   function evaluateEligibility(signal,config=scalperConfig()){
@@ -890,12 +1118,14 @@
 
   function applyFilters(){
     const config=scalperConfig(),machine=$("machineSelect")?.value;
-    const selected=state.scalpEvents.filter(signal=>(signal.source||"V1")===config.engineProfile&&(!machine||signal.machineId===machine));
-    for(const signal of selected)signal.eligibility=evaluateEligibility(signal,config);
+    const machineSignals=state.scalpEvents.filter(signal=>!machine||signal.machineId===machine);
+    for(const signal of state.scalpEvents){signal.eligibility=evaluateEligibility(signal,config);signal.capacityBlocked=false;signal.simulationTag=signal.eligibility.tag;}
+    const capacityCandidates=machineSignals.filter(signal=>signal.eligibility.eligible&&!!signal.side);
+    state.outcomes=evaluateSequentialOutcomes(capacityCandidates,config);
+    const selected=machineSignals.filter(signal=>(signal.source||"V1")===config.engineProfile);
     state.selectedScalpEvents=selected;
-    state.filteredScalpEvents=selected.filter(signal=>signal.eligibility.eligible);
-    state.resultScalpEvents=$("showRejected").checked?selected:state.filteredScalpEvents;
-    evaluateAllOutcomes();
+    state.filteredScalpEvents=selected.filter(signal=>signal.eligibility.eligible&&!signal.capacityBlocked);
+    state.resultScalpEvents=$("showRejected").checked?selected:selected.filter(signal=>signal.eligibility.eligible);
     renderScalpSummaries();
     renderResults();
     requestRedraw();
@@ -905,15 +1135,15 @@
     $(target).innerHTML=stats.map(([label,value])=>`<div class="stat"><span>${escapeHtml(label)}</span><b>${value}</b></div>`).join("");
   }
   function renderScalpSummaries(){
-    const signals=state.filteredScalpEvents,rejected=state.selectedScalpEvents.filter(signal=>!signal.eligibility?.eligible);
+    const signals=state.filteredScalpEvents,rejected=state.selectedScalpEvents.filter(signal=>!signal.eligibility?.eligible),capacitySkipped=state.selectedScalpEvents.filter(signal=>signal.capacityBlocked);
     const hypothetical=signals.filter(signal=>!signal.linkedTrade).map(signal=>state.outcomes.get(signal.id)).filter(outcome=>outcome?.status==="RESOLVED"&&Number.isFinite(outcome.barrierReturn));
     const actual=signals.map(signal=>signal.linkedTrade).filter(Boolean),actualPnl=actual.map(trade=>trade.estimatedPnlUsd).filter(Number.isFinite);
     statCards("scalpSummary",[
-      ["Eligible",signals.length],["Rejected",rejected.length],["Cross / Bounce",`${signals.filter(s=>s.eventType==="CROSS").length} / ${signals.filter(s=>s.eventType==="BOUNCE").length}`],
+      ["Simulated",signals.length],["Gate rejected",rejected.length],["Max concurrent",capacitySkipped.length],["Cross / Bounce",`${signals.filter(s=>s.eventType==="CROSS").length} / ${signals.filter(s=>s.eventType==="BOUNCE").length}`],
       ["Exact-linked trades",actual.length],["Detector-only",signals.filter(s=>!s.linkedTrade).length],
       ["Hypo win rate",hypothetical.length?`${fmt(hypothetical.filter(o=>o.barrierReturn>0).length/hypothetical.length*100,1)}%`:"—"],
       ["Hypo expectancy",hypothetical.length?`${signed(hypothetical.reduce((sum,o)=>sum+o.barrierReturn,0)/hypothetical.length,2)}%`:"—"],
-      ["Hypo P/L",formatUsd(hypothetical.reduce((sum,o)=>sum+(finite(o.pnlUsd)??0),0))],
+      ["Hypo P/L",formatUsd(hypothetical.reduce((sum,o)=>sum+(finite(o.pnlUsd)??0),0))],["TP1 managed",hypothetical.filter(outcome=>outcome.partialClosed).length],["BE moved",hypothetical.filter(outcome=>outcome.beMoved).length],["Rank extended",hypothetical.filter(outcome=>outcome.rankBoostApplied).length],
       ["Actual wins",actualPnl.length?`${actualPnl.filter(v=>v>0).length}/${actualPnl.length}`:"—"],
       ["Actual P&L USD",actualPnl.length?formatUsd(actualPnl.reduce((a,b)=>a+b,0)):"—"],
       ["Rank rejected",signals.filter(s=>s.recordedAction==="RANK_REJECTED").length],["Missing rank",signals.filter(s=>s.rank===null).length]
@@ -925,15 +1155,16 @@
     return resultColumnOrder.map(key=>`<td data-column-key="${key}"${visible[key]===false?' style="display:none"':""}>${cells[key]??"—"}</td>`).join("");
   }
   function scalpResultRow(signal,outcome){
-    const cls=signal.side>0?"bull":"bear",trade=signal.linkedTrade,resolved=outcome?.status==="RESOLVED",eligible=signal.eligibility?.eligible===true;
+    const cls=signal.side>0?"bull":"bear",trade=signal.linkedTrade,resolved=outcome?.status==="RESOLVED",eligible=signal.eligibility?.eligible===true&&!signal.capacityBlocked;
+    const eligibilityTag=signal.capacityBlocked?"MAX CONCURRENT":signal.simulationTag==="OUTCOME DATA PENDING"?"OUTCOME DATA PENDING":signal.eligibility?.tag||"NOT EVALUATED";
     const actualReturn=trade&&finite(trade.entryPrice)!==null&&finite(trade.exitPrice)!==null
       ?signal.side*(trade.exitPrice-trade.entryPrice)/trade.entryPrice*100:null;
     const barrier=trade?.exitReason??outcome?.barrier??"—";
     const cells={
       time:`<span title="${escapeHtml(iso(signal.time))}">${escapeHtml(dubai(signal.time))}${signal.timestampApproximate?"*":""}</span>`,
       source:`<span class="warn">SCALP ${escapeHtml(signal.source||"V1")}</span>`,signal:`<span class="${cls}">${escapeHtml(`${signal.direction} ${signal.eventType}`)}</span>`,
-      eligibility:`<span class="${eligible?"bull":"bear"}" title="${escapeHtml(signal.eligibility?.tag||"NOT EVALUATED")}">${escapeHtml(signal.eligibility?.tag||"NOT EVALUATED")}</span>`,
-      basis:eligible?(trade?"ACTUAL RECORDED":"HYPOTHETICAL"):"EXCLUDED",
+      eligibility:`<span class="${eligible?"bull":"bear"}" title="${escapeHtml(eligibilityTag)}">${escapeHtml(eligibilityTag)}</span>`,
+      basis:signal.capacityBlocked?"SKIPPED":eligible?(trade?"ACTUAL RECORDED":"HYPOTHETICAL"):"EXCLUDED",
       quantity:formatQuantity(trade?.filledQty??trade?.requestedQty??outcome?.testLot),
       entry:formatPrice(trade?.entryPrice??outcome?.entryPrice),exit:formatPrice(trade?.exitPrice??(resolved?outcome?.exitPrice:null)),
       return:trade?formatPercent(actualReturn):resolved?formatPercent(outcome?.barrierReturn):"—",
@@ -1200,11 +1431,18 @@
   }
   function isRightAxisStrip(g,x){return x>=g.left+g.plotW&&x<=g.width;}
   function isRightPriceAxisHit(g,x,y){return isRightAxisStrip(g,x)&&y>=g.top&&y<=g.top+g.priceH;}
+  function drawOlderHistoryIndicator(g){
+    if(!olderHistoryState(state.displayInterval).loading)return false;
+    const ctx=g.ctx,x=g.left+10,y=g.top+10,w=150,h=28;
+    ctx.fillStyle="rgba(255,255,255,.96)";ctx.fillRect(x,y,w,h);ctx.strokeStyle="#d9dce1";ctx.lineWidth=hairline();ctx.strokeRect(px(x),px(y),w,h);
+    ctx.fillStyle=COLORS.axis;ctx.font="12px Arial";ctx.textAlign="left";ctx.fillText("Loading older candles...",x+10,y+19);return true;
+  }
 
   function drawPrice(){
     const canvas=$("priceChart"),g=plotGeometry(canvas);clearCanvas(g);drawGrid(g,6);
+    olderIfNeeded(visibleCandleIndexRange());
     const candles=visibleCandles();
-    if(!candles.length){g.ctx.fillStyle=COLORS.axis;g.ctx.fillText("Waiting for Binance candle history.",g.left+20,g.top+30);return;}
+    if(!candles.length){g.ctx.fillStyle=COLORS.axis;g.ctx.fillText("Waiting for Binance candle history.",g.left+20,g.top+30);drawOlderHistoryIndicator(g);return;}
     const sets=visibleSignalSets(),markerSpecs=tradeMarkerSpecs(sets),visibleMarkerSpecs=markerSpecs.filter(marker=>marker.time>=state.viewStart&&marker.time<=state.viewEnd);
     let min=Math.min(...candles.map(c=>c.low)),max=Math.max(...candles.map(c=>c.high));
     for(const marker of visibleMarkerSpecs){min=Math.min(min,marker.price);max=Math.max(max,marker.price);}
@@ -1257,6 +1495,7 @@
     ctx.restore();
     drawSharedCrosshair(g,true);
     if(crosshairScope(g,state.pricePointerY).showPriceTag)drawPriceAxisTag(g,state.pricePointerY);
+    drawOlderHistoryIndicator(g);
   }
 
   function crosshairScope(g,pointerY){
@@ -1362,7 +1601,7 @@
       const g=plotGeometry(canvas),rect=canvas.getBoundingClientRect(),focus=timeFor(event.clientX-rect.left,g);
       const factor=event.deltaY>0?1.18:.84,oldWidth=state.viewEnd-state.viewStart,newWidth=clamp(oldWidth*factor,20*MINUTE,(state.fullEnd-state.fullStart)*2);
       const ratio=(focus-state.viewStart)/oldWidth;
-      state.viewStart=focus-newWidth*ratio;state.viewEnd=state.viewStart+newWidth;requestRedraw();
+      state.viewStart=focus-newWidth*ratio;state.viewEnd=state.viewStart+newWidth;armOlderHistory(state.displayInterval,Math.ceil(newWidth/timeframeMs(state.displayInterval)));requestRedraw();
     },{passive:false});
     canvas.addEventListener("pointerdown",event=>{
       if(event.button!==undefined&&event.button!==0)return;
@@ -1386,7 +1625,7 @@
       state.crosshairTime=timeFor(x,g);
       if(state.drag){
         const range=horizontalPanRange(state.drag,x);
-        if(range){state.viewStart=range.start;state.viewEnd=range.end;}
+        if(range){state.viewStart=range.start;state.viewEnd=range.end;armOlderHistory(state.displayInterval,requestedVisibleCandles());}
         const yRange=manualYRangeForBodyPan(state.drag,y);
         if(yRange)state.manualPriceRange=yRange;
       }
@@ -1453,6 +1692,8 @@
       if(!state.scalpSignals.length&&!state.scalpV2Signals.length)throw new Error(`No usable ${SYMBOL} rows found in the Scalp V1/V2 signal tables`);
       state.scalpTrades=[];attachScalpTrades();populateMachineSelect();
       updateMachineRows();
+      setStatus("Loading outcome 1m","busy");
+      await ensureOutcomeHistoryCoverage();connectOutcomeSocket();
       updateDatasetStatus();setStatus("Signals loaded","success");
     }catch(error){
       console.error(error);$("datasetStatus").className="statusline error";$("datasetStatus").textContent=error.message||String(error);setStatus("Load failed","error");
@@ -1579,7 +1820,8 @@
       assert(normalizedScalp.signals.some(s=>s.eventId===normalizedTrades[0].eventId),"SCALP exact eventId trade linkage input");
 
       const saved={
-        displayCandles:state.displayCandles,candleCache:new Map(state.candleCache),displayInterval:state.displayInterval,
+        displayCandles:state.displayCandles,candleCache:new Map(state.candleCache),olderHistoryByInterval:new Map([...state.olderHistoryByInterval].map(([key,value])=>[key,{...value}])),outcomeCandles:state.outcomeCandles,displayInterval:state.displayInterval,
+        viewStart:state.viewStart,viewEnd:state.viewEnd,fullStart:state.fullStart,fullEnd:state.fullEnd,
         scalpSignals:state.scalpSignals,scalpV2Signals:state.scalpV2Signals,
         scalpTrades:state.scalpTrades,scalpEvents:state.scalpEvents,selectedScalpEvents:state.selectedScalpEvents,
         filteredScalpEvents:state.filteredScalpEvents,resultScalpEvents:state.resultScalpEvents,outcomes:new Map(state.outcomes),
@@ -1598,6 +1840,27 @@
       state.candleCache.set("15m",[{openTime:100,open:1,high:2,low:.5,close:1.2,volume:1,closeTime:199,final:false}]);
       upsertCachedCandle("15m",{openTime:100,open:1,high:3,low:.5,close:2.5,volume:2,closeTime:199,final:true});
       assert(state.candleCache.get("15m").length===1&&state.candleCache.get("15m")[0].final===true&&state.candleCache.get("15m")[0].close===2.5,"live forming candle is replaced when the same Binance candle finalizes");
+
+      const lazyCandle=(openTime,close=1)=>({openTime,open:close,high:close+1,low:close-1,close,volume:1,closeTime:openTime+999,final:true});
+      const mergedOlder=mergeOlderCandles([lazyCandle(2000,20),lazyCandle(3000,30)],[lazyCandle(1000,10),lazyCandle(2000,999)],3);
+      assert(mergedOlder.map(candle=>candle.openTime).join("|")==="1000|2000|3000"&&mergedOlder[1].close===20&&mergeOlderCandles([lazyCandle(3000)],[lazyCandle(1000),lazyCandle(2000)],2).map(candle=>candle.openTime).join("|")==="1000|2000","older merge prepends, sorts, dedupes by open time, preserves cached overlap, and trims newest rows at retention");
+
+      state.displayInterval="4h";state.marketRequestGeneration=88;state.viewStart=1000000;state.viewEnd=1002000;
+      state.candleCache.set("4h",[lazyCandle(1000000),lazyCandle(1001000),lazyCandle(1002000)]);state.displayCandles=state.candleCache.get("4h").slice();resetOlderHistoryState("4h");
+      armOlderHistory("4h",3);
+      let lazyCalls=0,releaseLazy;
+      const deferredOlder=new Promise(resolve=>{releaseLazy=resolve;}),lazyFetcher=async(_interval,_generation,options)=>{lazyCalls++;lazyFetcher.options=options;return deferredOlder;};
+      const lazyRange=visibleCandleIndexRange(),firstLazy=olderIfNeeded(lazyRange,lazyFetcher);await Promise.resolve();
+      const overlappingLazy=await olderIfNeeded(lazyRange,lazyFetcher);
+      assert(lazyCalls===1&&olderHistoryState("4h").loading&&overlappingLazy.started===false,"lazy older-history in-flight guard prevents overlapping edge fetches");
+      releaseLazy(Array.from({length:OLDER_HISTORY_THRESHOLD},(_,index)=>lazyCandle(1000+index*1000)));
+      const lazyResult=await firstLazy;
+      assert(lazyRange.start===0&&lazyResult.started&&lazyResult.fetched===OLDER_HISTORY_THRESHOLD&&lazyFetcher.options.endTime===999999&&lazyFetcher.options.target===OLDER_HISTORY_THRESHOLD&&OLDER_HISTORY_EDGE_CANDLES===2&&OLDER_HISTORY_LIMIT===1500&&PRICE_HISTORY_RETENTION_CAP===10000,"near-left index <= 2 fetches 120+ older candles ending at oldest open time minus one");
+
+      resetOlderHistoryState("4h");armOlderHistory("4h",3);let emptyOlderCalls=0;
+      const emptyOlder=await olderIfNeeded({start:0,end:2},async()=>{emptyOlderCalls++;return [];});armOlderHistory("4h",3);
+      const afterNoMore=await olderIfNeeded({start:0,end:2},async()=>{emptyOlderCalls++;return [lazyCandle(0)];});
+      assert(emptyOlder.noMore&&olderHistoryState("4h").noMore&&afterNoMore.started===false&&emptyOlderCalls===1,"empty older-history response permanently stops further requests for that timeframe");
       state.scalpSignals=normalizedScalp.signals.map(signal=>({...signal,source:"V1"}));
       state.scalpV2Signals=normalizedScalp.signals.slice(0,2).map(signal=>({...signal,id:`v2|${signal.id}`,source:"V2"}));
       state.scalpTrades=normalizedTrades;attachScalpTrades();state.displayInterval="1m";state.displayCandles=fixture.candles;
@@ -1612,21 +1875,23 @@
         openTime:lifecycleStart+index*MINUTE,closeTime:lifecycleStart+(index+1)*MINUTE-1,
         open:100,close:100,high:index===count-1?(final.high??100.5):100.5,low:index===count-1?(final.low??99.5):99.5,volume:1
       }));
-      const oldInputs={costUnit:$("costUnit").value,fee:$("fee").value,slip:$("slippage").value,lot:$("scalperLot").value,target:$("scalperTarget").value,tpDelta:$("scalperTpDelta").value,tpDriver:$("scalperTpDriver").value,stop:$("scalperStop").value,slDelta:$("scalperSlDelta").value,slDriver:$("scalperSlDriver").value};
+      const oldInputs={costUnit:$("costUnit").value,fee:$("fee").value,slip:$("slippage").value,lot:$("scalperLot").value,target:$("scalperTarget").value,tpDelta:$("scalperTpDelta").value,tpDriver:$("scalperTpDriver").value,stop:$("scalperStop").value,slDelta:$("scalperSlDelta").value,slDriver:$("scalperSlDriver").value,
+        moveSlToBeEnabled:$("moveSlToBeEnabled").checked,beThresholdPct:$("beThresholdPct").value,closePortionEnabled:$("closePortionEnabled").checked,closeThresholdPct:$("closeThresholdPct").value,closePortionPct:$("closePortionPct").value,
+        rankBoostEnabled:$("rankBoostEnabled").checked,rankBoostThreshold:$("rankBoostThreshold").value,rankBoostPoints:$("rankBoostPoints").value,maxConcurrentAutoPositions:$("maxConcurrentAutoPositions").value};
       $("costUnit").value="percent";$("fee").value="0";$("slippage").value="0";$("scalperLot").value=".01";$("scalperTpDriver").value="TP_DELTA";$("scalperTpDelta").value="1";$("scalperSlDriver").value="SL_DELTA";$("scalperSlDelta").value="1";
-      state.displayCandles=lifecycleCandles(251,{high:101.2,low:99.5});
+      state.outcomeCandles=lifecycleCandles(251,{high:101.2,low:99.5});
       const lateLongTp=evaluateOutcome(lifecycleEvent(1));
       assert(lateLongTp.entryTime>lifecycleEvent(1).time,"no look-ahead: entry after signal");
       assert(lateLongTp.barrier==="TP"&&lateLongTp.barrierMinute===251,"TP after former 240m horizon still resolves");
-      state.displayCandles=lifecycleCandles(251,{high:100.5,low:98.8});
+      state.outcomeCandles=lifecycleCandles(251,{high:100.5,low:98.8});
       assert(evaluateOutcome(lifecycleEvent(1)).barrier==="SL","SL after former 240m horizon still resolves");
-      state.displayCandles=lifecycleCandles(20);
+      state.outcomeCandles=lifecycleCandles(20);
       assert(evaluateOutcome(lifecycleEvent(1)).status==="OPEN / UNRESOLVED","no barrier before data end remains open/unresolved");
-      state.displayCandles=lifecycleCandles(1,{high:101.2,low:98.8});
+      state.outcomeCandles=lifecycleCandles(1,{high:101.2,low:98.8});
       assert(evaluateOutcome(lifecycleEvent(1)).status==="AMBIGUOUS","same 1m candle TP+SL is ambiguous");
-      state.displayCandles=lifecycleCandles(2,{high:100.5,low:98.8});
+      state.outcomeCandles=lifecycleCandles(2,{high:100.5,low:98.8});
       assert(evaluateOutcome(lifecycleEvent(-1)).barrier==="TP","short TP direction is correct");
-      state.displayCandles=lifecycleCandles(2,{high:101.2,low:99.5});
+      state.outcomeCandles=lifecycleCandles(2,{high:101.2,low:99.5});
       assert(evaluateOutcome(lifecycleEvent(-1)).barrier==="SL","short SL direction is correct");
 
       assert(monetaryPnl({entryPrice:63000,exitPrice:63500,side:1,quantity:.01,feePercent:0}).pnlUsd===5&&monetaryPnl({entryPrice:63000,exitPrice:62500,side:-1,quantity:.01,feePercent:0}).pnlUsd===5,"long and short P/L use direction × price difference × lot");
@@ -1634,11 +1899,11 @@
 
       const distanceEvent={id:"distance-event",side:1,time:lifecycleStart-1,timestampApproximate:false,linkedTrade:null};
       $("scalperTpDelta").value="500";$("scalperSlDelta").value="500";$("scalperLot").value=".01";
-      state.displayCandles=[{openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:63000,close:63500,high:63510,low:62950,volume:1}];
+      state.outcomeCandles=[{openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:63000,close:63500,high:63510,low:62950,volume:1}];
       const distanceLong=evaluateOutcome(distanceEvent);$("scalperLot").value=".02";const distanceLongDouble=evaluateOutcome(distanceEvent);
       assert(distanceLong.targetPrice===63500&&distanceLong.stopPrice===62500,"long TP/SL dollar distances derive correct prices");
       assert(distanceLong.pnlUsd===5&&distanceLongDouble.pnlUsd===10&&distanceLong.stopPrice===distanceLongDouble.stopPrice,"lot changes P/L without changing price distance");
-      state.displayCandles=[{openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:63000,close:62500,high:63050,low:62490,volume:1}];
+      state.outcomeCandles=[{openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:63000,close:62500,high:63050,low:62490,volume:1}];
       const shortDistance=evaluateOutcome({...distanceEvent,id:"distance-short",side:-1});
       assert(shortDistance.targetPrice===62500&&shortDistance.stopPrice===63500&&shortDistance.pnlUsd===10,"short TP/SL dollar distances and P/L are directionally correct");
       const netTargetLevels=tradeLevels({entryPrice:63000,side:1,quantity:.01,feePercent:0,tpDriver:"NET_TARGET",target:5,slDriver:"NET_SL",stop:3});
@@ -1646,6 +1911,36 @@
       assert(netTargetLevels.targetPrice===63500&&deltaTargetLevels.targetPrice===63400&&netTargetLevels.targetPrice!==deltaTargetLevels.targetPrice,"TP_DELTA and NET_TARGET produce distinct correct TP prices");
       const feeAwareLevels=tradeLevels({entryPrice:63000,side:1,quantity:.01,feePercent:.1,tpDriver:"NET_TARGET",target:5,slDriver:"NET_SL",stop:3});
       assert(Math.abs(monetaryPnl({entryPrice:63000,exitPrice:feeAwareLevels.targetPrice,side:1,quantity:.01,feePercent:.1}).pnlUsd-5)<1e-9&&Math.abs(monetaryPnl({entryPrice:63000,exitPrice:feeAwareLevels.stopPrice,side:1,quantity:.01,feePercent:.1}).pnlUsd+3)<1e-9,"NET_TARGET and NET_SL prices remain net of configured entry and exit fees");
+
+      const invariantEvent={id:"tf-invariant",side:1,time:lifecycleStart-1,rank:95,timestampApproximate:false,linkedTrade:null},invariantConfig={...scalperConfig(),lot:"1",tpDriver:"TP_DELTA",tpDelta:"10",slDriver:"SL_DELTA",slDelta:"5",moveSlToBeEnabled:true,beThresholdPct:30,closePortionEnabled:true,closeThresholdPct:50,closePortionPct:40,rankBoostEnabled:true,rankBoostThreshold:90,rankBoostPoints:2,maxConcurrentAutoPositions:1};
+      state.outcomeCandles=[
+        {openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:100,high:106.1,low:100.5,close:105,volume:1},
+        {openTime:lifecycleStart+MINUTE,closeTime:lifecycleStart+2*MINUTE-1,open:105,high:111,low:101,close:110,volume:1},
+        {openTime:lifecycleStart+2*MINUTE,closeTime:lifecycleStart+3*MINUTE-1,open:110,high:112.1,low:101,close:112,volume:1}
+      ];
+      state.displayInterval="1m";state.displayCandles=[{openTime:lifecycleStart,closeTime:lifecycleStart+MINUTE-1,open:100,high:101,low:50,close:60,volume:1}];const invariantAt1m=evaluateOutcome(invariantEvent,invariantConfig);
+      state.displayInterval="15m";state.displayCandles=[{openTime:lifecycleStart,closeTime:lifecycleStart+15*MINUTE-1,open:100,high:500,low:1,close:300,volume:1}];const invariantAt15m=evaluateOutcome(invariantEvent,invariantConfig);
+      const invariantKeys=["status","barrier","barrierMinute","pnlUsd","mfe","mae","beMoved","beMovedAt","partialClosed","tp1Time","targetPrice","exitPrice"];
+      assert(invariantAt1m.barrier==="TP1 + TP2"&&invariantAt1m.rankBoostApplied&&invariantAt1m.beMoved&&invariantAt1m.partialClosed&&invariantKeys.every(key=>Object.is(invariantAt1m[key],invariantAt15m[key])),"outcome P/L, barriers, MFE/MAE, BE, TP1, and rank extension are identical across 1m and 15m display TFs");
+      assert(evaluateOutcome(invariantEvent,invariantConfig,[{openTime:lifecycleStart+10*MINUTE,closeTime:lifecycleStart+11*MINUTE-1,open:100,high:101,low:99,close:100,volume:1}]).status==="OUTCOME DATA PENDING","missing dedicated 1m coverage is explicitly pending and never falls back to display candles");
+
+      const phaseBBase={...scalperConfig(),lot:"1",tpDriver:"TP_DELTA",tpDelta:"10",slDriver:"SL_DELTA",slDelta:"5",moveSlToBeEnabled:false,closePortionEnabled:false,rankBoostEnabled:false,maxConcurrentAutoPositions:1};
+      const managedCandle=(index,{high=104,low=99,open=100,close=100}={})=>({openTime:lifecycleStart+index*MINUTE,closeTime:lifecycleStart+(index+1)*MINUTE-1,open,high,low,close,volume:1});
+      const concurrentEvents=[{id:"cap-v1",source:"V1",side:1,time:lifecycleStart-1,rank:50},{id:"cap-v2",source:"V2",side:1,time:lifecycleStart+1000,rank:50},{id:"cap-short",source:"V2",side:-1,time:lifecycleStart+2000,rank:50}];
+      const concurrentOutcomes=evaluateSequentialOutcomes(concurrentEvents,phaseBBase,[managedCandle(0),managedCandle(1)],lifecycleStart+3*MINUTE);
+      assert(concurrentOutcomes.has("cap-v1")&&!concurrentOutcomes.has("cap-v2")&&concurrentEvents[1].simulationTag==="MAX CONCURRENT"&&concurrentOutcomes.has("cap-short"),"Max Concurrent blocks the second open V1/V2 tranche in one direction without blocking the opposite direction");
+
+      $("fee").value="0.1";
+      const beOutcome=evaluateOutcome({id:"be-fixture",side:1,time:lifecycleStart-1,rank:50},{...phaseBBase,moveSlToBeEnabled:true,beThresholdPct:50},[managedCandle(0,{high:106,low:100.5}),managedCandle(1,{high:104,low:100.2})],lifecycleStart+3*MINUTE);
+      assert(beOutcome.beMoved&&beOutcome.barrier==="BE"&&beOutcome.effectiveStopPrice>100&&beOutcome.pnlUsd>=0&&beOutcome.pnlUsd<=.11,"Move SL to BE triggers once and exits at a fee-aware tick-rounded breakeven");
+
+      $("fee").value="0";
+      const partialOutcome=evaluateOutcome({id:"partial-fixture",side:1,time:lifecycleStart-1,rank:50},{...phaseBBase,closePortionEnabled:true,closeThresholdPct:50,closePortionPct:40},[managedCandle(0,{high:105.1,low:100}),managedCandle(1,{high:110.1,low:104})],lifecycleStart+3*MINUTE);
+      assert(partialOutcome.partialClosed&&partialOutcome.barrier==="TP1 + TP2"&&Math.abs(partialOutcome.partialQty-.4)<1e-9&&Math.abs(partialOutcome.pnlUsd-8)<1e-9,"Close % realizes TP1 for its portion and aggregates the remainder's TP2 P/L");
+
+      const boostedOutcome=evaluateOutcome({id:"rank-fixture",side:1,time:lifecycleStart-1,rank:91},{...phaseBBase,rankBoostEnabled:true,rankBoostThreshold:90,rankBoostPoints:5},[managedCandle(0,{high:115.1,low:100})],lifecycleStart+2*MINUTE);
+      const thresholdOutcome=evaluateOutcome({id:"rank-threshold-fixture",side:1,time:lifecycleStart-1,rank:90},{...phaseBBase,rankBoostEnabled:true,rankBoostThreshold:90,rankBoostPoints:5},[managedCandle(0,{high:110.1,low:100})],lifecycleStart+2*MINUTE);
+      assert(boostedOutcome.rankBoostApplied&&boostedOutcome.baseTargetPrice===110&&boostedOutcome.targetPrice===115&&thresholdOutcome.rankBoostApplied===false&&thresholdOutcome.targetPrice===110,"Rank TP extension moves TP outward only when rank is strictly above threshold");
 
       const tooltipFixture=scalpTooltip({direction:"LONG",eventType:"BOUNCE",rank:67},{barrierReturn:1.2,pnlUsd:5,grossPnlUsd:5.5,feesUsd:.5,mfe:2.1,mae:-.7,timeToBest:4,timeToWorst:2});
       assert(tooltipFixture.split("\n").length===5&&tooltipFixture.startsWith("SCALP LONG BOUNCE · rank 67\nReturn:")&&!/MARKER|Simulation eligibility|Timestamp|Recorded action|Detector-only|OUTCOME|Status:|Quantity:|Entry:|TP_DELTA|SL_DELTA|Barrier:/.test(tooltipFixture),"entry/outcome tooltip contains only the five requested compact lines");
@@ -1668,8 +1963,10 @@
       assert(markerPoint.x===60&&markerPoint.y===630,"marker coordinates remain exact through chart transforms");
       state.viewStart=oldViewStart;state.viewEnd=oldViewEnd;state.outcomes.delete(markerEvent.id);
 
-      $("costUnit").value=oldInputs.costUnit;$("fee").value=oldInputs.fee;$("slippage").value=oldInputs.slip;$("scalperLot").value=oldInputs.lot;$("scalperTarget").value=oldInputs.target;$("scalperTpDelta").value=oldInputs.tpDelta;$("scalperTpDriver").value=oldInputs.tpDriver;$("scalperStop").value=oldInputs.stop;$("scalperSlDelta").value=oldInputs.slDelta;$("scalperSlDriver").value=oldInputs.slDriver;syncTradeDriverUi();
-      state.displayCandles=saved.displayCandles;state.candleCache=saved.candleCache;state.displayInterval=saved.displayInterval;state.marketRequestGeneration=saved.marketRequestGeneration;state.binanceRestPausedUntil=saved.binanceRestPausedUntil;state.scalpSignals=saved.scalpSignals;state.scalpV2Signals=saved.scalpV2Signals;state.scalpTrades=saved.scalpTrades;state.scalpEvents=saved.scalpEvents;state.selectedScalpEvents=saved.selectedScalpEvents;state.filteredScalpEvents=saved.filteredScalpEvents;state.resultScalpEvents=saved.resultScalpEvents;state.outcomes=saved.outcomes;
+      $("costUnit").value=oldInputs.costUnit;$("fee").value=oldInputs.fee;$("slippage").value=oldInputs.slip;$("scalperLot").value=oldInputs.lot;$("scalperTarget").value=oldInputs.target;$("scalperTpDelta").value=oldInputs.tpDelta;$("scalperTpDriver").value=oldInputs.tpDriver;$("scalperStop").value=oldInputs.stop;$("scalperSlDelta").value=oldInputs.slDelta;$("scalperSlDriver").value=oldInputs.slDriver;
+      $("moveSlToBeEnabled").checked=oldInputs.moveSlToBeEnabled;$("beThresholdPct").value=oldInputs.beThresholdPct;$("closePortionEnabled").checked=oldInputs.closePortionEnabled;$("closeThresholdPct").value=oldInputs.closeThresholdPct;$("closePortionPct").value=oldInputs.closePortionPct;
+      $("rankBoostEnabled").checked=oldInputs.rankBoostEnabled;$("rankBoostThreshold").value=oldInputs.rankBoostThreshold;$("rankBoostPoints").value=oldInputs.rankBoostPoints;$("maxConcurrentAutoPositions").value=oldInputs.maxConcurrentAutoPositions;syncTradeDriverUi();
+      state.displayCandles=saved.displayCandles;state.candleCache=saved.candleCache;state.olderHistoryByInterval=saved.olderHistoryByInterval;state.outcomeCandles=saved.outcomeCandles;state.displayInterval=saved.displayInterval;state.viewStart=saved.viewStart;state.viewEnd=saved.viewEnd;state.fullStart=saved.fullStart;state.fullEnd=saved.fullEnd;state.marketRequestGeneration=saved.marketRequestGeneration;state.binanceRestPausedUntil=saved.binanceRestPausedUntil;state.scalpSignals=saved.scalpSignals;state.scalpV2Signals=saved.scalpV2Signals;state.scalpTrades=saved.scalpTrades;state.scalpEvents=saved.scalpEvents;state.selectedScalpEvents=saved.selectedScalpEvents;state.filteredScalpEvents=saved.filteredScalpEvents;state.resultScalpEvents=saved.resultScalpEvents;state.outcomes=saved.outcomes;
 
       assert(!$("horizon")&&!evaluateOutcome.toString().includes("slice(entryIndex,entryIndex+"),"outcomes remain active until TP, SL, or data end");
       assert(LOCAL_API_BASE==="http://127.0.0.1:3001","fixed local API endpoint");
@@ -1709,6 +2006,7 @@
       if(control.id==="machineSelect"||control.closest("#indicatorSettingsPanel"))return;
       control.addEventListener("change",()=>{
         if(control.id==="scalperTpDriver"||control.id==="scalperSlDriver")syncTradeDriverUi();
+        if(["moveSlToBeEnabled","closePortionEnabled","rankBoostEnabled"].includes(control.id))syncTradeManagementUi();
         applyFilters();
       });
     });
@@ -1738,7 +2036,7 @@
     });
   }
 
-  restoreSidebarWidth();restorePriceTimeframe();restoreIndicatorSettings();restoreResultColumnOrder();restoreLowerPanels();restoreSidebarCards();bindSidebarCards();bindIndicatorSettings();bindSettingsPanel();syncTradeDriverUi();bindControls();renderResultColumnVisibility();applyFilters();
+  restoreSidebarWidth();restorePriceTimeframe();restoreIndicatorSettings();restoreResultColumnOrder();restoreLowerPanels();restoreSidebarCards();bindSidebarCards();bindIndicatorSettings();bindSettingsPanel();syncTradeDriverUi();syncTradeManagementUi();bindControls();renderResultColumnVisibility();applyFilters();
   const selfTestRun=runSelfTests();
   const autoConnect=()=>Promise.resolve(selfTestRun).finally(startPriceAutoConnect);
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",autoConnect,{once:true});else autoConnect();

@@ -787,7 +787,7 @@ button:hover{filter:brightness(1.04)}
 .book-pressure-track{
   position:relative;
   box-sizing:border-box;
-  width:72px;
+  width:112px;
   height:10px;
   overflow:hidden;
   border:1px solid rgba(100,116,139,.62);
@@ -816,6 +816,25 @@ button:hover{filter:brightness(1.04)}
   background:#647083;
   transition:left .08s linear,width .08s linear,background-color .08s linear;
 }
+.book-pressure-window-control{display:inline-flex;align-items:center;justify-content:center;width:56px;height:18px}
+.book-pressure-window-button,.book-pressure-window-input{
+  box-sizing:border-box;
+  width:56px;
+  height:18px;
+  margin:0;
+  padding:1px 0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:#1f2937;
+  font:700 12px/16px Arial,sans-serif;
+  font-variant-numeric:tabular-nums;
+  text-align:center;
+}
+.book-pressure-window-button{cursor:pointer}
+.book-pressure-window-button:hover{color:#000}
+.book-pressure-window-input{border-bottom:1px solid rgba(71,85,105,.62)}
+.book-pressure-window-button:focus-visible,.book-pressure-window-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
 .chart-book-pressure-gauge.is-bid-muted .book-pressure-fill{background:rgba(22,163,74,.60)}
 .chart-book-pressure-gauge.is-bid-strong .book-pressure-fill{background:#00a83d}
 .chart-book-pressure-gauge.is-ask-muted .book-pressure-fill{background:rgba(220,38,38,.60)}
