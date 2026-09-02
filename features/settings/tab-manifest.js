@@ -67,6 +67,9 @@
         throw new Error("Heatmap settings mount is unavailable");
       }
       window.BT001HeatmapUI.settings(context.body);
+      if (window.BT001_DEPTH_PROFILE && typeof window.BT001_DEPTH_PROFILE.mountSettings === "function") {
+        window.BT001_DEPTH_PROFILE.mountSettings(context.body);
+      }
     }
   };
 

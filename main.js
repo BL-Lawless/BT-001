@@ -12977,6 +12977,12 @@ startTradeAuto();
     }catch(_heatmapError){
       try{window.BT001HeatmapState&&window.BT001HeatmapState.reportRender({renderFailure:true,errorMessage:_heatmapError&&_heatmapError.message?String(_heatmapError.message):"Heatmap renderer failed before draw",zeroDrawReason:"Heatmap renderer failed before draw",drawnCellCount:0});}catch(_ignoredHeatmapDiagnostic){}
     }
+    try{
+      const depthProfile=window.BT001_DEPTH_PROFILE;
+      if(depthProfile&&typeof depthProfile.drawUnderlay==='function'){
+        depthProfile.drawUnderlay({ctx,left,top,chartRight:w-right,priceH,minP,maxP,mapY,currentPrice:Number(latest.close)});
+      }
+    }catch(_depthProfileError){console.warn('Depth Profile draw failed',_depthProfileError);}
     for(let i=0;i<vis.length;i++){
       const c = vis[i], x = mapX(i), bull = c.close >= c.open;
       const body = bull ? css('--candle-up-body') : css('--candle-down-body');
@@ -23122,6 +23128,15 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     socket:null,generation:0,reconnectTimer:null,symbol:"",snapshotLastUpdateId:null,lastUpdateId:null,
     snapshotReady:false,synced:false,bids:new Map(),asks:new Map(),buffer:[],lastEventAt:0,lastReceivedAt:0,lastError:null
   };
+  const bookPressureDepthListeners = new Set();
+  function notifyBookPressureDepthListeners(){
+    bookPressureDepthListeners.forEach(listener=>{try{listener();}catch(error){console.warn("Deep order book listener failed",error);}});
+  }
+  function subscribeBookPressureDepth(listener){
+    if(typeof listener!=="function") throw new TypeError("Deep order book listener must be a function");
+    bookPressureDepthListeners.add(listener);
+    return ()=>bookPressureDepthListeners.delete(listener);
+  }
   function bookPressureWsBase(){
     const raw = String((cfg() && cfg().ws) || "wss://fstream.binance.com/stream").replace(/\/+$/g,"");
     if(/\/(?:public|market|private)\/stream$/i.test(raw)) return raw.replace(/\/(?:public|market|private)\/stream$/i,"/stream");
@@ -23167,6 +23182,7 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     bookPressureFeedState.lastUpdateId=updateId;
     bookPressureFeedState.lastEventAt=Number(event.E)||Date.now();
     bookPressureFeedState.lastReceivedAt=Date.now();
+    notifyBookPressureDepthListeners();
     return true;
   }
   function bridgeBookPressureEvents(){
@@ -23257,6 +23273,22 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const windowDepth=computeBookPressureWindow(bookPressureFeedState.bids.entries(),bookPressureFeedState.asks.entries(),price,percentage);
     const ageMs=bookPressureFeedState.lastReceivedAt?Date.now()-bookPressureFeedState.lastReceivedAt:null;
     return Object.freeze({symbol:bookPressureFeedState.symbol,...windowDepth,at:bookPressureFeedState.lastEventAt,updateId:bookPressureFeedState.lastUpdateId,ageMs,fresh:bookPressureFeedState.synced&&Number.isFinite(ageMs)&&ageMs<=5000,error:bookPressureFeedState.lastError});
+  }
+  function bookPressureLevelsSnapshot(){
+    connectBookPressureFeed();
+    const ageMs=bookPressureFeedState.lastReceivedAt?Date.now()-bookPressureFeedState.lastReceivedAt:null;
+    return Object.freeze({
+      symbol:bookPressureFeedState.symbol,
+      price:currentBookPressurePrice(),
+      bids:Array.from(bookPressureFeedState.bids.entries()),
+      asks:Array.from(bookPressureFeedState.asks.entries()),
+      at:bookPressureFeedState.lastEventAt,
+      updateId:bookPressureFeedState.lastUpdateId,
+      ageMs,
+      fresh:bookPressureFeedState.synced&&Number.isFinite(ageMs)&&ageMs<=5000,
+      snapshotReady:bookPressureFeedState.snapshotReady,
+      error:bookPressureFeedState.lastError
+    });
   }
   function computeBookPressureModel(book,typicalDepth,referenceSamples=0){
     const bidSize = Number(book && book.bidDepthSize);
@@ -23780,6 +23812,8 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     percentage:()=>meterState.bookPressurePercentage,
     setPercentage:setBookPressurePercentage,
     setDollar:setBookPressureDollar,
+    levelsSnapshot:bookPressureLevelsSnapshot,
+    subscribeDepth:subscribeBookPressureDepth,
     refresh:updateBookPressureGauge
   });
 

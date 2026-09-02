@@ -201,6 +201,30 @@
     if(text)text.textContent=Math.round(value)+"%";
   }
   function isOpen(){const win=q("rapidFireWindow");return !!(win&&!win.classList.contains("hidden"));}
+  function setCollapsed(win,collapsed){
+    const button=q("rapidFireCollapse"),body=win&&win.querySelector(".rapid-fire-body"),head=q("rapidFireHead");
+    if(!win||!button||!body)return;
+    if(collapsed){
+      if(win.classList.contains("is-collapsed"))return;
+      const rect=win.getBoundingClientRect();
+      win.dataset.expandedWidth=Math.round(rect.width)+"px";
+      win.dataset.expandedHeight=Math.round(rect.height)+"px";
+      win.dataset.bodyScrollTop=String(body.scrollTop||0);
+      win.style.width=win.dataset.expandedWidth;
+      win.style.height=((head&&head.offsetHeight)||34)+"px";
+      win.classList.add("is-collapsed");
+      button.setAttribute("aria-pressed","true");
+      button.title="Restore";
+      return;
+    }
+    if(!win.classList.contains("is-collapsed"))return;
+    win.classList.remove("is-collapsed");
+    if(win.dataset.expandedWidth)win.style.width=win.dataset.expandedWidth;
+    if(win.dataset.expandedHeight)win.style.height=win.dataset.expandedHeight;
+    button.setAttribute("aria-pressed","false");
+    button.title="Collapse";
+    requestAnimationFrame(()=>{body.scrollTop=Number(win.dataset.bodyScrollTop||0)||0;});
+  }
 
   function resetDoubleArm(){
     if(doubleArmTimer!=null)clearTimeout(doubleArmTimer);
@@ -516,9 +540,9 @@
     win.innerHTML=`
       <header class="calc-module-head rapid-fire-head" id="rapidFireHead" data-floating-window-header>
         <div class="calc-module-title">Rapid Fire</div>
-        <div class="calc-module-actions"><button id="rapidFireCloseWindow" type="button" title="Close" aria-label="Close Rapid Fire">x</button></div>
+        <div class="calc-module-actions"><button id="rapidFireCollapse" type="button" title="Collapse" aria-label="Collapse Rapid Fire" aria-pressed="false">−</button><button id="rapidFireCloseWindow" type="button" title="Close" aria-label="Close Rapid Fire">x</button></div>
       </header>
-      <div class="rapid-fire-body">
+      <div class="calc-module-body rapid-fire-body">
         <div class="rapid-fire-summary" aria-label="Position summary">
           <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Remaining</span><span class="rapid-fire-number-control rapid-fire-size-control"><input class="rapid-fire-size-input" id="rapidFireOpenSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Remaining lot"><span class="rapid-fire-number-steppers"><button id="rapidFireOpenSizeUp" type="button" tabindex="-1" aria-label="Increase Remaining lot">&#9650;</button><button id="rapidFireOpenSizeDown" type="button" tabindex="-1" aria-label="Decrease Remaining lot">&#9660;</button></span></span></label>
           <label class="rapid-fire-summary-cell"><span class="rapid-fire-summary-label">Close</span><span class="rapid-fire-number-control rapid-fire-size-control"><input class="rapid-fire-size-input" id="rapidFireCloseSize" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" value="0" aria-label="Close lot"><span class="rapid-fire-number-steppers"><button id="rapidFireCloseSizeUp" type="button" tabindex="-1" aria-label="Increase Close lot">&#9650;</button><button id="rapidFireCloseSizeDown" type="button" tabindex="-1" aria-label="Decrease Close lot">&#9660;</button></span></span></label>
@@ -577,6 +601,7 @@
     if(floating&&typeof floating.install==="function"){
       windowApi=floating.install(win,{header:q("rapidFireHead"),storageKey:WINDOW_KEY,minWidth:430,minHeight:272,defaultWidth:500,defaultHeight:284});
     }
+    q("rapidFireCollapse").addEventListener("click",()=>setCollapsed(win,!win.classList.contains("is-collapsed")),false);
     q("rapidFireCloseWindow").addEventListener("click",hide,false);
     q("rapidFireStatus").addEventListener("click",()=>setStatus(""),false);
     q("rapidFireDir").addEventListener("click",()=>{

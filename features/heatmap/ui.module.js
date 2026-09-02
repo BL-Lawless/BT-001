@@ -6,7 +6,7 @@
   const sourceDate=value=>Number.isFinite(Number(value))?new Date(Number(value)*1000).toLocaleString():"--";
   const elapsed=value=>{const total=Math.max(0,Math.floor((Number(value)||0)/1000));return `${String(Math.floor(total/60)).padStart(2,"0")}:${String(total%60).padStart(2,"0")}`;};
   const text=(id,value)=>{const element=$(id);if(element)element.textContent=value==null||value===""?"--":String(value);};
-  const CONTROL_ORDER=["liq","otf","orders"];
+  const CONTROL_ORDER=["liq","book","obd","otf","orders"];
   let layoutFrame=0,layoutDiscoveryObserver=null,stackObserver=null,layoutResizeObserver=null,observedStackMetric=null,observedWrap=null,dprQuery=null;
   function ensureOverlayGroup(){
     const canvas=$("chart"),wrap=canvas&&canvas.parentElement;
