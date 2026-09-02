@@ -84,12 +84,13 @@ assert(!main.includes('setTopOfBookConsumerActive("book-pressure-gauge",true)'),
 assert(main.includes("const BOOK_PRESSURE_REFERENCE_MS = 3 * 60 * 1000"),"typical depth must use the documented three-minute reference window");
 assert(main.includes("const lean = Math.max(-1,Math.min(1,rawLean * magnitudeRatio))"),"deflection must combine instantaneous imbalance with current-vs-typical total depth");
 assert(!main.slice(start,end).includes("history")&&!main.slice(start,end).includes("previous"),"the displayed lean model must not smooth or average consecutive readings");
+assert(main.includes('fill.style.left = model.side === "bid" ? "50%" : model.side === "ask" ? (50 - magnitudePct) + "%" : "calc(50% - 2px)"'),"Book Pressure must deflect bid/green right and ask/red left");
 assert(main.includes('className = "chart-market-gauges"'),"Book Pressure and ADX/ATR must be kept together in one non-wrapping row group");
 assert(/\.chart-market-gauges\{[^}]*display:inline-flex;[^}]*white-space:nowrap;/s.test(css),"the shared ADX/ATR and Book Pressure group must not split across rows");
 assert(/\.chart-book-pressure-gauge\{[^}]*min-height:20px;[^}]*border-left:1px solid/s.test(css),"Book Pressure must share the ADX/ATR row sizing and separator language");
 assert(/\.book-pressure-track\{[^}]*width:112px;[^}]*height:10px;/s.test(css),"freed label space must widen the Book Pressure bar");
 assert(/\.book-pressure-window-control\{[^}]*width:56px;[^}]*height:18px/s.test(css),"the editable dollar control must stay compact while fitting the full valid dollar range");
-assert(/\.book-pressure-window-button,.book-pressure-window-input\{[^}]*border:0;[^}]*background:transparent;[^}]*font:700 12px\/16px/s.test(css),"the readable dollar text must not be enclosed in a button box");
+assert(/\.book-pressure-window-button,.book-pressure-window-input\{[^}]*border:0;[^}]*background:transparent;[^}]*font:700 14px\/16px/s.test(css),"the enlarged readable dollar text must not be enclosed in a button box");
 assert(css.includes(".chart-book-pressure-gauge.is-bid-strong .book-pressure-fill{background:#00a83d}")&&css.includes(".chart-book-pressure-gauge.is-ask-strong .book-pressure-fill{background:#dc2626}"),"strong bid/ask lean must use the established green/red colors");
 
 console.log("Book Pressure percentage-window, persistence, UI, and deep-feed tests passed.");

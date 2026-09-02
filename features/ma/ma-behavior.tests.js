@@ -261,6 +261,9 @@ function setToggleStates(runtime, states) {
   context.drawInd("MA1-enabled");
   context.drawInd("VWAP-enabled");
   assert.equal(calls.length, 2, "master-off must suppress draws regardless of individual enabled state");
+  assert(/function drawPriceLevels\(\)\{\s*if\(!levelsEnabled\(\)\) return;/.test(sources.main), "Key levels must depend only on their own stored toggle state");
+  assert(/function drawDsma\(\)\{\s*if\(!enabled\(\)\) return;/.test(sources.main), "DSMA must depend only on its own stored toggle state");
+  assert(!sources.main.includes("indicatorVisibilityOn"), "DSMA/Key levels must not retain a master-visibility helper");
 }
 
 function exposeFunction(source, startText, endText, names, prelude = "") {
