@@ -9,6 +9,7 @@ const root=path.resolve(__dirname,"..","..");
 const coreSource=fs.readFileSync(path.join(__dirname,"taker-volume-delta-core.js"),"utf8");
 const featureSource=fs.readFileSync(path.join(__dirname,"taker-volume-delta.js"),"utf8");
 const css=fs.readFileSync(path.join(__dirname,"taker-volume-delta.css"),"utf8");
+const appCss=fs.readFileSync(path.join(root,"style.css"),"utf8");
 const main=fs.readFileSync(path.join(root,"main.js"),"utf8");
 const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
 const context={window:{},Object,Number,String,Math};
@@ -50,10 +51,12 @@ assert(featureSource.includes('DEFAULTS=Object.freeze({durationSeconds:60,lookba
 assert(featureSource.includes('event.type!=="aggTrade"')&&main.includes('publishMarketUpdate({type:"aggTrade"'),"TVD must consume the existing public aggTrade flow");
 assert(main.includes('takerSide:buyerIsMaker?"sell":"buy"'),"aggTrade maker-side classification must identify the aggressor");
 assert(featureSource.includes('class="tvd-sell"')&&featureSource.includes('class="tvd-buy"'),"TVD must render one split red/green total bar");
+assert(!featureSource.includes('<span class="tvd-label">')&&!css.includes(".tvd-label"),"TVD must match OBI's no-visible-label treatment");
 assert(featureSource.includes('stack.appendChild(node)')&&featureSource.includes('stack.appendChild(obi)'),"TVD must mount directly below OBI in one stack");
 assert(/\.tvd-track\{[^}]*width:112px;[^}]*height:10px;/s.test(css),"TVD must use the OBI bar dimensions");
 assert(/\.tvd-total\{[^}]*display:flex;/s.test(css)&&css.indexOf(".tvd-sell")<css.indexOf(".tvd-buy"),"red sell volume must sit left of green buy volume");
 assert(featureSource.includes("tvd-duration-setting")&&featureSource.includes("tvd-lookback-setting")&&featureSource.includes("tvd-setting-input"),"both TVD settings must use inline click-to-edit controls");
+assert(css.includes("font:400 10px/13px Arial,sans-serif")&&appCss.includes("font:400 10px/13px Arial,sans-serif"),"OBI and both TVD setting values must share the same smaller readable font");
 assert(html.includes("taker-volume-delta-core.js")&&html.includes("taker-volume-delta.js")&&html.includes("taker-volume-delta.css"),"TVD assets must load in the app and standalone build");
 
 console.log("TVD fixed-bucket, aggressor, magnitude, settings, and presentation tests: PASS");

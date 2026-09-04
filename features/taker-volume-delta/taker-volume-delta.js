@@ -39,7 +39,7 @@
     let node=q("chartTakerVolumeDeltaGauge");
     if(!node){
       node=document.createElement("span");node.id="chartTakerVolumeDeltaGauge";node.className="chart-tvd-gauge";node.setAttribute("role","group");
-      node.innerHTML='<span class="tvd-label">TVD</span><span class="tvd-track" aria-hidden="true"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span><span class="tvd-setting tvd-duration-setting"></span><span class="tvd-setting tvd-lookback-setting"></span>';
+      node.innerHTML='<span class="tvd-track" aria-hidden="true"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span><span class="tvd-setting tvd-duration-setting"></span><span class="tvd-setting tvd-lookback-setting"></span>';
       stack.appendChild(node);
     }
     return node;
