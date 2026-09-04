@@ -5236,6 +5236,7 @@ const marketDataHub = (() => {
   }
   function queueTradeTick(d){
     const price = Number(d && d.p);
+    const quantity = Number(d && d.q);
     const ms = Number((d && (d.T || d.E)) || now());
     if(!Number.isFinite(price) || price <= 0) return;
     diag.latestPrice = price;
@@ -5244,6 +5245,10 @@ const marketDataHub = (() => {
     if(mClose) mClose.textContent = ip(price);
     updatePositionStrip({close:price});
     publishMarketUpdate({type:"price",source:"aggTrade",price,exchangeTime:ms});
+    if(Number.isFinite(quantity) && quantity > 0){
+      const buyerIsMaker = d && d.m === true;
+      publishMarketUpdate({type:"aggTrade",source:"aggTrade",price,quantity,buyerIsMaker,takerSide:buyerIsMaker?"sell":"buy",aggregateTradeId:d&&d.a,exchangeTime:ms});
+    }
   }
   function queueMarkPriceTick(d){
     const price = Number(d && d.p);

@@ -156,6 +156,14 @@
     const normalized=bridge&&typeof bridge.normalizePrice==="function"?bridge.normalizePrice(value):null;
     return normalized&&normalized.executable?normalized.text:(number(value)>0?String(value):"");
   }
+  function protectionPriceDisplayText(value){const parsed=number(value);return parsed==null||parsed<=0?"":parsed.toFixed(0);}
+  function setProtectionPriceDisplay(input,value,bridge){
+    if(!input)return;
+    const exact=normalizedPriceText(value,bridge);
+    input.dataset.exactPrice=exact;
+    input.value=protectionPriceDisplayText(exact);
+  }
+  function protectionPriceSubmissionValue(input){return input&&input.dataset.exactPrice!=null&&input.dataset.exactPrice!==""?input.dataset.exactPrice:input&&input.value;}
   function protectionWheelValue(currentValue,stepValue,direction,precision){
     const current=number(currentValue)||0;
     const step=Math.max(0,number(stepValue)||0);
@@ -422,12 +430,12 @@
     [slInput,tpInput,slPlInput,tpPlInput].forEach(input=>{if(input)input.disabled=protectionBusy||!priceRules.available;});
     const tpSet=q("rapidFireTakeProfitSet");
     if(tpSet)tpSet.disabled=protectionBusy||!priceRules.available;
-    if(slInput&&(document.activeElement!==slInput||authoritativeProtectionChange.sl))slInput.value=snapshot.masterStopPrice==null?"":normalizedPriceText(snapshot.masterStopPrice,bridge);
+    if(slInput&&(document.activeElement!==slInput||authoritativeProtectionChange.sl))setProtectionPriceDisplay(slInput,snapshot.masterStopPrice,bridge);
     if(!position&&snapshot.masterStopPrice>0)pendingMasterStopValue=String(snapshot.masterStopPrice);
     const tpField=takeProfitFieldState(snapshot.takeProfitOrder,snapshot.takeProfitPrice,pendingTakeProfitValue);
     if(tpField.hasLive)pendingTakeProfitValue=null;
     if(tpInput&&(document.activeElement!==tpInput||authoritativeProtectionChange.tp)){
-      tpInput.value=tpField.value===""?"":normalizedPriceText(tpField.value,bridge);
+      setProtectionPriceDisplay(tpInput,tpField.value,bridge);
     }
     if(tpInput)tpInput.classList.toggle("is-pending-unsent",tpField.pending);
     if(slInput)slInput.classList.toggle("is-pending-unsent",!position&&number(snapshot.masterStopPrice)>0);
@@ -475,7 +483,7 @@
   async function commitProtection(kind,input,valueOverride){
     const bridge=api();
     if(!bridge||!input)return;
-    const rawValue=valueOverride!=null?valueOverride:input.value;
+    const rawValue=valueOverride!=null?valueOverride:protectionPriceSubmissionValue(input);
     const snapshot=bridge.snapshot();
     if(String(rawValue==null?"":rawValue).trim()===""){
       try{
@@ -505,6 +513,7 @@
     }
     const normalizedPrice=normalized.text;
     input.value=normalizedPrice;
+    input.dataset.exactPrice=normalizedPrice;
     if(!snapshot.position){
       if(typeof bridge.setProtectionDraft==="function")bridge.setProtectionDraft(kind,normalizedPrice);
       if(kind==="sl")pendingMasterStopValue=normalizedPrice;
@@ -649,7 +658,7 @@
       lotController.commit("trigger");
       void executeOrCancel({action:"add",
         direction:selectedDirection,quantity:q("rapidFireLot").value,
-        slPrice:q("rapidFireMasterSl").value,tpPrice:q("rapidFireTakeProfit").value,
+        slPrice:protectionPriceSubmissionValue(q("rapidFireMasterSl")),tpPrice:protectionPriceSubmissionValue(q("rapidFireTakeProfit")),
         slPl:protectionEditDriver.sl==="pl"?protectionPlTarget.sl:null,
         tpPl:protectionEditDriver.tp==="pl"?protectionPlTarget.tp:null
       });
@@ -685,6 +694,9 @@
     const slPlInput=q("rapidFireMasterSlPl");
     const tpPlInput=q("rapidFireTakeProfitPl");
     const newAverageToggle=q("rapidFireNewAverageToggle");
+    [slInput,tpInput].forEach(input=>input.addEventListener("focus",()=>{
+      if(input.dataset.exactPrice)input.value=input.dataset.exactPrice;
+    },false));
     newAverageToggle.addEventListener("click",()=>{
       const bridge=api();
       const next=newAverageToggle.getAttribute("aria-pressed")!=="true";
@@ -692,6 +704,7 @@
       render();
     },false);
     const draftProtectionPrice=(kind,input,value)=>{
+      input.dataset.exactPrice=value;
       protectionEditDriver[kind]="price";
       protectionPlTarget[kind]=null;
       if(kind==="sl")pendingMasterStopValue=value.trim()===""?null:value;
@@ -709,6 +722,7 @@
       const normalized=bridge.normalizePrice(input.value);
       if(!normalized.executable)return;
       input.value=normalized.text;
+      input.dataset.exactPrice=normalized.text;
       if(kind==="sl")pendingMasterStopValue=normalized.text;
       else{pendingTakeProfitValue=normalized.text;takeProfitEditValue=normalized.text;}
       previewProtection(kind,input);
@@ -729,6 +743,7 @@
         : null;
       if(number(price)>0){
         priceInput.value=String(price);
+        priceInput.dataset.exactPrice=String(price);
         if(kind==="sl")pendingMasterStopValue=String(price);
         else{pendingTakeProfitValue=String(price);takeProfitEditValue=String(price);}
         previewProtection(kind,priceInput);
@@ -803,7 +818,7 @@
       render();
     },0);},false);
     tpSet.addEventListener("click",()=>{
-      const typedValue=takeProfitCommitValue(tpInput.value,takeProfitEditValue);
+      const typedValue=takeProfitCommitValue(protectionPriceSubmissionValue(tpInput),takeProfitEditValue);
       void commitProtection("tp",tpInput,typedValue);
     },false);
     statusUnsubscribe=api().subscribe(detail=>{

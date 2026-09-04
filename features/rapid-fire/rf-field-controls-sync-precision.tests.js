@@ -20,6 +20,18 @@ function between(source,startText,endText){
 assert(/id="rapidFireTakeProfitPl" type="text"/.test(rapid)&&rapid.includes('id="rapidFireTakeProfitPlUp"')&&rapid.includes('id="rapidFireTakeProfitPlDown"'),"TP P/L must expose decimal-safe custom spinner arrows");
 assert(rapid.includes('upButton,downButton,step:0.5,precision:2')&&rapid.includes('bindNumericAdjustControls(numericControllers.tpPl,protectionAdjustOptions("tp","pl"'),"TP P/L arrows and wheel must retain a shared 0.5 step and two-decimal precision");
 assert(rapid.includes("function protectionPlText(value)")&&rapid.includes("parsed.toFixed(2)"),"P/L display must use two decimal places");
+assert(rapid.includes("function protectionPriceDisplayText(value)")&&rapid.includes('parsed.toFixed(0)'),"SL and TP price fields must display zero decimal places");
+assert(rapid.includes("input.dataset.exactPrice=exact")&&rapid.includes("function protectionPriceSubmissionValue(input)"),"zero-decimal display must retain a separate exact executable price");
+assert(rapid.includes('slPrice:protectionPriceSubmissionValue(q("rapidFireMasterSl")),tpPrice:protectionPriceSubmissionValue(q("rapidFireTakeProfit"))'),"Rapid Fire submissions must use the retained exact price rather than rounded display text");
+const displayContext={number:value=>Number.isFinite(Number(value))?Number(value):null,Number,String};
+vm.createContext(displayContext);
+vm.runInContext(between(rapid,"function normalizedPriceText","function protectionWheelValue"),displayContext);
+const displayInput={value:"",dataset:{}};
+const displayBridge={normalizePrice:()=>({executable:true,text:"123.46"})};
+displayContext.setProtectionPriceDisplay(displayInput,"123.456",displayBridge);
+assert.equal(displayInput.value,"123","the resting RF price display must contain no decimal places");
+assert.equal(displayInput.dataset.exactPrice,"123.46","the tick-normalized price must remain exact behind the display");
+assert.equal(displayContext.protectionPriceSubmissionValue(displayInput),"123.46","submission must recover the exact Binance-tick value");
 
 const protectionMarkup=between(rapid,'<div class="rapid-fire-protection-row"','</div>\n      </div>`');
 const protectionOrder=["rapidFireMasterSl","rapidFireMasterSlPl","rapidFireTakeProfit","rapidFireTakeProfitPl","rapidFireTakeProfitSet","rapidFireNewAverageToggle"].map(id=>protectionMarkup.indexOf(`id="${id}"`));

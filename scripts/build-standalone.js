@@ -32,6 +32,29 @@ html=html.replace(/\s*<link rel="stylesheet" href="([^"]+)"\/>/g,(_tag,href)=>{
   return /^features\/scalp\//i.test(file)?"":`\n<style>\n/* bundled: ${file} */\n${styleSafe(read(file))}\n</style>`;
 });
 
+// The main-account Read action is retained in the standalone build. Its shared panel styles
+// historically lived in the excluded feature stylesheet, so keep the non-feature-specific rules.
+const mainAccountStyles=`
+.api-account-block{margin-top:8px;padding-top:8px;border-top:1px solid #d9dce1}
+.api-account-block:first-of-type{margin-top:6px;padding-top:0;border-top:none}
+.api-account-row{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.api-account-nickname{flex:1;min-width:0;height:26px;box-sizing:border-box;padding:2px 8px;border:1px solid #d9dce1;border-radius:5px;font-size:12px}
+.api-account-controls{display:flex;align-items:center;gap:7px;flex-shrink:0}
+.api-account-read{height:26px;padding:3px 9px;font-size:11px}
+.api-account-status-window{position:fixed;z-index:1600;left:50%;top:76px;transform:translateX(-50%);width:min(650px,calc(100vw - 24px));height:min(610px,calc(100vh - 92px));min-width:min(420px,calc(100vw - 24px));min-height:280px;box-sizing:border-box;overflow:hidden;resize:both;border:1px solid #cfd3d8;border-radius:10px;background:#fff;box-shadow:0 18px 50px rgba(15,23,42,.22);color:var(--text)}
+.api-account-status-window.hidden{display:none}
+.api-account-status-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid #d9dce1;background:#f3f5f7;cursor:move;user-select:none}
+.api-account-status-title{font-size:12px;font-weight:800}
+.api-account-status-subtitle{margin-top:2px;color:var(--muted);font-size:11px}
+.api-account-status-head button{width:27px;height:25px;padding:0;font-size:17px;line-height:1;cursor:pointer}
+.api-account-status-content{height:calc(100% - 52px);box-sizing:border-box;overflow:auto;padding:12px}
+.api-account-status-loading,.api-account-status-error{padding:10px;border:1px solid #e5e7eb;border-radius:7px;background:#fafafa;color:var(--muted);font-size:12px}
+.api-account-status-error{border-color:#fecdd3;background:#fff1f2;color:#b42318}
+#apiCapabilityCard,#readApiKeys{display:none!important}
+@media(max-width:600px){.api-account-row{align-items:stretch;flex-direction:column}.api-account-controls{justify-content:space-between}.api-account-status-window{left:6px;top:54px;transform:none;width:calc(100vw - 12px);height:calc(100vh - 60px);min-width:0}}
+`;
+html=replaceOne(html,/<\/head>/,()=>`<style>\n/* bundled: main-account-settings presentation */\n${mainAccountStyles}\n</style>\n</head>`,"main-account presentation");
+
 function mainSource(source){
   source=replaceOne(source,/  const accountPrefix = window\.BT001ScalpAccount[^\n]+\n  document\.title = accountPrefix \+ /,'  document.title = "M " + ',"main title");
   source=replaceOne(source,/function activeApiCredentials\(\)\{[\s\S]*?\n\}/,'function activeApiCredentials(){\n  return {key:apiKeyEl.value.trim(),secret:apiSecretEl.value.trim()};\n}',"main credentials");
@@ -123,5 +146,6 @@ const bundle=`\n<!-- Standalone execution block: all formerly deferred scripts a
 html=replaceOne(html,/\n<\/body>/,()=>`${bundle}\n</body>`,"safe end-of-body insertion");
 must(!/<script\s+src=|<link\s+rel="stylesheet"/i.test(html),"External asset reference remains");
 must(!/scalp/i.test(html),"Stripped content remains");
+must(html.includes(".api-account-status-window.hidden{display:none}"),"Main account status panel hide rule is missing");
 fs.writeFileSync(path.join(root,"standalone.html"),html,"utf8");
 console.log(`Built standalone.html (${Buffer.byteLength(html)} bytes; ${executable.length} executable blocks)`);

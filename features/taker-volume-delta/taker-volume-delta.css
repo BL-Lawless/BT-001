@@ -1,0 +1,14 @@
+.market-pressure-gauge-stack{display:inline-flex;flex-direction:column;align-items:stretch;flex:0 0 auto;white-space:nowrap}
+.market-pressure-gauge-stack .chart-book-pressure-gauge{box-sizing:border-box}
+.chart-tvd-gauge{display:inline-flex;align-items:center;gap:5px;box-sizing:border-box;min-height:20px;padding:1px 7px;border-left:1px solid rgba(148,163,184,.55);color:#1f2937;font:700 12px/1 Arial,sans-serif;white-space:nowrap}
+.tvd-label{width:28px;color:#475569;font-size:11px;letter-spacing:.02em;text-align:left}
+.tvd-track{position:relative;box-sizing:border-box;width:112px;height:10px;overflow:hidden;border:1px solid rgba(100,116,139,.62);border-radius:3px;background:rgba(148,163,184,.16);box-shadow:inset 0 0 0 1px rgba(255,255,255,.65)}
+.tvd-track::after{content:"";position:absolute;z-index:2;top:0;bottom:0;left:50%;width:1px;background:rgba(71,85,105,.34)}
+.tvd-total{position:absolute;z-index:1;display:flex;top:1px;bottom:1px;left:50%;width:0;overflow:hidden;border-radius:1px;transform:translateX(-50%);transition:width .08s linear}
+.tvd-sell{height:100%;background:#dc2626;transition:width .08s linear,opacity .08s linear}
+.tvd-buy{height:100%;background:#00a83d;transition:width .08s linear,opacity .08s linear}
+.chart-tvd-gauge.is-waiting .tvd-total{min-width:0}
+.tvd-setting{display:inline-flex;align-items:center;justify-content:center;width:35px;height:18px}
+.tvd-setting-button,.tvd-setting-input{box-sizing:border-box;width:35px;height:18px;margin:0;padding:1px 0;border:0;border-radius:0;background:transparent;color:#1f2937;font:400 11.5px/16px Arial,sans-serif;font-variant-numeric:tabular-nums;text-align:center}
+.tvd-setting-button{cursor:pointer}.tvd-setting-button:hover{color:#000}.tvd-setting-input{border-bottom:1px solid rgba(71,85,105,.62)}
+.tvd-setting-button:focus-visible,.tvd-setting-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}

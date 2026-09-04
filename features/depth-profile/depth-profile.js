@@ -91,12 +91,13 @@
     if(book&&controls&&typeof controls.register==="function")controls.register(book,"book");
     let button=q("depthProfileOverlayToggle");
     if(!button){
-      button=document.createElement("button");button.id="depthProfileOverlayToggle";button.type="button";button.className="calc-module-orders-toggle depth-profile-overlay-toggle is-off";button.textContent="OBD";button.title="Toggle Depth Profile · right-click for settings";button.setAttribute("aria-label","Order book depth profile visibility");button.setAttribute("aria-pressed","false");
+      button=document.createElement("button");button.id="depthProfileOverlayToggle";button.type="button";button.className="calc-module-orders-toggle depth-profile-overlay-toggle is-off";button.textContent="OBD";button.title="Toggle Depth Profile · double-click or right-click for settings";button.setAttribute("aria-label","Order book depth profile visibility");button.setAttribute("aria-pressed","false");
     }
     if(controls&&typeof controls.register==="function")controls.register(button,"obd");else{button.dataset.chartControl="obd";group.appendChild(button);}
     if(!button.__depthProfileBound){
       button.__depthProfileBound=true;
       button.addEventListener("click",()=>{write(KEYS.enabled,settings().enabled?"0":"1");syncToggle();scheduleRefresh(true);},false);
+      button.addEventListener("dblclick",event=>{event.preventDefault();openSettings();},false);
       button.addEventListener("contextmenu",event=>{event.preventDefault();openSettings();},false);
     }
     syncToggle();return button;
