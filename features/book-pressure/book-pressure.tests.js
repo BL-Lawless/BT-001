@@ -74,11 +74,12 @@ assert.equal(percentageFromDollar(50,50000),.1,"$50 at a $50,000 current price m
 assert.equal(percentageFromDollar(5,50000),.01,"the minimum converted percentage must be accepted");
 assert.equal(percentageFromDollar(5000,50000),10,"the maximum converted percentage must be accepted");
 assert.equal(percentageFromDollar(4.99,50000),null);assert.equal(percentageFromDollar(5000.01,50000),null);assert.equal(percentageFromDollar("bad",50000),null);
-assert(main.includes('button.textContent=dollarText')&&main.includes('"$"+distance.toFixed(1)'),"the compact control must show only the live dollar equivalent with one decimal");
+assert(main.includes('value.textContent=dollarText')&&main.includes('"$"+distance.toFixed(1)'),"the passive readout must show only the live dollar equivalent with one decimal");
 assert(main.includes('if(keyEvent.key==="Enter")')&&main.includes('setBookPressureDollar(input.value)'),"Enter must treat the draft as dollars and convert it at the live price");
 assert(main.includes('if(!Number.isFinite(next)||next<BOOK_PRESSURE_WINDOW_MIN||next>BOOK_PRESSURE_WINDOW_MAX) return false'),"invalid and out-of-range drafts must be rejected without changing state");
-assert(main.includes('const existingButton=slot.querySelector("button")')&&main.includes('if(existingButton){')&&main.includes('existingButton.textContent=dollarText'),"live ticks must update the existing button in place so they cannot cancel a click in progress");
-assert(main.includes('button.addEventListener("pointerdown",event=>event.stopPropagation())')&&main.includes('button.addEventListener("mousedown",event=>event.stopPropagation())'),"the editor click target must not leak chart gestures to competing handlers");
+assert(main.includes('track.addEventListener("click"')&&main.includes('editBookPressureWindowControl(node,bookPressureDepthSnapshot())'),"clicking the OBI bar must open the existing inline dollar editor");
+assert(main.includes('value.className="book-pressure-window-value"')&&!main.includes('className="book-pressure-window-button"'),"the dollar readout must be passive and the dedicated settings button must be removed");
+assert(main.includes('track.addEventListener("pointerdown",event=>event.stopPropagation())')&&main.includes('input.addEventListener("mousedown",event=>event.stopPropagation())'),"the bar and editor must not leak gestures to competing handlers");
 assert(!main.includes('<span class="book-pressure-label">'),"the Book Pressure gauge must render no adjacent label wording");
 assert(!main.includes('setTopOfBookConsumerActive("book-pressure-gauge",true)'),"Book Pressure must not keep the bounded chase depth5 feed active");
 assert(main.includes("const BOOK_PRESSURE_REFERENCE_MS = 3 * 60 * 1000"),"typical depth must use the documented three-minute reference window");
@@ -90,7 +91,7 @@ assert(/\.chart-market-gauges\{[^}]*display:inline-flex;[^}]*white-space:nowrap;
 assert(/\.chart-book-pressure-gauge\{[^}]*min-height:20px;[^}]*border-left:1px solid/s.test(css),"Book Pressure must share the ADX/ATR row sizing and separator language");
 assert(/\.book-pressure-track\{[^}]*width:112px;[^}]*height:10px;/s.test(css),"freed label space must widen the Book Pressure bar");
 assert(/\.book-pressure-window-control\{[^}]*width:56px;[^}]*height:18px/s.test(css),"the editable dollar control must stay compact while fitting the full valid dollar range");
-assert(/\.book-pressure-window-button,.book-pressure-window-input\{[^}]*border:0;[^}]*background:transparent;[^}]*font:400 10px\/13px Arial,sans-serif;/s.test(css),"the readable dollar text must use the smaller compact regular-weight treatment without a button box");
+assert(/\.book-pressure-window-value,.book-pressure-window-input\{[^}]*border:0;[^}]*background:transparent;[^}]*font:400 12\.5px\/16px Arial,sans-serif;/s.test(css),"the passive readout and inline editor must retain the readable compact treatment without a button box");
 assert(css.includes(".chart-book-pressure-gauge.is-bid-strong .book-pressure-fill{background:#00a83d}")&&css.includes(".chart-book-pressure-gauge.is-ask-strong .book-pressure-fill{background:#dc2626}"),"strong bid/ask lean must use the established green/red colors");
 
 console.log("Book Pressure percentage-window, persistence, UI, and deep-feed tests passed.");

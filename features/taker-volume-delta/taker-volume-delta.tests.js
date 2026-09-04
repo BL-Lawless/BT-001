@@ -9,7 +9,6 @@ const root=path.resolve(__dirname,"..","..");
 const coreSource=fs.readFileSync(path.join(__dirname,"taker-volume-delta-core.js"),"utf8");
 const featureSource=fs.readFileSync(path.join(__dirname,"taker-volume-delta.js"),"utf8");
 const css=fs.readFileSync(path.join(__dirname,"taker-volume-delta.css"),"utf8");
-const appCss=fs.readFileSync(path.join(root,"style.css"),"utf8");
 const main=fs.readFileSync(path.join(root,"main.js"),"utf8");
 const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
 const context={window:{},Object,Number,String,Math};
@@ -54,9 +53,13 @@ assert(featureSource.includes('class="tvd-sell"')&&featureSource.includes('class
 assert(!featureSource.includes('<span class="tvd-label">')&&!css.includes(".tvd-label"),"TVD must match OBI's no-visible-label treatment");
 assert(featureSource.includes('stack.appendChild(node)')&&featureSource.includes('stack.appendChild(obi)'),"TVD must mount directly below OBI in one stack");
 assert(/\.tvd-track\{[^}]*width:112px;[^}]*height:10px;/s.test(css),"TVD must use the OBI bar dimensions");
+assert(/\.market-pressure-gauge-stack\{[^}]*row-gap:2px;/s.test(css)&&/\.market-pressure-gauge-stack \.chart-book-pressure-gauge\{[^}]*height:10px;[^}]*flex:0 0 10px;/s.test(css)&&/\.chart-tvd-gauge\{[^}]*height:10px;[^}]*flex:0 0 10px;/s.test(css),"the resting stack must be exactly two ten-pixel bars plus the two-pixel middle gap, allowing equal parent padding above and below");
+assert(css.includes(".chart-tvd-gauge:has(.tvd-settings-editor){height:18px;min-height:18px;flex-basis:18px}"),"the compact resting frame must still expand to fit both TVD editors");
 assert(/\.tvd-total\{[^}]*display:flex;/s.test(css)&&css.indexOf(".tvd-sell")<css.indexOf(".tvd-buy"),"red sell volume must sit left of green buy volume");
-assert(featureSource.includes("tvd-duration-setting")&&featureSource.includes("tvd-lookback-setting")&&featureSource.includes("tvd-setting-input"),"both TVD settings must use inline click-to-edit controls");
-assert(css.includes("font:400 10px/13px Arial,sans-serif")&&appCss.includes("font:400 10px/13px Arial,sans-serif"),"OBI and both TVD setting values must share the same smaller readable font");
+assert(featureSource.includes('class="tvd-track" role="button"')&&featureSource.includes('track.addEventListener("click"')&&featureSource.includes("openSettingsEditor(node)"),"clicking the TVD bar must open its settings editor");
+assert(!featureSource.includes("tvd-setting-button")&&!featureSource.includes("tvd-duration-setting")&&!featureSource.includes("tvd-lookback-setting")&&!css.includes(".tvd-setting-button"),"TVD must render no dedicated resting setting values or buttons");
+assert(featureSource.includes('class="tvd-setting-input tvd-duration-input"')&&featureSource.includes('class="tvd-setting-input tvd-lookback-input"')&&featureSource.includes("node.appendChild(editor)"),"one TVD bar click must reveal duration and lookback editors simultaneously");
+assert(featureSource.includes("LIMITS.durationMin")&&featureSource.includes("LIMITS.durationMax")&&featureSource.includes("LIMITS.lookbackMin")&&featureSource.includes("LIMITS.lookbackMax"),"the joint editor must retain both settings ranges");
 assert(html.includes("taker-volume-delta-core.js")&&html.includes("taker-volume-delta.js")&&html.includes("taker-volume-delta.css"),"TVD assets must load in the app and standalone build");
 
 console.log("TVD fixed-bucket, aggressor, magnitude, settings, and presentation tests: PASS");

@@ -852,6 +852,7 @@ button:hover{filter:brightness(1.04)}
   border-radius:3px;
   background:rgba(148,163,184,.16);
   box-shadow:inset 0 0 0 1px rgba(255,255,255,.65);
+  cursor:pointer;
 }
 .book-pressure-track::after{
   content:"";
@@ -875,7 +876,7 @@ button:hover{filter:brightness(1.04)}
   transition:left .08s linear,width .08s linear,background-color .08s linear;
 }
 .book-pressure-window-control{display:inline-flex;align-items:center;justify-content:center;width:56px;height:18px}
-.book-pressure-window-button,.book-pressure-window-input{
+.book-pressure-window-value,.book-pressure-window-input{
   box-sizing:border-box;
   width:56px;
   height:18px;
@@ -885,14 +886,13 @@ button:hover{filter:brightness(1.04)}
   border-radius:0;
   background:transparent;
   color:#1f2937;
-  font:400 10px/13px Arial,sans-serif;
+  font:400 12.5px/16px Arial,sans-serif;
   font-variant-numeric:tabular-nums;
   text-align:center;
 }
-.book-pressure-window-button{cursor:pointer}
-.book-pressure-window-button:hover{color:#000}
+.book-pressure-window-value{pointer-events:none}
 .book-pressure-window-input{border-bottom:1px solid rgba(71,85,105,.62)}
-.book-pressure-window-button:focus-visible,.book-pressure-window-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
+.book-pressure-track:focus-visible,.book-pressure-window-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
 .chart-book-pressure-gauge.is-bid-muted .book-pressure-fill{background:rgba(22,163,74,.60)}
 .chart-book-pressure-gauge.is-bid-strong .book-pressure-fill{background:#00a83d}
 .chart-book-pressure-gauge.is-ask-muted .book-pressure-fill{background:rgba(220,38,38,.60)}
@@ -4881,19 +4881,20 @@ button:hover{filter:brightness(1.04)}
 </style>
 <style>
 /* bundled: features/taker-volume-delta/taker-volume-delta.css */
-.market-pressure-gauge-stack{display:inline-flex;flex-direction:column;align-items:stretch;flex:0 0 auto;white-space:nowrap}
-.market-pressure-gauge-stack .chart-book-pressure-gauge{box-sizing:border-box}
-.chart-tvd-gauge{display:inline-flex;align-items:center;gap:5px;box-sizing:border-box;min-height:20px;padding:1px 7px;border-left:1px solid rgba(148,163,184,.55);color:#1f2937;font:700 12px/1 Arial,sans-serif;white-space:nowrap}
-.tvd-track{position:relative;box-sizing:border-box;width:112px;height:10px;overflow:hidden;border:1px solid rgba(100,116,139,.62);border-radius:3px;background:rgba(148,163,184,.16);box-shadow:inset 0 0 0 1px rgba(255,255,255,.65)}
+.market-pressure-gauge-stack{display:inline-flex;flex-direction:column;align-items:stretch;row-gap:2px;flex:0 0 auto;white-space:nowrap}
+.market-pressure-gauge-stack .chart-book-pressure-gauge{box-sizing:border-box;height:10px;min-height:10px;flex:0 0 10px;padding-top:0;padding-bottom:0;align-items:center}
+.chart-tvd-gauge{display:inline-flex;align-items:flex-start;gap:5px;box-sizing:border-box;height:10px;min-height:10px;flex:0 0 10px;padding:0 7px;border-left:1px solid rgba(148,163,184,.55);color:#1f2937;font:700 12px/1 Arial,sans-serif;white-space:nowrap}
+.chart-tvd-gauge:has(.tvd-settings-editor){height:18px;min-height:18px;flex-basis:18px}
+.tvd-track{position:relative;box-sizing:border-box;width:112px;height:10px;overflow:hidden;border:1px solid rgba(100,116,139,.62);border-radius:3px;background:rgba(148,163,184,.16);box-shadow:inset 0 0 0 1px rgba(255,255,255,.65);cursor:pointer}
 .tvd-track::after{content:"";position:absolute;z-index:2;top:0;bottom:0;left:50%;width:1px;background:rgba(71,85,105,.34)}
 .tvd-total{position:absolute;z-index:1;display:flex;top:1px;bottom:1px;left:50%;width:0;overflow:hidden;border-radius:1px;transform:translateX(-50%);transition:width .08s linear}
 .tvd-sell{height:100%;background:#dc2626;transition:width .08s linear,opacity .08s linear}
 .tvd-buy{height:100%;background:#00a83d;transition:width .08s linear,opacity .08s linear}
 .chart-tvd-gauge.is-waiting .tvd-total{min-width:0}
-.tvd-setting{display:inline-flex;align-items:center;justify-content:center;width:35px;height:18px}
-.tvd-setting-button,.tvd-setting-input{box-sizing:border-box;width:35px;height:18px;margin:0;padding:1px 0;border:0;border-radius:0;background:transparent;color:#1f2937;font:400 10px/13px Arial,sans-serif;font-variant-numeric:tabular-nums;text-align:center}
-.tvd-setting-button{cursor:pointer}.tvd-setting-button:hover{color:#000}.tvd-setting-input{border-bottom:1px solid rgba(71,85,105,.62)}
-.tvd-setting-button:focus-visible,.tvd-setting-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
+.tvd-settings-editor{display:inline-flex;align-items:center;gap:5px;height:18px}
+.tvd-setting-input{box-sizing:border-box;width:42px;height:18px;margin:0;padding:1px 0;border:0;border-bottom:1px solid rgba(71,85,105,.62);border-radius:0;background:transparent;color:#1f2937;font:400 12.5px/16px Arial,sans-serif;font-variant-numeric:tabular-nums;text-align:center}
+.tvd-lookback-input{width:35px}
+.tvd-track:focus-visible,.tvd-setting-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
 
 </style>
 <style>
@@ -47051,13 +47052,25 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const row = ensureChartMarketGaugeRow();
     if(!row) return null;
     let node = document.getElementById("chartBookPressureGauge");
-    if(node) return node;
-    node = document.createElement("span");
-    node.id = "chartBookPressureGauge";
-    node.className = "chart-book-pressure-gauge is-neutral";
-    node.setAttribute("role","group");
-    node.innerHTML = '<span class="book-pressure-track" aria-hidden="true"><span class="book-pressure-fill"></span></span><span class="book-pressure-window-control"></span>';
-    row.appendChild(node);
+    if(!node){
+      node = document.createElement("span");
+      node.id = "chartBookPressureGauge";
+      node.className = "chart-book-pressure-gauge is-neutral";
+      node.setAttribute("role","group");
+      node.innerHTML = '<span class="book-pressure-track" role="button" tabindex="0"><span class="book-pressure-fill"></span></span><span class="book-pressure-window-control"></span>';
+      row.appendChild(node);
+    }
+    const track=node.querySelector(".book-pressure-track");
+    if(track&&!track.__bookPressureEditBound){
+      track.__bookPressureEditBound=true;
+      track.addEventListener("pointerdown",event=>event.stopPropagation());
+      track.addEventListener("mousedown",event=>event.stopPropagation());
+      track.addEventListener("click",event=>{event.preventDefault();event.stopPropagation();editBookPressureWindowControl(node,bookPressureDepthSnapshot());});
+      track.addEventListener("keydown",event=>{
+        if(event.key!=="Enter"&&event.key!==" ")return;
+        event.preventDefault();event.stopPropagation();editBookPressureWindowControl(node,bookPressureDepthSnapshot());
+      });
+    }
     return node;
   }
   function setBookPressurePercentage(value){
@@ -47079,47 +47092,41 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const percentage=bookPressurePercentageFromDollar(value,currentBookPressurePrice());
     return percentage==null?false:setBookPressurePercentage(percentage);
   }
+  function editBookPressureWindowControl(node,book){
+    const slot=node&&node.querySelector(".book-pressure-window-control");
+    if(!slot||slot.querySelector("input"))return;
+    const distance=Number(book&&book.distance);
+    const input=document.createElement("input");
+    input.type="text";
+    input.className="book-pressure-window-input";
+    input.inputMode="decimal";
+    input.value=Number.isFinite(distance)?distance.toFixed(1):"";
+    input.setAttribute("aria-label","Book Pressure depth window in dollars");
+    input.addEventListener("pointerdown",event=>event.stopPropagation());
+    input.addEventListener("mousedown",event=>event.stopPropagation());
+    let closed=false;
+    const close=()=>{if(closed)return;closed=true;slot.innerHTML="";renderBookPressureWindowControl(node,bookPressureDepthSnapshot());};
+    input.addEventListener("keydown",keyEvent=>{
+      if(keyEvent.key==="Enter"){keyEvent.preventDefault();setBookPressureDollar(input.value);close();}
+      else if(keyEvent.key==="Escape"){keyEvent.preventDefault();close();}
+    });
+    input.addEventListener("blur",close,{once:true});
+    slot.replaceChildren(input);
+    input.focus();input.select();
+  }
   function renderBookPressureWindowControl(node,book){
     const slot=node&&node.querySelector(".book-pressure-window-control");
-    if(!slot||slot.querySelector("input")) return;
+    if(!slot||slot.querySelector("input"))return;
     const distance=Number(book&&book.distance);
     const dollarText=Number.isFinite(distance)?"$"+distance.toFixed(1):"$--.-";
-    const existingButton=slot.querySelector("button");
-    if(existingButton){
-      existingButton.textContent=dollarText;
-      existingButton.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click to edit dollar amount.";
-      existingButton.setAttribute("aria-label","Book Pressure depth window "+dollarText);
-      return;
+    let value=slot.querySelector(".book-pressure-window-value");
+    if(!value){value=document.createElement("span");value.className="book-pressure-window-value";slot.replaceChildren(value);}
+    value.textContent=dollarText;
+    const track=node.querySelector(".book-pressure-track");
+    if(track){
+      track.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click bar to edit dollar amount.";
+      track.setAttribute("aria-label","Book Pressure depth window "+dollarText+". Click bar to edit.");
     }
-    const button=document.createElement("button");
-    button.type="button";
-    button.className="book-pressure-window-button";
-    button.textContent=dollarText;
-    button.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click to edit dollar amount.";
-    button.setAttribute("aria-label","Book Pressure depth window "+dollarText);
-    button.addEventListener("pointerdown",event=>event.stopPropagation());
-    button.addEventListener("mousedown",event=>event.stopPropagation());
-    button.addEventListener("click",event=>{
-      event.preventDefault();event.stopPropagation();
-      const input=document.createElement("input");
-      input.type="text";
-      input.className="book-pressure-window-input";
-      input.inputMode="decimal";
-      input.value=Number.isFinite(distance)?distance.toFixed(1):"";
-      input.setAttribute("aria-label","Book Pressure depth window in dollars");
-      input.addEventListener("pointerdown",event=>event.stopPropagation());
-      input.addEventListener("mousedown",event=>event.stopPropagation());
-      let closed=false;
-      const close=()=>{if(closed)return;closed=true;slot.innerHTML="";renderBookPressureWindowControl(node,bookPressureDepthSnapshot());};
-      input.addEventListener("keydown",keyEvent=>{
-        if(keyEvent.key==="Enter"){keyEvent.preventDefault();setBookPressureDollar(input.value);close();}
-        else if(keyEvent.key==="Escape"){keyEvent.preventDefault();close();}
-      });
-      input.addEventListener("blur",close,{once:true});
-      slot.replaceChildren(input);
-      input.focus();input.select();
-    });
-    slot.appendChild(button);
   }
   function formatBookPressureSize(value){
     if(!Number.isFinite(Number(value))) return "n/a";
@@ -47797,7 +47804,6 @@ if(typeof window !== "undefined"){
   const q=id=>document.getElementById(id);
   const exchangeNow=()=>Date.now()+exchangeOffsetMs;
   const volume=value=>Number(value||0).toLocaleString(undefined,{maximumFractionDigits:3});
-  const durationText=seconds=>seconds<60?seconds+"s":seconds%60===0?(seconds/60)+"m":Number(seconds/60).toFixed(1)+"m";
 
   function ensureGauge(){
     const obi=q("chartBookPressureGauge");
@@ -47810,31 +47816,45 @@ if(typeof window !== "undefined"){
     let node=q("chartTakerVolumeDeltaGauge");
     if(!node){
       node=document.createElement("span");node.id="chartTakerVolumeDeltaGauge";node.className="chart-tvd-gauge";node.setAttribute("role","group");
-      node.innerHTML='<span class="tvd-track" aria-hidden="true"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span><span class="tvd-setting tvd-duration-setting"></span><span class="tvd-setting tvd-lookback-setting"></span>';
+      node.innerHTML='<span class="tvd-track" role="button" tabindex="0" aria-label="Edit TVD bucket duration and baseline lookback"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span>';
       stack.appendChild(node);
+    }
+    const track=node.querySelector(".tvd-track");
+    if(track&&!track.__tvdEditBound){
+      track.__tvdEditBound=true;
+      track.addEventListener("pointerdown",event=>event.stopPropagation());
+      track.addEventListener("mousedown",event=>event.stopPropagation());
+      track.addEventListener("click",event=>{event.preventDefault();event.stopPropagation();openSettingsEditor(node);});
+      track.addEventListener("keydown",event=>{
+        if(event.key!=="Enter"&&event.key!==" ")return;
+        event.preventDefault();event.stopPropagation();openSettingsEditor(node);
+      });
     }
     return node;
   }
-  function editSetting(slot,{value,label,min,max,step,commit}){
-    if(!slot||slot.querySelector("input"))return;
-    const input=document.createElement("input");
-    input.type="text";input.className="tvd-setting-input";input.inputMode="decimal";input.value=String(value);input.setAttribute("aria-label",label);
-    ["pointerdown","mousedown","click"].forEach(type=>input.addEventListener(type,event=>event.stopPropagation()));
+  function openSettingsEditor(node){
+    if(!node||node.querySelector(".tvd-settings-editor"))return;
+    const model=engine.snapshot();
+    const editor=document.createElement("span");editor.className="tvd-settings-editor";
+    editor.innerHTML='<input class="tvd-setting-input tvd-duration-input" type="text" inputmode="decimal" aria-label="TVD fixed bucket duration in seconds" title="Bucket duration (seconds)"><input class="tvd-setting-input tvd-lookback-input" type="text" inputmode="numeric" aria-label="TVD baseline lookback in completed buckets" title="Baseline lookback (completed buckets)">';
+    const durationInput=editor.querySelector(".tvd-duration-input"),lookbackInput=editor.querySelector(".tvd-lookback-input");
+    durationInput.value=String(model.durationMs/1000);lookbackInput.value=String(model.lookback);
+    ["pointerdown","mousedown","click"].forEach(type=>editor.addEventListener(type,event=>event.stopPropagation()));
     let closed=false;
-    const close=()=>{if(closed)return;closed=true;slot.replaceChildren();requestRender();};
-    input.addEventListener("keydown",event=>{
+    const close=()=>{if(closed)return;closed=true;editor.remove();requestRender();};
+    const commit=()=>{
+      const duration=Math.max(LIMITS.durationMin,Math.min(LIMITS.durationMax,Number(durationInput.value)));
+      const lookback=Math.max(LIMITS.lookbackMin,Math.min(LIMITS.lookbackMax,Math.round(Number(lookbackInput.value))));
+      if(!Number.isFinite(duration)||!Number.isFinite(lookback))return false;
+      setDuration(Math.round(duration));setLookback(lookback);close();return true;
+    };
+    editor.addEventListener("keydown",event=>{
       if(event.key==="Enter"){
-        event.preventDefault();const next=Math.max(min,Math.min(max,Number(input.value)));
-        if(Number.isFinite(next)){commit(step>=1?Math.round(next):next);close();}
+        event.preventDefault();commit();
       }else if(event.key==="Escape"){event.preventDefault();close();}
     });
-    input.addEventListener("blur",close,{once:true});slot.replaceChildren(input);input.focus();input.select();
-  }
-  function settingButton(slot,{text,title,label,onEdit}){
-    if(!slot||slot.querySelector("input"))return;
-    let button=slot.querySelector("button");
-    if(!button){button=document.createElement("button");button.type="button";button.className="tvd-setting-button";slot.appendChild(button);button.addEventListener("click",event=>{event.preventDefault();event.stopPropagation();onEdit(slot);});}
-    button.textContent=text;button.title=title;button.setAttribute("aria-label",label);
+    editor.addEventListener("focusout",()=>setTimeout(()=>{if(!editor.contains(document.activeElement))close();},0));
+    node.appendChild(editor);durationInput.focus();durationInput.select();
   }
   function setDuration(seconds){
     const next=Math.max(LIMITS.durationMin,Math.min(LIMITS.durationMax,Number(seconds)));
@@ -47853,20 +47873,14 @@ if(typeof window !== "undefined"){
     total.style.width=model.totalLengthPct+"%";
     sell.style.width=(model.sellPct*100)+"%";buy.style.width=(model.buyPct*100)+"%";
     node.classList.toggle("is-waiting",!model.current||model.totalVolume<=0);
-    settingButton(node.querySelector(".tvd-duration-setting"),{
-      text:durationText(model.durationMs/1000),title:"TVD fixed bucket duration. Click to edit seconds.",label:"TVD bucket duration "+durationText(model.durationMs/1000),
-      onEdit:slot=>editSetting(slot,{value:model.durationMs/1000,label:"TVD fixed bucket duration in seconds",min:LIMITS.durationMin,max:LIMITS.durationMax,step:1,commit:setDuration})
-    });
-    settingButton(node.querySelector(".tvd-lookback-setting"),{
-      text:model.lookback+"b",title:"TVD baseline lookback. Click to edit completed bucket count.",label:"TVD baseline lookback "+model.lookback+" completed buckets",
-      onEdit:slot=>editSetting(slot,{value:model.lookback,label:"TVD baseline lookback in completed buckets",min:LIMITS.lookbackMin,max:LIMITS.lookbackMax,step:1,commit:setLookback})
-    });
     const current=model.current;
     const ratio=model.magnitudeRatio==null?"warming":model.magnitudeRatio.toFixed(2)+"x";
     const buyPct=Math.round(model.buyPct*100),sellPct=Math.round(model.sellPct*100);
     const period=current?new Date(current.start).toLocaleTimeString()+"–"+new Date(current.end).toLocaleTimeString():"waiting for trades";
     node.title="TVD (Taker Volume Delta) · LIVE fixed bucket "+period+" · Total "+volume(model.totalVolume)+" · Buy "+volume(model.buyVolume)+" ("+buyPct+"%) · Sell "+volume(model.sellVolume)+" ("+sellPct+"%) · Delta "+volume(model.delta)+" · Baseline "+ratio+" across "+model.baselineSampleCount+" completed bucket(s)";
     node.setAttribute("aria-label",node.title);
+    const track=node.querySelector(".tvd-track");
+    if(track){track.title="Click bar to edit TVD bucket duration and baseline lookback";track.setAttribute("aria-label","Edit TVD bucket duration and baseline lookback");}
   }
   function onMarketEvent(event){
     if(!event||event.type!=="aggTrade")return;

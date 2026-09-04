@@ -26,7 +26,6 @@
   const q=id=>document.getElementById(id);
   const exchangeNow=()=>Date.now()+exchangeOffsetMs;
   const volume=value=>Number(value||0).toLocaleString(undefined,{maximumFractionDigits:3});
-  const durationText=seconds=>seconds<60?seconds+"s":seconds%60===0?(seconds/60)+"m":Number(seconds/60).toFixed(1)+"m";
 
   function ensureGauge(){
     const obi=q("chartBookPressureGauge");
@@ -39,31 +38,45 @@
     let node=q("chartTakerVolumeDeltaGauge");
     if(!node){
       node=document.createElement("span");node.id="chartTakerVolumeDeltaGauge";node.className="chart-tvd-gauge";node.setAttribute("role","group");
-      node.innerHTML='<span class="tvd-track" aria-hidden="true"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span><span class="tvd-setting tvd-duration-setting"></span><span class="tvd-setting tvd-lookback-setting"></span>';
+      node.innerHTML='<span class="tvd-track" role="button" tabindex="0" aria-label="Edit TVD bucket duration and baseline lookback"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span>';
       stack.appendChild(node);
+    }
+    const track=node.querySelector(".tvd-track");
+    if(track&&!track.__tvdEditBound){
+      track.__tvdEditBound=true;
+      track.addEventListener("pointerdown",event=>event.stopPropagation());
+      track.addEventListener("mousedown",event=>event.stopPropagation());
+      track.addEventListener("click",event=>{event.preventDefault();event.stopPropagation();openSettingsEditor(node);});
+      track.addEventListener("keydown",event=>{
+        if(event.key!=="Enter"&&event.key!==" ")return;
+        event.preventDefault();event.stopPropagation();openSettingsEditor(node);
+      });
     }
     return node;
   }
-  function editSetting(slot,{value,label,min,max,step,commit}){
-    if(!slot||slot.querySelector("input"))return;
-    const input=document.createElement("input");
-    input.type="text";input.className="tvd-setting-input";input.inputMode="decimal";input.value=String(value);input.setAttribute("aria-label",label);
-    ["pointerdown","mousedown","click"].forEach(type=>input.addEventListener(type,event=>event.stopPropagation()));
+  function openSettingsEditor(node){
+    if(!node||node.querySelector(".tvd-settings-editor"))return;
+    const model=engine.snapshot();
+    const editor=document.createElement("span");editor.className="tvd-settings-editor";
+    editor.innerHTML='<input class="tvd-setting-input tvd-duration-input" type="text" inputmode="decimal" aria-label="TVD fixed bucket duration in seconds" title="Bucket duration (seconds)"><input class="tvd-setting-input tvd-lookback-input" type="text" inputmode="numeric" aria-label="TVD baseline lookback in completed buckets" title="Baseline lookback (completed buckets)">';
+    const durationInput=editor.querySelector(".tvd-duration-input"),lookbackInput=editor.querySelector(".tvd-lookback-input");
+    durationInput.value=String(model.durationMs/1000);lookbackInput.value=String(model.lookback);
+    ["pointerdown","mousedown","click"].forEach(type=>editor.addEventListener(type,event=>event.stopPropagation()));
     let closed=false;
-    const close=()=>{if(closed)return;closed=true;slot.replaceChildren();requestRender();};
-    input.addEventListener("keydown",event=>{
+    const close=()=>{if(closed)return;closed=true;editor.remove();requestRender();};
+    const commit=()=>{
+      const duration=Math.max(LIMITS.durationMin,Math.min(LIMITS.durationMax,Number(durationInput.value)));
+      const lookback=Math.max(LIMITS.lookbackMin,Math.min(LIMITS.lookbackMax,Math.round(Number(lookbackInput.value))));
+      if(!Number.isFinite(duration)||!Number.isFinite(lookback))return false;
+      setDuration(Math.round(duration));setLookback(lookback);close();return true;
+    };
+    editor.addEventListener("keydown",event=>{
       if(event.key==="Enter"){
-        event.preventDefault();const next=Math.max(min,Math.min(max,Number(input.value)));
-        if(Number.isFinite(next)){commit(step>=1?Math.round(next):next);close();}
+        event.preventDefault();commit();
       }else if(event.key==="Escape"){event.preventDefault();close();}
     });
-    input.addEventListener("blur",close,{once:true});slot.replaceChildren(input);input.focus();input.select();
-  }
-  function settingButton(slot,{text,title,label,onEdit}){
-    if(!slot||slot.querySelector("input"))return;
-    let button=slot.querySelector("button");
-    if(!button){button=document.createElement("button");button.type="button";button.className="tvd-setting-button";slot.appendChild(button);button.addEventListener("click",event=>{event.preventDefault();event.stopPropagation();onEdit(slot);});}
-    button.textContent=text;button.title=title;button.setAttribute("aria-label",label);
+    editor.addEventListener("focusout",()=>setTimeout(()=>{if(!editor.contains(document.activeElement))close();},0));
+    node.appendChild(editor);durationInput.focus();durationInput.select();
   }
   function setDuration(seconds){
     const next=Math.max(LIMITS.durationMin,Math.min(LIMITS.durationMax,Number(seconds)));
@@ -82,20 +95,14 @@
     total.style.width=model.totalLengthPct+"%";
     sell.style.width=(model.sellPct*100)+"%";buy.style.width=(model.buyPct*100)+"%";
     node.classList.toggle("is-waiting",!model.current||model.totalVolume<=0);
-    settingButton(node.querySelector(".tvd-duration-setting"),{
-      text:durationText(model.durationMs/1000),title:"TVD fixed bucket duration. Click to edit seconds.",label:"TVD bucket duration "+durationText(model.durationMs/1000),
-      onEdit:slot=>editSetting(slot,{value:model.durationMs/1000,label:"TVD fixed bucket duration in seconds",min:LIMITS.durationMin,max:LIMITS.durationMax,step:1,commit:setDuration})
-    });
-    settingButton(node.querySelector(".tvd-lookback-setting"),{
-      text:model.lookback+"b",title:"TVD baseline lookback. Click to edit completed bucket count.",label:"TVD baseline lookback "+model.lookback+" completed buckets",
-      onEdit:slot=>editSetting(slot,{value:model.lookback,label:"TVD baseline lookback in completed buckets",min:LIMITS.lookbackMin,max:LIMITS.lookbackMax,step:1,commit:setLookback})
-    });
     const current=model.current;
     const ratio=model.magnitudeRatio==null?"warming":model.magnitudeRatio.toFixed(2)+"x";
     const buyPct=Math.round(model.buyPct*100),sellPct=Math.round(model.sellPct*100);
     const period=current?new Date(current.start).toLocaleTimeString()+"–"+new Date(current.end).toLocaleTimeString():"waiting for trades";
     node.title="TVD (Taker Volume Delta) · LIVE fixed bucket "+period+" · Total "+volume(model.totalVolume)+" · Buy "+volume(model.buyVolume)+" ("+buyPct+"%) · Sell "+volume(model.sellVolume)+" ("+sellPct+"%) · Delta "+volume(model.delta)+" · Baseline "+ratio+" across "+model.baselineSampleCount+" completed bucket(s)";
     node.setAttribute("aria-label",node.title);
+    const track=node.querySelector(".tvd-track");
+    if(track){track.title="Click bar to edit TVD bucket duration and baseline lookback";track.setAttribute("aria-label","Edit TVD bucket duration and baseline lookback");}
   }
   function onMarketEvent(event){
     if(!event||event.type!=="aggTrade")return;

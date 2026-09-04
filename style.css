@@ -836,6 +836,7 @@ button:hover{filter:brightness(1.04)}
   border-radius:3px;
   background:rgba(148,163,184,.16);
   box-shadow:inset 0 0 0 1px rgba(255,255,255,.65);
+  cursor:pointer;
 }
 .book-pressure-track::after{
   content:"";
@@ -859,7 +860,7 @@ button:hover{filter:brightness(1.04)}
   transition:left .08s linear,width .08s linear,background-color .08s linear;
 }
 .book-pressure-window-control{display:inline-flex;align-items:center;justify-content:center;width:56px;height:18px}
-.book-pressure-window-button,.book-pressure-window-input{
+.book-pressure-window-value,.book-pressure-window-input{
   box-sizing:border-box;
   width:56px;
   height:18px;
@@ -869,14 +870,13 @@ button:hover{filter:brightness(1.04)}
   border-radius:0;
   background:transparent;
   color:#1f2937;
-  font:400 10px/13px Arial,sans-serif;
+  font:400 12.5px/16px Arial,sans-serif;
   font-variant-numeric:tabular-nums;
   text-align:center;
 }
-.book-pressure-window-button{cursor:pointer}
-.book-pressure-window-button:hover{color:#000}
+.book-pressure-window-value{pointer-events:none}
 .book-pressure-window-input{border-bottom:1px solid rgba(71,85,105,.62)}
-.book-pressure-window-button:focus-visible,.book-pressure-window-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
+.book-pressure-track:focus-visible,.book-pressure-window-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
 .chart-book-pressure-gauge.is-bid-muted .book-pressure-fill{background:rgba(22,163,74,.60)}
 .chart-book-pressure-gauge.is-bid-strong .book-pressure-fill{background:#00a83d}
 .chart-book-pressure-gauge.is-ask-muted .book-pressure-fill{background:rgba(220,38,38,.60)}

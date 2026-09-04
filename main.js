@@ -23336,13 +23336,25 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const row = ensureChartMarketGaugeRow();
     if(!row) return null;
     let node = document.getElementById("chartBookPressureGauge");
-    if(node) return node;
-    node = document.createElement("span");
-    node.id = "chartBookPressureGauge";
-    node.className = "chart-book-pressure-gauge is-neutral";
-    node.setAttribute("role","group");
-    node.innerHTML = '<span class="book-pressure-track" aria-hidden="true"><span class="book-pressure-fill"></span></span><span class="book-pressure-window-control"></span>';
-    row.appendChild(node);
+    if(!node){
+      node = document.createElement("span");
+      node.id = "chartBookPressureGauge";
+      node.className = "chart-book-pressure-gauge is-neutral";
+      node.setAttribute("role","group");
+      node.innerHTML = '<span class="book-pressure-track" role="button" tabindex="0"><span class="book-pressure-fill"></span></span><span class="book-pressure-window-control"></span>';
+      row.appendChild(node);
+    }
+    const track=node.querySelector(".book-pressure-track");
+    if(track&&!track.__bookPressureEditBound){
+      track.__bookPressureEditBound=true;
+      track.addEventListener("pointerdown",event=>event.stopPropagation());
+      track.addEventListener("mousedown",event=>event.stopPropagation());
+      track.addEventListener("click",event=>{event.preventDefault();event.stopPropagation();editBookPressureWindowControl(node,bookPressureDepthSnapshot());});
+      track.addEventListener("keydown",event=>{
+        if(event.key!=="Enter"&&event.key!==" ")return;
+        event.preventDefault();event.stopPropagation();editBookPressureWindowControl(node,bookPressureDepthSnapshot());
+      });
+    }
     return node;
   }
   function setBookPressurePercentage(value){
@@ -23364,47 +23376,41 @@ window.V13_TOOLTIP_PLBOX_HOVER = {version:MODULE};
     const percentage=bookPressurePercentageFromDollar(value,currentBookPressurePrice());
     return percentage==null?false:setBookPressurePercentage(percentage);
   }
+  function editBookPressureWindowControl(node,book){
+    const slot=node&&node.querySelector(".book-pressure-window-control");
+    if(!slot||slot.querySelector("input"))return;
+    const distance=Number(book&&book.distance);
+    const input=document.createElement("input");
+    input.type="text";
+    input.className="book-pressure-window-input";
+    input.inputMode="decimal";
+    input.value=Number.isFinite(distance)?distance.toFixed(1):"";
+    input.setAttribute("aria-label","Book Pressure depth window in dollars");
+    input.addEventListener("pointerdown",event=>event.stopPropagation());
+    input.addEventListener("mousedown",event=>event.stopPropagation());
+    let closed=false;
+    const close=()=>{if(closed)return;closed=true;slot.innerHTML="";renderBookPressureWindowControl(node,bookPressureDepthSnapshot());};
+    input.addEventListener("keydown",keyEvent=>{
+      if(keyEvent.key==="Enter"){keyEvent.preventDefault();setBookPressureDollar(input.value);close();}
+      else if(keyEvent.key==="Escape"){keyEvent.preventDefault();close();}
+    });
+    input.addEventListener("blur",close,{once:true});
+    slot.replaceChildren(input);
+    input.focus();input.select();
+  }
   function renderBookPressureWindowControl(node,book){
     const slot=node&&node.querySelector(".book-pressure-window-control");
-    if(!slot||slot.querySelector("input")) return;
+    if(!slot||slot.querySelector("input"))return;
     const distance=Number(book&&book.distance);
     const dollarText=Number.isFinite(distance)?"$"+distance.toFixed(1):"$--.-";
-    const existingButton=slot.querySelector("button");
-    if(existingButton){
-      existingButton.textContent=dollarText;
-      existingButton.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click to edit dollar amount.";
-      existingButton.setAttribute("aria-label","Book Pressure depth window "+dollarText);
-      return;
+    let value=slot.querySelector(".book-pressure-window-value");
+    if(!value){value=document.createElement("span");value.className="book-pressure-window-value";slot.replaceChildren(value);}
+    value.textContent=dollarText;
+    const track=node.querySelector(".book-pressure-track");
+    if(track){
+      track.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click bar to edit dollar amount.";
+      track.setAttribute("aria-label","Book Pressure depth window "+dollarText+". Click bar to edit.");
     }
-    const button=document.createElement("button");
-    button.type="button";
-    button.className="book-pressure-window-button";
-    button.textContent=dollarText;
-    button.title="Book Pressure window: "+meterState.bookPressurePercentage+"% of current price. Click to edit dollar amount.";
-    button.setAttribute("aria-label","Book Pressure depth window "+dollarText);
-    button.addEventListener("pointerdown",event=>event.stopPropagation());
-    button.addEventListener("mousedown",event=>event.stopPropagation());
-    button.addEventListener("click",event=>{
-      event.preventDefault();event.stopPropagation();
-      const input=document.createElement("input");
-      input.type="text";
-      input.className="book-pressure-window-input";
-      input.inputMode="decimal";
-      input.value=Number.isFinite(distance)?distance.toFixed(1):"";
-      input.setAttribute("aria-label","Book Pressure depth window in dollars");
-      input.addEventListener("pointerdown",event=>event.stopPropagation());
-      input.addEventListener("mousedown",event=>event.stopPropagation());
-      let closed=false;
-      const close=()=>{if(closed)return;closed=true;slot.innerHTML="";renderBookPressureWindowControl(node,bookPressureDepthSnapshot());};
-      input.addEventListener("keydown",keyEvent=>{
-        if(keyEvent.key==="Enter"){keyEvent.preventDefault();setBookPressureDollar(input.value);close();}
-        else if(keyEvent.key==="Escape"){keyEvent.preventDefault();close();}
-      });
-      input.addEventListener("blur",close,{once:true});
-      slot.replaceChildren(input);
-      input.focus();input.select();
-    });
-    slot.appendChild(button);
   }
   function formatBookPressureSize(value){
     if(!Number.isFinite(Number(value))) return "n/a";
