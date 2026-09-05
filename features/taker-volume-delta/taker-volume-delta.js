@@ -26,6 +26,26 @@
   const q=id=>document.getElementById(id);
   const exchangeNow=()=>Date.now()+exchangeOffsetMs;
   const volume=value=>Number(value||0).toLocaleString(undefined,{maximumFractionDigits:3});
+  const signedVolume=value=>{const n=Number(value)||0;return (n>0?"+":n<0?"-":"")+volume(Math.abs(n));};
+  const signedPrice=value=>{const n=Number(value)||0;return (n>0?"+$":n<0?"-$":"$")+Math.abs(n).toLocaleString(undefined,{maximumFractionDigits:2});};
+  const tone=value=>Number(value)>0?"positive":Number(value)<0?"negative":"neutral";
+  const miniBar=(kind,value,magnitude)=>'<i class="tvd-relation-bar-cell is-'+kind+'"><b class="tvd-relation-bar is-'+tone(value)+'" style="height:'+(value===0?1:Math.max(3,magnitude*48)).toFixed(2)+'%"></b></i>';
+
+  function renderRelationship(node,model){
+    const display=node&&node.querySelector(".tvd-delta-price-display");if(!display)return;
+    const current=model.current||{};
+    display.querySelector(".tvd-current-delta").textContent="Δ: "+signedVolume(model.delta);
+    display.querySelector(".tvd-current-price").textContent="Px: "+signedPrice(current.priceChange);
+    const tooltip=display.querySelector(".tvd-relation-tooltip");
+    const rows=core.relationshipModel(model.baselineBuckets);
+    if(!rows.length){tooltip.innerHTML='<div class="tvd-relation-heading">Completed buckets: 0/'+model.lookback+'</div><div class="tvd-relation-empty">Waiting for completed TVD buckets</div>';return;}
+    const pairs=rows.map((row,index)=>{
+      const bucket=row.bucket||{},time=new Date(Number(bucket.start)||0).toLocaleTimeString();
+      const reason=row.directionMismatch?"direction mismatch":row.magnitudeMismatch?"magnitude mismatch":"proportionate";
+      return '<span class="tvd-relation-pair'+(row.divergent?' is-divergent':'')+'" title="'+time+' · Δ '+signedVolume(row.delta)+' · Px '+signedPrice(row.priceChange)+' · '+reason+'">'+miniBar("delta",row.delta,row.deltaMagnitude)+miniBar("price",row.priceChange,row.priceMagnitude)+'</span>';
+    }).join("");
+    tooltip.innerHTML='<div class="tvd-relation-heading">Completed buckets: '+rows.length+'/'+model.lookback+' · oldest → newest</div><div class="tvd-relation-chart">'+pairs+'</div><div class="tvd-relation-legend"><span>Δ</span><span>Px</span><span class="is-divergence-key">divergence</span></div>';
+  }
 
   function ensureGauge(){
     const obi=q("chartBookPressureGauge");
@@ -38,7 +58,7 @@
     let node=q("chartTakerVolumeDeltaGauge");
     if(!node){
       node=document.createElement("span");node.id="chartTakerVolumeDeltaGauge";node.className="chart-tvd-gauge";node.setAttribute("role","group");
-      node.innerHTML='<span class="tvd-track" role="button" tabindex="0" aria-label="Edit TVD bucket duration and baseline lookback"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span>';
+      node.innerHTML='<span class="tvd-track" role="button" tabindex="0" aria-label="Edit TVD bucket duration and baseline lookback"><span class="tvd-total"><span class="tvd-sell"></span><span class="tvd-buy"></span></span></span><span class="tvd-delta-price-display" tabindex="0"><span class="tvd-current-delta">Δ: 0</span><span class="tvd-current-price">Px: $0</span><span class="tvd-relation-tooltip" role="tooltip"></span></span>';
       stack.appendChild(node);
     }
     const track=node.querySelector(".tvd-track");
@@ -76,7 +96,7 @@
       }else if(event.key==="Escape"){event.preventDefault();close();}
     });
     editor.addEventListener("focusout",()=>setTimeout(()=>{if(!editor.contains(document.activeElement))close();},0));
-    node.appendChild(editor);durationInput.focus();durationInput.select();
+    node.insertBefore(editor,node.querySelector(".tvd-delta-price-display"));durationInput.focus();durationInput.select();
   }
   function setDuration(seconds){
     const next=Math.max(LIMITS.durationMin,Math.min(LIMITS.durationMax,Number(seconds)));
@@ -95,6 +115,7 @@
     total.style.width=model.totalLengthPct+"%";
     sell.style.width=(model.sellPct*100)+"%";buy.style.width=(model.buyPct*100)+"%";
     node.classList.toggle("is-waiting",!model.current||model.totalVolume<=0);
+    renderRelationship(node,model);
     const current=model.current;
     const ratio=model.magnitudeRatio==null?"warming":model.magnitudeRatio.toFixed(2)+"x";
     const buyPct=Math.round(model.buyPct*100),sellPct=Math.round(model.sellPct*100);

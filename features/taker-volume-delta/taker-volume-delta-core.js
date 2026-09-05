@@ -3,7 +3,26 @@
 
   const clamp=(value,min,max)=>Math.max(min,Math.min(max,value));
   const HISTORY_LIMIT=200;
+  const DIVERGENCE_LARGE=0.65;
+  const DIVERGENCE_SMALL=0.25;
+  const DIVERGENCE_SIGN_MIN=0.20;
   const fixedBucketStart=(timeMs,durationMs)=>Math.floor(Number(timeMs)/durationMs)*durationMs;
+
+  function relationshipModel(buckets){
+    const rows=(Array.isArray(buckets)?buckets:[]).map(bucket=>{
+      const buy=Number(bucket&&bucket.buyVolume)||0,sell=Number(bucket&&bucket.sellVolume)||0;
+      return {bucket,delta:buy-sell,priceChange:Number(bucket&&bucket.priceChange)||0};
+    });
+    const maxDelta=Math.max(0,...rows.map(row=>Math.abs(row.delta)));
+    const maxPriceChange=Math.max(0,...rows.map(row=>Math.abs(row.priceChange)));
+    return Object.freeze(rows.map(row=>{
+      const deltaMagnitude=maxDelta>0?Math.abs(row.delta)/maxDelta:0;
+      const priceMagnitude=maxPriceChange>0?Math.abs(row.priceChange)/maxPriceChange:0;
+      const magnitudeMismatch=Math.max(deltaMagnitude,priceMagnitude)>=DIVERGENCE_LARGE&&Math.min(deltaMagnitude,priceMagnitude)<=DIVERGENCE_SMALL;
+      const directionMismatch=Math.sign(row.delta)!==0&&Math.sign(row.priceChange)!==0&&Math.sign(row.delta)!==Math.sign(row.priceChange)&&deltaMagnitude>=DIVERGENCE_SIGN_MIN&&priceMagnitude>=DIVERGENCE_SIGN_MIN;
+      return Object.freeze({...row,deltaMagnitude,priceMagnitude,divergent:magnitudeMismatch||directionMismatch,magnitudeMismatch,directionMismatch});
+    }));
+  }
 
   function createEngine(options={}){
     let durationMs=clamp(Math.round(Number(options.durationMs)||60000),1000,60*60*1000);
@@ -13,7 +32,7 @@
     let completed=[];
     let revision=0;
 
-    const emptyBucket=(start,baselineEligible=true)=>({start,end:start+durationMs,buyVolume:0,sellVolume:0,totalVolume:0,tradeCount:0,locked:false,baselineEligible});
+    const emptyBucket=(start,baselineEligible=true)=>({start,end:start+durationMs,buyVolume:0,sellVolume:0,totalVolume:0,tradeCount:0,openPrice:null,lastPrice:null,priceChange:0,locked:false,baselineEligible});
     const notify=()=>{revision+=1;if(typeof options.onUpdate==="function")options.onUpdate(snapshot());};
     const appendCompleted=bucket=>{
       completed.push(Object.freeze({...bucket,locked:true}));
@@ -39,6 +58,7 @@
     function ingest(trade){
       const time=Number(trade&&(trade.exchangeTime??trade.time??trade.T??trade.E));
       const quantity=Number(trade&&(trade.quantity??trade.q));
+      const price=Number(trade&&trade.price);
       const nextSymbol=String(trade&&trade.symbol||symbol||"").toUpperCase();
       if(!Number.isFinite(time)||time<=0||!Number.isFinite(quantity)||quantity<=0)return false;
       if(symbol&&nextSymbol&&nextSymbol!==symbol)reset(nextSymbol);
@@ -50,6 +70,11 @@
       if(sell)current.sellVolume+=quantity;else current.buyVolume+=quantity;
       current.totalVolume=current.buyVolume+current.sellVolume;
       current.tradeCount+=1;
+      if(Number.isFinite(price)&&price>0){
+        if(!(current.openPrice>0))current.openPrice=price;
+        current.lastPrice=price;
+        current.priceChange=current.lastPrice-current.openPrice;
+      }
       notify();
       return true;
     }
@@ -72,7 +97,7 @@
       const magnitudeRatio=baselineAverage>0?total/baselineAverage:null;
       return Object.freeze({
         symbol,durationMs,lookback,revision,current:bucket&&Object.freeze(bucket),
-        completed:Object.freeze(completed.slice(-HISTORY_LIMIT)),baselineAverage,
+        completed:Object.freeze(completed.slice(-HISTORY_LIMIT)),baselineBuckets:Object.freeze(baselineBuckets.slice()),baselineAverage,
         baselineSampleCount:baselineBuckets.length,totalVolume:total,buyVolume:buy,sellVolume:sell,
         buyPct:total>0?buy/total:0,sellPct:total>0?sell/total:0,delta:buy-sell,
         magnitudeRatio,totalLengthPct:total>0?(magnitudeRatio==null?50:clamp(magnitudeRatio*50,2,100)):0
@@ -81,5 +106,5 @@
     return Object.freeze({ingest,rollTo,reset,configure,snapshot});
   }
 
-  window.BT001TakerVolumeDeltaCore=Object.freeze({createEngine,fixedBucketStart});
+  window.BT001TakerVolumeDeltaCore=Object.freeze({createEngine,fixedBucketStart,relationshipModel,divergenceThresholds:Object.freeze({large:DIVERGENCE_LARGE,small:DIVERGENCE_SMALL,signMin:DIVERGENCE_SIGN_MIN})});
 })();

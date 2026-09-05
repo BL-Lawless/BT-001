@@ -12,3 +12,17 @@
 .tvd-setting-input{box-sizing:border-box;width:42px;height:18px;margin:0;padding:1px 0;border:0;border-bottom:1px solid rgba(71,85,105,.62);border-radius:0;background:transparent;color:#1f2937;font:400 12.5px/16px Arial,sans-serif;font-variant-numeric:tabular-nums;text-align:center}
 .tvd-lookback-input{width:35px}
 .tvd-track:focus-visible,.tvd-setting-input:focus{outline:2px solid rgba(37,99,235,.45);outline-offset:1px}
+.tvd-delta-price-display{position:relative;display:inline-flex;align-items:center;gap:7px;height:10px;padding-left:7px;border-left:1px solid rgba(148,163,184,.55);color:#334155;font:700 10.5px/10px Arial,sans-serif;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tvd-delta-price-display:focus-visible{outline:2px solid rgba(37,99,235,.45);outline-offset:2px}
+.tvd-relation-tooltip{position:absolute;z-index:40;display:none;box-sizing:border-box;top:calc(100% + 7px);right:0;width:min(280px,70vw);padding:7px;border:1px solid rgba(100,116,139,.55);border-radius:5px;background:rgba(17,24,39,.96);box-shadow:0 8px 22px rgba(15,23,42,.24);color:#f8fafc;font:10px/1.2 Arial,sans-serif;pointer-events:none}
+.tvd-delta-price-display:hover .tvd-relation-tooltip,.tvd-delta-price-display:focus-visible .tvd-relation-tooltip{display:block}
+.tvd-relation-heading{margin-bottom:5px;color:#e2e8f0;font-weight:700;text-align:left}
+.tvd-relation-chart{position:relative;display:flex;align-items:stretch;gap:0;width:100%;height:58px;padding:2px 0}
+.tvd-relation-chart::after{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(226,232,240,.26)}
+.tvd-relation-pair{position:relative;z-index:1;display:flex;flex:1 1 0;align-items:stretch;gap:1px;box-sizing:border-box;min-width:1px;max-width:13px;height:100%;padding:0;border-radius:2px}
+.tvd-relation-pair.is-divergent{background:rgba(245,158,11,.18);box-shadow:inset 0 0 0 1px rgba(245,158,11,.30)}
+.tvd-relation-bar-cell{position:relative;display:block;flex:1 1 0;min-width:0;height:100%}
+.tvd-relation-bar{position:absolute;left:0;width:100%;min-height:1px;border-radius:1px}
+.tvd-relation-bar.is-positive{bottom:50%;background:#00a83d}.tvd-relation-bar.is-negative{top:50%;background:#dc2626}.tvd-relation-bar.is-neutral{top:50%;background:#94a3b8}
+.tvd-relation-legend{display:flex;gap:9px;color:#cbd5e1}.tvd-relation-legend .is-divergence-key{margin-left:auto;color:#fbbf24}
+.tvd-relation-empty{padding:17px 4px;color:#cbd5e1;text-align:center}
